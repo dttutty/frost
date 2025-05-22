@@ -76,6 +76,7 @@ class MemoryMailbox():
                 torch.index_select(self.mailbox_ts, 0, idx, out=self.pinned_mailbox_ts_buffs[i][:idx.shape[0]])
                 b.srcdata['mail_ts'] = self.pinned_mailbox_ts_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
             else:
+                # b_cpu = b.cpu() is added by Lei Zhao
                 b_cpu = b.cpu()
                 b.srcdata['mem'] = self.node_memory[b_cpu.srcdata['ID'].long()].cuda()
                 b.srcdata['mem_ts'] = self.node_memory_ts[b_cpu.srcdata['ID'].long()].cuda()

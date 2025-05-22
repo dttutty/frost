@@ -149,4 +149,3 @@ def get_ids(mfgs, node_feats, edge_feats):
     return nids, eids
 
 
-
