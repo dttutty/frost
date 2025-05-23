@@ -21,44 +21,47 @@ class MemoryMailbox():
 
     def __init__(self, 
                  memory_param: MemoryParams, 
-                 num_nodes, 
+                 shared_cfg, 
                  dim_edge_feat, 
-                 _node_memory=None, 
-                 _node_memory_ts=None,
-                 _mailbox=None, 
-                 _mailbox_ts=None, 
-                 _next_mail_pos=None, 
-                 _update_mail_pos=None):
-        
+                 shared_arrays):
         if memory_param.type != 'node':
             raise NotImplementedError
+
         
+        for config_key, (shape_definition, dtype_definition) in shared_cfg.items():
+            # Get the corresponding value from the input shared_arrays dictionary.
+            # The original code implies that all keys in local_shared_cfg
+            # will be present in shared_arrays (though their values can be None).
+            shared_value = shared_arrays[config_key]
+
+            if shared_value is None:
+                # If the shared value is None:
+                # - For 'update_mail_pos', the attribute becomes None (as per original logic).
+                # - For others, initialize with a tensor of zeros.
+                if config_key == 'update_mail_pos':
+                    setattr(self, config_key, None) # not torch.zeros(shape_definition, dtype=dtype_definition)
+                else:
+                    setattr(self, config_key, torch.zeros(shape_definition, dtype=dtype_definition))
+            else:
+                # If a shared value is provided, use it directly.
+                setattr(self, config_key, shared_value)
+                
         self.memory_param = memory_param
         self.dim_edge_feat = dim_edge_feat
-        
-        self.node_memory = torch.zeros((num_nodes, memory_param.dim_out), dtype=torch.float32) if _node_memory is None else _node_memory
-        self.node_memory_ts = torch.zeros(num_nodes, dtype=torch.float32) if _node_memory_ts is None else _node_memory_ts
-        
-        self.mailbox = torch.zeros((num_nodes, memory_param.mailbox_size, 2 * memory_param.dim_out + dim_edge_feat), dtype=torch.float32) if _mailbox is None else _mailbox
-        self.mailbox_ts = torch.zeros((num_nodes, memory_param.mailbox_size), dtype=torch.float32) if _mailbox_ts is None else _mailbox_ts
-        
-        self.next_mail_pos = torch.zeros((num_nodes), dtype=torch.long) if _next_mail_pos is None else _next_mail_pos
-        self.update_mail_pos = _update_mail_pos
-        
         self.device = torch.device('cpu')
         
     def reset(self):
         self.node_memory.fill_(0)
         self.node_memory_ts.fill_(0)
-        self.mailbox.fill_(0)
-        self.mailbox_ts.fill_(0)
+        self.mails.fill_(0)
+        self.mail_ts.fill_(0)
         self.next_mail_pos.fill_(0)
 
     def move_to_gpu(self):
         self.node_memory = self.node_memory.cuda()
         self.node_memory_ts = self.node_memory_ts.cuda()
-        self.mailbox = self.mailbox.cuda()
-        self.mailbox_ts = self.mailbox_ts.cuda()
+        self.mails = self.mails.cuda()
+        self.mail_ts = self.mail_ts.cuda()
         self.next_mail_pos = self.next_mail_pos.cuda()
         self.device = torch.device('cuda:0')
 
@@ -74,8 +77,8 @@ class MemoryMailbox():
         for _ in range(sample_param.history):
             self.pinned_node_memory_buffs.append(torch.zeros((limit, self.node_memory.shape[1]), pin_memory=True))
             self.pinned_node_memory_ts_buffs.append(torch.zeros((limit,), pin_memory=True))
-            self.pinned_mailbox_buffs.append(torch.zeros((limit, self.mailbox.shape[1], self.mailbox.shape[2]), pin_memory=True))
-            self.pinned_mailbox_ts_buffs.append(torch.zeros((limit, self.mailbox_ts.shape[1]), pin_memory=True))
+            self.pinned_mailbox_buffs.append(torch.zeros((limit, self.mails.shape[1], self.mails.shape[2]), pin_memory=True))
+            self.pinned_mailbox_ts_buffs.append(torch.zeros((limit, self.mail_ts.shape[1]), pin_memory=True))
 
     def prep_input_mails(self, mfg, use_pinned_buffers=False):
         for i, b in enumerate(mfg):
@@ -85,17 +88,17 @@ class MemoryMailbox():
                 b.srcdata['mem'] = self.pinned_node_memory_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
                 torch.index_select(self.node_memory_ts,0, idx, out=self.pinned_node_memory_ts_buffs[i][:idx.shape[0]])
                 b.srcdata['mem_ts'] = self.pinned_node_memory_ts_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
-                torch.index_select(self.mailbox, 0, idx, out=self.pinned_mailbox_buffs[i][:idx.shape[0]])
+                torch.index_select(self.mails, 0, idx, out=self.pinned_mailbox_buffs[i][:idx.shape[0]])
                 b.srcdata['mem_input'] = self.pinned_mailbox_buffs[i][:idx.shape[0]].reshape(b.srcdata['ID'].shape[0], -1).cuda(non_blocking=True)
-                torch.index_select(self.mailbox_ts, 0, idx, out=self.pinned_mailbox_ts_buffs[i][:idx.shape[0]])
+                torch.index_select(self.mail_ts, 0, idx, out=self.pinned_mailbox_ts_buffs[i][:idx.shape[0]])
                 b.srcdata['mail_ts'] = self.pinned_mailbox_ts_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
             else:
                 # b_cpu = b.cpu() is added by Lei Zhao
                 b_cpu = b.cpu()
                 b.srcdata['mem'] = self.node_memory[b_cpu.srcdata['ID'].long()].cuda()
                 b.srcdata['mem_ts'] = self.node_memory_ts[b_cpu.srcdata['ID'].long()].cuda()
-                b.srcdata['mem_input'] = self.mailbox[b_cpu.srcdata['ID'].long()].cuda().reshape(b.srcdata['ID'].shape[0], -1)
-                b.srcdata['mail_ts'] = self.mailbox_ts[b_cpu.srcdata['ID'].long()].cuda()
+                b.srcdata['mem_input'] = self.mails[b_cpu.srcdata['ID'].long()].cuda().reshape(b.srcdata['ID'].shape[0], -1)
+                b.srcdata['mail_ts'] = self.mail_ts[b_cpu.srcdata['ID'].long()].cuda()
 
     def update_memory(self, nid, memory, root_nodes, ts, neg_samples=1):
         if nid is None:
@@ -141,8 +144,8 @@ class MemoryMailbox():
                 mail = mail[perm]
                 mail_ts = mail_ts[perm]
                 if self.memory_param.mail_combine == 'last':
-                    self.mailbox[nid.long(), self.next_mail_pos[nid.long()]] = mail
-                    self.mailbox_ts[nid.long(), self.next_mail_pos[nid.long()]] = mail_ts
+                    self.mails[nid.long(), self.next_mail_pos[nid.long()]] = mail
+                    self.mail_ts[nid.long(), self.next_mail_pos[nid.long()]] = mail_ts
                     if self.memory_param.mailbox_size > 1:
                         self.next_mail_pos[nid.long()] = torch.remainder(self.next_mail_pos[nid.long()] + 1, self.memory_param.mailbox_size)
             # APAN
@@ -163,8 +166,8 @@ class MemoryMailbox():
                     (nid, idx) = torch.unique(block.dstdata['ID'], return_inverse=True)
                     mail = scatter(mail, idx, reduce='mean', dim=0)
                     mail_ts = scatter(mail_ts, idx, reduce='mean')
-                    self.mailbox[nid.long(), self.next_mail_pos[nid.long()]] = mail
-                    self.mailbox_ts[nid.long(), self.next_mail_pos[nid.long()]] = mail_ts
+                    self.mails[nid.long(), self.next_mail_pos[nid.long()]] = mail
+                    self.mail_ts[nid.long(), self.next_mail_pos[nid.long()]] = mail_ts
                 elif self.memory_param.mail_combine == 'last':
                     nid = block.dstdata['ID']
                     # find unique nid to update mailbox
@@ -174,8 +177,8 @@ class MemoryMailbox():
                     nid = nid[perm]
                     mail = mail[perm]
                     mail_ts = mail_ts[perm]
-                    self.mailbox[nid.long(), self.next_mail_pos[nid.long()]] = mail
-                    self.mailbox_ts[nid.long(), self.next_mail_pos[nid.long()]] = mail_ts
+                    self.mails[nid.long(), self.next_mail_pos[nid.long()]] = mail
+                    self.mail_ts[nid.long(), self.next_mail_pos[nid.long()]] = mail_ts
                 else:
                     raise NotImplementedError
                 if self.memory_param.mailbox_size > 1:

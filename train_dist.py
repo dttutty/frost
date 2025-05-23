@@ -45,42 +45,44 @@ set_seed(args.seed)
 
 
 
-def _str_to_dtype(dtype_str):
-    # "torch.float32" → "float32"
-    if dtype_str.startswith("torch."):
-        dtype_str = dtype_str.split(".", 1)[1]
-    return getattr(torch, dtype_str)
-
-def init_shared(name, shape, dtype):
-    """rank0 create, others get, barrier 之后返回张量句柄"""
-    if local_rank == 0:
-        arr = create_shared_mem_array(name, torch.Size(shape), dtype=dtype)
-    dist.barrier()
-    if local_rank != 0:
-        arr = get_shared_mem_array(name, torch.Size(shape), dtype=dtype)
-    return arr
 
 
-def init_shared_array(name, tensor):
+
+
+
+
+from typing import Optional
+def init_shared_array(name, tensor_on_rank0=None):
     """
     Rank 0: create + copy; others: barrier then get.
     Returns the shared tensor or None.
     """
-    arr = None
-    if local_rank == 0 and tensor is not None:
-        meta = [tuple(tensor.shape), str(tensor.dtype)]
-        arr = create_shared_mem_array(name, tensor.shape, dtype=tensor.dtype)
-        arr.copy_(tensor)
+    arr_for_current_rank: Optional[torch.Tensor] = None 
+    if local_rank == 0:
+        if tensor_on_rank0 is not None:
+            current_shape = tuple(tensor_on_rank0.shape)
+            current_dtype = tensor_on_rank0.dtype 
+            
+            arr_for_current_rank = create_shared_mem_array(name, current_shape, dtype=current_dtype)
+            arr_for_current_rank.copy_(tensor_on_rank0)
+            meta_payload = {'shape': current_shape, 'dtype': current_dtype}
+        else:
+            meta_payload = {'shape': None, 'dtype': None}
     else:
-        meta = [None, None]
-    dist.broadcast_object_list(meta, src=0)
-    shape, dtype_str = meta
-    if shape is None:
+        meta_payload = {}
+    meta_list_to_broadcast = [meta_payload if local_rank == 0 else None]
+    dist.broadcast_object_list(meta_list_to_broadcast, src=0)
+    received_meta = meta_list_to_broadcast[0]
+    final_shape = received_meta['shape']
+    final_dtype = received_meta['dtype']
+    
+    if final_shape is None or final_dtype is None:
         return None
-    dtype = _str_to_dtype(dtype_str)
+
     if local_rank != 0:
-        arr = get_shared_mem_array(name, shape, dtype=dtype)
-    return arr
+        arr_for_current_rank = get_shared_mem_array(name, final_shape, dtype=final_dtype)
+    
+    return arr_for_current_rank
 
 # inside main init
 if local_rank == 0:
@@ -88,8 +90,8 @@ if local_rank == 0:
 else:
     node_np = edge_np = None
 # create/get shared arrays
-edge_feats = init_shared_array('edge_feats', edge_np)
-node_feats = init_shared_array('node_feats', node_np)
+edge_feats = init_shared_array('edge_feats', tensor_on_rank0=edge_np)
+node_feats = init_shared_array('node_feats', tensor_on_rank0=node_np)
 
 
 # collect dim info once on rank0, broadcast to all
@@ -127,6 +129,15 @@ dist.barrier()
 dist.broadcast_object_list(num_nodes, src=world_size - 1)
 num_nodes = num_nodes[0]
 
+def init_shared(name, shape, dtype):
+    """rank0 create, others get, barrier 之后返回张量句柄"""
+    if local_rank == 0:
+        arr = create_shared_mem_array(name, torch.Size(shape), dtype=dtype)
+    dist.barrier()
+    if local_rank != 0:
+        arr = get_shared_mem_array(name, torch.Size(shape), dtype=dtype)
+    return arr
+
 mailbox = None
 if memory_param.type != 'none':
     # name → (shape list, dtype)
@@ -138,14 +149,14 @@ if memory_param.type != 'none':
         'next_mail_pos':    ([num_nodes], torch.long),
         'update_mail_pos':  ([num_nodes], torch.int32),
     }
-    arrays = {}
+    shared_arrays = {}
     for name, (shape, dtype) in shared_cfg.items():
-        arrays[name] = init_shared(name, shape, dtype)
+        shared_arrays[name] = init_shared(name, shape, dtype)
     if local_rank == 0:
-        for arr in arrays.values():
+        for arr in shared_arrays.values():
             arr.zero_()
     
-    mailbox = MemoryMailbox(memory_param, num_nodes, dim_feats[4], arrays['node_memory'], arrays['node_memory_ts'], arrays['mails'], arrays['mail_ts'], arrays['next_mail_pos'], arrays['update_mail_pos'])
+    mailbox = MemoryMailbox(memory_param, shared_cfg, dim_feats[4], shared_arrays)
 
 
 if local_rank == world_size - 1:
