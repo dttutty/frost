@@ -5,8 +5,27 @@ import time
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from typing import Optional, Literal, List
+import torch
+import dgl
+from memorys import *
+from layers import *
+from dataclasses import dataclass, field
 from sampler_core import ParallelSampler, TemporalGraphBlock
 
+@dataclass
+class SampleParams:
+    strategy: Literal["recent", "uniform"] = "recent"
+    layer: Optional[int] = 1
+    neighbor: Optional[List[int]] = field(default_factory=lambda: [10, 10])
+    history: Optional[int] = 1
+    prop_time: bool = False
+    duration: Optional[int] = 0
+    num_thread: Optional[int] = 32
+    no_sample: Optional[bool] = False
+    no_neg: Optional[bool] = False
+
+    
 class NegLinkSampler:
 
     def __init__(self, num_nodes):

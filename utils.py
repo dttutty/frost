@@ -33,12 +33,15 @@ def load_graph(d):
     g = np.load('DATA/{}/ext_full.npz'.format(d))
     return g, df
 
+from sampler import SampleParams
+from memorys import MemoryParams
+from modules import GNNParams, TrainParams
 def parse_config(f):
     conf = yaml.safe_load(open(f, 'r'))
-    sample_param = conf['sampling'][0]
-    memory_param = conf['memory'][0]
-    gnn_param = conf['gnn'][0]
-    train_param = conf['train'][0]
+    sample_param = SampleParams(**conf['sampling'][0])
+    memory_param = MemoryParams(**conf['memory'][0])
+    gnn_param = GNNParams(**conf['gnn'][0])
+    train_param = TrainParams(**conf['train'][0])
     return sample_param, memory_param, gnn_param, train_param
 
 def to_dgl_blocks(ret, hist, reverse=False, cuda=True):

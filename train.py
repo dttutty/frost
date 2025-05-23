@@ -63,13 +63,13 @@ if args.use_inductive:
 gnn_dim_node = 0 if node_feats is None else node_feats.shape[1]
 gnn_dim_edge = 0 if edge_feats is None else edge_feats.shape[1]
 combine_first = False
-if 'combine_neighs' in train_param and train_param['combine_neighs']:
+if train_param.combine_neighs:
     combine_first = True
 model = GeneralModel(gnn_dim_node, gnn_dim_edge, sample_param, memory_param, gnn_param, train_param, combined=combine_first).cuda()
-mailbox = MemoryMailbox(memory_param, g['indptr'].shape[0] - 1, gnn_dim_edge) if memory_param['type'] != 'none' else None
+mailbox = MemoryMailbox(memory_param, g['indptr'].shape[0] - 1, gnn_dim_edge) if memory_param.type != 'none' else None
 creterion = torch.nn.BCEWithLogitsLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=train_param['lr'])
-if 'all_on_gpu' in train_param and train_param['all_on_gpu']:
+optimizer = torch.optim.Adam(model.parameters(), lr=train_param.lr)
+if  train_param.all_on_gpu:
     if node_feats is not None:
         node_feats = node_feats.cuda()
     if edge_feats is not None:
@@ -78,11 +78,11 @@ if 'all_on_gpu' in train_param and train_param['all_on_gpu']:
         mailbox.move_to_gpu()
 
 sampler = None
-if not ('no_sample' in sample_param and sample_param['no_sample']):
+if not sample_param.no_sample:
     sampler = ParallelSampler(g['indptr'], g['indices'], g['eid'], g['ts'].astype(np.float32),
-                              sample_param['num_thread'], 1, sample_param['layer'], sample_param['neighbor'],
-                              sample_param['strategy']=='recent', sample_param['prop_time'],
-                              sample_param['history'], float(sample_param['duration']))
+                              sample_param.num_thread, 1, sample_param.layer, sample_param.neighbor,
+                              sample_param.strategy=='recent', sample_param.prop_time,
+                              sample_param.history, float(sample_param.duration))
 
 if args.use_inductive:
     test_df = df[val_edge_end:]
@@ -106,18 +106,18 @@ def eval(mode='val'):
         eval_df = df[:train_edge_end]
     with torch.no_grad():
         total_loss = 0
-        for _, rows in eval_df.groupby(eval_df.index // train_param['batch_size']):
+        for _, rows in eval_df.groupby(eval_df.index // train_param.batch_size):
             root_nodes = np.concatenate([rows.src.values, rows.dst.values, neg_link_sampler.sample(len(rows) * neg_samples)]).astype(np.int32)
             ts = np.tile(rows.time.values, neg_samples + 2).astype(np.float32)
             if sampler is not None:
-                if 'no_neg' in sample_param and sample_param['no_neg']:
+                if sample_param.no_neg:
                     pos_root_end = len(rows) * 2
                     sampler.sample(root_nodes[:pos_root_end], ts[:pos_root_end])
                 else:
                     sampler.sample(root_nodes, ts)
                 ret = sampler.get_ret()
-            if gnn_param['arch'] != 'identity':
-                mfgs = to_dgl_blocks(ret, sample_param['history'])
+            if gnn_param.arch != 'identity':
+                mfgs = to_dgl_blocks(ret, sample_param.history)
             else:
                 mfgs = node_to_dgl_blocks(root_nodes, ts)
             mfgs = prepare_input(mfgs, node_feats, edge_feats, combine_first=combine_first)
@@ -137,8 +137,8 @@ def eval(mode='val'):
                 eid = rows['Unnamed: 0'].values
                 mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
                 block = None
-                if memory_param['deliver_to'] == 'neighbors':
-                    block = to_dgl_blocks(ret, sample_param['history'], reverse=True)[0][0]
+                if memory_param.deliver_to == 'neighbors':
+                    block = to_dgl_blocks(ret, sample_param.history, reverse=True)[0][0]
                 mailbox.update_mailbox(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, ts, mem_edge_feats, block, neg_samples=neg_samples)
                 mailbox.update_memory(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, model.memory_updater.last_updated_ts, neg_samples=neg_samples)
         if mode == 'val':
@@ -160,21 +160,21 @@ best_ap = 0
 best_e = 0
 val_losses = list()
 group_indexes = list()
-group_indexes.append(np.array(df[:train_edge_end].index // train_param['batch_size']))
-if 'reorder' in train_param:
+group_indexes.append(np.array(df[:train_edge_end].index // train_param.batch_size))
+if train_param.reorder is not None:
     # random chunk shceduling
-    reorder = train_param['reorder']
+    reorder = train_param.reorder
     group_idx = list()
     for i in range(reorder):
         group_idx += list(range(0 - i, reorder - i))
-    group_idx = np.repeat(np.array(group_idx), train_param['batch_size'] // reorder)
-    group_idx = np.tile(group_idx, train_edge_end // train_param['batch_size'] + 1)[:train_edge_end]
+    group_idx = np.repeat(np.array(group_idx), train_param.batch_size // reorder)
+    group_idx = np.tile(group_idx, train_edge_end // train_param.batch_size + 1)[:train_edge_end]
     group_indexes.append(group_indexes[0] + group_idx)
     base_idx = group_indexes[0]
-    for i in range(1, train_param['reorder']):
-        additional_idx = np.zeros(train_param['batch_size'] // train_param['reorder'] * i) - 1
+    for i in range(1, train_param.reorder):
+        additional_idx = np.zeros(train_param.batch_size // train_param.reorder * i) - 1
         group_indexes.append(np.concatenate([additional_idx, base_idx])[:base_idx.shape[0]])
-for e in range(train_param['epoch']):
+for e in range(train_param.epoch):
     print('Epoch {:d}:'.format(e))
     time_sample = 0
     time_prep = 0
@@ -192,7 +192,7 @@ for e in range(train_param['epoch']):
         root_nodes = np.concatenate([rows.src.values, rows.dst.values, neg_link_sampler.sample(len(rows))]).astype(np.int32)
         ts = np.concatenate([rows.time.values, rows.time.values, rows.time.values]).astype(np.float32)
         if sampler is not None:
-            if 'no_neg' in sample_param and sample_param['no_neg']:
+            if sample_param.no_neg:
                 pos_root_end = root_nodes.shape[0] * 2 // 3
                 sampler.sample(root_nodes[:pos_root_end], ts[:pos_root_end])
             else:
@@ -200,8 +200,8 @@ for e in range(train_param['epoch']):
             ret = sampler.get_ret()
             time_sample += ret[0].sample_time()
         t_prep_s = time.time()
-        if gnn_param['arch'] != 'identity':
-            mfgs = to_dgl_blocks(ret, sample_param['history'])
+        if gnn_param.arch != 'identity':
+            mfgs = to_dgl_blocks(ret, sample_param.history)
         else:
             mfgs = node_to_dgl_blocks(root_nodes, ts)
         mfgs = prepare_input(mfgs, node_feats, edge_feats, combine_first=combine_first)
@@ -212,7 +212,7 @@ for e in range(train_param['epoch']):
         pred_pos, pred_neg = model(mfgs)
         loss = creterion(pred_pos, torch.ones_like(pred_pos))
         loss += creterion(pred_neg, torch.zeros_like(pred_neg))
-        total_loss += float(loss) * train_param['batch_size']
+        total_loss += float(loss) * train_param.batch_size
         loss.backward()
         optimizer.step()
         t_prep_s = time.time()
@@ -220,8 +220,8 @@ for e in range(train_param['epoch']):
             eid = rows['Unnamed: 0'].values
             mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
             block = None
-            if memory_param['deliver_to'] == 'neighbors':
-                block = to_dgl_blocks(ret, sample_param['history'], reverse=True)[0][0]
+            if memory_param.deliver_to == 'neighbors':
+                block = to_dgl_blocks(ret, sample_param.history, reverse=True)[0][0]
             mailbox.update_mailbox(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, ts, mem_edge_feats, block)
             mailbox.update_memory(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, model.memory_updater.last_updated_ts)
         time_prep += time.time() - t_prep_s

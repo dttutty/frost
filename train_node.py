@@ -51,13 +51,13 @@ if not os.path.isfile('embs/' + emb_file_name):
     gnn_dim_node = 0 if node_feats is None else node_feats.shape[1]
     gnn_dim_edge = 0 if edge_feats is None else edge_feats.shape[1]
     combine_first = False
-    if 'combine_neighs' in train_param and train_param['combine_neighs']:
+    if train_param.combine_neighs:
         combine_first = True
     model = GeneralModel(gnn_dim_node, gnn_dim_edge, sample_param, memory_param, gnn_param, train_param, combined=combine_first).cuda()
-    mailbox = MemoryMailbox(memory_param, g['indptr'].shape[0] - 1, gnn_dim_edge) if memory_param['type'] != 'none' else None
+    mailbox = MemoryMailbox(memory_param, g['indptr'].shape[0] - 1, gnn_dim_edge) if memory_param.type != 'none' else None
     creterion = torch.nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=train_param['lr'])
-    if 'all_on_gpu' in train_param and train_param['all_on_gpu']:
+    optimizer = torch.optim.Adam(model.parameters(), lr=train_param.lr)
+    if train_param.all_on_gpu:
         if node_feats is not None:
             node_feats = node_feats.cuda()
         if edge_feats is not None:
@@ -66,11 +66,11 @@ if not os.path.isfile('embs/' + emb_file_name):
             mailbox.move_to_gpu()
 
     sampler = None
-    if not ('no_sample' in sample_param and sample_param['no_sample']):
+    if not sample_param.no_sample:
         sampler = ParallelSampler(g['indptr'], g['indices'], g['eid'], g['ts'].astype(np.float32),
-                                sample_param['num_thread'], 1, sample_param['layer'], sample_param['neighbor'],
-                                sample_param['strategy']=='recent', sample_param['prop_time'],
-                                sample_param['history'], float(sample_param['duration']))
+                                sample_param.num_thread, 1, sample_param.layer, sample_param.neighbor,
+                                sample_param.strategy=='recent', sample_param.prop_time,
+                                sample_param.history, float(sample_param.duration))
     neg_link_sampler = NegLinkSampler(g['indptr'].shape[0] - 1)
 
     model.load_state_dict(torch.load(args.model))
@@ -82,7 +82,7 @@ if not os.path.isfile('embs/' + emb_file_name):
         if processed_edge_id >= len(df):
             return
         while df.time[processed_edge_id] < time:
-            rows = df[processed_edge_id:min(processed_edge_id + train_param['batch_size'], len(df))]
+            rows = df[processed_edge_id:min(processed_edge_id + train_param.batch_size, len(df))]
             if processed_edge_id < train_edge_end:
                 model.train()
             else:
@@ -90,14 +90,14 @@ if not os.path.isfile('embs/' + emb_file_name):
             root_nodes = np.concatenate([rows.src.values, rows.dst.values, neg_link_sampler.sample(len(rows))]).astype(np.int32)
             ts = np.concatenate([rows.time.values, rows.time.values, rows.time.values]).astype(np.float32)
             if sampler is not None:
-                if 'no_neg' in sample_param and sample_param['no_neg']:
+                if  sample_param.no_neg:
                     pos_root_end = root_nodes.shape[0] * 2 // 3
                     sampler.sample(root_nodes[:pos_root_end], ts[:pos_root_end])
                 else:
                     sampler.sample(root_nodes, ts)
                 ret = sampler.get_ret()
-            if gnn_param['arch'] != 'identity':
-                mfgs = to_dgl_blocks(ret, sample_param['history'])
+            if gnn_param.arch != 'identity':
+                mfgs = to_dgl_blocks(ret, sample_param.history)
             else:
                 mfgs = node_to_dgl_blocks(root_nodes, ts)
             mfgs = prepare_input(mfgs, node_feats, edge_feats, combine_first=combine_first)
@@ -109,11 +109,11 @@ if not os.path.isfile('embs/' + emb_file_name):
                     eid = rows['Unnamed: 0'].values
                     mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
                     block = None
-                    if memory_param['deliver_to'] == 'neighbors':
-                        block = to_dgl_blocks(ret, sample_param['history'], reverse=True)[0][0]
+                    if memory_param.deliver_to == 'neighbors':
+                        block = to_dgl_blocks(ret, sample_param.history, reverse=True)[0][0]
                     mailbox.update_mailbox(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, ts, mem_edge_feats, block)
                     mailbox.update_memory(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, model.memory_updater.last_updated_ts)
-            processed_edge_id += train_param['batch_size']
+            processed_edge_id += train_param.batch_size
             if processed_edge_id >= len(df):
                 return
 
@@ -122,8 +122,8 @@ if not os.path.isfile('embs/' + emb_file_name):
         if sampler is not None:
             sampler.sample(root_nodes, ts)
             ret = sampler.get_ret()
-        if gnn_param['arch'] != 'identity':
-            mfgs = to_dgl_blocks(ret, sample_param['history'])
+        if gnn_param.arch != 'identity':
+            mfgs = to_dgl_blocks(ret, sample_param.history)
         else:
             mfgs = node_to_dgl_blocks(root_nodes, ts)
         mfgs = prepare_input(mfgs, node_feats, edge_feats, combine_first=combine_first)

@@ -128,13 +128,13 @@ dist.broadcast_object_list(num_nodes, src=world_size - 1)
 num_nodes = num_nodes[0]
 
 mailbox = None
-if memory_param['type'] != 'none':
+if memory_param.type != 'none':
     # name → (shape list, dtype)
     shared_cfg = {
-        'node_memory':      ([num_nodes, memory_param['dim_out']], torch.float32),
+        'node_memory':      ([num_nodes, memory_param.dim_out], torch.float32),
         'node_memory_ts':   ([num_nodes], torch.float32),
-        'mails':            ([num_nodes, memory_param['mailbox_size'], 2 * memory_param['dim_out'] + dim_feats[4]], torch.float32),
-        'mail_ts':          ([num_nodes, memory_param['mailbox_size']], torch.float32),
+        'mails':            ([num_nodes, memory_param.mailbox_size, 2 * memory_param.dim_out + dim_feats[4]], torch.float32),
+        'mail_ts':          ([num_nodes, memory_param.mailbox_size], torch.float32),
         'next_mail_pos':    ([num_nodes], torch.long),
         'update_mail_pos':  ([num_nodes], torch.int32),
     }
@@ -144,9 +144,10 @@ if memory_param['type'] != 'none':
     if local_rank == 0:
         for arr in arrays.values():
             arr.zero_()
+    
     mailbox = MemoryMailbox(memory_param, num_nodes, dim_feats[4], arrays['node_memory'], arrays['node_memory_ts'], arrays['mails'], arrays['mail_ts'], arrays['next_mail_pos'], arrays['update_mail_pos'])
 
-sample_param, memory_param, gnn_param, train_param = parse_config(args.config)
+
 if local_rank == world_size - 1:
     run_host(sample_param, memory_param, gnn_param, train_param, g, df, mailbox)
 else:
