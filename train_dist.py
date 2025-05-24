@@ -1,15 +1,16 @@
 import argparse
 import os
 LOCAL_RANK = int(os.environ['LOCAL_RANK'])
-cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
-device_count = len(cuda_visible_devices.split(','))
+cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES').split(',')
+device_count = len(cuda_visible_devices)
 
 if LOCAL_RANK != 2:
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(LOCAL_RANK)
+    os.environ['CUDA_VISIBLE_DEVICES'] = cuda_visible_devices[LOCAL_RANK]
 import torch.distributed as dist
 import datetime
 import torch
 
+from typing import Optional
 parser=argparse.ArgumentParser()
 parser.add_argument('--data', type=str, help='dataset name')
 parser.add_argument('--config', type=str, help='path to config file')
@@ -34,7 +35,8 @@ from modules import  MemoryMailbox
 from utils import load_feat, load_graph, parse_config
 from worker import run_worker
 from host import run_host
-
+import torch.distributed as dist
+from functools import wraps
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -43,15 +45,6 @@ def set_seed(seed):
 
 set_seed(args.seed)
 
-
-
-
-
-
-
-
-
-from typing import Optional
 def init_shared_array(name, tensor_on_rank0=None):
     """
     Rank 0: create + copy; others: barrier then get.
@@ -93,41 +86,61 @@ else:
 edge_feats = init_shared_array('edge_feats', tensor_on_rank0=edge_np)
 node_feats = init_shared_array('node_feats', tensor_on_rank0=node_np)
 
+def rank_exec_and_broadcast(func=None, *, needs_barrier=False, src_rank=0):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            payload = [None]  # 用于 broadcast_object_list
 
-# collect dim info once on rank0, broadcast to all
-if local_rank == 0:
-    dim_feats = [
-        node_np.shape[0] if node_np is not None else 0,
-        node_np.shape[1] if node_np is not None else 0,
-        node_np.dtype if node_np is not None else None,
-        edge_np.shape[0] if edge_np is not None else 0,
-        edge_np.shape[1] if edge_np is not None else 0,
-        edge_np.dtype if edge_np is not None else None,
+            if local_rank == src_rank:
+                result_on_src_rank = fn(*args, **kwargs)
+                payload[0] = result_on_src_rank
+            if needs_barrier:
+                dist.barrier()
+            dist.broadcast_object_list(payload, src=src_rank)
+            return payload[0]
+        return wrapper
+    if func is None:
+        return decorator
+    else:
+        return decorator(func)
+
+def _get_numpy_array_info(arr):
+    if arr is None:
+        return 0, 0, None
+    shape = arr.shape
+    dim0 = shape[0] if len(shape) > 0 else 0
+    dim1 = shape[1] if len(shape) > 1 else 0
+    return dim0, dim1, arr.dtype
+
+@rank_exec_and_broadcast
+def calculate_dim_feats():
+    num_nodes, node_feat_dim, node_dtype = _get_numpy_array_info(node_np)
+    num_edges, edge_feat_dim, edge_dtype = _get_numpy_array_info(edge_np)
+    return [
+        num_nodes, node_feat_dim, node_dtype,
+        num_edges, edge_feat_dim, edge_dtype,
     ]
-else:
-    dim_feats = [None] * 6
-dist.broadcast_object_list(dim_feats, src=0)
+    
+dim_feats_list = calculate_dim_feats()
+node_feat_dim = dim_feats_list[1]
+edge_feat_dim = dim_feats_list[4]
 
-
-sample_param, memory_param, gnn_param, train_param = parse_config(args.config)
-
-if local_rank == 0:
+@rank_exec_and_broadcast
+def prepare_path_saver(data_name):
     if not os.path.isdir('models'):
         os.mkdir('models')
-    path_saver = ['models/{}_{}.pkl'.format(args.data, time.time())]
-else:
-    path_saver = [None]
-dist.broadcast_object_list(path_saver, src=0)
-path_saver = path_saver[0]
+    return 'models/{}_{}.pkl'.format(data_name, time.time()) # time.time() 在 rank 0 执行
+path_saver = prepare_path_saver(args.data) # args.data 对于所有进程是相同的
 
 if local_rank == world_size - 1:
     g, df = load_graph(args.data)
-    num_nodes = [g['indptr'].shape[0] - 1]
-else:
-    num_nodes = [None]
-dist.barrier()
-dist.broadcast_object_list(num_nodes, src=world_size - 1)
-num_nodes = num_nodes[0]
+@rank_exec_and_broadcast(needs_barrier=True, src_rank=world_size - 1)
+def load_graph_and_get_num_nodes():
+    return g['indptr'].shape[0] - 1
+num_nodes = load_graph_and_get_num_nodes()
+
+sample_param, memory_param, gnn_param, train_param = parse_config(args.config)
 
 def init_shared(name, shape, dtype):
     """rank0 create, others get, barrier 之后返回张量句柄"""
@@ -138,13 +151,13 @@ def init_shared(name, shape, dtype):
         arr = get_shared_mem_array(name, torch.Size(shape), dtype=dtype)
     return arr
 
-mailbox = None
+memory_mailbox = None
 if memory_param.type != 'none':
     # name → (shape list, dtype)
     shared_cfg = {
         'node_memory':      ([num_nodes, memory_param.dim_out], torch.float32),
         'node_memory_ts':   ([num_nodes], torch.float32),
-        'mails':            ([num_nodes, memory_param.mailbox_size, 2 * memory_param.dim_out + dim_feats[4]], torch.float32),
+        'mails':            ([num_nodes, memory_param.mailbox_size, 2 * memory_param.dim_out + edge_feat_dim], torch.float32),
         'mail_ts':          ([num_nodes, memory_param.mailbox_size], torch.float32),
         'next_mail_pos':    ([num_nodes], torch.long),
         'update_mail_pos':  ([num_nodes], torch.int32),
@@ -156,11 +169,11 @@ if memory_param.type != 'none':
         for arr in shared_arrays.values():
             arr.zero_()
     
-    mailbox = MemoryMailbox(memory_param, shared_cfg, dim_feats[4], shared_arrays)
+    memory_mailbox = MemoryMailbox(memory_param, shared_cfg, edge_feat_dim, shared_arrays)
 
 
 if local_rank == world_size - 1:
-    run_host(sample_param, memory_param, gnn_param, train_param, g, df, mailbox)
+    run_host(sample_param, memory_param, gnn_param, train_param, g, df, memory_mailbox)
 else:
     print("dist-worker local_rank",local_rank)
-    run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, mailbox, dim_feats, path_saver, node_feats, edge_feats)
+    run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, memory_mailbox, node_feat_dim, edge_feat_dim, path_saver, node_feats, edge_feats)

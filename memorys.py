@@ -24,45 +24,43 @@ class MemoryMailbox():
                  shared_cfg, 
                  dim_edge_feat, 
                  shared_arrays):
+        self.shared_cfg = shared_cfg
+        self.memory_param = memory_param
+        self.dim_edge_feat = dim_edge_feat
+        
         if memory_param.type != 'node':
             raise NotImplementedError
 
         
-        for config_key, (shape_definition, dtype_definition) in shared_cfg.items():
-            # Get the corresponding value from the input shared_arrays dictionary.
-            # The original code implies that all keys in local_shared_cfg
-            # will be present in shared_arrays (though their values can be None).
+        for config_key, (shape_definition, dtype_definition) in self.shared_cfg.items():
             shared_value = shared_arrays[config_key]
 
             if shared_value is None:
-                # If the shared value is None:
-                # - For 'update_mail_pos', the attribute becomes None (as per original logic).
-                # - For others, initialize with a tensor of zeros.
                 if config_key == 'update_mail_pos':
                     setattr(self, config_key, None) # not torch.zeros(shape_definition, dtype=dtype_definition)
                 else:
                     setattr(self, config_key, torch.zeros(shape_definition, dtype=dtype_definition))
             else:
-                # If a shared value is provided, use it directly.
                 setattr(self, config_key, shared_value)
                 
-        self.memory_param = memory_param
-        self.dim_edge_feat = dim_edge_feat
+
         self.device = torch.device('cpu')
         
     def reset(self):
-        self.node_memory.fill_(0)
-        self.node_memory_ts.fill_(0)
-        self.mails.fill_(0)
-        self.mail_ts.fill_(0)
-        self.next_mail_pos.fill_(0)
+        for config_key, (shape_definition, dtype_definition) in self.shared_cfg.items():
+            if config_key == 'update_mail_pos':
+                continue
+            shared_value = getattr(self, config_key)
+            shared_value.zero_()
 
     def move_to_gpu(self):
-        self.node_memory = self.node_memory.cuda()
-        self.node_memory_ts = self.node_memory_ts.cuda()
-        self.mails = self.mails.cuda()
-        self.mail_ts = self.mail_ts.cuda()
-        self.next_mail_pos = self.next_mail_pos.cuda()
+        # only used in train.py and train_node.py
+        for config_key, (shape_definition, dtype_definition) in self.shared_cfg.items():
+            shared_value = getattr(self, config_key)
+            if config_key == 'update_mail_pos':
+                continue
+            if shared_value is not None:
+                setattr(self, config_key, shared_value.cuda())
         self.device = torch.device('cuda:0')
 
     def allocate_pinned_memory_buffers(self, sample_param, batch_size):
@@ -81,38 +79,70 @@ class MemoryMailbox():
             self.pinned_mailbox_ts_buffs.append(torch.zeros((limit, self.mail_ts.shape[1]), pin_memory=True))
 
     def prep_input_mails(self, mfg, use_pinned_buffers=False):
+        data_map = {
+            'mem': {'src': self.node_memory, 'pinned': getattr(self, 'pinned_node_memory_buffs', None)},
+            'mem_ts': {'src': self.node_memory_ts, 'pinned': getattr(self, 'pinned_node_memory_ts_buffs', None)},
+            'mem_input': {'src': self.mails, 'pinned': getattr(self, 'pinned_mailbox_buffs', None), 'reshape': True},
+            'mail_ts': {'src': self.mail_ts, 'pinned': getattr(self, 'pinned_mailbox_ts_buffs', None)}
+        }
         for i, b in enumerate(mfg):
-            if use_pinned_buffers:
-                idx = b.srcdata['ID'].cpu().long()
-                torch.index_select(self.node_memory, 0, idx, out=self.pinned_node_memory_buffs[i][:idx.shape[0]])
-                b.srcdata['mem'] = self.pinned_node_memory_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
-                torch.index_select(self.node_memory_ts,0, idx, out=self.pinned_node_memory_ts_buffs[i][:idx.shape[0]])
-                b.srcdata['mem_ts'] = self.pinned_node_memory_ts_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
-                torch.index_select(self.mails, 0, idx, out=self.pinned_mailbox_buffs[i][:idx.shape[0]])
-                b.srcdata['mem_input'] = self.pinned_mailbox_buffs[i][:idx.shape[0]].reshape(b.srcdata['ID'].shape[0], -1).cuda(non_blocking=True)
-                torch.index_select(self.mail_ts, 0, idx, out=self.pinned_mailbox_ts_buffs[i][:idx.shape[0]])
-                b.srcdata['mail_ts'] = self.pinned_mailbox_ts_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
-            else:
-                # b_cpu = b.cpu() is added by Lei Zhao
-                b_cpu = b.cpu()
-                b.srcdata['mem'] = self.node_memory[b_cpu.srcdata['ID'].long()].cuda()
-                b.srcdata['mem_ts'] = self.node_memory_ts[b_cpu.srcdata['ID'].long()].cuda()
-                b.srcdata['mem_input'] = self.mails[b_cpu.srcdata['ID'].long()].cuda().reshape(b.srcdata['ID'].shape[0], -1)
-                b.srcdata['mail_ts'] = self.mail_ts[b_cpu.srcdata['ID'].long()].cuda()
+            
+            idx = b.srcdata['ID'].cpu().long()
+            n_nodes = idx.shape[0]
+            for key, info in data_map.items():
+                src_tensor = info['src']
+                pinned_list = info['pinned']
+                do_reshape = info.get('reshape', False)
+                can_use_pinned = use_pinned_buffers and i < len(pinned_list)
+                if can_use_pinned:
+                    # --- Use Pinned Memory Buffers ---
+                    pinned_buffer = pinned_list[i]
+                    # Select data into the pinned buffer (CPU operation).
+                    torch.index_select(src_tensor, 0, idx, out=pinned_buffer[:n_nodes])
+                    # Copy the selected data from pinned buffer to GPU (non-blocking).
+                    gpu_data = pinned_buffer[:n_nodes].cuda(non_blocking=True)
+                else:
+                    # --- Standard Method (No Pinned Buffers) ---
+                    # Select data and directly copy to GPU.
+                    gpu_data = src_tensor[idx].cuda()
+                    # Reshape mailbox data if needed.
+                if do_reshape:
+                    gpu_data = gpu_data.reshape(n_nodes, -1)
 
+                # Assign the prepared data to the DGL block's source nodes.
+                b.srcdata[key] = gpu_data
+                
+            # if use_pinned_buffers:
+                
+            #     torch.index_select(self.node_memory, 0, idx, out=self.pinned_node_memory_buffs[i][:idx.shape[0]])
+            #     b.srcdata['mem'] = self.pinned_node_memory_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
+            #     torch.index_select(self.node_memory_ts,0, idx, out=self.pinned_node_memory_ts_buffs[i][:idx.shape[0]])
+            #     b.srcdata['mem_ts'] = self.pinned_node_memory_ts_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
+            #     torch.index_select(self.mails, 0, idx, out=self.pinned_mailbox_buffs[i][:idx.shape[0]])
+            #     b.srcdata['mem_input'] = self.pinned_mailbox_buffs[i][:idx.shape[0]].reshape(b.srcdata['ID'].shape[0], -1).cuda(non_blocking=True)
+            #     torch.index_select(self.mail_ts, 0, idx, out=self.pinned_mailbox_ts_buffs[i][:idx.shape[0]])
+            #     b.srcdata['mail_ts'] = self.pinned_mailbox_ts_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
+            # else:
+            #     # b_cpu = b.cpu() is added by Lei Zhao
+            #     b_cpu = b.cpu()
+            #     b.srcdata['mem'] = self.node_memory[b_cpu.srcdata['ID'].long()].cuda()
+            #     b.srcdata['mem_ts'] = self.node_memory_ts[b_cpu.srcdata['ID'].long()].cuda()
+            #     b.srcdata['mem_input'] = self.mails[b_cpu.srcdata['ID'].long()].cuda().reshape(b.srcdata['ID'].shape[0], -1)
+            #     b.srcdata['mail_ts'] = self.mail_ts[b_cpu.srcdata['ID'].long()].cuda()
+
+    @torch.no_grad()
     def update_memory(self, nid, memory, root_nodes, ts, neg_samples=1):
         if nid is None:
             return
         num_true_src_dst = root_nodes.shape[0] // (neg_samples + 2) * 2
-        with torch.no_grad():
-            nid = nid[:num_true_src_dst].to(self.device)
-            memory = memory[:num_true_src_dst].to(self.device)
-            ts = ts[:num_true_src_dst].to(self.device)
-            self.node_memory[nid.long()] = memory
-            self.node_memory_ts[nid.long()] = ts
+        nid = nid[:num_true_src_dst].to(self.device)
+        memory = memory[:num_true_src_dst].to(self.device)
+        ts = ts[:num_true_src_dst].to(self.device)
+        self.node_memory[nid.long()] = memory
+        self.node_memory_ts[nid.long()] = ts
 
+    @torch.no_grad()
     def update_mailbox(self, nid, memory, root_nodes, ts, edge_feats, block, neg_samples=1):
-        with torch.no_grad():
             num_true_edges = root_nodes.shape[0] // (neg_samples + 2)
             memory = memory.to(self.device)
             if edge_feats is not None:

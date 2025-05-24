@@ -5,6 +5,23 @@ import dgl
 import time
 import pandas as pd
 import numpy as np
+
+def get_ids(mfgs, node_feats, edge_feats):
+    nids = list()
+    eids = list()
+    if node_feats is not None:
+        for b in mfgs[0]:
+            nids.append(b.srcdata['ID'].long())
+    if 'ID' in mfgs[0][0].edata:
+        if edge_feats is not None:
+            for mfg in mfgs:
+                for b in mfg:
+                    eids.append(b.edata['ID'].long())
+    else:
+        eids = None
+    return nids, eids
+
+
 def load_feat(d, rand_de=0, rand_dn=0):
     node_feats = None
     if os.path.exists('DATA/{}/node_features.pt'.format(d)):
@@ -36,45 +53,61 @@ def load_graph(d):
 from sampler import SampleParams
 from memorys import MemoryParams
 from modules import GNNParams, TrainParams
-def parse_config(f):
+def parse_config(f, fashion='new'):
     conf = yaml.safe_load(open(f, 'r'))
-    sample_param = SampleParams(**conf['sampling'][0])
-    memory_param = MemoryParams(**conf['memory'][0])
-    gnn_param = GNNParams(**conf['gnn'][0])
-    train_param = TrainParams(**conf['train'][0])
+    if fashion == 'new':
+        sample_param = SampleParams(**conf['sampling'][0])
+        memory_param = MemoryParams(**conf['memory'][0])
+        gnn_param = GNNParams(**conf['gnn'][0])
+        train_param = TrainParams(**conf['train'][0])
+    else:
+        sample_param = conf['sampling'][0]
+        memory_param = conf['memory'][0]
+        gnn_param = conf['gnn'][0]
+        train_param = conf['train'][0]
     return sample_param, memory_param, gnn_param, train_param
 
-def to_dgl_blocks(ret, hist, reverse=False, cuda=True):
+def to_dgl_blocks(ret, history, reverse=False, cuda=True):
     mfgs = list()
-    for r in ret:
+    # 6 tgbs -> mfgs length 6 [1,2,3,4,5,6]
+    # if history = 2, grouped_mfgs = [[1,2],[3,4],[5,6]]
+    for tgb in ret:
+        tgb_nodes = torch.from_numpy(tgb.nodes())
+        tgb_dts = torch.from_numpy(tgb.dts())
+        tgb_ts = torch.from_numpy(tgb.ts())
+        tgb_eid = torch.from_numpy(tgb.eid())
         if not reverse:
-            b = dgl.create_block((r.col(), r.row()), num_src_nodes=r.dim_in(), num_dst_nodes=r.dim_out())
-            b.srcdata['ID'] = torch.from_numpy(r.nodes())
-            b.edata['dt'] = torch.from_numpy(r.dts())[b.num_dst_nodes():]
-            b.srcdata['ts'] = torch.from_numpy(r.ts())
+            edges = (tgb.col(), tgb.row())
+            num_src, num_dst = tgb.dim_in(), tgb.dim_out()
+            dt_slice_start = num_dst
+            id_ts_target = 'srcdata'
         else:
-            b = dgl.create_block((r.row(), r.col()), num_src_nodes=r.dim_out(), num_dst_nodes=r.dim_in())
-            b.dstdata['ID'] = torch.from_numpy(r.nodes())
-            b.edata['dt'] = torch.from_numpy(r.dts())[b.num_src_nodes():]
-            b.dstdata['ts'] = torch.from_numpy(r.ts())
-        b.edata['ID'] = torch.from_numpy(r.eid())
-        if cuda:
-            mfgs.append(b.to('cuda:0'))
-        else:
-            mfgs.append(b)
-    mfgs = list(map(list, zip(*[iter(mfgs)] * hist)))
-    mfgs.reverse()
-    return mfgs
+            edges = (tgb.row(), tgb.col())
+            num_src, num_dst = tgb.dim_out(), tgb.dim_in()
+            dt_slice_start = num_src
+            id_ts_target = 'dstdata'
+        block = dgl.create_block(edges, num_src_nodes=num_src, num_dst_nodes=num_dst)
+        getattr(block, id_ts_target)['ID'] = tgb_nodes
+        getattr(block, id_ts_target)['ts'] = tgb_ts
+        
+        # Assign edge data
+        block.edata['dt'] = tgb_dts[dt_slice_start:]
+        block.edata['ID'] = tgb_eid
+        
+        mfgs.append(block.to('cuda:0') if cuda else block)
+    grouped_mfgs = list(map(list, zip(*[iter(mfgs)] * history)))
+    grouped_mfgs.reverse()
+    return grouped_mfgs
 
 def node_to_dgl_blocks(root_nodes, ts, cuda=True):
     mfgs = list()
-    b = dgl.create_block(([],[]), num_src_nodes=root_nodes.shape[0], num_dst_nodes=root_nodes.shape[0])
-    b.srcdata['ID'] = torch.from_numpy(root_nodes)
-    b.srcdata['ts'] = torch.from_numpy(ts)
+    block = dgl.create_block(([],[]), num_src_nodes=root_nodes.shape[0], num_dst_nodes=root_nodes.shape[0])
+    block.srcdata['ID'] = torch.from_numpy(root_nodes)
+    block.srcdata['ts'] = torch.from_numpy(ts)
     if cuda:
-        mfgs.insert(0, [b.to('cuda:0')])
+        mfgs.insert(0, [block.to('cuda:0')])
     else:
-        mfgs.insert(0, [b])
+        mfgs.insert(0, [block])
     return mfgs
 
 def mfgs_to_cuda(mfgs):
@@ -136,19 +169,5 @@ def prepare_input(mfgs, node_feats, edge_feats, combine_first=False, pinned=Fals
                         b.edata['f'] = srch.cuda()
     return mfgs
 
-def get_ids(mfgs, node_feats, edge_feats):
-    nids = list()
-    eids = list()
-    if node_feats is not None:
-        for b in mfgs[0]:
-            nids.append(b.srcdata['ID'].long())
-    if 'ID' in mfgs[0][0].edata:
-        if edge_feats is not None:
-            for mfg in mfgs:
-                for b in mfg:
-                    eids.append(b.edata['ID'].long())
-    else:
-        eids = None
-    return nids, eids
 
 
