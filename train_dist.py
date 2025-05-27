@@ -135,12 +135,15 @@ path_saver = prepare_path_saver(args.data) # args.data 对于所有进程是相�
 
 if local_rank == world_size - 1:
     g, df = load_graph(args.data)
+    
 @rank_exec_and_broadcast(needs_barrier=True, src_rank=world_size - 1)
 def load_graph_and_get_num_nodes():
     return g['indptr'].shape[0] - 1
+
 num_nodes = load_graph_and_get_num_nodes()
 
 sample_param, memory_param, gnn_param, train_param = parse_config(args.config)
+
 
 def init_shared(name, shape, dtype):
     """rank0 create, others get, barrier 之后返回张量句柄"""
@@ -160,7 +163,7 @@ if memory_param.type != 'none':
         'mails':            ([num_nodes, memory_param.mailbox_size, 2 * memory_param.dim_out + edge_feat_dim], torch.float32),
         'mail_ts':          ([num_nodes, memory_param.mailbox_size], torch.float32),
         'next_mail_pos':    ([num_nodes], torch.long),
-        'update_mail_pos':  ([num_nodes], torch.int32),
+        'mail_pos_update_pending_flag':  ([num_nodes], torch.int8),
     }
     shared_arrays = {}
     for name, (shape, dtype) in shared_cfg.items():

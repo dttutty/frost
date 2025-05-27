@@ -95,14 +95,14 @@ if memory_param.type != 'none':
         mails = create_shared_mem_array('mails', torch.Size([num_nodes, memory_param.mailbox_size, 2 * memory_param.dim_out + dim_feats[4]]), dtype=torch.float32)
         mail_ts = create_shared_mem_array('mail_ts', torch.Size([num_nodes, memory_param.mailbox_size]), dtype=torch.float32)
         next_mail_pos = create_shared_mem_array('next_mail_pos', torch.Size([num_nodes]), dtype=torch.long)
-        update_mail_pos = create_shared_mem_array('update_mail_pos', torch.Size([num_nodes]), dtype=torch.int32)
+        mail_pos_update_pending_flag = create_shared_mem_array('mail_pos_update_pending_flag', torch.Size([num_nodes]), dtype=torch.int32)
         torch.distributed.barrier()
         node_memory.zero_()
         node_memory_ts.zero_()
         mails.zero_()
         mail_ts.zero_()
         next_mail_pos.zero_()
-        update_mail_pos.zero_()
+        mail_pos_update_pending_flag.zero_()
     else:
         torch.distributed.barrier()
         node_memory = get_shared_mem_array('node_memory', torch.Size([num_nodes, memory_param.dim_out]), dtype=torch.float32)
@@ -110,8 +110,8 @@ if memory_param.type != 'none':
         mails = get_shared_mem_array('mails', torch.Size([num_nodes, memory_param.mailbox_size, 2 * memory_param.dim_out + dim_feats[4]]), dtype=torch.float32)
         mail_ts = get_shared_mem_array('mail_ts', torch.Size([num_nodes, memory_param.mailbox_size]), dtype=torch.float32)
         next_mail_pos = get_shared_mem_array('next_mail_pos', torch.Size([num_nodes]), dtype=torch.long)
-        update_mail_pos = get_shared_mem_array('update_mail_pos', torch.Size([num_nodes]), dtype=torch.int32)
-    mailbox = MemoryMailbox(memory_param, num_nodes, dim_feats[4], node_memory, node_memory_ts, mails, mail_ts, next_mail_pos, update_mail_pos)
+        mail_pos_update_pending_flag = get_shared_mem_array('mail_pos_update_pending_flag', torch.Size([num_nodes]), dtype=torch.int32)
+    mailbox = MemoryMailbox(memory_param, num_nodes, dim_feats[4], node_memory, node_memory_ts, mails, mail_ts, next_mail_pos, mail_pos_update_pending_flag)
 
 if args.local_rank < args.num_gpus:
     # GPU worker process
@@ -138,7 +138,7 @@ if args.local_rank < args.num_gpus:
         multi_mfgs = [None] * (args.num_gpus + 1)
         torch.distributed.scatter_object_list(my_mfgs, multi_mfgs, src=args.num_gpus)
         mfgs = mfgs_to_cuda(my_mfgs[0])
-        prepare_input(mfgs, node_feats, edge_feats)
+        prepare_mfgs(mfgs, node_feats, edge_feats)
         if my_model_state[0] == 0:
             model.train()
             optimizer.zero_grad()

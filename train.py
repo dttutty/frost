@@ -120,7 +120,7 @@ def eval(mode='val'):
                 mfgs = to_dgl_blocks(ret, sample_param.history)
             else:
                 mfgs = node_to_dgl_blocks(root_nodes, ts)
-            mfgs = prepare_input(mfgs, node_feats, edge_feats, combine_first=combine_first)
+            mfgs = prepare_mfgs(mfgs, node_feats, edge_feats, combine_first=combine_first)
             if mailbox is not None:
                 mailbox.prep_input_mails(mfgs[0])
             pred_pos, pred_neg = model(mfgs, neg_samples=neg_samples)
@@ -204,7 +204,7 @@ for e in range(train_param.epoch):
             mfgs = to_dgl_blocks(ret, sample_param.history)
         else:
             mfgs = node_to_dgl_blocks(root_nodes, ts)
-        mfgs = prepare_input(mfgs, node_feats, edge_feats, combine_first=combine_first)
+        mfgs = prepare_mfgs(mfgs, node_feats, edge_feats, combine_first=combine_first)
         if mailbox is not None:
             mailbox.prep_input_mails(mfgs[0])
         time_prep += time.time() - t_prep_s

@@ -1,39 +1,42 @@
 
+from dataclasses import dataclass
 import torch
 from sklearn.metrics import average_precision_score, roc_auc_score
 from modules import GeneralModel
-from utils import   mfgs_to_cuda, prepare_input
+from utils import   mfgs_to_cuda, prepare_mfgs
 import torch.distributed as dist
 from modules import  MemoryMailbox, GNNParams, GeneralModel, MemoryParams
 from data_pipeline_thread import DataPipelineThread
+from dgl.heterograph import DGLBlock
+from dataclasses import dataclass
+from typing import List, Optional
+import torch
+from numpy.typing import NDArray
+import numpy as np
+from torch.nn.parallel import DistributedDataParallel as DDP
+from memorys import GRUMemoryUpdater, RNNMemoryUpdater, TransformerMemoryUpdater
+
 local_rank = dist.get_rank()
 world_size = dist.get_world_size()
 host_rank = world_size - 1
-from torch.nn.parallel import DistributedDataParallel as DDP
-        
+
 
 def scatter_receive(src=host_rank):
     my = [None]
     dist.scatter_object_list(my, [None] * world_size, src=src)
     return my[0]
 
-
-
+@dataclass
+class TransferedData:
+    mfgs: Optional[List[List[DGLBlock]]]  = None
+    root: Optional[NDArray[np.int32]] = None
+    ts: Optional[NDArray[np.float32]] = None
+    eid: Optional[List] = None
+    block: Optional[List[List[DGLBlock]]]  = None
 
 def run_training_step(stream, prev_thread: DataPipelineThread, mailbox: MemoryMailbox,  memory_param: MemoryParams, model: DDP, optimizer, creterion, node_feats, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, tot_loss):
-    
-    names = ['mfgs', 'root', 'ts', 'eid', 'block']
-    my_lists = {name: None for name in names}
-    
-    my_lists['mfgs'] = scatter_receive()
-    if mailbox is not None:
-        my_lists['root'] = scatter_receive()
-        my_lists['ts'] = scatter_receive()
-        my_lists['eid'] = scatter_receive()
-        if memory_param.deliver_to == 'neighbors':
-            my_lists['block'] = scatter_receive()
-
-    curr_thread = DataPipelineThread(my_lists, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param)
+    received_data: TransferedData = scatter_receive()
+    curr_thread = DataPipelineThread(received_data, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param)
     curr_thread.start()
     if prev_thread is not None:
         prev_thread, tot_loss = train_from_prefetch(prev_thread, mailbox, memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread)
@@ -43,14 +46,14 @@ def run_training_step(stream, prev_thread: DataPipelineThread, mailbox: MemoryMa
         
         
 
-def train_from_prefetch(prev_thread: DataPipelineThread, memory_mailbox: MemoryMailbox, memory_param: MemoryParams, model: DDP, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread):
+def train_from_prefetch(prev_thread: DataPipelineThread, memory_mailbox: MemoryMailbox, memory_param: MemoryParams, model: DDP|GeneralModel, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread):
     memory_updater = model.module.memory_updater
+    prev_th_hold_nomoved_data = prev_thread.received_data
     prev_thread.join()
-    # with torch.cuda.stream(prev_thread.get_stream()):
-    mfgs = prev_thread.get_mfgs()
+    # with torch.cuda.stream(prev_thread.stream):
     model.train()
     optimizer.zero_grad()
-    pred_pos, pred_neg = model(mfgs)
+    pred_pos, pred_neg = model(prev_thread.async_mfgs)
     loss = creterion(pred_pos, torch.ones_like(pred_pos))
     loss += creterion(pred_neg, torch.zeros_like(pred_neg))
     loss.backward()
@@ -59,13 +62,9 @@ def train_from_prefetch(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
         tot_loss += float(loss)
     if memory_mailbox is not None:
         with torch.no_grad():
-            eid = prev_thread.get_eid()
-            mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
-            root_nodes = prev_thread.get_root()
-            ts = prev_thread.get_ts()
-            block = prev_thread.get_block()
-            memory_mailbox.update_mailbox(memory_updater.last_updated_nid, memory_updater.last_updated_memory, root_nodes, ts, mem_edge_feats, block)
-            memory_mailbox.update_memory(memory_updater.last_updated_nid, memory_updater.last_updated_memory, root_nodes, memory_updater.last_updated_ts)
+            mem_edge_feats = edge_feats[prev_th_hold_nomoved_data.eid] if edge_feats is not None else None
+            memory_mailbox.update_mailbox(memory_updater.last_updated_nid, memory_updater.last_updated_memory, prev_th_hold_nomoved_data.root, prev_th_hold_nomoved_data.ts, mem_edge_feats, prev_th_hold_nomoved_data.block)
+            memory_mailbox.update_memory(memory_updater.last_updated_nid, memory_updater.last_updated_memory, prev_th_hold_nomoved_data.root, memory_updater.last_updated_ts)
             if memory_param.deliver_to == 'neighbors':
                 dist.barrier(group=nccl_group)
                 if local_rank == 0:
@@ -75,16 +74,15 @@ def train_from_prefetch(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
     return prev_thread, tot_loss
 
 
-    
-def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryMailbox,  memory_param, model: DDP, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, node_feats, tot_loss):
-    memory_updater = model.module.memory_updater
+def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryMailbox,  memory_param, model: DDP|GeneralModel, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, node_feats, tot_loss):
+    memory_updater: GRUMemoryUpdater|RNNMemoryUpdater|TransformerMemoryUpdater = model.module.memory_updater
     if prev_thread is not None:
         # finish last training mini-batch
         prev_thread, tot_loss = train_from_prefetch( prev_thread, memory_mailbox,  memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, None)
         
-    my_mfgs = scatter_receive()
-    mfgs = mfgs_to_cuda(my_mfgs)
-    prepare_input(mfgs, node_feats, edge_feats, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
+    received_data : TransferedData = scatter_receive()
+    mfgs = mfgs_to_cuda(received_data.mfgs)
+    prepare_mfgs(mfgs, node_feats, edge_feats, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
     
     model.eval()
     with torch.no_grad():
@@ -93,16 +91,10 @@ def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
         pred_pos, pred_neg = model(mfgs)
         if memory_mailbox is not None:
             
-            root_nodes = scatter_receive()
-            ts = scatter_receive()
-            eid = scatter_receive()
-            mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
-            block = None
-            
-            if memory_param.deliver_to == 'neighbors':
-                block = scatter_receive()
-            memory_mailbox.update_mailbox(memory_updater.last_updated_nid, memory_updater.last_updated_memory, root_nodes, ts, mem_edge_feats, block)
-            memory_mailbox.update_memory(memory_updater.last_updated_nid, memory_updater.last_updated_memory, root_nodes, memory_updater.last_updated_ts)
+            mem_edge_feats = edge_feats[received_data.eid] if edge_feats is not None else None
+
+            memory_mailbox.update_mailbox(memory_updater.last_updated_nid, memory_updater.last_updated_memory, received_data.root, received_data.ts, mem_edge_feats, received_data.block)
+            memory_mailbox.update_memory(memory_updater.last_updated_nid, memory_updater.last_updated_memory, received_data.root, memory_updater.last_updated_ts)
             
             if memory_param.deliver_to == 'neighbors':
                 dist.barrier(group=nccl_group)
@@ -172,3 +164,4 @@ def run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, m
                 tot_loss = 0
             case _:
                 raise ValueError(f"Unhandled state: {int(state_buf.item())}")
+            

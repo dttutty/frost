@@ -100,7 +100,7 @@ if not os.path.isfile('embs/' + emb_file_name):
                 mfgs = to_dgl_blocks(ret, sample_param.history)
             else:
                 mfgs = node_to_dgl_blocks(root_nodes, ts)
-            mfgs = prepare_input(mfgs, node_feats, edge_feats, combine_first=combine_first)
+            mfgs = prepare_mfgs(mfgs, node_feats, edge_feats, combine_first=combine_first)
             if mailbox is not None:
                 mailbox.prep_input_mails(mfgs[0])
             with torch.no_grad():
@@ -126,7 +126,7 @@ if not os.path.isfile('embs/' + emb_file_name):
             mfgs = to_dgl_blocks(ret, sample_param.history)
         else:
             mfgs = node_to_dgl_blocks(root_nodes, ts)
-        mfgs = prepare_input(mfgs, node_feats, edge_feats, combine_first=combine_first)
+        mfgs = prepare_mfgs(mfgs, node_feats, edge_feats, combine_first=combine_first)
         if mailbox is not None:
             mailbox.prep_input_mails(mfgs[0])
         with torch.no_grad():

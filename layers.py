@@ -9,7 +9,8 @@ class TimeEncode(torch.nn.Module):
         super(TimeEncode, self).__init__()
         self.dim = dim
         self.w = torch.nn.Linear(1, dim)
-        self.w.weight = torch.nn.Parameter((torch.from_numpy(1 / 10 ** np.linspace(0, 9, dim, dtype=np.float32))).reshape(dim, -1))
+        seq = np.linspace(0, 9, dim, dtype=np.float32)
+        self.w.weight = torch.nn.Parameter((torch.from_numpy(1 / 10 ** seq)).reshape(dim, -1))
         self.w.bias = torch.nn.Parameter(torch.zeros(dim))
 
     def forward(self, t):
@@ -35,6 +36,8 @@ class EdgePredictor(torch.nn.Module):
         return self.out_fc(h_pos_edge), self.out_fc(h_neg_edge)
 
 
+from torch import nn
+
 class TransfomerAttentionLayer(torch.nn.Module):
 
     def __init__(self, dim_node_feat, dim_edge_feat, dim_time, num_head, dropout, att_dropout, dim_out, combined=False):
@@ -44,12 +47,45 @@ class TransfomerAttentionLayer(torch.nn.Module):
         self.dim_edge_feat = dim_edge_feat
         self.dim_time = dim_time
         self.dim_out = dim_out
+        self.combined = combined
+        
         self.dropout = torch.nn.Dropout(dropout)
         self.att_dropout = torch.nn.Dropout(att_dropout)
         self.att_act = torch.nn.LeakyReLU(0.2)
-        self.combined = combined
+        self.layer_norm = torch.nn.LayerNorm(dim_out)
+        
         if dim_time > 0:
             self.time_enc = TimeEncode(dim_time)
+        
+        self.att_dropout = torch.nn.Dropout(att_dropout)
+        
+        # feat_dims = {
+        #     'n': dim_node_feat,
+        #     'e': dim_edge_feat,
+        #     't': dim_time
+        # }
+        # self.proj = nn.ModuleDict()
+        # if combined:
+        #     for f, d in feat_dims.items():
+        #         if d <= 0:
+        #             continue
+        #         # k、v 对所有有维度的特征都要
+        #         self.proj[f"k_{f}"] = nn.Linear(d, dim_out)  # 我们统一用 kv_f 做 k 和 v 投影
+        #         self.proj[f"k_{f}"] = nn.Linear(d, dim_out)  # 我们统一用 kv_f 做 k 和 v 投影
+        #         # 只对 'n' 和 't' 做 q 投影
+        #         if f in ('n', 't'):
+        #             self.proj[f"q_{f}"] = nn.Linear(d, dim_out)
+        # else:
+        #     dim_q  = dim_node_feat + dim_time
+        #     if dim_q > 0:
+        #         self.proj['q'] = nn.Linear(dim_q, dim_out)
+                
+        #     dim_kv = dim_node_feat + dim_edge_feat + dim_time
+        #     self.proj['k'] = nn.Linear(dim_kv, dim_out)
+        #     self.proj['v'] = nn.Linear(dim_kv, dim_out)
+            
+        # self.proj['out'] = nn.Linear(dim_node_feat + dim_out, dim_out)
+
         if combined:
             if dim_node_feat > 0:
                 self.w_q_n = torch.nn.Linear(dim_node_feat, dim_out)
@@ -68,7 +104,6 @@ class TransfomerAttentionLayer(torch.nn.Module):
             self.w_k = torch.nn.Linear(dim_node_feat + dim_edge_feat + dim_time, dim_out)
             self.w_v = torch.nn.Linear(dim_node_feat + dim_edge_feat + dim_time, dim_out)
         self.w_out = torch.nn.Linear(dim_node_feat + dim_out, dim_out)
-        self.layer_norm = torch.nn.LayerNorm(dim_out)
 
     def forward(self, b):
         assert(self.dim_time + self.dim_node_feat + self.dim_edge_feat > 0)

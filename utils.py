@@ -67,7 +67,12 @@ def parse_config(f, fashion='new'):
         train_param = conf['train'][0]
     return sample_param, memory_param, gnn_param, train_param
 
-def to_dgl_blocks(ret, history, reverse=False, cuda=True):
+
+from typing import List
+from dgl.heterograph import DGLBlock
+def to_dgl_blocks(ret, history, reverse=False, cuda=True) -> List[List[DGLBlock]]:
+    # eg. if sample_param.history = 3, sample_param.layer = 2, ret = [Ly1His1, Ly1His2, Ly1His3, Ly2His1, Ly2His2, Ly2His3]
+    # then grouped_mfgs = [[Ly1His1, Ly1His2], [Ly1His3, Ly2His1, [Ly2His2, Ly2His3]]
     mfgs = list()
     # 6 tgbs -> mfgs length 6 [1,2,3,4,5,6]
     # if history = 2, grouped_mfgs = [[1,2],[3,4],[5,6]]
@@ -95,11 +100,12 @@ def to_dgl_blocks(ret, history, reverse=False, cuda=True):
         block.edata['ID'] = tgb_eid
         
         mfgs.append(block.to('cuda:0') if cuda else block)
+    # [[Ly1His1, Ly1His2], [Ly1His3, Ly2His1, [Ly2His2, Ly2His3]]
     grouped_mfgs = list(map(list, zip(*[iter(mfgs)] * history)))
     grouped_mfgs.reverse()
     return grouped_mfgs
 
-def node_to_dgl_blocks(root_nodes, ts, cuda=True):
+def node_to_dgl_blocks(root_nodes, ts, cuda=True) -> List[List[DGLBlock]]:
     mfgs = list()
     block = dgl.create_block(([],[]), num_src_nodes=root_nodes.shape[0], num_dst_nodes=root_nodes.shape[0])
     block.srcdata['ID'] = torch.from_numpy(root_nodes)
@@ -115,58 +121,77 @@ def mfgs_to_cuda(mfgs):
         for i in range(len(mfg)):
             mfg[i] = mfg[i].to('cuda:0')
     return mfgs
+import torch
+import dgl
+from typing import List, Optional
 
-def prepare_input(mfgs, node_feats, edge_feats, combine_first=False, pinned=False, nfeat_buffs=None, efeat_buffs=None, nids=None, eids=None):
+
+def prepare_mfgs(mfgs, node_feats, edge_feats, combine_first=False, pinned=False, nfeat_buffs=None, efeat_buffs=None, nids=None, eids=None):
+    # mfgs = [[block1, block2], [block3, block4]] ,也就是layer 0 有 block1 和 block2, layer 1 有 block3 和 block4
+    # 信息传递方向 layer 0 -> layer 1
+    # layer 0: src->dst, layer 1: src->dst
+    # 所有layer 1的dst节点才是我们需要的节点
+    # DGLBlock的设计师src节点包含了dst节点
+    # 所有layer0的src必然包含了所有节点
+    mfgs_0 = mfgs[0]
+    # 第1部分: 可选 - 合并第一个MFG中相同的源节点
     if combine_first:
-        for i in range(len(mfgs[0])):
-            if mfgs[0][i].num_src_nodes() > mfgs[0][i].num_dst_nodes():
-                num_dst = mfgs[0][i].num_dst_nodes()
-                ts = mfgs[0][i].srcdata['ts'][num_dst:]
-                nid = mfgs[0][i].srcdata['ID'][num_dst:].float()
+        for i, block in enumerate(mfgs_0):
+            # 如果src节点数等于dst节点数,说明dst就包含了所有src节点
+            # src没有多余节点,dst节点和src节点没有重复节点,也就不需要合并了
+            if block.num_src_nodes() > block.num_dst_nodes():
+                num_dst = block.num_dst_nodes()
+                ts = block.srcdata['ts'][num_dst:]
+                nid = block.srcdata['ID'][num_dst:].float()
                 nts = torch.stack([ts, nid], dim=1)
                 unts, idx = torch.unique(nts, dim=0, return_inverse=True)
                 uts = unts[:, 0]
                 unid = unts[:, 1]
-                # import pdb; pdb.set_trace()
-                b = dgl.create_block((idx + num_dst, mfgs[0][i].edges()[1]), num_src_nodes=unts.shape[0] + num_dst, num_dst_nodes=num_dst, device=torch.device('cuda:0'))
-                b.srcdata['ts'] = torch.cat([mfgs[0][i].srcdata['ts'][:num_dst], uts], dim=0)
-                b.srcdata['ID'] = torch.cat([mfgs[0][i].srcdata['ID'][:num_dst], unid], dim=0)
-                b.edata['dt'] = mfgs[0][i].edata['dt']
-                b.edata['ID'] = mfgs[0][i].edata['ID']
-                mfgs[0][i] = b
                 
-    t_idx = 0
-    t_cuda = 0
+                # import pdb; pdb.set_trace()
+                # use same device as block
+                src, dst = idx + num_dst, block.edges()[1] 
+                new_block = dgl.create_block((src, dst), num_src_nodes=unts.shape[0] + num_dst, num_dst_nodes=num_dst, device=torch.device('cuda:0'))
+                new_block.srcdata['ts'] = torch.cat([block.srcdata['ts'][:num_dst], uts], dim=0)
+                new_block.srcdata['ID'] = torch.cat([block.srcdata['ID'][:num_dst], unid], dim=0)
+                new_block.edata['dt'] = block.edata['dt']
+                new_block.edata['ID'] = block.edata['ID']
+                mfgs_0[i] = new_block
+
+    # add node features to all blocks inside 1st mfgs
+    # 只需要处理第一个mfgs就行了,因为第一个mfgs的src必然包含全部节点
     i = 0
     if node_feats is not None:
-        for b in mfgs[0]:
+        for block in mfgs_0:
             if pinned:
                 if nids is not None:
                     idx = nids[i]
                 else:
-                    idx = b.srcdata['ID'].cpu().long()
+                    idx = block.srcdata['ID'].cpu().long()
                 torch.index_select(node_feats, 0, idx, out=nfeat_buffs[i][:idx.shape[0]])
-                b.srcdata['h'] = nfeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
+                block.srcdata['h'] = nfeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
                 i += 1
             else:
-                srch = node_feats[b.srcdata['ID'].long()].float()
-                b.srcdata['h'] = srch.cuda()
+                srch = node_feats[block.srcdata['ID'].long()].float()
+                block.srcdata['h'] = srch.cuda()
+                
+    # add edge features to all blocks inside all mfgs
     i = 0
     if edge_feats is not None:
         for mfg in mfgs:
-            for b in mfg:
-                if b.num_src_nodes() > b.num_dst_nodes():
+            for block in mfg:
+                if block.num_src_nodes() > block.num_dst_nodes():
                     if pinned:
                         if eids is not None:
                             idx = eids[i]
                         else:
-                            idx = b.edata['ID'].cpu().long()
+                            idx = block.edata['ID'].cpu().long()
                         torch.index_select(edge_feats, 0, idx, out=efeat_buffs[i][:idx.shape[0]])
-                        b.edata['f'] = efeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
+                        block.edata['f'] = efeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
                         i += 1
                     else:
-                        srch = edge_feats[b.edata['ID'].long()].float()
-                        b.edata['f'] = srch.cuda()
+                        srch = edge_feats[block.edata['ID'].long()].float()
+                        block.edata['f'] = srch.cuda()
     return mfgs
 
 
