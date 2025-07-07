@@ -1,6 +1,7 @@
 from glob import glob
 from setuptools import setup
 from pybind11.setup_helpers import Pybind11Extension
+cpp_args = ['-std=c++17', '-O3', '-fopenmp']
 
 ext_modules = [
     Pybind11Extension("sampler_core", 

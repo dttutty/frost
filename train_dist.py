@@ -4,7 +4,7 @@ LOCAL_RANK = int(os.environ['LOCAL_RANK'])
 cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES').split(',')
 device_count = len(cuda_visible_devices)
 
-if LOCAL_RANK != 2:
+if LOCAL_RANK != device_count:
     os.environ['CUDA_VISIBLE_DEVICES'] = cuda_visible_devices[LOCAL_RANK]
 import torch.distributed as dist
 import datetime
@@ -31,17 +31,19 @@ import time
 import random
 import numpy as np
 from dgl.utils.shared_mem import create_shared_mem_array, get_shared_mem_array
-from modules import  MemoryMailbox
+from memorys import  MemoryMailbox
 from utils import load_feat, load_graph, parse_config
 from worker import run_worker
 from host import run_host
 import torch.distributed as dist
-from functools import wraps
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+from utils import get_shape_and_dtype, get_node_edge_dimensions, get_model_save_path, get_node_count_from_graph
+from functools import wraps
 
 def broadcast_result_of_ranked_execution(func=None, *,  src_rank=0):
     def decorator(fn):
@@ -58,34 +60,10 @@ def broadcast_result_of_ranked_execution(func=None, *,  src_rank=0):
         return decorator
     else:
         return decorator(func)
-    
-@broadcast_result_of_ranked_execution
-def bget_shape_and_dtype(meta_payload):
-    final_shape, final_dtype = meta_payload['shape'], meta_payload['dtype']
-    return final_shape, final_dtype
-
-@broadcast_result_of_ranked_execution
-def bget_node_edge_dimensions(node_np, edge_np):
-    def _get_numpy_array_info(arr):
-        if arr is None:
-            return 0, 0, None
-        shape = arr.shape
-        dim0 = shape[0] if len(shape) > 0 else 0
-        dim1 = shape[1] if len(shape) > 1 else 0
-        return dim0, dim1, arr.dtype
-    num_nodes_w_feat, node_feat_dim, node_dtype = _get_numpy_array_info(node_np)
-    num_edges_w_feat, edge_feat_dim, edge_dtype = _get_numpy_array_info(edge_np)
-    return num_nodes_w_feat, node_feat_dim, node_dtype, num_edges_w_feat, edge_feat_dim, edge_dtype
-
-@broadcast_result_of_ranked_execution
-def bget_model_save_path(data_name):
-    if not os.path.isdir('models'):
-        os.mkdir('models')
-    return 'models/{}_{}.pkl'.format(data_name, time.time()) # time.time() 在 rank 0 执行
-
-@broadcast_result_of_ranked_execution(src_rank=world_size - 1)
-def bget_node_count_from_graph(g):
-    return g['indptr'].shape[0] - 1
+bget_shape_and_dtype = broadcast_result_of_ranked_execution(get_shape_and_dtype)
+bget_node_edge_dimensions = broadcast_result_of_ranked_execution(get_node_edge_dimensions)
+bget_model_save_path = broadcast_result_of_ranked_execution(get_model_save_path)
+bget_node_count_from_graph = broadcast_result_of_ranked_execution(src_rank=world_size - 1)(get_node_count_from_graph)
 
 def init_shared_array(name, tensor_on_rank0=None):
     """
@@ -119,7 +97,6 @@ def init_shared_array(name, tensor_on_rank0=None):
     return arr_for_current_rank
 
 set_seed(args.seed)
-
 # inside main init
 if local_rank == 0:
     node_np, edge_np = load_feat(args.data)
@@ -129,7 +106,8 @@ else:
 edge_feats = init_shared_array('edge_feats', tensor_on_rank0=edge_np)
 node_feats = init_shared_array('node_feats', tensor_on_rank0=node_np)
 _, node_feat_dim, _, _, edge_feat_dim, _ = bget_node_edge_dimensions(node_np, edge_np)
-path_saver = bget_model_save_path(args.data) # args.data 对于所有进程是相同的
+config_base_name = os.path.basename(args.config)
+path_saver = bget_model_save_path(args.data, config_base_name) # args.data 对于所有进程是相同的
 
 if local_rank == world_size - 1: 
     # host need g for sampling, so keep g in host process

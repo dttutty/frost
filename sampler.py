@@ -1,18 +1,17 @@
 import argparse
 import yaml
-import torch
-import time
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from typing import Optional, Literal, List
 import torch
-import dgl
 from memorys import *
 from layers import *
 from dataclasses import dataclass, field
 from sampler_core import ParallelSampler, TemporalGraphBlock
+from numba import njit, prange
 
+import random
 @dataclass
 class SampleParams:
     strategy: Literal["recent", "uniform"] = "recent"
@@ -28,11 +27,11 @@ class SampleParams:
     
 class NegLinkSampler:
 
-    def __init__(self, num_nodes):
-        self.num_nodes = num_nodes
-
-    def sample(self, n):
-        return np.random.randint(self.num_nodes, size=n)
+    def __init__(self, g):
+        self.num_nodes = g['indptr'].shape[0] - 1
+ 
+    def sample(self, src_ids, src_tss, num_neg=1):
+        return np.random.randint(self.num_nodes, size=len(src_ids) * num_neg)
 
 class NegLinkInductiveSampler:
     def __init__(self, nodes):
@@ -40,7 +39,138 @@ class NegLinkInductiveSampler:
 
     def sample(self, n):
         return np.random.choice(self.nodes, size=n)
+
+# class RealNegLinkSampler:
+#     def __init__(self, g):
+#         self.g = g
+#         self.max_node_id = g['indptr'].shape[0] - 2  # max node id is len(indptr) - 2
+        
+#     def get_all_neighbors(self, node_id, node_ts):
+#         # Extract the CSR arrays from the NpzFile object
+#         indptr = self.g['indptr']
+#         indices = self.g['indices']
+        
+#         # Check for valid node_id
+#         if node_id < 0 or node_id >= len(indptr) - 1:
+#             print(f"Error: node_id {node_id} is out of bounds.")
+#             return np.array([], dtype=indices.dtype)
+
+#         # Get the start and end pointers from the indptr array
+#         start = indptr[node_id]
+#         end = indptr[node_id + 1]
+
+#         # Slice the indices array to get the neighbors
+#         return indices[start:end]
     
+#     def sample_real_neg_dst(self, src_id, real_pos_dst, num_neg_sample):
+#         real_pos_set = set(real_pos_dst.tolist())
+#         neg_samples = []
+#         batch_size = max(4, num_neg_sample * 2)
+#         while len(neg_samples) < num_neg_sample:
+#             candidates = np.random.randint(
+#                 0, self.max_node_id + 1, size=batch_size
+#             )
+#             for c in candidates:
+#                 if c != src_id and c not in real_pos_set:
+#                     neg_samples.append(c)
+#                     if len(neg_samples) == num_neg_sample:
+#                         break
+#         return np.array(neg_samples, dtype=np.int32)
+    
+#     def sample(self, src_ids, num_neg_sample=1):
+#         neg_matrix = np.empty((len(src_ids), num_neg_sample), dtype=np.int32)
+#         for i, src in enumerate(src_ids):
+#             src = int(src)
+#             pos = self.get_all_neighbors(src)
+#             neg = self.sample_real_neg_dst(src, pos, num_neg_sample)
+#             neg_matrix[i] = neg
+#         src_cross = np.tile(src_ids, num_neg_sample)
+#         neg_cross = neg_matrix.T.reshape(-1)
+#         return neg_cross
+
+import numpy as np
+from numba import njit, prange
+
+# Numba-accelerated helper to fetch CSR neighbors\
+@njit
+def _get_neighbors(indptr, indices, node_id):
+    if node_id < 0 or node_id >= indptr.shape[0] - 1:
+        return np.empty(0, dtype=indices.dtype)
+    start = indptr[node_id]
+    end = indptr[node_id + 1]
+    out = np.empty(end - start, dtype=indices.dtype)
+    for i in range(start, end):
+        out[i - start] = indices[i]
+    return out
+
+# Numba-accelerated single-node negative sampling\
+@njit
+def _sample_neg_for_src(indptr, indices, max_node_id, src_id, num_neg):
+    neigh = _get_neighbors(indptr, indices, src_id)
+    negs = np.empty(num_neg, dtype=np.int32)
+    count = 0
+    while count < num_neg:
+        c = np.random.randint(0, max_node_id + 1)
+        if c == src_id:
+            continue
+        # linear scan in compiled code
+        ok = True
+        for j in range(neigh.shape[0]):
+            if neigh[j] == c:
+                ok = False
+                break
+        if ok:
+            negs[count] = c
+            count += 1
+    return negs
+
+# Numba-accelerated batch sampling and cross-pairing\
+@njit(parallel=True)
+def sample(src_ids, indptr, indices, num_neg, max_node_id):
+    n = src_ids.shape[0]
+    # matrix to hold per-source neg samples
+    neg_mat = np.empty((n, num_neg), dtype=np.int32)
+    for i in prange(n):
+        neg_mat[i] = _sample_neg_for_src(indptr, indices, max_node_id, src_ids[i], num_neg)
+    # build cross-paired output
+    total = n * num_neg
+    neg_cross = np.empty(total, dtype=np.int32)
+    for idx in prange(total):
+        # row = idx // n, col = idx % n if transpose order
+        r = idx // n
+        c = idx % n
+        neg_cross[idx] = neg_mat[c, r]
+    return neg_cross
+
+# Wrapper class
+def create_sampler(g):
+    indptr = g['indptr']
+    indices = g['indices']
+    max_node_id = indptr.shape[0] - 2
+
+    class NumbaNegSampler:
+        def __init__(self):
+            self.indptr = indptr
+            self.indices = indices
+            self.max_node_id = max_node_id
+
+        def sample(self, src_ids, src_tss, num_neg=1):
+            src_arr = np.asarray(src_ids, dtype=np.int32)
+            return sample(src_arr, self.indptr, self.indices, num_neg, self.max_node_id)
+
+    return NumbaNegSampler()
+
+class AvoidInfoLeakNegLinkSampler:
+    def __init__(self, sampler):
+        self.sampler = sampler
+
+    def sample(self, src_ids, src_tss, num_neg=1):
+        return sampler.sample_negatives(
+            root_nodes=src_ids.astype(np.int32),
+            root_ts=src_tss.astype(np.float32),
+            num_neg_samples=num_neg
+        )
+        
 if __name__ == '__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('--data', type=str, help='dataset name')
@@ -99,6 +229,3 @@ if __name__ == '__main__':
     print('sample time : {:.4f}'.format(sam_time))
     # print('unique time : {:.4f}'.format(uni_time))
     # print('unique per  : {:.4f}'.format(unique_nodes / total_nodes))
-
-
-    

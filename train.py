@@ -10,18 +10,20 @@ parser.add_argument('--use_inductive', action='store_true')
 parser.add_argument('--rand_edge_features', type=int, default=0, help='use random edge featrues')
 parser.add_argument('--rand_node_features', type=int, default=0, help='use random node featrues')
 parser.add_argument('--eval_neg_samples', type=int, default=1, help='how many negative samples to use at inference. Note: this will change the metric of test set to AP+AUC to AP+MRR!')
+parser.add_argument('--early_stop_patience', type=int, default=5, help='patience for early stopping. 0 to disable.')
+parser.add_argument('--train_neg_link_sampler', type=str, default='tgl_random', choices=['tgl_random', 'real', 'avoid_info_leak'], help='Type of negative link sampler to use for training')
 args=parser.parse_args()
 
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+os.environ["OMP_NUM_THREADS"] = "4"
 
 import torch
 import time
 import random
-import dgl
 import numpy as np
-from modules import *
-from sampler import *
-from utils import *
+from modules import GeneralModel
+from sampler import ParallelSampler, NegLinkSampler, NegLinkInductiveSampler, create_sampler, AvoidInfoLeakNegLinkSampler
+from utils import load_feat, load_graph, parse_config, to_dgl_blocks, node_to_dgl_blocks, prepare_mfgs
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 def set_seed(seed):
@@ -37,6 +39,8 @@ g, df = load_graph(args.data)
 sample_param, memory_param, gnn_param, train_param = parse_config(args.config)
 train_edge_end = df[df['ext_roll'].gt(0)].index[0]
 val_edge_end = df[df['ext_roll'].gt(1)].index[0]
+# ext_roll有三种 0 1 2
+# 0: train, 1: val, 2: test
 
 def get_inductive_links(df, train_edge_end, val_edge_end):
     train_df = df[:train_edge_end]
@@ -60,13 +64,31 @@ if args.use_inductive:
     inductive_inds = get_inductive_links(df, train_edge_end, val_edge_end)
     df = df.iloc[inductive_inds]
     
-gnn_dim_node = 0 if node_feats is None else node_feats.shape[1]
-gnn_dim_edge = 0 if edge_feats is None else edge_feats.shape[1]
-combine_first = False
-if train_param.combine_neighs:
-    combine_first = True
-model = GeneralModel(gnn_dim_node, gnn_dim_edge, sample_param, memory_param, gnn_param, train_param, combined=combine_first).cuda()
-mailbox = MemoryMailbox(memory_param, g['indptr'].shape[0] - 1, gnn_dim_edge) if memory_param.type != 'none' else None
+# gnn_dim_node = 0 if node_feats is None else node_feats.shape[1]
+# gnn_dim_edge = 0 if edge_feats is None else edge_feats.shape[1]
+
+from utils import get_node_edge_dimensions, get_node_count_from_graph
+_, node_feat_dim, _, _, edge_feat_dim, _ = get_node_edge_dimensions(node_feats, edge_feats)
+gnn_dim_node = node_feat_dim
+gnn_dim_edge = edge_feat_dim
+num_nodes = get_node_count_from_graph(g)
+
+shared_cfg = {
+    'node_memory':      ([num_nodes, memory_param.dim_out], torch.float32),
+    'node_memory_ts':   ([num_nodes], torch.float32),
+    'mails':            ([num_nodes, memory_param.mailbox_size, 2 * memory_param.dim_out + edge_feat_dim], torch.float32),
+    'mail_ts':          ([num_nodes, memory_param.mailbox_size], torch.float32),
+    'next_mail_pos':    ([num_nodes], torch.long),
+    'mail_pos_update_pending_flag':  ([num_nodes], torch.int8),
+}
+    # def __init__(self, 
+    #              memory_param: MemoryParams, 
+    #              shared_cfg, 
+    #              dim_edge_feat, 
+    #              shared_arrays = None):
+from memorys import MemoryMailbox
+model = GeneralModel(gnn_dim_node, gnn_dim_edge, sample_param, memory_param, gnn_param, train_param, combined=bool(train_param.combine_neighs)).cuda()
+mailbox = MemoryMailbox(memory_param, shared_cfg, edge_feat_dim) if memory_param.type != 'none' else None
 creterion = torch.nn.BCEWithLogitsLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=train_param.lr)
 if  train_param.all_on_gpu:
@@ -86,11 +108,20 @@ if not sample_param.no_sample:
 
 if args.use_inductive:
     test_df = df[val_edge_end:]
-    inductive_nodes = set(test_df.src.values).union(test_df.src.values)
+    inductive_nodes = set(test_df.src.values).union(test_df.dst.values) #fixed by sqp17
     print("inductive nodes", len(inductive_nodes))
-    neg_link_sampler = NegLinkInductiveSampler(inductive_nodes)
+    train_neg_link_sampler = NegLinkInductiveSampler(inductive_nodes)
+    eval_neg_link_sampler = NegLinkInductiveSampler(inductive_nodes)
 else:
-    neg_link_sampler = NegLinkSampler(g['indptr'].shape[0] - 1)
+    if args.train_neg_link_sampler == 'tgl_random':
+        train_neg_link_sampler = NegLinkSampler(g)
+    elif args.train_neg_link_sampler == 'real':
+        train_neg_link_sampler = create_sampler(g)
+    elif args.train_neg_link_sampler == 'avoid_info_leak':
+        train_neg_link_sampler = AvoidInfoLeakNegLinkSampler(sampler)
+    # eval_neg_link_sampler = NegLinkSampler(g)
+    eval_neg_link_sampler = create_sampler(g)
+    
 
 def eval(mode='val'):
     neg_samples = 1
@@ -106,12 +137,12 @@ def eval(mode='val'):
         eval_df = df[:train_edge_end]
     with torch.no_grad():
         total_loss = 0
-        for _, rows in eval_df.groupby(eval_df.index // train_param.batch_size):
-            root_nodes = np.concatenate([rows.src.values, rows.dst.values, neg_link_sampler.sample(len(rows) * neg_samples)]).astype(np.int32)
-            ts = np.tile(rows.time.values, neg_samples + 2).astype(np.float32)
+        for _, edges in eval_df.groupby(eval_df.index // train_param.batch_size):
+            root_nodes = np.concatenate([edges.src.values, edges.dst.values, eval_neg_link_sampler.sample(edges.src.values, edges.time.values)]).astype(np.int32)
+            ts = np.tile(edges.time.values, neg_samples + 2).astype(np.float32)
             if sampler is not None:
                 if sample_param.no_neg:
-                    pos_root_end = len(rows) * 2
+                    pos_root_end = len(edges) * 2
                     sampler.sample(root_nodes[:pos_root_end], ts[:pos_root_end])
                 else:
                     sampler.sample(root_nodes, ts)
@@ -120,7 +151,7 @@ def eval(mode='val'):
                 mfgs = to_dgl_blocks(ret, sample_param.history)
             else:
                 mfgs = node_to_dgl_blocks(root_nodes, ts)
-            mfgs = prepare_mfgs(mfgs, node_feats, edge_feats, combine_first=combine_first)
+            mfgs = prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
             if mailbox is not None:
                 mailbox.prep_input_mails(mfgs[0])
             pred_pos, pred_neg = model(mfgs, neg_samples=neg_samples)
@@ -134,7 +165,7 @@ def eval(mode='val'):
             else:
                 aucs_mrrs.append(roc_auc_score(y_true, y_pred))
             if mailbox is not None:
-                eid = rows['Unnamed: 0'].values
+                eid = edges['Unnamed: 0'].values
                 mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
                 block = None
                 if memory_param.deliver_to == 'neighbors':
@@ -187,10 +218,10 @@ for e in range(train_param.epoch):
     if mailbox is not None:
         mailbox.reset()
         model.memory_updater.last_updated_nid = None
-    for _, rows in df[:train_edge_end].groupby(group_indexes[random.randint(0, len(group_indexes) - 1)]):
+    for _, edges in df[:train_edge_end].groupby(group_indexes[random.randint(0, len(group_indexes) - 1)]):
         t_tot_s = time.time()
-        root_nodes = np.concatenate([rows.src.values, rows.dst.values, neg_link_sampler.sample(len(rows))]).astype(np.int32)
-        ts = np.concatenate([rows.time.values, rows.time.values, rows.time.values]).astype(np.float32)
+        root_nodes = np.concatenate([edges.src.values, edges.dst.values, train_neg_link_sampler.sample(edges.src.values, edges.time.values)]).astype(np.int32)
+        ts = np.concatenate([edges.time.values, edges.time.values, edges.time.values]).astype(np.float32)
         if sampler is not None:
             if sample_param.no_neg:
                 pos_root_end = root_nodes.shape[0] * 2 // 3
@@ -204,7 +235,7 @@ for e in range(train_param.epoch):
             mfgs = to_dgl_blocks(ret, sample_param.history)
         else:
             mfgs = node_to_dgl_blocks(root_nodes, ts)
-        mfgs = prepare_mfgs(mfgs, node_feats, edge_feats, combine_first=combine_first)
+        mfgs = prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
         if mailbox is not None:
             mailbox.prep_input_mails(mfgs[0])
         time_prep += time.time() - t_prep_s
@@ -217,7 +248,7 @@ for e in range(train_param.epoch):
         optimizer.step()
         t_prep_s = time.time()
         if mailbox is not None:
-            eid = rows['Unnamed: 0'].values
+            eid = edges['Unnamed: 0'].values
             mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
             block = None
             if memory_param.deliver_to == 'neighbors':
@@ -227,12 +258,26 @@ for e in range(train_param.epoch):
         time_prep += time.time() - t_prep_s
         time_tot += time.time() - t_tot_s
     ap, auc = eval('val')
-    if e > 2 and ap > best_ap:
-        best_e = e
-        best_ap = ap
-        torch.save(model.state_dict(), path_saver)
     print('\ttrain loss:{:.4f}  val ap:{:4f}  val auc:{:4f}'.format(total_loss, ap, auc))
     print('\ttotal time:{:.2f}s sample time:{:.2f}s prep time:{:.2f}s'.format(time_tot, total_sampling_time, time_prep))
+    
+    # if e > 2 and ap > best_ap:
+    if ap > best_ap:
+        best_e = e
+        best_ap = ap
+        epochs_without_improvement = 0
+        print(f'\tNew best validation AP: {best_ap:.4f}. Saving model to {path_saver}')
+        torch.save(model.state_dict(), path_saver)
+    else:
+        epochs_without_improvement += 1
+        print(f'\tValidation AP did not improve for {epochs_without_improvement} epoch(s).')
+        # Trigger early stopping if patience is reached
+    if args.early_stop_patience > 0 and epochs_without_improvement >= args.early_stop_patience:
+        print(f'\nEarly stopping triggered after {epochs_without_improvement} epochs without improvement.')
+        print(f'The best model was from epoch {best_e} with validation AP {best_ap:.4f}.')
+        break # Exit the training loop
+
+
 
 print('Loading model at epoch {}...'.format(best_e))
 model.load_state_dict(torch.load(path_saver))

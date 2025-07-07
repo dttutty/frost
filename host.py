@@ -7,10 +7,10 @@ import numpy as np
 import time
 from tqdm import tqdm
 from sampler_core import ParallelSampler, TemporalGraphBlock
-from sampler import NegLinkSampler, SampleParams
+from sampler import NegLinkSampler, SampleParams, NegLinkInductiveSampler
 from utils import  to_dgl_blocks, node_to_dgl_blocks
 import torch.distributed as dist
-from modules import  MemoryMailbox
+from memorys import  MemoryMailbox
 local_rank = dist.get_rank()
 world_size = dist.get_world_size()
 ngpus = world_size - 1
@@ -42,21 +42,12 @@ def scatter_send(lists, src=local_rank):
     lists.append(None)
     dist.scatter_object_list([None], lists, src=src)
     
-def sampler_wrapper(no_neg, root_nodes, total_sample_time, sampler: ParallelSampler|None, ts):
-    if no_neg:
-        pos_root_end = root_nodes.shape[0] * 2 // 3
-        sampler.sample(root_nodes[:pos_root_end], ts[:pos_root_end])
-    else:
-        sampler.sample(root_nodes, ts)
-    ret = sampler.get_ret()
-    if total_sample_time is not None:
-        total_sample_time += ret[0].sample_time()
-    return ret, total_sample_time
+from utils import sampler_wrapper
 
 
 def sample_and_scatter_batch(edges, memory_mailbox: MemoryMailbox, sampler: ParallelSampler|None, neg_link_sampler, gnn_param, memory_param, num_gpus, sample_param : SampleParams,
                                    batch_to_send, local_rank, mode='eval', total_sample_time=None, ap_tot=None, auc_tot=None):
-    root_nodes = np.concatenate([edges.src.values, edges.dst.values, neg_link_sampler.sample(len(edges))]).astype(np.int32)
+    root_nodes = np.concatenate([edges.src.values, edges.dst.values, neg_link_sampler.sample(edges.src.values)]).astype(np.int32)
     ts = np.concatenate([edges.time.values, edges.time.values, edges.time.values]).astype(np.float32)
     
     # example
@@ -65,7 +56,9 @@ def sample_and_scatter_batch(edges, memory_mailbox: MemoryMailbox, sampler: Para
     #                         sample_param.strategy=='recent', sample_param.prop_time,
     #                         sample_param.history, float(sample_param.duration))
 
-    ret, total_sample_time = sampler_wrapper(sample_param.no_neg, root_nodes, total_sample_time, sampler, ts)
+    # print('Sample nodes:', root_nodes.shape[0], 'edges:', edges.shape[0], 'ts:', ts.shape[0])
+    ret, total_sample_time = sampler_wrapper(sample_param.no_neg, root_nodes,  sampler, ts, total_sample_time)
+    # print('Sampled blocks:', len(ret), 'total sample time:', total_sample_time)
     if gnn_param.arch != 'identity':
         # eg. if sample_param.history = 3, sample_param.layer = 2, ret = [block1,block2, block3,block4, block5,block6]
         # then grouped_mfgs = [[block1,block2],[block3,block4],[block5,block6]]
@@ -179,7 +172,7 @@ def plan_gpu_batches(num_samples, target_batch_size, ngpus=1):
 
 
     
-def run_epoch(e, sampler: ParallelSampler|None, memory_mailbox: MemoryMailbox|None, df, train_edge_end, val_edge_end, gnn_param, memory_param, cfg_batch_size, sample_param, train_param, neg_link_sampler, best_ap, best_e, tap, tauc, local_rank): 
+def run_epoch(e, sampler: ParallelSampler|None, memory_mailbox: MemoryMailbox|None, df, train_edge_end, val_edge_end, gnn_param, memory_param, cfg_batch_size, sample_param, train_param, neg_link_sampler, neg_link_sampler_for_eval, best_ap, best_e, tap, tauc, local_rank): 
 
     train_df = df[:train_edge_end]
     val_df = df[train_edge_end:val_edge_end]
@@ -224,13 +217,13 @@ def run_epoch(e, sampler: ParallelSampler|None, memory_mailbox: MemoryMailbox|No
         total_loss = np.sum(np.array(gathered_loss) * train_param.batch_size)
         
         # val_df
-        ap, auc  = eval(val_df,   memory_mailbox,  sampler, neg_link_sampler, gnn_param, memory_param, cfg_batch_size, sample_param, pbar, local_rank)
+        ap, auc  = eval(val_df,   memory_mailbox,  sampler, neg_link_sampler_for_eval, gnn_param, memory_param, cfg_batch_size, sample_param, pbar, local_rank)
         if ap > best_ap:
             best_e = e
             best_ap = ap
             # test_df, for memory based models, testing after validation is faster
             broadcast_state('save')
-            tap, tauc = eval(test_df,  memory_mailbox,  sampler, neg_link_sampler, gnn_param, memory_param, cfg_batch_size, sample_param, pbar,local_rank)
+            tap, tauc = eval(test_df,  memory_mailbox,  sampler, neg_link_sampler_for_eval, gnn_param, memory_param, cfg_batch_size, sample_param, pbar,local_rank)
     print('\ttrain loss:{:.4f}  val ap:{:4f}  val auc:{:4f}'.format(total_loss, ap, auc))
     print('\ttotal time:{:.2f}s sample time:{:.2f}s'.format(time_tot, total_sample_time))
     return best_ap, best_e, tap, tauc
@@ -246,13 +239,15 @@ def run_host(sample_param, memory_param, gnn_param, train_param, g, df, memory_m
                                   sample_param.num_thread, 1, sample_param.layer, sample_param.neighbor,
                                   sample_param.strategy=='recent', sample_param.prop_time,
                                   sample_param.history, float(sample_param.duration))
-    neg_link_sampler = NegLinkSampler(g['indptr'].shape[0] - 1)
+    from sampler import create_sampler
+    neg_link_sampler_for_eval = create_sampler(g)
+    neg_link_sampler = NegLinkSampler(g)
 
 
     best_ap = best_e = tap = tauc = 0
     for e in range(train_param.epoch):
         best_ap, best_e, tap, tauc = run_epoch(e, sampler, memory_mailbox, df, train_edge_end, val_edge_end, gnn_param, memory_param,
-                                      cfg_batch_size, sample_param, train_param, neg_link_sampler,
+                                      cfg_batch_size, sample_param, train_param, neg_link_sampler, neg_link_sampler_for_eval,
                                       best_ap, best_e, tap, tauc, local_rank)
 
     print('Best model at epoch {}.'.format(best_e))

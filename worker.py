@@ -2,10 +2,10 @@
 from dataclasses import dataclass
 import torch
 from sklearn.metrics import average_precision_score, roc_auc_score
-from modules import GeneralModel
+from modules import GeneralModel, GNNParams
 from utils import   mfgs_to_cuda, prepare_mfgs
 import torch.distributed as dist
-from modules import  MemoryMailbox, GNNParams, GeneralModel, MemoryParams
+from memorys import  MemoryMailbox, MemoryParams
 from data_pipeline_thread import DataPipelineThread
 from dgl.heterograph import DGLBlock
 from dataclasses import dataclass
@@ -15,11 +15,12 @@ from numpy.typing import NDArray
 import numpy as np
 from torch.nn.parallel import DistributedDataParallel as DDP
 from memorys import GRUMemoryUpdater, RNNMemoryUpdater, TransformerMemoryUpdater
-
+# from viztracer import get_tracer
 local_rank = dist.get_rank()
 world_size = dist.get_world_size()
 host_rank = world_size - 1
-
+import time
+import threading
 
 def scatter_receive(src=host_rank):
     my = [None]
@@ -46,9 +47,10 @@ def run_training_step(stream,
                       pinned_nfeat_buffs, 
                       pinned_efeat_buffs, 
                       nccl_group, 
-                      tot_loss):
+                      tot_loss,
+                      deduplicate_mfg_src):
     received_data: TransferData = scatter_receive()
-    curr_thread = DataPipelineThread(received_data, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param)
+    curr_thread = DataPipelineThread(received_data, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src)
     curr_thread.start()
     if prev_thread is not None:
         prev_thread, tot_loss = train_from_prefetch(prev_thread, mailbox, memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread)
@@ -60,9 +62,10 @@ def run_training_step(stream,
 
 def train_from_prefetch(prev_thread: DataPipelineThread, memory_mailbox: MemoryMailbox, memory_param: MemoryParams, model: DDP|GeneralModel, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread):
     memory_updater = model.module.memory_updater
-    prev_th_hold_nomoved_data = prev_thread.received_data
+    prev_th_hold_notmoved_data = prev_thread.received_data
     prev_thread.join()
     # with torch.cuda.stream(prev_thread.stream):
+    # with get_tracer().log_event("Train: model forward and backward"):
     model.train()
     optimizer.zero_grad()
     pred_pos, pred_neg = model(prev_thread.async_mfgs)
@@ -74,9 +77,9 @@ def train_from_prefetch(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
         tot_loss += float(loss)
     if memory_mailbox is not None:
         with torch.no_grad():
-            mem_edge_feats = edge_feats[prev_th_hold_nomoved_data.eid] if edge_feats is not None else None
-            memory_mailbox.update_mailbox(memory_updater.last_updated_nid, memory_updater.last_updated_memory, prev_th_hold_nomoved_data.root, prev_th_hold_nomoved_data.ts, mem_edge_feats, prev_th_hold_nomoved_data.block)
-            memory_mailbox.update_memory(memory_updater.last_updated_nid, memory_updater.last_updated_memory, prev_th_hold_nomoved_data.root, memory_updater.last_updated_ts)
+            mem_edge_feats = edge_feats[prev_th_hold_notmoved_data.eid] if edge_feats is not None else None
+            memory_mailbox.update_mailbox(memory_updater.last_updated_nid, memory_updater.last_updated_memory, prev_th_hold_notmoved_data.root, prev_th_hold_notmoved_data.ts, mem_edge_feats, prev_th_hold_notmoved_data.block)
+            memory_mailbox.update_memory(memory_updater.last_updated_nid, memory_updater.last_updated_memory, prev_th_hold_notmoved_data.root, memory_updater.last_updated_ts)
             if memory_param.deliver_to == 'neighbors':
                 dist.barrier(group=nccl_group)
                 if local_rank == 0:
@@ -86,7 +89,7 @@ def train_from_prefetch(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
     return prev_thread, tot_loss
 
 
-def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryMailbox,  memory_param, model: DDP|GeneralModel, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, node_feats, tot_loss):
+def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryMailbox,  memory_param, model: DDP|GeneralModel, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, node_feats, tot_loss, deduplicate_mfg_src):
     memory_updater: GRUMemoryUpdater|RNNMemoryUpdater|TransformerMemoryUpdater = model.module.memory_updater
     if prev_thread is not None:
         # finish last training mini-batch
@@ -94,12 +97,14 @@ def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
         
     received_data : TransferData = scatter_receive()
     mfgs = mfgs_to_cuda(received_data.mfgs)
-    prepare_mfgs(mfgs, node_feats, edge_feats, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
+    prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=deduplicate_mfg_src, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
     
     model.eval()
     with torch.no_grad():
         if memory_mailbox is not None:
             memory_mailbox.prep_input_mails(mfgs[0])
+        # with get_tracer().log_event("Eval: model forward"):
+        #     print(f"Eval: model forward, local_rank={local_rank}")
         pred_pos, pred_neg = model(mfgs)
         if memory_mailbox is not None:
             
@@ -121,6 +126,7 @@ def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
         dist.gather_object(float(auc), None, dst=host_rank)
     return prev_thread, tot_loss
 
+
 def alc_pin_nfeat_efeat_buf(sample_param, batch_size, node_feats, edge_feats):
     pinned_nfeat_buffs = list()
     pinned_efeat_buffs = list()
@@ -132,26 +138,34 @@ def alc_pin_nfeat_efeat_buf(sample_param, batch_size, node_feats, edge_feats):
             if edge_feats is not None:
                 for _ in range(sample_param.history):
                     pinned_efeat_buffs.insert(0, torch.zeros((limit, edge_feats.shape[1]), pin_memory=True))
-    # if history = 2, neighbor = [10, 10]
+    # if history = 3, neighbor = [10, 10]
+    
     # pinned_efeat_buffs[5].torch.shape [3.3b*11*11, edge_feats.shape[1]]
     # pinned_efeat_buffs[4].torch.shape [3.3b*11*11, edge_feats.shape[1]]
     # pinned_efeat_buffs[3].torch.shape [3.3b*11*11, edge_feats.shape[1]]
+    
     # pinned_efeat_buffs[2].torch.shape [3.3b*11, edge_feats.shape[1]]
     # pinned_efeat_buffs[1].torch.shape [3.3b*11, edge_feats.shape[1]]
     # pinned_efeat_buffs[0].torch.shape [3.3b*11, edge_feats.shape[1]]
     if node_feats is not None:
         for _ in range(sample_param.history):
             pinned_nfeat_buffs.insert(0, torch.zeros((limit, node_feats.shape[1]), pin_memory=True))
-    # if history = 2
-    # pinned_efeat_buffs[1].torch.shape [3.3b*11*11, node_feats.shape[1]]
-    # pinned_efeat_buffs[0].torch.shape [3.3b*11*11, node_feats.shape[1]]
+    # if history = 3
+    # pinned_nfeat_buffs[2].torch.shape [3.3b*11*11, node_feats.shape[1]]
+    # pinned_nfeat_buffs[1].torch.shape [3.3b*11*11, node_feats.shape[1]]
+    # pinned_nfeat_buffs[0].torch.shape [3.3b*11*11, node_feats.shape[1]]
     return pinned_nfeat_buffs, pinned_efeat_buffs
 
+# 128 --->GPU0 tm10-tm20
+# 128 --->GPU1 tm20-tm28
+# 128 --->GPU3 tm28-tm32
+# 128 --->GPU1 tm32-tm48
 
 # GPU worker process
 def run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, memory_mailbox: MemoryMailbox, node_feat_dim, edge_feat_dim, path_saver, node_feats, edge_feats):
+    # stream position 1 
     stream = torch.cuda.Stream()
-    model = GeneralModel(node_feat_dim, edge_feat_dim, sample_param, memory_param, gnn_param, train_param).cuda()
+    model = GeneralModel(node_feat_dim, edge_feat_dim, sample_param, memory_param, gnn_param, train_param, combined=train_param.combine_neighs).cuda() #try by sqp17
     find_unused_parameters = True if sample_param.history > 1 else False
     
     # ddp model
@@ -159,6 +173,7 @@ def run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, m
     creterion = torch.nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=train_param.lr)
     
+    # buffer for features and mem_mailbox
     pinned_nfeat_buffs, pinned_efeat_buffs = alc_pin_nfeat_efeat_buf(sample_param, train_param.batch_size, node_feats, edge_feats)
     if memory_mailbox is not None:
         memory_mailbox.alc_pin_mem_mailbox_buf(sample_param, train_param.batch_size)
@@ -172,9 +187,11 @@ def run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, m
             case -1:# exit
                 break
             case 0:# train
-                prev_thread, tot_loss = run_training_step(stream, prev_thread, memory_mailbox,  memory_param, model, optimizer, creterion, node_feats, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, tot_loss)
+                # stream position 2
+                # stream = torch.cuda.Stream()
+                prev_thread, tot_loss = run_training_step(stream, prev_thread, memory_mailbox,  memory_param, model, optimizer, creterion, node_feats, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, tot_loss, train_param.deduplicate_mfg_src)
             case 1:# eval
-                prev_thread, tot_loss = run_evaluation_step(prev_thread, memory_mailbox, memory_param, model, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, node_feats, tot_loss)
+                prev_thread, tot_loss = run_evaluation_step(prev_thread, memory_mailbox, memory_param, model, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, node_feats, tot_loss, train_param.deduplicate_mfg_src)
             case 2:# save model
                 if local_rank == 0:
                     torch.save(model.state_dict(), path_saver)

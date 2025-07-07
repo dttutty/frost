@@ -1,0 +1,10 @@
+cp TGN.yml TGN_500.yml
+cp TGN.yml TGN_1000.yml
+cp TGN.yml TGN_1500.yml
+cp TGN.yml TGN_2000.yml
+cp TGN.yml TGN_2500.yml
+cp TGN.yml TGN_3000.yml
+cp TGN.yml TGN_3500.yml
+cp TGN.yml TGN_4000.yml
+cp TGN.yml TGN_4500.yml
+cp TGN.yml TGN_5000.yml

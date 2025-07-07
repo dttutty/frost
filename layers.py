@@ -59,32 +59,7 @@ class TransfomerAttentionLayer(torch.nn.Module):
         
         self.att_dropout = torch.nn.Dropout(att_dropout)
         
-        # feat_dims = {
-        #     'n': dim_node_feat,
-        #     'e': dim_edge_feat,
-        #     't': dim_time
-        # }
-        # self.proj = nn.ModuleDict()
-        # if combined:
-        #     for f, d in feat_dims.items():
-        #         if d <= 0:
-        #             continue
-        #         # k、v 对所有有维度的特征都要
-        #         self.proj[f"k_{f}"] = nn.Linear(d, dim_out)  # 我们统一用 kv_f 做 k 和 v 投影
-        #         self.proj[f"k_{f}"] = nn.Linear(d, dim_out)  # 我们统一用 kv_f 做 k 和 v 投影
-        #         # 只对 'n' 和 't' 做 q 投影
-        #         if f in ('n', 't'):
-        #             self.proj[f"q_{f}"] = nn.Linear(d, dim_out)
-        # else:
-        #     dim_q  = dim_node_feat + dim_time
-        #     if dim_q > 0:
-        #         self.proj['q'] = nn.Linear(dim_q, dim_out)
-                
-        #     dim_kv = dim_node_feat + dim_edge_feat + dim_time
-        #     self.proj['k'] = nn.Linear(dim_kv, dim_out)
-        #     self.proj['v'] = nn.Linear(dim_kv, dim_out)
-            
-        # self.proj['out'] = nn.Linear(dim_node_feat + dim_out, dim_out)
+
 
         if combined:
             if dim_node_feat > 0:
@@ -112,64 +87,58 @@ class TransfomerAttentionLayer(torch.nn.Module):
         if self.dim_time > 0:
             time_feat = self.time_enc(b.edata['dt'])
             zero_time_feat = self.time_enc(torch.zeros(b.num_dst_nodes(), dtype=torch.float32, device=torch.device('cuda:0')))
+        dst_h = b.srcdata['h'][:b.num_dst_nodes()] # DST位于srcdata['h']的前半部分
+        src_h = b.srcdata['h'][b.num_dst_nodes():] # SRC位于后半部分
+        dst_indices = b.edges()[1]
+        src_indices = b.edges()[0] - b.num_dst_nodes()
+        # e.g.: 0, 1, 2, 3, 4
+        # dst: 0, 1
+        # src: 2, 3, 4
         if self.combined:
             Q = torch.zeros((b.num_edges(), self.dim_out), device=torch.device('cuda:0'))
             K = torch.zeros((b.num_edges(), self.dim_out), device=torch.device('cuda:0'))
             V = torch.zeros((b.num_edges(), self.dim_out), device=torch.device('cuda:0'))
             if self.dim_node_feat > 0:
-                Q += self.w_q_n(b.srcdata['h'][:b.num_dst_nodes()])[b.edges()[1]]
-                K += self.w_k_n(b.srcdata['h'][b.num_dst_nodes():])[b.edges()[0] - b.num_dst_nodes()]
-                V += self.w_v_n(b.srcdata['h'][b.num_dst_nodes():])[b.edges()[0] - b.num_dst_nodes()]
+                Q += self.w_q_n(dst_h)[dst_indices]
+                K += self.w_k_n(src_h)[src_indices]
+                V += self.w_v_n(src_h)[src_indices]
             if self.dim_edge_feat > 0:
                 K += self.w_k_e(b.edata['f'])
                 V += self.w_v_e(b.edata['f'])
             if self.dim_time > 0:
-                Q += self.w_q_t(zero_time_feat)[b.edges()[1]]
+                Q += self.w_q_t(zero_time_feat)[dst_indices]
                 K += self.w_k_t(time_feat)
                 V += self.w_v_t(time_feat)
-            Q = torch.reshape(Q, (Q.shape[0], self.num_head, -1))
-            K = torch.reshape(K, (K.shape[0], self.num_head, -1))
-            V = torch.reshape(V, (V.shape[0], self.num_head, -1))
-            att = dgl.ops.edge_softmax(b, self.att_act(torch.sum(Q*K, dim=2)))
-            att = self.att_dropout(att)
-            V = torch.reshape(V*att[:, :, None], (V.shape[0], -1))
-            b.edata['v'] = V
-            b.update_all(dgl.function.copy_edge('v', 'm'), dgl.function.sum('m', 'h'))
         else:
-            if self.dim_time == 0 and self.dim_node_feat == 0:
-                Q = torch.ones((b.num_edges(), self.dim_out), device=torch.device('cuda:0'))
-                K = self.w_k(b.edata['f'])
-                V = self.w_v(b.edata['f'])
-            elif self.dim_time == 0 and self.dim_edge_feat == 0:
-                Q = self.w_q(b.srcdata['h'][:b.num_dst_nodes()])[b.edges()[1]]
-                K = self.w_k(b.srcdata['h'][b.num_dst_nodes():])
-                V = self.w_v(b.srcdata['h'][b.num_dst_nodes():])
-            elif self.dim_time == 0:
-                Q = self.w_q(b.srcdata['h'][:b.num_dst_nodes()])[b.edges()[1]]
-                K = self.w_k(torch.cat([b.srcdata['h'][b.num_dst_nodes():], b.edata['f']], dim=1))
-                V = self.w_v(torch.cat([b.srcdata['h'][b.num_dst_nodes():], b.edata['f']], dim=1))
-            elif self.dim_node_feat == 0:
-                Q = self.w_q(zero_time_feat)[b.edges()[1]]
-                K = self.w_k(torch.cat([b.edata['f'], time_feat], dim=1))
-                V = self.w_v(torch.cat([b.edata['f'], time_feat], dim=1))
-            elif self.dim_edge_feat == 0:
-                Q = self.w_q(torch.cat([b.srcdata['h'][:b.num_dst_nodes()], zero_time_feat], dim=1))[b.edges()[1]]
-                K = self.w_k(torch.cat([b.srcdata['h'][b.num_dst_nodes():], time_feat], dim=1))
-                V = self.w_v(torch.cat([b.srcdata['h'][b.num_dst_nodes():], time_feat], dim=1))
-            else:
-                Q = self.w_q(torch.cat([b.srcdata['h'][:b.num_dst_nodes()], zero_time_feat], dim=1))[b.edges()[1]]
-                K = self.w_k(torch.cat([b.srcdata['h'][b.num_dst_nodes():], b.edata['f'], time_feat], dim=1))
-                V = self.w_v(torch.cat([b.srcdata['h'][b.num_dst_nodes():], b.edata['f'], time_feat], dim=1))
-            Q = torch.reshape(Q, (Q.shape[0], self.num_head, -1))
-            K = torch.reshape(K, (K.shape[0], self.num_head, -1))
-            V = torch.reshape(V, (V.shape[0], self.num_head, -1))
-            att = dgl.ops.edge_softmax(b, self.att_act(torch.sum(Q*K, dim=2)))
-            att = self.att_dropout(att)
-            V = torch.reshape(V*att[:, :, None], (V.shape[0], -1))
-            b.srcdata['v'] = torch.cat([torch.zeros((b.num_dst_nodes(), V.shape[1]), device=torch.device('cuda:0')), V], dim=0)
+            q_input = []
+            kv_input = []
+            if self.dim_node_feat > 0:
+                q_input.append(dst_h)
+                kv_input.append(src_h)
+            if self.dim_edge_feat > 0:
+                kv_input.append(b.edata['f'])
+            if self.dim_time > 0:
+                q_input.append(zero_time_feat)
+                kv_input.append(time_feat)
+            Q = self.w_q(torch.cat(q_input, dim=1))[dst_indices] if len(q_input) > 0 else torch.ones((b.num_edges(), self.dim_out), device=torch.device('cuda:0'))
+            K = self.w_k(torch.cat(kv_input, dim=1))
+            V = self.w_v(torch.cat(kv_input, dim=1))
+        Q = torch.reshape(Q, (Q.shape[0], self.num_head, -1))
+        K = torch.reshape(K, (K.shape[0], self.num_head, -1))
+        V = torch.reshape(V, (V.shape[0], self.num_head, -1))
+        att = dgl.ops.edge_softmax(b, self.att_act(torch.sum(Q*K, dim=2)))
+        att = self.att_dropout(att)
+        V = torch.reshape(V*att[:, :, None], (V.shape[0], -1))
+        if self.combined:
+            b.edata['v'] = V
+            b.update_all(dgl.function.copy_e('v', 'm'), dgl.function.sum('m', 'h'))
+        else:
+            dst_dummy = torch.zeros((b.num_dst_nodes(), V.shape[1]), device=torch.device('cuda:0'))
+            b.srcdata['v'] = torch.cat([dst_dummy, V], dim=0)
             b.update_all(dgl.function.copy_u('v', 'm'), dgl.function.sum('m', 'h'))
+        
         if self.dim_node_feat != 0:
-            rst = torch.cat([b.dstdata['h'], b.srcdata['h'][:b.num_dst_nodes()]], dim=1)
+            rst = torch.cat([b.dstdata['h'], dst_h], dim=1)
         else:
             rst = b.dstdata['h']
         rst = self.w_out(rst)
