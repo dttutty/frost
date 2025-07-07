@@ -176,7 +176,7 @@ if train_param.reorder is not None:
         group_indexes.append(np.concatenate([additional_idx, base_idx])[:base_idx.shape[0]])
 for e in range(train_param.epoch):
     print('Epoch {:d}:'.format(e))
-    time_sample = 0
+    total_sampling_time = 0
     time_prep = 0
     time_tot = 0
     total_loss = 0
@@ -198,7 +198,7 @@ for e in range(train_param.epoch):
             else:
                 sampler.sample(root_nodes, ts)
             ret = sampler.get_ret()
-            time_sample += ret[0].sample_time()
+            total_sampling_time += ret[0].sample_time()
         t_prep_s = time.time()
         if gnn_param.arch != 'identity':
             mfgs = to_dgl_blocks(ret, sample_param.history)
@@ -232,7 +232,7 @@ for e in range(train_param.epoch):
         best_ap = ap
         torch.save(model.state_dict(), path_saver)
     print('\ttrain loss:{:.4f}  val ap:{:4f}  val auc:{:4f}'.format(total_loss, ap, auc))
-    print('\ttotal time:{:.2f}s sample time:{:.2f}s prep time:{:.2f}s'.format(time_tot, time_sample, time_prep))
+    print('\ttotal time:{:.2f}s sample time:{:.2f}s prep time:{:.2f}s'.format(time_tot, total_sampling_time, time_prep))
 
 print('Loading model at epoch {}...'.format(best_e))
 model.load_state_dict(torch.load(path_saver))

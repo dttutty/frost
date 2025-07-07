@@ -9,14 +9,14 @@ from typing import Optional, Literal
 @dataclass
 class MemoryParams:
     type: Optional[Literal["node"]] = "node"
-    dim_time: Optional[int] = None
+    dim_time: Optional[int] = None # time dim
     deliver_to: Optional[Literal["self", "neighbors"]] = "self"
     mail_combine: Optional[Literal["mean", "last"]] = "last"
     memory_update: Optional[Literal["gru", "rnn", "transformer"]] = "gru"
     mailbox_size: Optional[int] = None
     combine_node_feature: bool = False
     attention_head: Optional[int] = None
-    dim_out: Optional[int] = None
+    dim_out: Optional[int] = None # memory dim
 
 
 # shared_cfg = {
@@ -71,12 +71,38 @@ class MemoryMailbox():
                 setattr(self, config_key, shared_value.cuda())
         self.device = torch.device('cuda:0')
 
-    def allocate_pinned_memory_buffers(self, sample_param, batch_size):
+    def alc_pin_nfeat_efeat_buf(sample_param, batch_size, node_feats, edge_feats):
+        pinned_nfeat_buffs = list()
+        pinned_efeat_buffs = list()
+        limit = int(batch_size * 3.3)
+        if sample_param.neighbor is not None:
+            for i in sample_param.neighbor:
+                limit *= i + 1
+                
+                if edge_feats is not None:
+                    for _ in range(sample_param.history):
+                        pinned_efeat_buffs.insert(0, torch.zeros((limit, edge_feats.shape[1]), pin_memory=True))
+        # if history = 2, neighbor = [10, 10]
+        # pinned_efeat_buffs[5].torch.shape [3.3b*11*11, edge_feats.shape[1]]
+        # pinned_efeat_buffs[4].torch.shape [3.3b*11*11, edge_feats.shape[1]]
+        # pinned_efeat_buffs[3].torch.shape [3.3b*11*11, edge_feats.shape[1]]
+        # pinned_efeat_buffs[2].torch.shape [3.3b*11, edge_feats.shape[1]]
+        # pinned_efeat_buffs[1].torch.shape [3.3b*11, edge_feats.shape[1]]
+        # pinned_efeat_buffs[0].torch.shape [3.3b*11, edge_feats.shape[1]]
+        if node_feats is not None:
+            for _ in range(sample_param.history):
+                pinned_nfeat_buffs.insert(0, torch.zeros((limit, node_feats.shape[1]), pin_memory=True))
+        # if history = 2
+        # pinned_efeat_buffs[1].torch.shape [3.3b*11*11, node_feats.shape[1]]
+        # pinned_efeat_buffs[0].torch.shape [3.3b*11*11, node_feats.shape[1]]
+        return pinned_nfeat_buffs, pinned_efeat_buffs
+    
+    def alc_pin_mem_mailbox_buf(self, sample_param, batch_size):
         limit_of_n_nodes = int(batch_size * 3.3)
         if sample_param.neighbor is not None:
             for i in sample_param.neighbor:
                 limit_of_n_nodes *= i + 1
-        # e.g. neighbor = [10, 10]
+        # e.g. neighbor = [10, 10] 
         # limit_of_n_nodes = 3.3 * batch_size * (10 + 1) * (10 + 1) = 3.3 * batch_size * 11 * 11
         # limit_of_n_nodes, i.e. the length of pinned_buffer[history_i], need to be larger than size of blocks[history_i].srcdata['ID']
         self.pinned_node_memory_buffs = list()
@@ -192,7 +218,7 @@ class MemoryMailbox():
             dst_mem_entries.append(edge_feats) # e.g. [Tensor[[31,32],[41,42]], Tensor[[11,12],[21,22]], Tensor[[51,52,53],[61,62,63]]] 
         src_mail = torch.cat(src_mem_entries, dim=1) # e.g. Tensor[[11,12, 31,32, 51,52,53], [21,22, 41,42, 61,62,63]]
         dst_mail = torch.cat(dst_mem_entries, dim=1) # e.g. Tensor[[31,32, 11,12, 51,52,53], [41,42, 21,22, 61,62,63]]
-        return src_mail, dst_mail
+        return src_mail, dst_mail # src_mail dim [n, 2*mem_dim + edge_dim]
         
     def _prepare_mail_and_node_ids(self, root_nodes, ts, n_src, mail_delivery_block, src_mail, dst_mail):
         mail = None
@@ -202,7 +228,7 @@ class MemoryMailbox():
             src = torch.from_numpy(root_nodes[:n_src]).to(self.device) # e.g [1,2]
             dst = torch.from_numpy(root_nodes[n_src:n_src * 2]).to(self.device) # e.g [3,4]
             mail = torch.cat([src_mail, dst_mail], dim=1).reshape(-1, src_mail.shape[1]) 
-            # [n_ture_edges, 2*mail_dim] -> [2*n_ture_edges, mail_dim], mail = tensor([[1, 2], [5, 6], [3, 4], [7, 8]])
+            # 2 [n_ture_edges, mail_dim] -> [n_ture_edges, 2*mail_dim] -> [2*n_ture_edges, mail_dim], mail = tensor([[1, 2], [5, 6], [3, 4], [7, 8]])
             # after cat:
             # Tensor[[11,12, 31,32, 51,52,53, 31,32, 11,12, 51,52,53], [21,22, 41,42, 61,62,63, 41,42, 21,22, 61,62,63]]
             # after reshape:
@@ -230,7 +256,7 @@ class MemoryMailbox():
             mail_ts = torch.cat([mail_ts, mail_ts[mail_delivery_block.edges()[0].long()]], dim=0)
         else:
             raise NotImplementedError
-        return mail, mail_ts, unique_node_ids, inverse_indices
+        return mail, mail_ts, unique_node_ids, inverse_indices # mail dim [2n, 2(2*mem_dim + edge_dim)]
 
     def _combine_mail_mean_last(self, mail, mail_ts,  inverse_indices, unique_node_ids):
         if self.memory_param.mail_combine == 'mean':
@@ -260,10 +286,10 @@ class BasicMemoryUpdater(torch.nn.Module):
     def __init__(self, memory_param: MemoryParams, edge_feat_dim, node_feat_dim):
         super().__init__()
         
-        self.dim_in = 2 * memory_param.dim_out + edge_feat_dim
         self.dim_hid = memory_param.dim_out
-        self.combine_node_feature = memory_param.combine_node_feature
         self.dim_time = memory_param.dim_time
+        self.rnn_input_size = 2 * self.dim_hid + edge_feat_dim + self.dim_time
+        self.combine_node_feature = memory_param.combine_node_feature
         
         self.dim_node_feat = node_feat_dim
         
@@ -298,12 +324,12 @@ class BasicMemoryUpdater(torch.nn.Module):
 class GRUMemoryUpdater(BasicMemoryUpdater):
     def __init__(self, memory_param: MemoryParams, edge_feat_dim,  node_feat_dim):
         super().__init__(memory_param, edge_feat_dim,  node_feat_dim)
-        self.updater = torch.nn.GRUCell(self.dim_in + self.dim_time, self.dim_hid)
+        self.updater = torch.nn.GRUCell(self.rnn_input_size, self.dim_hid)
 
 class RNNMemoryUpdater(BasicMemoryUpdater):
     def __init__(self, memory_param: MemoryParams, edge_feat_dim,  node_feat_dim):
         super().__init__(memory_param, edge_feat_dim,  node_feat_dim)
-        self.updater = torch.nn.RNNCell(self.dim_in + self.dim_time, self.dim_hid)
+        self.updater = torch.nn.RNNCell(self.rnn_input_size, self.dim_hid)
 
 
 
@@ -334,6 +360,7 @@ class TransformerMemoryUpdater(torch.nn.Module):
         for block in mfg:
             Q = self.w_q(block.srcdata['mem']).reshape((block.num_src_nodes(), self.att_h, -1))
             mails = block.srcdata['mem_input'].reshape((block.num_src_nodes(), self.memory_param.mailbox_size, -1))
+            # mem_input dim (2*mem_dim + edge_dim)
             if self.dim_time > 0:
                 time_feat = self.time_enc(block.srcdata['ts'][:, None] - block.srcdata['mail_ts']).reshape((block.num_src_nodes(), self.memory_param.mailbox_size, -1))
                 mails = torch.cat([mails, time_feat], dim=2)

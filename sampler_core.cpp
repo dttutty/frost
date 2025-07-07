@@ -465,18 +465,18 @@ public:
         // a weird bug, dgl library seems to modify the total number of threads
         omp_set_num_threads(num_threads);
         ret.resize(0);
-        bool first_layer = true;
         bool use_ptr = false;
+        // 如果(first_layer) || ((prop_time) && num_history == 1) || (recent) 不符合, use_ptr_true
         for (int i = 0; i < num_layers; i++)
         {
             ret.resize(ret.size() + num_history);
-            if ((first_layer) || ((prop_time) && num_history == 1) || (recent))
+            if (i == 0 || ((prop_time) && num_history == 1) || recent)
             {
-                first_layer = false;
                 use_ptr = true;
             }
             else
                 use_ptr = false;
+
             if (i == 0)
                 sample_layer(root_nodes, root_ts, num_neighbors[i], use_ptr, true);
             else

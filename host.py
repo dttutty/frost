@@ -16,7 +16,11 @@ world_size = dist.get_world_size()
 ngpus = world_size - 1
 state_buf = torch.empty(1, dtype=torch.int32, device='cpu')
 
-from worker import TransferedData
+from worker import TransferData
+
+from contextlib import contextmanager
+
+
     
 def eval(eval_df,  memory_mailbox: MemoryMailbox, sampler: ParallelSampler|None, neg_link_sampler, gnn_param, memory_param, cfg_batch_size, sample_param, pbar, local_rank):
     _, batch_size = plan_gpu_batches(len(eval_df), cfg_batch_size, ngpus)
@@ -27,7 +31,7 @@ def eval(eval_df,  memory_mailbox: MemoryMailbox, sampler: ParallelSampler|None,
     
     batch_to_send = []
     for _, rows in eval_df.groupby(batches_assignment):
-        ap_tot, auc_tot = prepare_and_scatter_microbatch(rows, memory_mailbox, sampler, neg_link_sampler, gnn_param, memory_param, ngpus, sample_param,
+        ap_tot, auc_tot = sample_and_scatter_batch(rows, memory_mailbox, sampler, neg_link_sampler, gnn_param, memory_param, ngpus, sample_param,
                                    batch_to_send, local_rank, mode='eval', ap_tot=ap_tot, auc_tot=auc_tot)
         pbar.update(1)
     ap = float(torch.tensor(ap_tot).mean())
@@ -38,22 +42,22 @@ def scatter_send(lists, src=local_rank):
     lists.append(None)
     dist.scatter_object_list([None], lists, src=src)
     
-def sampler_wrapper(no_neg, root_nodes, time_sample, sampler: ParallelSampler|None, ts):
+def sampler_wrapper(no_neg, root_nodes, total_sample_time, sampler: ParallelSampler|None, ts):
     if no_neg:
         pos_root_end = root_nodes.shape[0] * 2 // 3
         sampler.sample(root_nodes[:pos_root_end], ts[:pos_root_end])
     else:
         sampler.sample(root_nodes, ts)
     ret = sampler.get_ret()
-    if time_sample is not None:
-        time_sample += ret[0].sample_time()
-    return ret, time_sample
+    if total_sample_time is not None:
+        total_sample_time += ret[0].sample_time()
+    return ret, total_sample_time
 
 
-def prepare_and_scatter_microbatch(rows, memory_mailbox: MemoryMailbox, sampler: ParallelSampler|None, neg_link_sampler, gnn_param, memory_param, num_gpus, sample_param : SampleParams,
-                                   batch_to_send, local_rank, mode='eval', time_sample=None, ap_tot=None, auc_tot=None):
-    root_nodes = np.concatenate([rows.src.values, rows.dst.values, neg_link_sampler.sample(len(rows))]).astype(np.int32)
-    ts = np.concatenate([rows.time.values, rows.time.values, rows.time.values]).astype(np.float32)
+def sample_and_scatter_batch(edges, memory_mailbox: MemoryMailbox, sampler: ParallelSampler|None, neg_link_sampler, gnn_param, memory_param, num_gpus, sample_param : SampleParams,
+                                   batch_to_send, local_rank, mode='eval', total_sample_time=None, ap_tot=None, auc_tot=None):
+    root_nodes = np.concatenate([edges.src.values, edges.dst.values, neg_link_sampler.sample(len(edges))]).astype(np.int32)
+    ts = np.concatenate([edges.time.values, edges.time.values, edges.time.values]).astype(np.float32)
     
     # example
     # sampler = ParallelSampler(g['indptr'], g['indices'], g['eid'], g['ts'].astype(np.float32),
@@ -61,7 +65,7 @@ def prepare_and_scatter_microbatch(rows, memory_mailbox: MemoryMailbox, sampler:
     #                         sample_param.strategy=='recent', sample_param.prop_time,
     #                         sample_param.history, float(sample_param.duration))
 
-    ret, time_sample = sampler_wrapper(sample_param.no_neg, root_nodes, time_sample, sampler, ts)
+    ret, total_sample_time = sampler_wrapper(sample_param.no_neg, root_nodes, total_sample_time, sampler, ts)
     if gnn_param.arch != 'identity':
         # eg. if sample_param.history = 3, sample_param.layer = 2, ret = [block1,block2, block3,block4, block5,block6]
         # then grouped_mfgs = [[block1,block2],[block3,block4],[block5,block6]]
@@ -70,16 +74,16 @@ def prepare_and_scatter_microbatch(rows, memory_mailbox: MemoryMailbox, sampler:
         # eg. grouped_mfgs = [[block]]
         grouped_mfgs = node_to_dgl_blocks(root_nodes, ts, cuda=False)
     
-    data_to_send = TransferedData(
+    data_to_send = TransferData(
         mfgs = grouped_mfgs,
         root = root_nodes,
         ts = ts,
-        eid = rows['Unnamed: 0'].values,
+        eid = edges['Unnamed: 0'].values,
         block = None
     )
     if memory_mailbox is not None and memory_param.deliver_to == 'neighbors':
-        mail_deliver_block = to_dgl_blocks(ret, sample_param.history, reverse=True, cuda=False)[0][0]
-        data_to_send.block.append(mail_deliver_block)
+        # only deliver to neighbors in history[1]
+        data_to_send.block = to_dgl_blocks(ret, sample_param.history, reverse=True, cuda=False)[0][0]
     batch_to_send.append(data_to_send)
 
         
@@ -87,31 +91,64 @@ def prepare_and_scatter_microbatch(rows, memory_mailbox: MemoryMailbox, sampler:
         broadcast_state(mode)
         scatter_send(batch_to_send)
         if mode =='eval':
-            gathered_ap = [None] * (num_gpus + 1)
-            gathered_auc = [None] * (num_gpus + 1)
-            dist.gather_object(float(0), gathered_ap, dst=local_rank)
-            dist.gather_object(float(0), gathered_auc, dst=local_rank)
-            ap_tot += gathered_ap[:-1]
-            auc_tot += gathered_auc[:-1]
+            ap_tot += gather_receive(world_size, dst=local_rank)
+            auc_tot += gather_receive(world_size, dst=local_rank)
         batch_to_send.clear()
 
     if mode =='eval':
         return ap_tot, auc_tot
     else:
-        return time_sample
+        return total_sample_time
 
-def generate_reordered_indexes(reorder, batch_size, num_samples, group_indexes):
-    # random chunk shceduling
+def gather_receive(world_size, dst=local_rank):
+    gathered = [None] * world_size
+    dist.gather_object(float(0), gathered, dst=dst)
+    return gathered[:-1]  
+
+def generate_reordered_indexes_1(reorder, batch_size, num_samples, batches_assignment_0):
+    # train_param.batch_size = 8, reorder = 3
+    # batches_assignment_0 = [0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 3 3 3 3 3 3]
     group_idx = list()
     for i in range(reorder):
         group_idx += list(range(0 - i, reorder - i))
-    group_idx = np.repeat(np.array(group_idx), batch_size // reorder)
-    group_idx = np.tile(group_idx, num_samples // batch_size + 1)[:num_samples]
-    group_indexes.append(group_indexes[0] + group_idx)
-    base_idx = group_indexes[0]
+    # group_idx = [0, 1, 2, -1, 0, 1, -2, -1, 0]
+    chunk_size = batch_size // reorder
+    # chunk_size = 8 // 3 = 2
+    group_idx = np.repeat(np.array(group_idx), chunk_size)
+    # group_idx = [ 0, 0, 1, 1, 2, 2 -1 -1, 0, 0, 1, 1 -2 -2 -1 -1, 0, 0]
+    # len(group_idx) = 18
+    tiles = num_samples // batch_size + 1
+    # tiles = 30 // 8 + 1 = 4
+    group_idx = np.tile(group_idx, tiles)[:num_samples]
+    # after tile: group_idx = [ 
+    # 0, 0, 1, 1, 2, 2, -1, -1, 0, 0, 1, 1, -2, -2, -1, -1, 0, 0, 
+    # 0, 0, 1, 1, 2, 2, -1, -1, 0, 0, 1, 1, -2, -2, -1, -1, 0, 0
+    # 0, 0, 1, 1, 2, 2, -1, -1, 0, 0, 1, 1, -2, -2, -1, -1, 0, 0
+    # 0, 0, 1, 1, 2, 2, -1, -1, 0, 0, 1, 1, -2, -2, -1, -1, 0, 0]
+    # totally 18 * 4 = 72 
+    # after slice: group_idx = [    
+    # 0, 0, 1, 1, 2, 2, -1, -1, 0, 0, 1, 1, -2, -2, -1, -1, 0, 0, 
+    # 0, 0, 1, 1, 2, 2, -1, -1, 0, 0, 1, 1]
+    # totally 30
+    return_val = batches_assignment_0 + group_idx
+    # return_val = [
+    # 0, 0, 1, 1, 2, 2, -1, -1, 1, 1, 2, 2, -1, -1,  0,  0, 2, 2,
+    # 2, 2, 3, 3, 4, 4,  2,  2, 3, 3, 4, 4]
+    # totally 6 kinds of indexes -1, 0, 1, 2, 3, 4
+    return return_val
+    
+def generate_reordered_indexes_2(reorder, batch_size, batches_assignment_0):
+    # random chunk shceduling
+    group_indexes = []
+    chunk_size = batch_size // reorder
+    # chunk_size = 8 // 3 = 2
     for i in range(1, reorder):
-        additional_idx = np.zeros(batch_size// reorder * i) - 1
-        group_indexes.append(np.concatenate([additional_idx, base_idx])[:base_idx.shape[0]])
+        additional_idx = np.zeros(chunk_size * i) - 1
+        group_indexes.append(np.concatenate([additional_idx, batches_assignment_0])[:batches_assignment_0.shape[0]])
+    # [-1. -1.  0.  0.  0.  0.  0.  0.  0.  0.  1.  1.  1.  1.  1.  1.  1.  1.  2.  2.  2.  2.  2.  2.  2.  2.  3.  3.  3.  3.]
+    # totally 5 kinds of indexes -1, 0, 1, 2, 3
+    # [-1. -1. -1. -1.  0.  0.  0.  0.  0.  0.  0.  0.  1.  1.  1.  1.  1.  1.  1.  1.  2.  2.  2.  2.  2.  2.  2.  2.  3.  3.]
+    # totally 5 kinds of indexes -1, 0, 1, 2, 3
     return group_indexes
 
 def batches_assign(index, batch_size):
@@ -148,7 +185,7 @@ def run_epoch(e, sampler: ParallelSampler|None, memory_mailbox: MemoryMailbox|No
     val_df = df[train_edge_end:val_edge_end]
     test_df = df[val_edge_end:]
     print('Epoch {:d}:'.format(e))
-    time_sample = 0
+    total_sample_time = 0
     time_tot = 0
     sampler.reset()
     if memory_mailbox is not None:
@@ -160,24 +197,30 @@ def run_epoch(e, sampler: ParallelSampler|None, memory_mailbox: MemoryMailbox|No
 
     batch_to_send = []
     batches_assignment_0 = batches_assign(train_df.index, train_param.batch_size)
+    # example:
+    # train_df.index = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]
+    # train_param.batch_size = 8, reorder = 3
+    # batches_assignment_0 = [0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 3 3 3 3 3 3]
     group_indexes  = [batches_assignment_0]
     
     if train_param.reorder is not None:
         # random chunk shceduling
-        group_indexes = generate_reordered_indexes(train_param.reorder, train_param.batch_size, len(train_df), group_indexes)
+        group_indexes.append(generate_reordered_indexes_1(train_param.reorder, train_param.batch_size, len(train_df), batches_assignment_0))
+        group_indexes.extend(generate_reordered_indexes_2(train_param.reorder, train_param.batch_size, batches_assignment_0))
             
     with tqdm(total=train_iteration_total + val_iteration_total) as pbar:
         # train_df
-        for _, rows in train_df.groupby(group_indexes[random.randint(0, len(group_indexes) - 1)]):
+        batches_assignment = group_indexes[random.randint(0, len(group_indexes) - 1)]
+        batches_assignment = batches_assignment_0
+        for _, edges in train_df.groupby(batches_assignment):
             t_tot_s = time.time()
-            time_sample = prepare_and_scatter_microbatch(rows, memory_mailbox, sampler, neg_link_sampler, gnn_param, memory_param, ngpus, sample_param,
-                                   batch_to_send,  local_rank, mode='train', time_sample=time_sample)
+            total_sample_time = sample_and_scatter_batch(edges, memory_mailbox, sampler, neg_link_sampler, gnn_param, memory_param, ngpus, sample_param,
+                                   batch_to_send, local_rank, mode='train', total_sample_time=total_sample_time)
             time_tot += time.time() - t_tot_s
             pbar.update(1)
         print('Training time:',time_tot)
         broadcast_state('loss_reduce')
-        gathered_loss = [None] * world_size
-        dist.gather_object(float(0), gathered_loss, dst=local_rank)
+        gathered_loss = gather_receive(world_size, dst=local_rank)
         total_loss = np.sum(np.array(gathered_loss) * train_param.batch_size)
         
         # val_df
@@ -185,12 +228,11 @@ def run_epoch(e, sampler: ParallelSampler|None, memory_mailbox: MemoryMailbox|No
         if ap > best_ap:
             best_e = e
             best_ap = ap
-            
             # test_df, for memory based models, testing after validation is faster
             broadcast_state('save')
             tap, tauc = eval(test_df,  memory_mailbox,  sampler, neg_link_sampler, gnn_param, memory_param, cfg_batch_size, sample_param, pbar,local_rank)
     print('\ttrain loss:{:.4f}  val ap:{:4f}  val auc:{:4f}'.format(total_loss, ap, auc))
-    print('\ttotal time:{:.2f}s sample time:{:.2f}s'.format(time_tot, time_sample))
+    print('\ttotal time:{:.2f}s sample time:{:.2f}s'.format(time_tot, total_sample_time))
     return best_ap, best_e, tap, tauc
 
 # host.py

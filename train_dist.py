@@ -43,7 +43,49 @@ def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-set_seed(args.seed)
+def broadcast_result_of_ranked_execution(func=None, *,  src_rank=0):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            payload = [None]  # 用于 broadcast_object_list
+            if local_rank == src_rank:
+                result_on_src_rank = fn(*args, **kwargs)
+                payload[0] = result_on_src_rank
+            dist.broadcast_object_list(payload, src=src_rank)
+            return payload[0]
+        return wrapper
+    if func is None:
+        return decorator
+    else:
+        return decorator(func)
+    
+@broadcast_result_of_ranked_execution
+def bget_shape_and_dtype(meta_payload):
+    final_shape, final_dtype = meta_payload['shape'], meta_payload['dtype']
+    return final_shape, final_dtype
+
+@broadcast_result_of_ranked_execution
+def bget_node_edge_dimensions(node_np, edge_np):
+    def _get_numpy_array_info(arr):
+        if arr is None:
+            return 0, 0, None
+        shape = arr.shape
+        dim0 = shape[0] if len(shape) > 0 else 0
+        dim1 = shape[1] if len(shape) > 1 else 0
+        return dim0, dim1, arr.dtype
+    num_nodes_w_feat, node_feat_dim, node_dtype = _get_numpy_array_info(node_np)
+    num_edges_w_feat, edge_feat_dim, edge_dtype = _get_numpy_array_info(edge_np)
+    return num_nodes_w_feat, node_feat_dim, node_dtype, num_edges_w_feat, edge_feat_dim, edge_dtype
+
+@broadcast_result_of_ranked_execution
+def bget_model_save_path(data_name):
+    if not os.path.isdir('models'):
+        os.mkdir('models')
+    return 'models/{}_{}.pkl'.format(data_name, time.time()) # time.time() 在 rank 0 执行
+
+@broadcast_result_of_ranked_execution(src_rank=world_size - 1)
+def bget_node_count_from_graph(g):
+    return g['indptr'].shape[0] - 1
 
 def init_shared_array(name, tensor_on_rank0=None):
     """
@@ -60,14 +102,13 @@ def init_shared_array(name, tensor_on_rank0=None):
             arr_for_current_rank.copy_(tensor_on_rank0)
             meta_payload = {'shape': current_shape, 'dtype': current_dtype}
         else:
+            # node_feats or edge_feats is None, i.e. no features
             meta_payload = {'shape': None, 'dtype': None}
     else:
-        meta_payload = {}
-    meta_list_to_broadcast = [meta_payload if local_rank == 0 else None]
-    dist.broadcast_object_list(meta_list_to_broadcast, src=0)
-    received_meta = meta_list_to_broadcast[0]
-    final_shape = received_meta['shape']
-    final_dtype = received_meta['dtype']
+        meta_payload = None
+    
+    # let all ranks know the shape and dtype
+    final_shape, final_dtype = bget_shape_and_dtype(meta_payload)
     
     if final_shape is None or final_dtype is None:
         return None
@@ -77,6 +118,8 @@ def init_shared_array(name, tensor_on_rank0=None):
     
     return arr_for_current_rank
 
+set_seed(args.seed)
+
 # inside main init
 if local_rank == 0:
     node_np, edge_np = load_feat(args.data)
@@ -85,63 +128,14 @@ else:
 # create/get shared arrays
 edge_feats = init_shared_array('edge_feats', tensor_on_rank0=edge_np)
 node_feats = init_shared_array('node_feats', tensor_on_rank0=node_np)
+_, node_feat_dim, _, _, edge_feat_dim, _ = bget_node_edge_dimensions(node_np, edge_np)
+path_saver = bget_model_save_path(args.data) # args.data 对于所有进程是相同的
 
-def rank_exec_and_broadcast(func=None, *, needs_barrier=False, src_rank=0):
-    def decorator(fn):
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            payload = [None]  # 用于 broadcast_object_list
-
-            if local_rank == src_rank:
-                result_on_src_rank = fn(*args, **kwargs)
-                payload[0] = result_on_src_rank
-            if needs_barrier:
-                dist.barrier()
-            dist.broadcast_object_list(payload, src=src_rank)
-            return payload[0]
-        return wrapper
-    if func is None:
-        return decorator
-    else:
-        return decorator(func)
-
-def _get_numpy_array_info(arr):
-    if arr is None:
-        return 0, 0, None
-    shape = arr.shape
-    dim0 = shape[0] if len(shape) > 0 else 0
-    dim1 = shape[1] if len(shape) > 1 else 0
-    return dim0, dim1, arr.dtype
-
-@rank_exec_and_broadcast
-def calculate_dim_feats():
-    num_nodes, node_feat_dim, node_dtype = _get_numpy_array_info(node_np)
-    num_edges, edge_feat_dim, edge_dtype = _get_numpy_array_info(edge_np)
-    return [
-        num_nodes, node_feat_dim, node_dtype,
-        num_edges, edge_feat_dim, edge_dtype,
-    ]
-    
-dim_feats_list = calculate_dim_feats()
-node_feat_dim = dim_feats_list[1]
-edge_feat_dim = dim_feats_list[4]
-
-@rank_exec_and_broadcast
-def prepare_path_saver(data_name):
-    if not os.path.isdir('models'):
-        os.mkdir('models')
-    return 'models/{}_{}.pkl'.format(data_name, time.time()) # time.time() 在 rank 0 执行
-path_saver = prepare_path_saver(args.data) # args.data 对于所有进程是相同的
-
-if local_rank == world_size - 1:
+if local_rank == world_size - 1: 
+    # host need g for sampling, so keep g in host process
     g, df = load_graph(args.data)
     
-@rank_exec_and_broadcast(needs_barrier=True, src_rank=world_size - 1)
-def load_graph_and_get_num_nodes():
-    return g['indptr'].shape[0] - 1
-
-num_nodes = load_graph_and_get_num_nodes()
-
+num_nodes = bget_node_count_from_graph(g if local_rank == world_size - 1 else None)
 sample_param, memory_param, gnn_param, train_param = parse_config(args.config)
 
 
@@ -169,6 +163,7 @@ if memory_param.type != 'none':
     for name, (shape, dtype) in shared_cfg.items():
         shared_arrays[name] = init_shared(name, shape, dtype)
     if local_rank == 0:
+        # only rank 0 initializes the shared memory arrays
         for arr in shared_arrays.values():
             arr.zero_()
     
@@ -178,5 +173,4 @@ if memory_param.type != 'none':
 if local_rank == world_size - 1:
     run_host(sample_param, memory_param, gnn_param, train_param, g, df, memory_mailbox)
 else:
-    print("dist-worker local_rank",local_rank)
     run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, memory_mailbox, node_feat_dim, edge_feat_dim, path_saver, node_feats, edge_feats)

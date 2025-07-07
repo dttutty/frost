@@ -5,3 +5,8 @@ models/
 __pycache__/
 .vscode/
 *.so
+*.log
+*.png
+*.pkl
+models/
+*.pt

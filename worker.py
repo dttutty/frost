@@ -27,15 +27,27 @@ def scatter_receive(src=host_rank):
     return my[0]
 
 @dataclass
-class TransferedData:
+class TransferData:
     mfgs: Optional[List[List[DGLBlock]]]  = None
     root: Optional[NDArray[np.int32]] = None
     ts: Optional[NDArray[np.float32]] = None
     eid: Optional[List] = None
     block: Optional[List[List[DGLBlock]]]  = None
 
-def run_training_step(stream, prev_thread: DataPipelineThread, mailbox: MemoryMailbox,  memory_param: MemoryParams, model: DDP, optimizer, creterion, node_feats, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, tot_loss):
-    received_data: TransferedData = scatter_receive()
+def run_training_step(stream,
+                      prev_thread: DataPipelineThread,
+                      mailbox: MemoryMailbox, 
+                      memory_param: MemoryParams, 
+                      model: DDP, 
+                      optimizer, 
+                      creterion, 
+                      node_feats, 
+                      edge_feats, 
+                      pinned_nfeat_buffs, 
+                      pinned_efeat_buffs, 
+                      nccl_group, 
+                      tot_loss):
+    received_data: TransferData = scatter_receive()
     curr_thread = DataPipelineThread(received_data, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param)
     curr_thread.start()
     if prev_thread is not None:
@@ -80,7 +92,7 @@ def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
         # finish last training mini-batch
         prev_thread, tot_loss = train_from_prefetch( prev_thread, memory_mailbox,  memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, None)
         
-    received_data : TransferedData = scatter_receive()
+    received_data : TransferData = scatter_receive()
     mfgs = mfgs_to_cuda(received_data.mfgs)
     prepare_mfgs(mfgs, node_feats, edge_feats, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
     
@@ -109,19 +121,30 @@ def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
         dist.gather_object(float(auc), None, dst=host_rank)
     return prev_thread, tot_loss
 
-def get_pinned_buffers(sample_param, batch_size, node_feats, edge_feats):
+def alc_pin_nfeat_efeat_buf(sample_param, batch_size, node_feats, edge_feats):
     pinned_nfeat_buffs = list()
     pinned_efeat_buffs = list()
     limit = int(batch_size * 3.3)
     if sample_param.neighbor is not None:
         for i in sample_param.neighbor:
             limit *= i + 1
+            
             if edge_feats is not None:
                 for _ in range(sample_param.history):
                     pinned_efeat_buffs.insert(0, torch.zeros((limit, edge_feats.shape[1]), pin_memory=True))
+    # if history = 2, neighbor = [10, 10]
+    # pinned_efeat_buffs[5].torch.shape [3.3b*11*11, edge_feats.shape[1]]
+    # pinned_efeat_buffs[4].torch.shape [3.3b*11*11, edge_feats.shape[1]]
+    # pinned_efeat_buffs[3].torch.shape [3.3b*11*11, edge_feats.shape[1]]
+    # pinned_efeat_buffs[2].torch.shape [3.3b*11, edge_feats.shape[1]]
+    # pinned_efeat_buffs[1].torch.shape [3.3b*11, edge_feats.shape[1]]
+    # pinned_efeat_buffs[0].torch.shape [3.3b*11, edge_feats.shape[1]]
     if node_feats is not None:
         for _ in range(sample_param.history):
             pinned_nfeat_buffs.insert(0, torch.zeros((limit, node_feats.shape[1]), pin_memory=True))
+    # if history = 2
+    # pinned_efeat_buffs[1].torch.shape [3.3b*11*11, node_feats.shape[1]]
+    # pinned_efeat_buffs[0].torch.shape [3.3b*11*11, node_feats.shape[1]]
     return pinned_nfeat_buffs, pinned_efeat_buffs
 
 
@@ -136,9 +159,9 @@ def run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, m
     creterion = torch.nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=train_param.lr)
     
-    pinned_nfeat_buffs, pinned_efeat_buffs = get_pinned_buffers(sample_param, train_param.batch_size, node_feats, edge_feats)
+    pinned_nfeat_buffs, pinned_efeat_buffs = alc_pin_nfeat_efeat_buf(sample_param, train_param.batch_size, node_feats, edge_feats)
     if memory_mailbox is not None:
-        memory_mailbox.allocate_pinned_memory_buffers(sample_param, train_param.batch_size)
+        memory_mailbox.alc_pin_mem_mailbox_buf(sample_param, train_param.batch_size)
     
     tot_loss = 0
     prev_thread = None
