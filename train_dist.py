@@ -1,0 +1,154 @@
+import argparse
+import os
+LOCAL_RANK = int(os.environ['LOCAL_RANK'])
+cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES').split(',')
+device_count = len(cuda_visible_devices)
+
+if LOCAL_RANK != device_count:
+    os.environ['CUDA_VISIBLE_DEVICES'] = cuda_visible_devices[LOCAL_RANK]
+import torch.distributed as dist
+import datetime
+import torch
+
+from typing import Optional
+parser=argparse.ArgumentParser()
+parser.add_argument('--data', type=str, help='dataset name')
+parser.add_argument('--config', type=str, help='path to config file')
+parser.add_argument('--seed', type=int, default=0, help='random seed to use')
+parser.add_argument('--omp_num_threads', type=int, default=8)
+args=parser.parse_args()
+dist.init_process_group(backend='gloo', timeout=datetime.timedelta(0, 3600))
+
+local_rank = dist.get_rank()
+world_size = dist.get_world_size()
+assert world_size == device_count + 1, "world size should be num_gpus + 1"
+nccl_group = dist.new_group(ranks=list(range(world_size - 1)), backend='nccl')
+
+os.environ['OMP_NUM_THREADS'] = str(args.omp_num_threads)
+os.environ['MKL_NUM_THREADS'] = str(args.omp_num_threads)
+import time
+
+import random
+import numpy as np
+from dgl.utils.shared_mem import create_shared_mem_array, get_shared_mem_array
+from memorys import  MemoryMailbox
+from utils import load_feat, load_graph, parse_config
+from worker import run_worker
+from host import run_host
+import torch.distributed as dist
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+from utils import get_shape_and_dtype, get_node_edge_dimensions, get_model_save_path, get_node_count_from_graph
+from functools import wraps
+
+def broadcast_result_of_ranked_execution(func=None, *,  src_rank=0):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            payload = [None]  # 用于 broadcast_object_list
+            if local_rank == src_rank:
+                result_on_src_rank = fn(*args, **kwargs)
+                payload[0] = result_on_src_rank
+            dist.broadcast_object_list(payload, src=src_rank)
+            return payload[0]
+        return wrapper
+    if func is None:
+        return decorator
+    else:
+        return decorator(func)
+bget_shape_and_dtype = broadcast_result_of_ranked_execution(get_shape_and_dtype)
+bget_node_edge_dimensions = broadcast_result_of_ranked_execution(get_node_edge_dimensions)
+bget_model_save_path = broadcast_result_of_ranked_execution(get_model_save_path)
+bget_node_count_from_graph = broadcast_result_of_ranked_execution(src_rank=world_size - 1)(get_node_count_from_graph)
+
+def init_shared_array(name, tensor_on_rank0=None):
+    """
+    Rank 0: create + copy; others: barrier then get.
+    Returns the shared tensor or None.
+    """
+    arr_for_current_rank: Optional[torch.Tensor] = None 
+    if local_rank == 0:
+        if tensor_on_rank0 is not None:
+            current_shape = tuple(tensor_on_rank0.shape)
+            current_dtype = tensor_on_rank0.dtype 
+            
+            arr_for_current_rank = create_shared_mem_array(name, current_shape, dtype=current_dtype)
+            arr_for_current_rank.copy_(tensor_on_rank0)
+            meta_payload = {'shape': current_shape, 'dtype': current_dtype}
+        else:
+            # node_feats or edge_feats is None, i.e. no features
+            meta_payload = {'shape': None, 'dtype': None}
+    else:
+        meta_payload = None
+    
+    # let all ranks know the shape and dtype
+    final_shape, final_dtype = bget_shape_and_dtype(meta_payload)
+    
+    if final_shape is None or final_dtype is None:
+        return None
+
+    if local_rank != 0:
+        arr_for_current_rank = get_shared_mem_array(name, final_shape, dtype=final_dtype)
+    
+    return arr_for_current_rank
+
+set_seed(args.seed)
+# inside main init
+if local_rank == 0:
+    node_np, edge_np = load_feat(args.data)
+else:
+    node_np = edge_np = None
+# create/get shared arrays
+edge_feats = init_shared_array('edge_feats', tensor_on_rank0=edge_np)
+node_feats = init_shared_array('node_feats', tensor_on_rank0=node_np)
+_, node_feat_dim, _, _, edge_feat_dim, _ = bget_node_edge_dimensions(node_np, edge_np)
+config_base_name = os.path.basename(args.config)
+path_saver = bget_model_save_path(args.data, config_base_name) # args.data 对于所有进程是相同的
+
+if local_rank == world_size - 1: 
+    # host need g for sampling, so keep g in host process
+    g, df = load_graph(args.data)
+    
+num_nodes = bget_node_count_from_graph(g if local_rank == world_size - 1 else None)
+sample_param, memory_param, gnn_param, train_param = parse_config(args.config)
+
+
+def init_shared(name, shape, dtype):
+    """rank0 create, others get, barrier 之后返回张量句柄"""
+    if local_rank == 0:
+        arr = create_shared_mem_array(name, torch.Size(shape), dtype=dtype)
+    dist.barrier()
+    if local_rank != 0:
+        arr = get_shared_mem_array(name, torch.Size(shape), dtype=dtype)
+    return arr
+
+memory_mailbox = None
+if memory_param.type != 'none':
+    # name → (shape list, dtype)
+    shared_cfg = {
+        'node_memory':      ([num_nodes, memory_param.dim_out], torch.float32),
+        'node_memory_ts':   ([num_nodes], torch.float32),
+        'mails':            ([num_nodes, memory_param.mailbox_size, 2 * memory_param.dim_out + edge_feat_dim], torch.float32),
+        'mail_ts':          ([num_nodes, memory_param.mailbox_size], torch.float32),
+        'next_mail_pos':    ([num_nodes], torch.long),
+        'mail_pos_update_pending_flag':  ([num_nodes], torch.int8),
+    }
+    shared_arrays = {}
+    for name, (shape, dtype) in shared_cfg.items():
+        shared_arrays[name] = init_shared(name, shape, dtype)
+    if local_rank == 0:
+        # only rank 0 initializes the shared memory arrays
+        for arr in shared_arrays.values():
+            arr.zero_()
+    
+    memory_mailbox = MemoryMailbox(memory_param, shared_cfg, edge_feat_dim, shared_arrays)
+
+
+if local_rank == world_size - 1:
+    run_host(sample_param, memory_param, gnn_param, train_param, g, df, memory_mailbox)
+else:
+    run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, memory_mailbox, node_feat_dim, edge_feat_dim, path_saver, node_feats, edge_feats)

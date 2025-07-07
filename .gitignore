@@ -1,0 +1,12 @@
+DATA/
+build/
+models/
+*.egg-info/
+__pycache__/
+.vscode/
+*.so
+*.log
+*.png
+*.pkl
+models/
+*.pt
