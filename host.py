@@ -42,12 +42,61 @@ def scatter_send(lists, src=local_rank):
     lists.append(None)
     dist.scatter_object_list([None], lists, src=src)
     
-from utils import sampler_wrapper
+from utils import sampler_wrapper, dgl_blocks_to_tensor_dicts, tensor_dicts_to_dgl_blocks
 
+def sample_and_dispatch_batch(edges, memory_mailbox: MemoryMailbox, sampler: ParallelSampler|None, neg_link_sampler, gnn_param, memory_param, num_gpus, sample_param : SampleParams,
+                                   batch_to_send, local_rank, mode='eval', total_sample_time=None, ap_tot=None, auc_tot=None):
+    """Samples data and dispatches it to workers as tensor dictionaries."""
+    root_nodes = np.concatenate([edges.src.values, edges.dst.values, neg_link_sampler.sample(edges.src.values, edges.time.values)]).astype(np.int32)
+    ts = np.concatenate([edges.time.values, edges.time.values, edges.time.values]).astype(np.float32)
+    
+    ret, _ = sampler_wrapper(sample_param.no_neg, root_nodes, sampler, ts, total_sample_time)
+    
+    if gnn_param.arch != 'identity':
+        grouped_mfgs = to_dgl_blocks(ret, sample_param.history, cuda=False)
+    else:
+        grouped_mfgs = node_to_dgl_blocks(root_nodes, ts, cuda=False)
 
+    # Deconstruct DGL blocks into tensor representations
+    # This is the KEY change for performance
+    mfgs_tensors = [dgl_blocks_to_tensor_dicts(mfg_list) for mfg_list in grouped_mfgs]
+
+    # --- 【新增】处理 memory_mailbox 需要的特殊 block ---
+    special_block_tensors = None
+    if memory_mailbox is not None and memory_param.deliver_to == 'neighbors':
+        # 创建这个特殊的、反转的 block
+        special_block = to_dgl_blocks(ret, sample_param.history, reverse=True, cuda=False)[0][0]
+        # 使用同样的工具函数将其转换为张量字典
+        # 注意用列表包裹和解包，因为工具函数接收的是列表
+        special_block_tensors = dgl_blocks_to_tensor_dicts([special_block])[0]
+    
+    
+    payload = {
+        'mode': mode, # <--- NEW: 告诉 worker 当前的模式
+        'mfgs_tensors': mfgs_tensors,
+        'special_block_tensors': special_block_tensors, # <--- NEW: 加入特殊 block 的张量字典
+        'root': torch.from_numpy(root_nodes),
+        'ts': torch.from_numpy(ts),
+        'eid': torch.from_numpy(edges['Unnamed: 0'].values)
+    }
+    batch_to_send.append(payload)
+    if len(batch_to_send) == num_gpus:
+        broadcast_state(mode)
+        for i, payload in enumerate(batch_to_send):
+            dist.send_object(payload, dst=i)
+        if mode == 'eval':
+            ap_tot += gather_receive(world_size, dst=local_rank)
+            auc_tot += gather_receive(world_size, dst=local_rank)
+        batch_to_send.clear()
+
+    if mode =='eval':
+        return ap_tot, auc_tot
+    else:
+        return total_sample_time
+import pickle
 def sample_and_scatter_batch(edges, memory_mailbox: MemoryMailbox, sampler: ParallelSampler|None, neg_link_sampler, gnn_param, memory_param, num_gpus, sample_param : SampleParams,
                                    batch_to_send, local_rank, mode='eval', total_sample_time=None, ap_tot=None, auc_tot=None):
-    root_nodes = np.concatenate([edges.src.values, edges.dst.values, neg_link_sampler.sample(edges.src.values)]).astype(np.int32)
+    root_nodes = np.concatenate([edges.src.values, edges.dst.values, neg_link_sampler.sample(edges.src.values, edges.time.values)]).astype(np.int32)
     ts = np.concatenate([edges.time.values, edges.time.values, edges.time.values]).astype(np.float32)
     
     # example
@@ -79,10 +128,57 @@ def sample_and_scatter_batch(edges, memory_mailbox: MemoryMailbox, sampler: Para
         data_to_send.block = to_dgl_blocks(ret, sample_param.history, reverse=True, cuda=False)[0][0]
     batch_to_send.append(data_to_send)
 
-        
+
+    
     if len(batch_to_send) == num_gpus:
         broadcast_state(mode)
-        scatter_send(batch_to_send)
+        # scatter_send(batch_to_send)
+        # =================================================================
+        # === 阶段 1A: 发起【所有】的数据发送 ===
+        # =================================================================
+        print("Host: Phase 1A - Initiating all data sends...")
+        send_requests = []
+        for rank, data_payload in enumerate(batch_to_send):
+            pickled_payload = pickle.dumps(data_payload)
+            tensor = torch.ByteTensor(list(pickled_payload))
+            size_tensor = torch.LongTensor([len(tensor)])
+            
+            dist.isend(tensor=size_tensor, dst=rank)
+            req = dist.isend(tensor=tensor, dst=rank)
+            send_requests.append(req)
+
+        # =================================================================
+        # === 阶段 1B: 等待【所有】的数据发送完成 ===
+        # !!! 必须在发起任何接收之前，先等待发送完成 !!!
+        # 这是确保 Host 自身任务清理干净的关键同步点。
+        # =================================================================
+        print("Host: Phase 1B - Waiting for data sends to complete...")
+        for req in send_requests:
+            req.wait()
+        print("Host: All data has been sent successfully.")
+
+
+        # =================================================================
+        # === 阶段 2A: 发起【所有】的 ACK 接收 ===
+        # =================================================================
+        print("Host: Phase 2A - Initiating non-blocking receives for all ACKs...")
+        recv_requests = []
+        ack_buffers = []
+        for rank in range(len(batch_to_send)):
+            ack_tensor = torch.tensor([0], dtype=torch.int32, device='cpu')
+            req = dist.irecv(tensor=ack_tensor, src=rank)
+            recv_requests.append(req)
+            ack_buffers.append(ack_tensor)
+
+        # =================================================================
+        # === 阶段 2B: 等待【所有】的 ACK 接收完成 ===
+        # =================================================================
+        print("Host: Phase 2B - Waiting for all ACKs to be received...")
+        for i, req in enumerate(recv_requests):
+            req.wait()
+
+        print("Host: All workers have acknowledged. Proceeding to next step.")
+
         if mode =='eval':
             ap_tot += gather_receive(world_size, dst=local_rank)
             auc_tot += gather_receive(world_size, dst=local_rank)
@@ -240,14 +336,14 @@ def run_host(sample_param, memory_param, gnn_param, train_param, g, df, memory_m
                                   sample_param.strategy=='recent', sample_param.prop_time,
                                   sample_param.history, float(sample_param.duration))
     from sampler import create_sampler
-    neg_link_sampler_for_eval = create_sampler(g)
-    neg_link_sampler = NegLinkSampler(g)
+    eval_neg_link_sampler = create_sampler(g)
+    train_neg_link_sampler = NegLinkSampler(g)
 
 
     best_ap = best_e = tap = tauc = 0
     for e in range(train_param.epoch):
         best_ap, best_e, tap, tauc = run_epoch(e, sampler, memory_mailbox, df, train_edge_end, val_edge_end, gnn_param, memory_param,
-                                      cfg_batch_size, sample_param, train_param, neg_link_sampler, neg_link_sampler_for_eval,
+                                      cfg_batch_size, sample_param, train_param, train_neg_link_sampler, eval_neg_link_sampler,
                                       best_ap, best_e, tap, tauc, local_rank)
 
     print('Best model at epoch {}.'.format(best_e))

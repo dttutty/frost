@@ -22,17 +22,17 @@ BATCH_SIZES=(500 1000 1500 2000 2500 3000 3500 4000 4500 5000)
 PYTHON_BIN="/home/sqp17/miniconda3/envs/simple_py310/bin/python"
 PROGRAM_PATH="/home/sqp17/Projects/tgl/train.py"
 CONFIG_DIR="/home/sqp17/Projects/tgl/config"
-DATASET="MOOC"
+DATASET="LASTFM"
 
 # 定义所有可用的GPU ID
-AVAILABLE_GPUS=( 2 3 4 5 6 7)
+AVAILABLE_GPUS=(0 1 2 3 4 5 6 7)
 
 # 计算可用GPU的数量
 NUM_AVAILABLE_GPUS=${#AVAILABLE_GPUS[@]}
 
 # --- 3. 运行前设置 (Pre-run setup) ---
 # 创建日志子目录
-LOG_DIR="logs/${DATASET}"
+LOG_DIR="logs/${CONFIG_PREFIX}/${DATASET}"
 mkdir -p "$LOG_DIR"
 
 # --- 4. 任务启动 (Job Launching) ---

@@ -6,6 +6,43 @@ import time
 import pandas as pd
 import numpy as np
 
+
+# In utils.py
+import dgl
+import torch
+
+def dgl_blocks_to_tensor_dicts(blocks):
+    """Converts a list of DGL blocks to a list of serializable tensor dictionaries."""
+    tensor_dicts = []
+    for block in blocks:
+        # Get the graph structure in CSC format, which is efficient
+        csc_mat = block.adj_tensors('csc')
+        tensor_dicts.append({
+            'num_src_nodes': block.number_of_src_nodes(),
+            'num_dst_nodes': block.number_of_dst_nodes(),
+            'csc_indptr': csc_mat[0],
+            'csc_indices': csc_mat[1],
+            'edge_ids': csc_mat[2]
+        })
+    return tensor_dicts
+
+def tensor_dicts_to_dgl_blocks(tensor_dicts, device='cpu'):
+    """Reconstructs a list of DGL blocks from a list of tensor dictionaries."""
+    blocks = []
+    for d in tensor_dicts:
+        # Create a graph from the CSC representation
+        g = dgl.create_block(
+            (d['csc_indptr'], d['csc_indices']),
+            num_src_nodes=d['num_src_nodes'],
+            num_dst_nodes=d['num_dst_nodes'],
+            device=device
+        )
+        # The edge IDs are stored in the 'eid' feature of the new block
+        g.edata[dgl.EID] = d['edge_ids']
+        blocks.append(g)
+    return blocks
+
+
 def get_ids(mfgs, node_feats, edge_feats):
     nids = list()
     eids = list()
@@ -232,7 +269,7 @@ def prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=False, pinned
                 # print(f"Pinned Buffers Equal: {is_equal}")
                 total_node_id_count += idx.shape[0]
                 unique_node_id_count += torch.unique(idx).shape[0]
-                print(f"[Send node feature to GPU]Node ID: Unique/Total: {int(unique_node_id_count/batch)}/{int(total_node_id_count/batch)}")
+                # print(f"[Send node feature to GPU]Node ID: Unique/Total: {int(unique_node_id_count/batch)}/{int(total_node_id_count/batch)}")
                 torch.index_select(node_feats, 0, idx, out=nfeat_buffs[i][:idx.shape[0]])
                 block.srcdata['h'] = nfeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
                 i += 1
@@ -257,7 +294,7 @@ def prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=False, pinned
                         # print(f"Pinned Buffers Equal: {is_equal}")
                         total_edge_id_count += idx.shape[0]
                         unique_edge_id_count += torch.unique(idx).shape[0]
-                        print(f"[Send edge feature to GPU]Edge ID: Unique/Total: {int(unique_edge_id_count/batch)}/{int(total_edge_id_count/batch)}")
+                        # print(f"[Send edge feature to GPU]Edge ID: Unique/Total: {int(unique_edge_id_count/batch)}/{int(total_edge_id_count/batch)}")
                         torch.index_select(edge_feats, 0, idx, out=efeat_buffs[i][:idx.shape[0]])
                         block.edata['f'] = efeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
                         i += 1

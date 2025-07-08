@@ -35,6 +35,19 @@ class TransferData:
     eid: Optional[List] = None
     block: Optional[List[List[DGLBlock]]]  = None
 
+def irecv_object(src=host_rank):
+    """Initiates a non-blocking receive of an object and returns the request handle."""
+    # 1. 先同步接收大小（这一步很快，可以接受）
+    size_tensor = torch.LongTensor([0])
+    dist.recv(tensor=size_tensor, src=src)
+    
+    # 2. 根据大小创建 buffer，并发起非阻塞接收
+    buffer = torch.ByteTensor(size=[size_tensor.item()])
+    recv_request = dist.irecv(tensor=buffer, src=src)
+    # 3. 返回请求句柄和 buffer
+    return recv_request, buffer
+
+
 def run_training_step(stream,
                       prev_thread: DataPipelineThread,
                       mailbox: MemoryMailbox, 
@@ -49,8 +62,10 @@ def run_training_step(stream,
                       nccl_group, 
                       tot_loss,
                       deduplicate_mfg_src):
-    received_data: TransferData = scatter_receive()
-    curr_thread = DataPipelineThread(received_data, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src)
+    # received_data: TransferData = scatter_receive()
+    recv_req, buffer = irecv_object()
+    curr_thread = DataPipelineThread(host_rank, recv_req, buffer, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src)
+    print(f"Rank {local_rank} starting DataPipelineThread")
     curr_thread.start()
     if prev_thread is not None:
         prev_thread, tot_loss = train_from_prefetch(prev_thread, mailbox, memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread)
@@ -98,32 +113,39 @@ def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
     received_data : TransferData = scatter_receive()
     mfgs = mfgs_to_cuda(received_data.mfgs)
     prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=deduplicate_mfg_src, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
-    
-    model.eval()
-    with torch.no_grad():
-        if memory_mailbox is not None:
-            memory_mailbox.prep_input_mails(mfgs[0])
-        # with get_tracer().log_event("Eval: model forward"):
-        #     print(f"Eval: model forward, local_rank={local_rank}")
-        pred_pos, pred_neg = model(mfgs)
-        if memory_mailbox is not None:
-            
-            mem_edge_feats = edge_feats[received_data.eid] if edge_feats is not None else None
+    try:
 
-            memory_mailbox.update_mailbox(memory_updater.last_updated_nid, memory_updater.last_updated_memory, received_data.root, received_data.ts, mem_edge_feats, received_data.block)
-            memory_mailbox.update_memory(memory_updater.last_updated_nid, memory_updater.last_updated_memory, received_data.root, memory_updater.last_updated_ts)
-            
-            if memory_param.deliver_to == 'neighbors':
-                dist.barrier(group=nccl_group)
-                if local_rank == 0:
-                    memory_mailbox.update_next_mail_pos()
-                    
-        y_pred = torch.cat([pred_pos, pred_neg], dim=0).sigmoid().cpu()
-        y_true = torch.cat([torch.ones(pred_pos.size(0)), torch.zeros(pred_neg.size(0))], dim=0)
-        ap = average_precision_score(y_true, y_pred)
-        auc = roc_auc_score(y_true, y_pred)
-        dist.gather_object(float(ap), None, dst=host_rank)
-        dist.gather_object(float(auc), None, dst=host_rank)
+        model.eval()
+        with torch.no_grad():
+            if memory_mailbox is not None:
+                memory_mailbox.prep_input_mails(mfgs[0])
+            # with get_tracer().log_event("Eval: model forward"):
+            #     print(f"Eval: model forward, local_rank={local_rank}")
+            pred_pos, pred_neg = model(mfgs)
+            if memory_mailbox is not None:
+                
+                mem_edge_feats = edge_feats[received_data.eid] if edge_feats is not None else None
+
+                memory_mailbox.update_mailbox(memory_updater.last_updated_nid, memory_updater.last_updated_memory, received_data.root, received_data.ts, mem_edge_feats, received_data.block)
+                memory_mailbox.update_memory(memory_updater.last_updated_nid, memory_updater.last_updated_memory, received_data.root, memory_updater.last_updated_ts)
+                
+                if memory_param.deliver_to == 'neighbors':
+                    dist.barrier(group=nccl_group)
+                    if local_rank == 0:
+                        memory_mailbox.update_next_mail_pos()
+                        
+            y_pred = torch.cat([pred_pos, pred_neg], dim=0).sigmoid().cpu()
+            y_true = torch.cat([torch.ones(pred_pos.size(0)), torch.zeros(pred_neg.size(0))], dim=0)
+            ap = average_precision_score(y_true, y_pred)
+            auc = roc_auc_score(y_true, y_pred)
+            dist.gather_object(float(ap), None, dst=host_rank)
+            dist.gather_object(float(auc), None, dst=host_rank)
+    except Exception as e:
+        print(f"!!!!!!!! Rank {local_rank} caught an exception in run_evaluation_step !!!!!!!!")
+        print(e)
+        # 抛出异常或进行其他处理，但关键是打印出来
+        raise e
+
     return prev_thread, tot_loss
 
 
