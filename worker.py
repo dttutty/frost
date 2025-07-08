@@ -15,7 +15,7 @@ from numpy.typing import NDArray
 import numpy as np
 from torch.nn.parallel import DistributedDataParallel as DDP
 from memorys import GRUMemoryUpdater, RNNMemoryUpdater, TransformerMemoryUpdater
-# from viztracer import get_tracer
+from viztracer import get_tracer
 local_rank = dist.get_rank()
 world_size = dist.get_world_size()
 host_rank = world_size - 1
@@ -65,27 +65,32 @@ def train_from_prefetch(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
     prev_th_hold_notmoved_data = prev_thread.received_data
     prev_thread.join()
     # with torch.cuda.stream(prev_thread.stream):
-    # with get_tracer().log_event("Train: model forward and backward"):
-    model.train()
-    optimizer.zero_grad()
-    pred_pos, pred_neg = model(prev_thread.async_mfgs)
-    loss = creterion(pred_pos, torch.ones_like(pred_pos))
-    loss += creterion(pred_neg, torch.zeros_like(pred_neg))
-    loss.backward()
-    optimizer.step()
+    with get_tracer().log_event("Train: model forward and backward"):
+        model.train()
+        optimizer.zero_grad()
+        pred_pos, pred_neg = model(prev_thread.async_mfgs)
+        loss = creterion(pred_pos, torch.ones_like(pred_pos))
+        loss += creterion(pred_neg, torch.zeros_like(pred_neg))
+        loss.backward()
+        optimizer.step()
     with torch.no_grad():
         tot_loss += float(loss)
+
     if memory_mailbox is not None:
-        with torch.no_grad():
-            mem_edge_feats = edge_feats[prev_th_hold_notmoved_data.eid] if edge_feats is not None else None
-            memory_mailbox.update_mailbox(memory_updater.last_updated_nid, memory_updater.last_updated_memory, prev_th_hold_notmoved_data.root, prev_th_hold_notmoved_data.ts, mem_edge_feats, prev_th_hold_notmoved_data.block)
-            memory_mailbox.update_memory(memory_updater.last_updated_nid, memory_updater.last_updated_memory, prev_th_hold_notmoved_data.root, memory_updater.last_updated_ts)
-            if memory_param.deliver_to == 'neighbors':
-                dist.barrier(group=nccl_group)
-                if local_rank == 0:
-                    memory_mailbox.update_next_mail_pos()
-    prev_thread.clear_tensors()
-    prev_thread = curr_thread
+        
+        with get_tracer().log_event("update_mailbox update_memory"):
+            with torch.no_grad():
+                mem_edge_feats = edge_feats[prev_th_hold_notmoved_data.eid] if edge_feats is not None else None
+                memory_mailbox.update_mailbox(memory_updater.last_updated_nid, memory_updater.last_updated_memory, prev_th_hold_notmoved_data.root, prev_th_hold_notmoved_data.ts, mem_edge_feats, prev_th_hold_notmoved_data.block)
+                memory_mailbox.update_memory(memory_updater.last_updated_nid, memory_updater.last_updated_memory, prev_th_hold_notmoved_data.root, memory_updater.last_updated_ts)
+                if memory_param.deliver_to == 'neighbors':
+                    dist.barrier(group=nccl_group)
+                    if local_rank == 0:
+                        memory_mailbox.update_next_mail_pos()
+        
+        with get_tracer().log_event("clear_tensors"):
+            prev_thread.clear_tensors()
+            prev_thread = curr_thread
     return prev_thread, tot_loss
 
 
