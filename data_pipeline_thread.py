@@ -14,15 +14,14 @@ def scatter_receive(src=host_rank):
 
 import  torch.distributed as dist
 class DataPipelineThread(threading.Thread):
-    def __init__(self, received_data, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox: MemoryMailbox, memory_param, deduplicate_mfg_src):
+    def __init__(self, data_received_event: threading.Event, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox: MemoryMailbox, memory_param, deduplicate_mfg_src):
         
         
         super(DataPipelineThread, self).__init__()
-        self.received_data = received_data
+        self.received_data = None
         self.host_rank = host_rank
-        # self.data_received_event = data_received_event
+        self.data_received_event = data_received_event
         
-        self.raw_mfgs = self.received_data.mfgs
         # self.received_data = received_data
         self.stream = stream
         self.async_mfgs = None
@@ -49,10 +48,11 @@ class DataPipelineThread(threading.Thread):
         
         # # 3. 现在可以安全地继续执行或结束线程了
         # print(f"Rank {torch.distributed.get_rank()} received data, starting processing")
-        # self.received_data = scatter_receive()
-        # self.data_received_event.set()
+        self.received_data = scatter_receive()
+        self.data_received_event.set()
 
         # self.received_data = pickle.loads(bytes(self.buffer.tolist()))
+        self.raw_mfgs = self.received_data.mfgs
         
         with torch.cuda.stream(self.stream):
             # print(local_rank, 'start thread')

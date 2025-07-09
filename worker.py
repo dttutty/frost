@@ -63,15 +63,15 @@ def run_training_step(stream,
                       nccl_group, 
                       tot_loss,
                       deduplicate_mfg_src):
-    received_data: TransferData = scatter_receive()
-    # data_ready_event = threading.Event()
-    curr_thread = DataPipelineThread(received_data, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src)
+    # received_data: TransferData = scatter_receive()
+    data_ready_event = threading.Event()
+    curr_thread = DataPipelineThread(data_ready_event, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src)
     curr_thread.start()
     if prev_thread is not None:
         prev_thread, tot_loss = train_from_prefetch(prev_thread, mailbox, memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread)
     else:
         prev_thread = curr_thread
-    # data_ready_event.wait() 
+    data_ready_event.wait() 
     return prev_thread, tot_loss
         
         
