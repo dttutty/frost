@@ -48,6 +48,7 @@ def irecv_object(src=host_rank):
     return recv_request, buffer
 
 
+
 def run_training_step(stream,
                       prev_thread: DataPipelineThread,
                       mailbox: MemoryMailbox, 
@@ -62,16 +63,17 @@ def run_training_step(stream,
                       nccl_group, 
                       tot_loss,
                       deduplicate_mfg_src):
-    # received_data: TransferData = scatter_receive()
-    recv_req, buffer = irecv_object()
-    curr_thread = DataPipelineThread(host_rank, recv_req, buffer, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src)
-    print(f"Rank {local_rank} starting DataPipelineThread")
+    received_data: TransferData = scatter_receive()
+    # data_ready_event = threading.Event()
+    curr_thread = DataPipelineThread(received_data, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src)
     curr_thread.start()
     if prev_thread is not None:
         prev_thread, tot_loss = train_from_prefetch(prev_thread, mailbox, memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread)
     else:
         prev_thread = curr_thread
+    # data_ready_event.wait() 
     return prev_thread, tot_loss
+        
         
         
 

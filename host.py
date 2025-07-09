@@ -132,52 +132,53 @@ def sample_and_scatter_batch(edges, memory_mailbox: MemoryMailbox, sampler: Para
     
     if len(batch_to_send) == num_gpus:
         broadcast_state(mode)
-        # scatter_send(batch_to_send)
-        # =================================================================
-        # === 阶段 1A: 发起【所有】的数据发送 ===
-        # =================================================================
-        print("Host: Phase 1A - Initiating all data sends...")
-        send_requests = []
-        for rank, data_payload in enumerate(batch_to_send):
-            pickled_payload = pickle.dumps(data_payload)
-            tensor = torch.ByteTensor(list(pickled_payload))
-            size_tensor = torch.LongTensor([len(tensor)])
+        scatter_send(batch_to_send)
+        # # scatter_send(batch_to_send)
+        # # =================================================================
+        # # === 阶段 1A: 发起【所有】的数据发送 ===
+        # # =================================================================
+        # print("Host: Phase 1A - Initiating all data sends...")
+        # send_requests = []
+        # for rank, data_payload in enumerate(batch_to_send):
+        #     pickled_payload = pickle.dumps(data_payload)
+        #     tensor = torch.ByteTensor(list(pickled_payload))
+        #     size_tensor = torch.LongTensor([len(tensor)])
             
-            dist.isend(tensor=size_tensor, dst=rank)
-            req = dist.isend(tensor=tensor, dst=rank)
-            send_requests.append(req)
+        #     dist.isend(tensor=size_tensor, dst=rank)
+        #     req = dist.isend(tensor=tensor, dst=rank)
+        #     send_requests.append(req)
 
-        # =================================================================
-        # === 阶段 1B: 等待【所有】的数据发送完成 ===
-        # !!! 必须在发起任何接收之前，先等待发送完成 !!!
-        # 这是确保 Host 自身任务清理干净的关键同步点。
-        # =================================================================
-        print("Host: Phase 1B - Waiting for data sends to complete...")
-        for req in send_requests:
-            req.wait()
-        print("Host: All data has been sent successfully.")
+        # # =================================================================
+        # # === 阶段 1B: 等待【所有】的数据发送完成 ===
+        # # !!! 必须在发起任何接收之前，先等待发送完成 !!!
+        # # 这是确保 Host 自身任务清理干净的关键同步点。
+        # # =================================================================
+        # print("Host: Phase 1B - Waiting for data sends to complete...")
+        # for req in send_requests:
+        #     req.wait()
+        # print("Host: All data has been sent successfully.")
 
 
-        # =================================================================
-        # === 阶段 2A: 发起【所有】的 ACK 接收 ===
-        # =================================================================
-        print("Host: Phase 2A - Initiating non-blocking receives for all ACKs...")
-        recv_requests = []
-        ack_buffers = []
-        for rank in range(len(batch_to_send)):
-            ack_tensor = torch.tensor([0], dtype=torch.int32, device='cpu')
-            req = dist.irecv(tensor=ack_tensor, src=rank)
-            recv_requests.append(req)
-            ack_buffers.append(ack_tensor)
+        # # =================================================================
+        # # === 阶段 2A: 发起【所有】的 ACK 接收 ===
+        # # =================================================================
+        # print("Host: Phase 2A - Initiating non-blocking receives for all ACKs...")
+        # recv_requests = []
+        # ack_buffers = []
+        # for rank in range(len(batch_to_send)):
+        #     ack_tensor = torch.tensor([0], dtype=torch.int32, device='cpu')
+        #     req = dist.irecv(tensor=ack_tensor, src=rank)
+        #     recv_requests.append(req)
+        #     ack_buffers.append(ack_tensor)
 
-        # =================================================================
-        # === 阶段 2B: 等待【所有】的 ACK 接收完成 ===
-        # =================================================================
-        print("Host: Phase 2B - Waiting for all ACKs to be received...")
-        for i, req in enumerate(recv_requests):
-            req.wait()
+        # # =================================================================
+        # # === 阶段 2B: 等待【所有】的 ACK 接收完成 ===
+        # # =================================================================
+        # print("Host: Phase 2B - Waiting for all ACKs to be received...")
+        # for i, req in enumerate(recv_requests):
+        #     req.wait()
 
-        print("Host: All workers have acknowledged. Proceeding to next step.")
+        # print("Host: All workers have acknowledged. Proceeding to next step.")
 
         if mode =='eval':
             ap_tot += gather_receive(world_size, dst=local_rank)
