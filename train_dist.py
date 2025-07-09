@@ -1,7 +1,7 @@
 import argparse
 import os
 LOCAL_RANK = int(os.environ['LOCAL_RANK'])
-cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES').split(' ')
+cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES').split(',')
 device_count = len(cuda_visible_devices)
 
 if LOCAL_RANK != device_count:
