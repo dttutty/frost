@@ -97,7 +97,6 @@ def train_from_prefetch(prev_cpu_to_gpu_thread: DataPipelineThread, memory_mailb
             )
             
             curr_mailbox_memory_update_thread.start()
-            curr_mailbox_memory_update_thread.join()
             # if memory_param.deliver_to == 'neighbors':
             #     dist.barrier(group=nccl_group)
             #     if local_rank == 0:
@@ -143,7 +142,6 @@ def run_evaluation_step(prev_cpu_to_gpu_thread: DataPipelineThread, memory_mailb
                 block=prev_th_hold_notmoved_data.block
             )
             curr_mailbox_memory_update_thread.start()
-            curr_mailbox_memory_update_thread.join()
             # if memory_param.deliver_to == 'neighbors':
             #     dist.barrier(group=nccl_group)
             #     if local_rank == 0:
