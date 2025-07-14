@@ -268,7 +268,7 @@ class MemoryMailbox():
             # nid = tensor([[1, 3], [2, 4]])
             # after reshape:
             # nid = tensor([1, 3, 2, 4])
-            mail_ts = torch.from_numpy(ts[:n_src * 2]).to(self.device)
+            mail_ts = ts[:n_src * 2].to(self.device)
             if mail_ts.dtype == torch.float64:
                 import pdb; pdb.set_trace()
             # find unique nid to update mailbox
@@ -281,7 +281,7 @@ class MemoryMailbox():
             unique_node_ids, inverse_indices = torch.unique(recipients_nid, return_inverse=True)
             src_of_edge = mail_delivery_block.edges()[0]
             mail = torch.cat([mail, mail[src_of_edge.long()]], dim=0)
-            mail_ts = torch.from_numpy(ts[:n_src * 2]).to(self.device)
+            mail_ts = ts[:n_src * 2].to(self.device)
             mail_ts = torch.cat([mail_ts, mail_ts[src_of_edge.long()]], dim=0)
         else:
             raise NotImplementedError

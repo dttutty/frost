@@ -53,7 +53,7 @@ def run_training_step(stream,
                       ):
     # received_data: TransferData = scatter_receive()
     data_ready_event = threading.Event()
-    curr_thread = DataPipelineThread(data_ready_event, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src, prev_mailbox_memory_update_thread)
+    curr_thread = DataPipelineThread(data_ready_event, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src, prev_mailbox_memory_update_thread)
     curr_thread.start()
     if prev_thread is not None:
         prev_thread, tot_loss, prev_mailbox_memory_update_thread = train_from_prefetch(prev_thread, mailbox, memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread, prev_mailbox_memory_update_thread)
@@ -112,7 +112,7 @@ def run_evaluation_step(prev_cpu_to_gpu_thread: DataPipelineThread, memory_mailb
     memory_updater: GRUMemoryUpdater|RNNMemoryUpdater|TransformerMemoryUpdater = model.module.memory_updater
     if prev_cpu_to_gpu_thread is not None:
         # finish last training mini-batch
-        prev_cpu_to_gpu_thread, tot_loss = train_from_prefetch( prev_cpu_to_gpu_thread, memory_mailbox,  memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, None, prev_mailbox_memory_update_thread)
+        prev_cpu_to_gpu_thread, tot_loss, prev_mailbox_memory_update_thread = train_from_prefetch( prev_cpu_to_gpu_thread, memory_mailbox,  memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, None, prev_mailbox_memory_update_thread)
         
     prev_th_hold_notmoved_data : TransferData = scatter_receive()
     mfgs = mfgs_to_cuda(prev_th_hold_notmoved_data.mfgs)
@@ -120,6 +120,7 @@ def run_evaluation_step(prev_cpu_to_gpu_thread: DataPipelineThread, memory_mailb
     
     model.eval()
     with torch.no_grad():
+        prev_mailbox_memory_update_thread.join() if prev_mailbox_memory_update_thread is not None else None
         if memory_mailbox is not None:
             memory_mailbox.prep_input_mails(mfgs[0])
         # with get_tracer().log_event("Eval: model forward"):
@@ -220,7 +221,7 @@ def run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, m
             case 0:# train
                 # stream position 2
                 # stream = torch.cuda.Stream()
-                prev_thread, tot_loss = run_training_step(stream, prev_thread, memory_mailbox,  memory_param, model, optimizer, creterion, node_feats, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, tot_loss, train_param.deduplicate_mfg_src, prev_mailbox_memory_update_thread)
+                prev_thread, tot_loss, prev_mailbox_memory_update_thread = run_training_step(stream, prev_thread, memory_mailbox,  memory_param, model, optimizer, creterion, node_feats, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, tot_loss, train_param.deduplicate_mfg_src, prev_mailbox_memory_update_thread)
             case 1:# eval
                 prev_thread, tot_loss = run_evaluation_step(prev_thread, memory_mailbox, memory_param, model, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, node_feats, tot_loss, train_param.deduplicate_mfg_src, prev_mailbox_memory_update_thread)
             case 2:# save model
