@@ -18,11 +18,9 @@ class DataPipelineThread(threading.Thread):
         
         
         super(DataPipelineThread, self).__init__()
-        self.received_data = None
         self.host_rank = host_rank
         self.data_received_event = data_received_event
         
-        # self.received_data = received_data
         self.stream = stream
         self.async_mfgs = None
         self.pinned_nfeat_buffs = pinned_nfeat_buffs
@@ -34,28 +32,11 @@ class DataPipelineThread(threading.Thread):
         self.deduplicate_mfg_src = deduplicate_mfg_src
 
     def run(self):
-        # # 1. 等待主数据接收完成
-        # self.recv_request.wait()
-        
-        # # 2. 发送 ACK，并【等待】它完成
-        # ack_tensor = torch.tensor([1], dtype=torch.int32, device='cpu') 
-        
-        # # isend 返回一个请求对象
-        # ack_request = dist.isend(ack_tensor, dst=self.host_rank)
-        
-        # # !!! 这是最关键的修正：等待 ACK 发送操作完成 !!!
-        # ack_request.wait()
-        
-        # # 3. 现在可以安全地继续执行或结束线程了
-        # print(f"Rank {torch.distributed.get_rank()} received data, starting processing")
         self.received_data = scatter_receive()
         self.data_received_event.set()
-
-        # self.received_data = pickle.loads(bytes(self.buffer.tolist()))
         self.raw_mfgs = self.received_data.mfgs
         
         with torch.cuda.stream(self.stream):
-            # print(local_rank, 'start thread')
             nids, eids = get_ids(self.raw_mfgs, self.node_feats, self.edge_feats)
             gnn_mfgs = mfgs_to_cuda(self.raw_mfgs)
             prepare_mfgs(gnn_mfgs, self.node_feats, self.edge_feats, deduplicate_mfg_src=self.deduplicate_mfg_src, pinned=True, nfeat_buffs=self.pinned_nfeat_buffs, efeat_buffs=self.pinned_efeat_buffs, nids=nids, eids=eids)
@@ -66,3 +47,28 @@ class DataPipelineThread(threading.Thread):
     def clear_tensors(self):
         self.async_mfgs.clear()
         # self.raw_mfgs.clear()
+
+
+class MailboxUpdateThread(threading.Thread):
+    def __init__(self, memory_mailbox, nid, memory, root_nodes, ts, mem_edge_feats, block):
+        super().__init__()
+        # --- Store all the necessary data for the update ---
+        self.memory_mailbox = memory_mailbox
+        self.nid = nid
+        self.memory = memory
+        self.root_nodes = root_nodes
+        self.ts = ts
+        self.mem_edge_feats = mem_edge_feats
+        self.block = block
+
+    def run(self):
+        """
+        The main logic of the thread.
+        This part can be executed in parallel with other operations.
+        """
+        # These two operations are safe to run in a separate thread.
+        # They primarily involve tensor manipulations that PyTorch can handle concurrently.
+        self.memory_mailbox.update_mailbox(self.nid, self.memory, self.root_nodes, self.ts, self.mem_edge_feats, self.block)
+        self.memory_mailbox.update_memory(self.nid, self.memory, self.root_nodes, self.ts)
+        
+        

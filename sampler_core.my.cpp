@@ -443,7 +443,8 @@ public:
     {
         // a weird bug, dgl library seems to modify the total number of threads
         omp_set_num_threads(num_threads);
-        tgbs.reserve(num_layers * num_history);
+        // tgbs.reserve(num_layers * num_history); //难道这里错了吗
+        tgbs.resize(0);
         for (int i = 0; i < num_layers; i++)
         {
             tgbs.resize(tgbs.size() + num_history); // if num_history = 3, ret.size = 3, 6
