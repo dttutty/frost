@@ -113,6 +113,7 @@ class TransfomerAttentionLayer(torch.nn.Module):
             q_input = []
             kv_input = []
             if self.dim_node_feat > 0:
+                # if the src_h size_0 not equal to edge number, it will cause error
                 q_input.append(dst_h)
                 kv_input.append(src_h)
             if self.dim_edge_feat > 0:

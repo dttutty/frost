@@ -214,12 +214,17 @@ def prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=False, pinned
     global total_edge_id_count 
     global total_node_id_count 
     global unique_node_id_count 
-    # mfgs = [[block1, block2], [block3, block4]] ,也就是layer 0 有 block1 和 block2, layer 1 有 block3 和 block4
+    # mfgs = [[block1, block2], [block3, block4]] ,
+    # 也就是layer 0 有 block1 和 block2, 
+    # layer 1 有 block3 和 block4
+    
     # 信息传递方向 layer 0 -> layer 1
     # layer 0: src->dst, layer 1: src->dst
+    
     # 所有layer 1的dst节点才是我们需要的节点
     # DGLBlock的设计时src节点包含了dst节点
-    # 所有layer0的src必然包含了所有节点
+    # 所以layer0的src必然包含了所有节点
+    
     mfgs_0 = mfgs[0] #[block1, block2]
     # 第1部分: 可选 - 合并第一个MFG中相同的源节点
     # print(f"[Batch {batch} Combine first MFGs: {deduplicate_mfg_src}")
@@ -255,6 +260,8 @@ def prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=False, pinned
 
     # add node features to all blocks inside 1st mfgs
     # 只需要处理第一个mfgs就行了,因为第一个mfgs的src必然包含全部节点
+    # create a set to store unique node IDs
+    all_node_ids = set()
     i = 0
     if node_feats is not None:
         for block in mfgs_0:
@@ -272,12 +279,14 @@ def prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=False, pinned
                 # print(f"[Send node feature to GPU]Node ID: Unique/Total: {int(unique_node_id_count/batch)}/{int(total_node_id_count/batch)}")
                 torch.index_select(node_feats, 0, idx, out=nfeat_buffs[i][:idx.shape[0]])
                 block.srcdata['h'] = nfeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
+                # block.srcdata['mapping'] = 
                 i += 1
             else:
                 idx = block.srcdata['ID'].long()
                 srch = node_feats[idx].float()
                 block.srcdata['h'] = srch.cuda()
-                
+    
+    
     # add edge features to all blocks inside all mfgs
     i = 0
     if edge_feats is not None:
@@ -297,11 +306,14 @@ def prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=False, pinned
                         # print(f"[Send edge feature to GPU]Edge ID: Unique/Total: {int(unique_edge_id_count/batch)}/{int(total_edge_id_count/batch)}")
                         torch.index_select(edge_feats, 0, idx, out=efeat_buffs[i][:idx.shape[0]])
                         block.edata['f'] = efeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
+                        # block.edata['mapping'] = 
                         i += 1
                     else:
                         idx = block.edata['ID'].long()
                         srch = edge_feats[idx].float()
                         block.edata['f'] = srch.cuda()
+
+
     return mfgs
 
 
