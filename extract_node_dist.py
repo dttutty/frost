@@ -138,13 +138,13 @@ if args.local_rank < args.num_gpus:
         multi_mfgs = [None] * (args.num_gpus + 1)
         torch.distributed.scatter_object_list(my_mfgs, multi_mfgs, src=args.num_gpus)
         mfgs = mfgs_to_cuda(my_mfgs[0])
-        prepare_mfgs(mfgs, node_feats, edge_feats)
+        _, node_feats_on_gpu, edge_feats_on_gpu= prepare_mfgs(mfgs, node_feats, edge_feats)
         if my_model_state[0] == 0:
             model.train()
             optimizer.zero_grad()
             if mailbox is not None:
                 mailbox.prep_input_mails(mfgs[0])
-            pred_pos, pred_neg = model(mfgs)
+            pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu)
             loss = creterion(pred_pos, torch.ones_like(pred_pos))
             loss += creterion(pred_neg, torch.zeros_like(pred_neg))
             loss.backward()
@@ -182,7 +182,7 @@ if args.local_rank < args.num_gpus:
             with torch.no_grad():
                 if mailbox is not None:
                     mailbox.prep_input_mails(mfgs[0])
-                pred_pos, pred_neg = model(mfgs)
+                pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu)
                 if mailbox is not None:
                     my_root = [None]
                     multi_root = [None] * (args.num_gpus + 1)

@@ -58,7 +58,7 @@ class DataPipelineThread(threading.Thread):
             # print(local_rank, 'start thread')
             nids, eids = get_ids(self.raw_mfgs, self.node_feats, self.edge_feats)
             gnn_mfgs = mfgs_to_cuda(self.raw_mfgs)
-            prepare_mfgs(gnn_mfgs, self.node_feats, self.edge_feats, deduplicate_mfg_src=self.deduplicate_mfg_src, pinned=True, nfeat_buffs=self.pinned_nfeat_buffs, efeat_buffs=self.pinned_efeat_buffs, nids=nids, eids=eids)
+            mfgs, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(gnn_mfgs, self.node_feats, self.edge_feats, deduplicate_mfg_src=self.deduplicate_mfg_src, pinned=True, nfeat_buffs=self.pinned_nfeat_buffs, efeat_buffs=self.pinned_efeat_buffs, nids=nids, eids=eids)
             if self.mailbox is not None:
                 self.mailbox.prep_input_mails(gnn_mfgs[0], use_pinned_buffers=True)
             self.async_mfgs = gnn_mfgs

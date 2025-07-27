@@ -102,7 +102,7 @@ def generate_temporal_embeddings(ldf, emb_file_name):
             else:
                 mfgs = node_to_dgl_blocks(root_nodes, ts)
                 
-            mfgs = prepare_mfgs(mfgs, node_np, edge_np, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
+            mfgs, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs, node_np, edge_np, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
             if mailbox is not None:
                 mailbox.prep_input_mails(mfgs[0])
             with torch.no_grad():
@@ -129,7 +129,7 @@ def generate_temporal_embeddings(ldf, emb_file_name):
             mfgs = to_dgl_blocks(ret, sample_param.history)
         else: # why aggragate?
             mfgs = node_to_dgl_blocks(root_nodes, ts)
-        mfgs = prepare_mfgs(mfgs, node_np, edge_np, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
+        mfgs, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs, node_np, edge_np, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
         if mailbox is not None:
             mailbox.prep_input_mails(mfgs[0])
         with torch.no_grad():

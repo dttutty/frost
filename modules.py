@@ -120,7 +120,16 @@ class GeneralModel(torch.nn.Module):
         # predictor header
         return hist_out
     
-    def forward(self, mfgs, neg_samples=1):
+    def forward(self, mfgs, node_feats_on_gpu, edge_feats_on_gpu, neg_samples=1):
+        if node_feats_on_gpu is not None:
+            for block in mfgs[0]:
+                    block.srcdata['h'] = node_feats_on_gpu[block.srcdata['pos']]
+            del node_feats_on_gpu
+        if edge_feats_on_gpu is not None:
+            for blocks in mfgs:
+                for block in blocks:
+                        block.edata['f'] = edge_feats_on_gpu[block.edata['pos']]
+            del edge_feats_on_gpu
         hist_out = self.get_emb(mfgs)
         return self.edge_predictor(hist_out, neg_samples=neg_samples)
 

@@ -212,7 +212,7 @@ def run_worker(rank, world_size):
         if mode == 'train':
             # model.train()
             # optimizer.zero_grad()
-            # pred_pos, pred_neg = model(mfgs, root_nodes, ts, eids, special_block)
+            # pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu, root_nodes, ts, eids, special_block)
             # loss = calculate_loss(pred_pos, pred_neg)
             # loss.backward() # DDP handles gradient sync
             # optimizer.step()
@@ -223,7 +223,7 @@ def run_worker(rank, world_size):
         elif mode == 'eval':
             # model.eval()
             with torch.no_grad():
-                # pred_pos, pred_neg = model(mfgs, root_nodes, ts, eids, special_block)
+                # pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu,  root_nodes, ts, eids, special_block)
                 # local_ap, local_auc = calculate_metrics(pred_pos, pred_neg)
                 # Send metrics back to host for this specific batch
                 dist.send_object({'ap': 0.95, 'auc': 0.98}, dst=host_rank) # Dummy values

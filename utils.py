@@ -259,62 +259,44 @@ def prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=False, pinned
                 mfgs_0[i] = new_block
 
     # add node features to all blocks inside 1st mfgs
-    # 只需要处理第一个mfgs就行了,因为第一个mfgs的src必然包含全部节点
+    # 只需要处理mfgs_0就行了,因为mfgs_0的src必然包含全部节点
+    
+
+
     # create a set to store unique node IDs
-    all_node_ids = set()
-    i = 0
+    node_feats_on_gpu = None
     if node_feats is not None:
-        for block in mfgs_0:
-            if pinned:
-                # if nids is not None:
-                #     idx = nids[i]
-                # else:
-                idx = block.srcdata['ID'].cpu().long()
-                
-                # print if len(nids[i]) == len(idx)
-                # is_equal = (len(nids[i]) == idx.shape[0])
-                # print(f"Pinned Buffers Equal: {is_equal}")
-                total_node_id_count += idx.shape[0]
-                unique_node_id_count += torch.unique(idx).shape[0]
-                # print(f"[Send node feature to GPU]Node ID: Unique/Total: {int(unique_node_id_count/batch)}/{int(total_node_id_count/batch)}")
-                torch.index_select(node_feats, 0, idx, out=nfeat_buffs[i][:idx.shape[0]])
-                block.srcdata['h'] = nfeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
-                # block.srcdata['mapping'] = 
-                i += 1
-            else:
-                idx = block.srcdata['ID'].long()
-                srch = node_feats[idx].float()
-                block.srcdata['h'] = srch.cuda()
-    
-    
-    # add edge features to all blocks inside all mfgs
-    i = 0
+        # create a set to store unique node IDs
+        cat_src = torch.cat([b.srcdata['ID'].to('cuda', non_blocking=True) for b in mfgs_0], dim=0)
+        uniq, inv = torch.unique(cat_src, sorted=False, return_inverse=True)  # GPU 上做
+        if pinned:
+            torch.index_select(node_feats, 0, uniq, out=nfeat_buffs[i][:uniq.shape[0]])
+            node_feats_on_gpu = nfeat_buffs[:uniq.shape[0]].cuda(non_blocking=True)
+        else:
+            node_feats_on_gpu = node_feats[uniq].to('cuda', non_blocking=True)
+        offset = 0
+        for b in mfgs_0:
+            n = b.num_src_nodes()
+            b.srcdata['pos'] = inv[offset:offset+n]    # dtype=long（PyTorch 索引需要）
+            offset += n
+
+    edge_feats_on_gpu = None
     if edge_feats is not None:
+        cat_edge = torch.cat([b.edata['ID'].to('cuda', non_blocking=True) for mfg in mfgs for b in mfg], dim=0)
+        uniq, inv = torch.unique(cat_edge, sorted=False, return_inverse=True)  # GPU 上做
+        if pinned:
+            torch.index_select(edge_feats, 0, uniq, out=efeat_buffs[i][:uniq.shape[0]])
+            edge_feats_on_gpu = efeat_buffs[:uniq.shape[0]].cuda(non_blocking=True)
+        else:
+            edge_feats_on_gpu = edge_feats[uniq].to('cuda', non_blocking=True)  # GPU 上做
+        offset = 0
         for mfg in mfgs:
-            for block in mfg:
-                if block.num_src_nodes() > block.num_dst_nodes():
-                    if pinned:
-                        # if eids is not None:
-                        #     idx = eids[i]
-                        # else:
-                        idx = block.edata['ID'].cpu().long()
-                        
-                        # is_equal = (len(eids[i]) == idx.shape[0])
-                        # print(f"Pinned Buffers Equal: {is_equal}")
-                        total_edge_id_count += idx.shape[0]
-                        unique_edge_id_count += torch.unique(idx).shape[0]
-                        # print(f"[Send edge feature to GPU]Edge ID: Unique/Total: {int(unique_edge_id_count/batch)}/{int(total_edge_id_count/batch)}")
-                        torch.index_select(edge_feats, 0, idx, out=efeat_buffs[i][:idx.shape[0]])
-                        block.edata['f'] = efeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
-                        # block.edata['mapping'] = 
-                        i += 1
-                    else:
-                        idx = block.edata['ID'].long()
-                        srch = edge_feats[idx].float()
-                        block.edata['f'] = srch.cuda()
+            for b in mfg:
+                n = b.num_edges()
+                b.edata['pos'] = inv[offset:offset+n]    # dtype=long（PyTorch 索引需要）
+                offset += n
 
-
-    return mfgs
+    return mfgs, node_feats_on_gpu, edge_feats_on_gpu
 
 
 

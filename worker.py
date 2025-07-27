@@ -114,7 +114,7 @@ def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
         
     received_data : TransferData = scatter_receive()
     mfgs = mfgs_to_cuda(received_data.mfgs)
-    prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=deduplicate_mfg_src, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
+    _, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=deduplicate_mfg_src, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
     try:
 
         model.eval()
@@ -123,7 +123,7 @@ def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
                 memory_mailbox.prep_input_mails(mfgs[0])
             # with get_tracer().log_event("Eval: model forward"):
             #     print(f"Eval: model forward, local_rank={local_rank}")
-            pred_pos, pred_neg = model(mfgs)
+            pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu)
             if memory_mailbox is not None:
                 
                 mem_edge_feats = edge_feats[received_data.eid] if edge_feats is not None else None
@@ -155,13 +155,12 @@ def alc_pin_nfeat_efeat_buf(sample_param, batch_size, node_feats, edge_feats):
     pinned_nfeat_buffs = list()
     pinned_efeat_buffs = list()
     limit = int(batch_size * 3.3)
-    if sample_param.neighbor is not None:
+    if sample_param.neighbor is not None and edge_feats is not None:
+        edge_space = 0
         for i in sample_param.neighbor:
-            limit *= i + 1
-            
-            if edge_feats is not None:
-                for _ in range(sample_param.history):
-                    pinned_efeat_buffs.insert(0, torch.zeros((limit, edge_feats.shape[1]), pin_memory=True))
+            limit = limit * (i + 1)
+            edge_space += limit * sample_param.history
+        pinned_efeat_buffs = torch.zeros((edge_space, edge_feats.shape[1]), pin_memory=True)
     # if history = 3, neighbor = [10, 10]
     
     # pinned_efeat_buffs[5].torch.shape [3.3b*11*11, edge_feats.shape[1]]
@@ -172,8 +171,7 @@ def alc_pin_nfeat_efeat_buf(sample_param, batch_size, node_feats, edge_feats):
     # pinned_efeat_buffs[1].torch.shape [3.3b*11, edge_feats.shape[1]]
     # pinned_efeat_buffs[0].torch.shape [3.3b*11, edge_feats.shape[1]]
     if node_feats is not None:
-        for _ in range(sample_param.history):
-            pinned_nfeat_buffs.insert(0, torch.zeros((limit, node_feats.shape[1]), pin_memory=True))
+        pinned_nfeat_buffs = torch.zeros((limit * sample_param.history, node_feats.shape[1]), pin_memory=True))
     # if history = 3
     # pinned_nfeat_buffs[2].torch.shape [3.3b*11*11, node_feats.shape[1]]
     # pinned_nfeat_buffs[1].torch.shape [3.3b*11*11, node_feats.shape[1]]

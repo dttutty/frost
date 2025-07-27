@@ -108,7 +108,7 @@ class MemoryMailbox():
             {'name': 'mem','src': self.node_memory, 'pinned': 'pinned_node_memory_buffs'},
             {'name': 'mem_ts','src': self.node_memory_ts, 'pinned': 'pinned_node_memory_ts_buffs'},
             {'name': 'mem_input','src': self.mails, 'pinned': 'pinned_mailbox_buffs', },
-            {'name': 'mail_ts','src': self.mail_ts, 'pinned': 'pinned_mailbox_ts_buffs'}
+            {'name': 'mail_ts','src': self.mail_ts, 'pinned': 'pinned_mailbox_ts_buffs'},
         ]
         # def find_unique_idx(idx):
         #     # find unique node ids in idx, and return the unique node ids and their inverse indices
