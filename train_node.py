@@ -98,9 +98,9 @@ def generate_temporal_embeddings(ldf, emb_file_name):
             if sampler is not None:
                 ret, _ = sampler_wrapper(sample_param.no_neg, root_nodes,  sampler, ts)
             if gnn_param.arch != 'identity':
-                mfgs = to_dgl_blocks(ret, sample_param.history)
+                mfgs = to_dgl_blocks(ret, sample_param.history, cuda=True)
             else:
-                mfgs = node_to_dgl_blocks(root_nodes, ts)
+                mfgs = node_to_dgl_blocks(root_nodes, ts, cuda=True)
                 
             mfgs, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs, node_np, edge_np, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
             if mailbox is not None:
@@ -112,7 +112,7 @@ def generate_temporal_embeddings(ldf, emb_file_name):
                     mem_edge_feats = edge_np[eid] if edge_np is not None else None
                     block = None
                     if memory_param.deliver_to == 'neighbors':
-                        block = to_dgl_blocks(ret, sample_param.history, reverse=True)[0][0]
+                        block = to_dgl_blocks(ret, sample_param.history, reverse=True, cuda=True)[0][0]
                     mailbox.update_mailbox(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, ts, mem_edge_feats, block)
                     mailbox.update_memory(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, model.memory_updater.last_updated_ts)
             processed_edge_id += train_param.batch_size
@@ -126,9 +126,9 @@ def generate_temporal_embeddings(ldf, emb_file_name):
             sampler.sample(root_nodes, ts)
             ret = sampler.get_ret()
         if gnn_param.arch != 'identity':
-            mfgs = to_dgl_blocks(ret, sample_param.history)
+            mfgs = to_dgl_blocks(ret, sample_param.history, cuda=True)
         else: # why aggragate?
-            mfgs = node_to_dgl_blocks(root_nodes, ts)
+            mfgs = node_to_dgl_blocks(root_nodes, ts, cuda=True)
         mfgs, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs, node_np, edge_np, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
         if mailbox is not None:
             mailbox.prep_input_mails(mfgs[0])

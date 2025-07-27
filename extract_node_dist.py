@@ -20,6 +20,7 @@ else:
 os.environ['OMP_NUM_THREADS'] = str(args.omp_num_threads)
 os.environ['MKL_NUM_THREADS'] = str(args.omp_num_threads)
 
+from utils import mfgs_to_cuda
 import torch
 import dgl
 import random

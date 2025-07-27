@@ -113,17 +113,18 @@ def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
         prev_thread, tot_loss = train_from_prefetch( prev_thread, memory_mailbox,  memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, None)
         
     received_data : TransferData = scatter_receive()
-    mfgs = mfgs_to_cuda(received_data.mfgs)
-    _, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=deduplicate_mfg_src, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
+    mfgs_on_cpu = received_data.mfgs
+    mfgs_on_gpu = mfgs_to_cuda(mfgs_on_cpu)
+    _, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs_on_gpu, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=deduplicate_mfg_src, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
     try:
 
         model.eval()
         with torch.no_grad():
             if memory_mailbox is not None:
-                memory_mailbox.prep_input_mails(mfgs[0])
+                memory_mailbox.prep_input_mails(mfgs_on_gpu[0])
             # with get_tracer().log_event("Eval: model forward"):
             #     print(f"Eval: model forward, local_rank={local_rank}")
-            pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu)
+            pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu)
             if memory_mailbox is not None:
                 
                 mem_edge_feats = edge_feats[received_data.eid] if edge_feats is not None else None

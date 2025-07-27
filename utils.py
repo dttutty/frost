@@ -183,7 +183,7 @@ def to_dgl_blocks(ret, history, reverse=False, cuda=True) -> List[List[DGLBlock]
     grouped_mfgs.reverse()
     return grouped_mfgs
 
-def node_to_dgl_blocks(root_nodes, ts, cuda=True) -> List[List[DGLBlock]]:
+def node_to_dgl_blocks(root_nodes, ts, cuda) -> List[List[DGLBlock]]:
     mfgs = list()
     block = dgl.create_block(([],[]), num_src_nodes=root_nodes.shape[0], num_dst_nodes=root_nodes.shape[0])
     block.srcdata['ID'] = torch.from_numpy(root_nodes)
@@ -208,7 +208,7 @@ unique_edge_id_count = 0
 total_edge_id_count = 0
 total_node_id_count = 0
 unique_node_id_count = 0
-def prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=False, pinned=False, nfeat_buffs=None, efeat_buffs=None, nids=None, eids=None):
+def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=False, pinned=False, nfeat_buffs=None, efeat_buffs=None, nids=None, eids=None):
     global batch
     global unique_edge_id_count 
     global total_edge_id_count 
@@ -225,12 +225,13 @@ def prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=False, pinned
     # DGLBlock的设计时src节点包含了dst节点
     # 所以layer0的src必然包含了所有节点
     
-    mfgs_0 = mfgs[0] #[block1, block2]
+    mfgs_on_gpu_0 = mfgs_on_gpu[0] #[block1, block2]
+    mfgs_on_same_device_as_feat_0 = mfgs_on_same_device_as_feat[0] #[block1, block2]
     # 第1部分: 可选 - 合并第一个MFG中相同的源节点
     # print(f"[Batch {batch} Combine first MFGs: {deduplicate_mfg_src}")
     batch = batch + 1
     if deduplicate_mfg_src:
-        for i, block in enumerate(mfgs_0):
+        for i, block in enumerate(mfgs_on_gpu_0):
             # 如果src节点数等于dst节点数,说明dst就包含了所有src节点
             # src没有多余节点,dst节点和src节点没有重复节点,也就不需要合并了
             if block.num_src_nodes() > block.num_dst_nodes():
@@ -256,47 +257,47 @@ def prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=False, pinned
                 new_block.srcdata['ID'] = torch.cat([block.srcdata['ID'][:num_dst], unid], dim=0)
                 new_block.edata['dt'] = block.edata['dt']
                 new_block.edata['ID'] = block.edata['ID']
-                mfgs_0[i] = new_block
+                mfgs_on_gpu_0[i] = new_block
 
     # add node features to all blocks inside 1st mfgs
     # 只需要处理mfgs_0就行了,因为mfgs_0的src必然包含全部节点
     
 
-
+    
     # create a set to store unique node IDs
     node_feats_on_gpu = None
     if node_feats is not None:
         # create a set to store unique node IDs
-        cat_src = torch.cat([b.srcdata['ID'].to('cuda', non_blocking=True) for b in mfgs_0], dim=0)
-        uniq, inv = torch.unique(cat_src, sorted=False, return_inverse=True)  # GPU 上做
+        cat_src = torch.cat([b.srcdata['ID'] for b in mfgs_on_same_device_as_feat_0], dim=0)
+        uniq, inv = torch.unique(cat_src, sorted=False, return_inverse=True)  # 和feat相同的设备上做
         if pinned:
             torch.index_select(node_feats, 0, uniq, out=nfeat_buffs[i][:uniq.shape[0]])
             node_feats_on_gpu = nfeat_buffs[:uniq.shape[0]].cuda(non_blocking=True)
         else:
             node_feats_on_gpu = node_feats[uniq].to('cuda', non_blocking=True)
         offset = 0
-        for b in mfgs_0:
+        for b in mfgs_on_gpu_0:
             n = b.num_src_nodes()
             b.srcdata['pos'] = inv[offset:offset+n]    # dtype=long（PyTorch 索引需要）
             offset += n
 
     edge_feats_on_gpu = None
     if edge_feats is not None:
-        cat_edge = torch.cat([b.edata['ID'].to('cuda', non_blocking=True) for mfg in mfgs for b in mfg], dim=0)
-        uniq, inv = torch.unique(cat_edge, sorted=False, return_inverse=True)  # GPU 上做
+        cat_edge = torch.cat([b.edata['ID'].to('cuda', non_blocking=True) for mfg in mfgs_on_same_device_as_feat for b in mfg], dim=0)
+        uniq, inv = torch.unique(cat_edge, sorted=False, return_inverse=True)  # 和feat相同的设备上做
         if pinned:
             torch.index_select(edge_feats, 0, uniq, out=efeat_buffs[i][:uniq.shape[0]])
             edge_feats_on_gpu = efeat_buffs[:uniq.shape[0]].cuda(non_blocking=True)
         else:
             edge_feats_on_gpu = edge_feats[uniq].to('cuda', non_blocking=True)  # GPU 上做
         offset = 0
-        for mfg in mfgs:
+        for mfg in mfgs_on_gpu:
             for b in mfg:
                 n = b.num_edges()
                 b.edata['pos'] = inv[offset:offset+n]    # dtype=long（PyTorch 索引需要）
                 offset += n
 
-    return mfgs, node_feats_on_gpu, edge_feats_on_gpu
+    return mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu
 
 
 

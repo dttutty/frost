@@ -1,6 +1,7 @@
 import argparse
 import os
 
+from utils import mfgs_to_cuda
 parser=argparse.ArgumentParser()
 parser.add_argument('--data', type=str, help='dataset name')
 parser.add_argument('--config', type=str, help='path to config file')
@@ -148,13 +149,15 @@ def eval(mode='val'):
                     sampler.sample(root_nodes, ts)
                 ret = sampler.get_ret()
             if gnn_param.arch != 'identity':
-                mfgs = to_dgl_blocks(ret, sample_param.history)
+                mfgs_same_device_as_feat = to_dgl_blocks(ret, sample_param.history, cuda=train_param.all_on_gpu)
             else:
-                mfgs = node_to_dgl_blocks(root_nodes, ts)
-            mfgs, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
+                mfgs_same_device_as_feat = node_to_dgl_blocks(root_nodes, ts, cuda=train_param.all_on_gpu)
+            # show mfgs device
+            mfgs_on_gpu = mfgs_to_cuda(mfgs_same_device_as_feat)
+            _, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
             if mailbox is not None:
-                mailbox.prep_input_mails(mfgs[0])
-            pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu,  neg_samples=neg_samples)
+                mailbox.prep_input_mails(mfgs_on_gpu[0])
+            pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu,  neg_samples=neg_samples)
             total_loss += creterion(pred_pos, torch.ones_like(pred_pos))
             total_loss += creterion(pred_neg, torch.zeros_like(pred_neg))
             y_pred = torch.cat([pred_pos, pred_neg], dim=0).sigmoid().cpu()
@@ -169,7 +172,7 @@ def eval(mode='val'):
                 mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
                 block = None
                 if memory_param.deliver_to == 'neighbors':
-                    block = to_dgl_blocks(ret, sample_param.history, reverse=True)[0][0]
+                    block = to_dgl_blocks(ret, sample_param.history, reverse=True, cuda=train_param.all_on_gpu)[0][0]
                 mailbox.update_mailbox(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, ts, mem_edge_feats, block, neg_samples=neg_samples)
                 mailbox.update_memory(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, model.memory_updater.last_updated_ts, neg_samples=neg_samples)
         if mode == 'val':
@@ -232,15 +235,16 @@ for e in range(train_param.epoch):
             total_sampling_time += ret[0].sample_time()
         t_prep_s = time.time()
         if gnn_param.arch != 'identity':
-            mfgs = to_dgl_blocks(ret, sample_param.history)
+            mfgs_same_device_as_feat = to_dgl_blocks(ret, sample_param.history, cuda=train_param.all_on_gpu)
         else:
-            mfgs = node_to_dgl_blocks(root_nodes, ts)
-        mfgs, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
+            mfgs_same_device_as_feat = node_to_dgl_blocks(root_nodes, ts, cuda=train_param.all_on_gpu)
+        mfgs_on_gpu = mfgs_to_cuda(mfgs_same_device_as_feat)
+        _, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
         if mailbox is not None:
-            mailbox.prep_input_mails(mfgs[0])
+            mailbox.prep_input_mails(mfgs_on_gpu[0])
         time_prep += time.time() - t_prep_s
         optimizer.zero_grad()
-        pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu)
+        pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu)
         loss = creterion(pred_pos, torch.ones_like(pred_pos))
         loss += creterion(pred_neg, torch.zeros_like(pred_neg))
         total_loss += float(loss) * train_param.batch_size
