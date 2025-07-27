@@ -184,11 +184,18 @@ class MemoryMailbox():
         total_memory_id_count += nid.shape[0]
         unique_memory_id_count += torch.unique(nid).shape[0]
         # print(f"[Memory Update]Node ID : Unique/Total: {int(unique_memory_id_count/batch)}/{int(total_memory_id_count/batch)}")
-        
-        memory = memory[:num_true_src_dst].to(self.device)
-        ts = ts[:num_true_src_dst].to(self.device)
-        self.node_memory[nid.long()] = memory
-        self.node_memory_ts[nid.long()] = ts
+        nid = nid.long()[:num_true_src_dst]   # shape: [N]
+        memory = memory[:num_true_src_dst]    # shape: [N, D]
+        ts = ts[:num_true_src_dst]            # shape: [N]
+        idx = torch.arange(nid.size(0), device=nid.device)
+        from torch_scatter import scatter_max
+
+        _, last_occurrence_idx = scatter_max(idx, nid)
+        uniq_nid = torch.unique(nid)
+        selected_idx = last_occurrence_idx[uniq_nid]
+
+        self.node_memory[uniq_nid] = memory[selected_idx].to(self.device)
+        self.node_memory_ts[uniq_nid] = ts[selected_idx].to(self.device)
 
     @torch.no_grad()
     def update_mailbox(self, nid, memory: torch.Tensor, root_nodes, ts, edge_feats, mail_delivery_block, neg_samples=1):
