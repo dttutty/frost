@@ -23,4 +23,4 @@ train:
     lr: 0.0001
     dropout: 0.1
     att_dropout: 0.1
-    all_on_gpu: True
+    all_on_gpu: False
