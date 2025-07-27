@@ -177,7 +177,7 @@ def to_dgl_blocks(ret, history, reverse=False, cuda=True) -> List[List[DGLBlock]
         block.edata['dt'] = tgb_dts[dt_slice_start:]
         block.edata['ID'] = tgb_eid
         
-        mfgs.append(block.to('cuda:0') if cuda else block)
+        mfgs.append(block.to('cuda:0') if cuda == True else block)
     # [[Ly1His1, Ly1His2], [Ly1His3, Ly2His1, [Ly2His2, Ly2His3]]
     grouped_mfgs = list(map(list, zip(*[iter(mfgs)] * history)))
     grouped_mfgs.reverse()
@@ -188,17 +188,18 @@ def node_to_dgl_blocks(root_nodes, ts, cuda) -> List[List[DGLBlock]]:
     block = dgl.create_block(([],[]), num_src_nodes=root_nodes.shape[0], num_dst_nodes=root_nodes.shape[0])
     block.srcdata['ID'] = torch.from_numpy(root_nodes)
     block.srcdata['ts'] = torch.from_numpy(ts)
-    if cuda:
+    if cuda == True:
         mfgs.insert(0, [block.to('cuda:0')])
     else:
         mfgs.insert(0, [block])
     return mfgs
 
 def mfgs_to_cuda(mfgs):
+    new_mfgs = []
     for mfg in mfgs:
-        for i in range(len(mfg)):
-            mfg[i] = mfg[i].to('cuda:0')
-    return mfgs
+        new_mfg = [block.to('cuda:0') for block in mfg]
+        new_mfgs.append(new_mfg)
+    return new_mfgs
 import torch
 import dgl
 from typing import List, Optional
@@ -270,6 +271,7 @@ def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feat
         # create a set to store unique node IDs
         cat_src = torch.cat([b.srcdata['ID'] for b in mfgs_on_same_device_as_feat_0], dim=0)
         uniq, inv = torch.unique(cat_src, sorted=False, return_inverse=True)  # 和feat相同的设备上做
+        inv = inv.to('cuda', non_blocking=True)
         if pinned:
             torch.index_select(node_feats, 0, uniq, out=nfeat_buffs[i][:uniq.shape[0]])
             node_feats_on_gpu = nfeat_buffs[:uniq.shape[0]].cuda(non_blocking=True)
@@ -283,8 +285,9 @@ def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feat
 
     edge_feats_on_gpu = None
     if edge_feats is not None:
-        cat_edge = torch.cat([b.edata['ID'].to('cuda', non_blocking=True) for mfg in mfgs_on_same_device_as_feat for b in mfg], dim=0)
+        cat_edge = torch.cat([b.edata['ID'] for mfg in mfgs_on_same_device_as_feat for b in mfg], dim=0)
         uniq, inv = torch.unique(cat_edge, sorted=False, return_inverse=True)  # 和feat相同的设备上做
+        inv = inv.to('cuda', non_blocking=True)
         if pinned:
             torch.index_select(edge_feats, 0, uniq, out=efeat_buffs[i][:uniq.shape[0]])
             edge_feats_on_gpu = efeat_buffs[:uniq.shape[0]].cuda(non_blocking=True)
