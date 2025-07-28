@@ -273,14 +273,14 @@ def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feat
         uniq, inv = torch.unique(cat_src, sorted=False, return_inverse=True)  # 和feat相同的设备上做
         inv = inv.to('cuda', non_blocking=True)
         if pinned:
-            torch.index_select(node_feats, 0, uniq, out=nfeat_buffs[i][:uniq.shape[0]])
+            torch.index_select(node_feats, 0, uniq, out=nfeat_buffs[:uniq.shape[0]])
             node_feats_on_gpu = nfeat_buffs[:uniq.shape[0]].cuda(non_blocking=True)
         else:
             node_feats_on_gpu = node_feats[uniq].to('cuda', non_blocking=True)
         offset = 0
         for b in mfgs_on_gpu_0:
             n = b.num_src_nodes()
-            b.srcdata['pos'] = inv[offset:offset+n]    # dtype=long（PyTorch 索引需要）
+            b.srcdata['pos'] = inv[offset:offset+n]
             offset += n
 
     edge_feats_on_gpu = None
@@ -289,7 +289,7 @@ def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feat
         uniq, inv = torch.unique(cat_edge, sorted=False, return_inverse=True)  # 和feat相同的设备上做
         inv = inv.to('cuda', non_blocking=True)
         if pinned:
-            torch.index_select(edge_feats, 0, uniq, out=efeat_buffs[i][:uniq.shape[0]])
+            torch.index_select(edge_feats, 0, uniq, out=efeat_buffs[:uniq.shape[0]])
             edge_feats_on_gpu = efeat_buffs[:uniq.shape[0]].cuda(non_blocking=True)
         else:
             edge_feats_on_gpu = edge_feats[uniq].to('cuda', non_blocking=True)  # GPU 上做
@@ -297,7 +297,7 @@ def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feat
         for mfg in mfgs_on_gpu:
             for b in mfg:
                 n = b.num_edges()
-                b.edata['pos'] = inv[offset:offset+n]    # dtype=long（PyTorch 索引需要）
+                b.edata['pos'] = inv[offset:offset+n]
                 offset += n
 
     return mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu

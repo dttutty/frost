@@ -348,7 +348,7 @@ public:
             if ((first_layer) || ((prop_time) && num_history == 1) || (recent))
             {
                 first_layer = false;
-                use_ptr = true;
+                use_ptr = false;
             }
             else
                 use_ptr = false;

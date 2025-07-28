@@ -1,5 +1,10 @@
 import argparse
 import os
+import multiprocessing as mp
+import threading
+import queue
+from etc import get_staleness_constraint,  adaptive_split, batch_producer
+from tqdm import tqdm
 
 from utils import mfgs_to_cuda
 parser=argparse.ArgumentParser()
@@ -208,6 +213,7 @@ if train_param.reorder is not None:
     for i in range(1, train_param.reorder):
         additional_idx = np.zeros(train_param.batch_size // train_param.reorder * i) - 1
         group_indexes.append(np.concatenate([additional_idx, base_idx])[:base_idx.shape[0]])
+
 for e in range(train_param.epoch):
     print('Epoch {:d}:'.format(e))
     total_sampling_time = 0
@@ -221,46 +227,82 @@ for e in range(train_param.epoch):
     if mailbox is not None:
         mailbox.reset()
         model.memory_updater.last_updated_nid = None
-    for _, edges in df[:train_edge_end].groupby(group_indexes[random.randint(0, len(group_indexes) - 1)]):
-        t_tot_s = time.time()
-        root_nodes = np.concatenate([edges.src.values, edges.dst.values, train_neg_link_sampler.sample(edges.src.values, edges.time.values)]).astype(np.int32)
-        ts = np.concatenate([edges.time.values, edges.time.values, edges.time.values]).astype(np.float32)
-        if sampler is not None:
-            if sample_param.no_neg:
-                pos_root_end = root_nodes.shape[0] * 2 // 3
-                sampler.sample(root_nodes[:pos_root_end], ts[:pos_root_end])
+        
+    train_index = np.array(df[:train_edge_end].index)
+    train_data = np.stack([df[:train_edge_end].src, df[:train_edge_end].dst]).T
+    batch_plan_queue = queue.Queue(maxsize=5)
+    producer_thread = threading.Thread(
+        target=batch_producer,
+        args=(train_data, train_param.batch_size, batch_plan_queue)
+    )
+    producer_thread.start()
+    print("[Sampler] Ready to start sampling. Waiting for first batch...")
+    with tqdm(desc="[Sampler] Processing Batches") as pbar:
+
+        batch_num = 0
+        
+        while True:
+            current_batch_indices = batch_plan_queue.get()
+            
+
+            if current_batch_indices is None:
+                tqdm.write("[Sampler] Received completion signal. Finishing sampling.")
+                break
+            
+            batch_num += 1
+            pbar.update(1)
+            pbar.set_postfix(
+                batch=batch_num,
+                q_size=batch_plan_queue.qsize(),
+                batch_size=len(current_batch_indices)
+            )
+            t0 = time.time()
+            edge_src_values = df.loc[current_batch_indices].src.values
+            edge_dst_values = df.loc[current_batch_indices].dst.values
+            neg = train_neg_link_sampler.sample(edge_src_values, edge_dst_values)
+            root_nodes = np.concatenate([edge_src_values, edge_dst_values, neg]).astype(np.int32)
+            tims_value = df.loc[current_batch_indices].time.values
+            ts = np.concatenate([tims_value, tims_value, tims_value]).astype(np.float32)
+            t_tot_s = time.time()
+            # root_nodes = np.concatenate([edges.src.values, edges.dst.values, train_neg_link_sampler.sample(edges.src.values, edges.time.values)]).astype(np.int32)
+            # ts = np.concatenate([edges.time.values, edges.time.values, edges.time.values]).astype(np.float32)
+            if sampler is not None:
+                if sample_param.no_neg:
+                    pos_root_end = root_nodes.shape[0] * 2 // 3
+                    sampler.sample(root_nodes[:pos_root_end], ts[:pos_root_end])
+                else:
+                    sampler.sample(root_nodes, ts)
+                ret = sampler.get_ret()
+                total_sampling_time += ret[0].sample_time()
+            t_prep_s = time.time()
+            if gnn_param.arch != 'identity':
+                mfgs_same_device_as_feat = to_dgl_blocks(ret, sample_param.history, cuda=train_param.all_on_gpu)
             else:
-                sampler.sample(root_nodes, ts)
-            ret = sampler.get_ret()
-            total_sampling_time += ret[0].sample_time()
-        t_prep_s = time.time()
-        if gnn_param.arch != 'identity':
-            mfgs_same_device_as_feat = to_dgl_blocks(ret, sample_param.history, cuda=train_param.all_on_gpu)
-        else:
-            mfgs_same_device_as_feat = node_to_dgl_blocks(root_nodes, ts, cuda=train_param.all_on_gpu)
-        mfgs_on_gpu = mfgs_to_cuda(mfgs_same_device_as_feat)
-        _, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
-        if mailbox is not None:
-            mailbox.prep_input_mails(mfgs_on_gpu[0])
-        time_prep += time.time() - t_prep_s
-        optimizer.zero_grad()
-        pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu)
-        loss = creterion(pred_pos, torch.ones_like(pred_pos))
-        loss += creterion(pred_neg, torch.zeros_like(pred_neg))
-        total_loss += float(loss) * train_param.batch_size
-        loss.backward()
-        optimizer.step()
-        t_prep_s = time.time()
-        if mailbox is not None:
-            eid = edges['Unnamed: 0'].values
-            mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
-            block = None
-            if memory_param.deliver_to == 'neighbors':
-                block = to_dgl_blocks(ret, sample_param.history, reverse=True)[0][0]
-            mailbox.update_mailbox(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, ts, mem_edge_feats, block)
-            mailbox.update_memory(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, model.memory_updater.last_updated_ts)
-        time_prep += time.time() - t_prep_s
-        time_tot += time.time() - t_tot_s
+                mfgs_same_device_as_feat = node_to_dgl_blocks(root_nodes, ts, cuda=train_param.all_on_gpu)
+            mfgs_on_gpu = mfgs_to_cuda(mfgs_same_device_as_feat)
+            _, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
+            if mailbox is not None:
+                mailbox.prep_input_mails(mfgs_on_gpu[0])
+            time_prep += time.time() - t_prep_s
+            optimizer.zero_grad()
+            pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu)
+            loss = creterion(pred_pos, torch.ones_like(pred_pos))
+            loss += creterion(pred_neg, torch.zeros_like(pred_neg))
+            total_loss += float(loss) * train_param.batch_size
+            loss.backward()
+            optimizer.step()
+            t_prep_s = time.time()
+            if mailbox is not None:
+                eid = current_batch_indices
+                mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
+                block = None
+                if memory_param.deliver_to == 'neighbors':
+                    block = to_dgl_blocks(ret, sample_param.history, reverse=True)[0][0]
+                mailbox.update_mailbox(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, ts, mem_edge_feats, block)
+                mailbox.update_memory(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, model.memory_updater.last_updated_ts)
+            time_prep += time.time() - t_prep_s
+            time_tot += time.time() - t_tot_s
+        producer_thread.join()
     ap, auc = eval('val')
     print('\ttrain loss:{:.4f}  val ap:{:4f}  val auc:{:4f}'.format(total_loss, ap, auc))
     print('\ttotal time:{:.2f}s sample time:{:.2f}s prep time:{:.2f}s'.format(time_tot, total_sampling_time, time_prep))
