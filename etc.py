@@ -45,7 +45,7 @@ def adaptive_split_generator_numba(max_batch_size, data, max_node_id):
 
         if  current_batch_len > 0:
             
-            if current_batch_len < 25:
+            if current_batch_len < 5:
                 break
             num_grouped_edges += current_batch_len
             yield current_batch_indices[:current_batch_len]
@@ -66,7 +66,7 @@ def batch_producer(train_data, max_batch_size, batch_queue):
         max_batch_size (int): The max size for each batch.
         batch_queue (queue.Queue): The thread-safe queue to put batches into.
     """
-    print("[Producer] Starting to generate batches...")
+    print("\n[Producer] Starting to generate batches...")
     # Create a generator instance
     train_data = train_data.astype(np.int64)
     max_node_id = int(train_data.max()) 
@@ -80,7 +80,7 @@ def batch_producer(train_data, max_batch_size, batch_queue):
     
     # --- Sentinel Value ---
     # Put a special value (None) into the queue to signal that production is complete.
-    print("[Producer] All batches generated. Signaling completion.")
+    print("\n[Producer] All batches generated. Signaling completion.")
     batch_queue.put(None)
 
 
