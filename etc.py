@@ -45,7 +45,7 @@ def adaptive_split_generator_numba(max_batch_size, data, max_node_id):
 
         if  current_batch_len > 0:
             
-            if current_batch_len < 5:
+            if current_batch_len < 2:
                 break
             num_grouped_edges += current_batch_len
             yield current_batch_indices[:current_batch_len]
