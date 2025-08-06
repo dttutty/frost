@@ -5,6 +5,7 @@ import threading
 import queue
 from etc import get_staleness_constraint,  adaptive_split, batch_producer
 from tqdm import tqdm
+from profiler import profiler, Timer
 
 from utils import mfgs_to_cuda
 parser=argparse.ArgumentParser()
@@ -235,7 +236,7 @@ for e in range(train_param.epoch):
     batch_plan_queue = queue.Queue(maxsize=5)
     producer_thread = threading.Thread(
         target=batch_producer,
-        args=(train_data, train_param.batch_size, batch_plan_queue)
+        args=(train_data, 50, batch_plan_queue)
     )
     producer_thread.start()
     print("[Sampler] Ready to start sampling. Waiting for first batch...")
@@ -251,6 +252,7 @@ for e in range(train_param.epoch):
                 tqdm.write("[Sampler] Received completion signal. Finishing sampling.")
                 break
             
+            profiler.next_batch()
             batch_num += 1
             pbar.update(1)
             pbar.set_postfix(
@@ -325,7 +327,7 @@ for e in range(train_param.epoch):
         print(f'The best model was from epoch {best_e} with validation AP {best_ap:.4f}.')
         break # Exit the training loop
 
-
+profiler.report()
 
 print('Loading model at epoch {}...'.format(best_e))
 model.load_state_dict(torch.load(path_saver))

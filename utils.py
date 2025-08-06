@@ -5,6 +5,7 @@ import dgl
 import time
 import pandas as pd
 import numpy as np
+from profiler import Timer, profiler
 
 
 # In utils.py
@@ -204,17 +205,19 @@ import torch
 import dgl
 from typing import List, Optional
 
-batch = 0
-unique_edge_id_count = 0
-total_edge_id_count = 0
-total_node_id_count = 0
-unique_node_id_count = 0
+
+
+            # '0_compute_uniq_node_id': 0.0,
+            # '1_transfer_node_feat': 0.0,
+            # '2_transfer_node_mapping': 0.0,
+            
+            # '0_compute_uniq_edge_id': 0.0,
+            # '1_transfer_edge_feat': 0.0,
+            # '2_transfer_edge_mapping': 0.0,
 def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=False, pinned=False, nfeat_buffs=None, efeat_buffs=None, nids=None, eids=None):
-    global batch
-    global unique_edge_id_count 
-    global total_edge_id_count 
-    global total_node_id_count 
-    global unique_node_id_count 
+
+    time_stats = {}
+    count_stats = {}
     # mfgs = [[block1, block2], [block3, block4]] ,
     # 也就是layer 0 有 block1 和 block2, 
     # layer 1 有 block3 和 block4
@@ -230,7 +233,6 @@ def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feat
     mfgs_on_same_device_as_feat_0 = mfgs_on_same_device_as_feat[0] #[block1, block2]
     # 第1部分: 可选 - 合并第一个MFG中相同的源节点
     # print(f"[Batch {batch} Combine first MFGs: {deduplicate_mfg_src}")
-    batch = batch + 1
     if deduplicate_mfg_src:
         for i, block in enumerate(mfgs_on_gpu_0):
             # 如果src节点数等于dst节点数,说明dst就包含了所有src节点
@@ -264,43 +266,67 @@ def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feat
     # 只需要处理mfgs_0就行了,因为mfgs_0的src必然包含全部节点
     
 
-    
     # create a set to store unique node IDs
     node_feats_on_gpu = None
     node_uniq = None
     if node_feats is not None:
+        with Timer() as t:
         # create a set to store unique node IDs
-        cat_src = torch.cat([b.srcdata['ID'] for b in mfgs_on_same_device_as_feat_0], dim=0)
-        node_uniq, inv = torch.unique(cat_src, sorted=False, return_inverse=True)  # 和feat相同的设备上做
-        inv = inv.to('cuda', non_blocking=True)
-        if pinned:
-            torch.index_select(node_feats, 0, node_uniq, out=nfeat_buffs[:node_uniq.shape[0]])
-            node_feats_on_gpu = nfeat_buffs[:node_uniq.shape[0]].cuda(non_blocking=True)
-        else:
-            node_feats_on_gpu = node_feats[node_uniq].to('cuda', non_blocking=True)
-        offset = 0
-        for b in mfgs_on_gpu_0:
-            n = b.num_src_nodes()
-            b.srcdata['pos'] = inv[offset:offset+n]
-            offset += n
+            cat_src = torch.cat([b.srcdata['ID'] for b in mfgs_on_same_device_as_feat_0], dim=0)
+            node_uniq, inv = torch.unique(cat_src, sorted=False, return_inverse=True)  # 和feat相同的设备上做
+            inv = inv.to('cuda', non_blocking=True)
+        time_stats['0_compute_uniq_node_id'] = t.last_duration
+        with Timer() as t:
+            if pinned:
+                torch.index_select(node_feats, 0, node_uniq, out=nfeat_buffs[:node_uniq.shape[0]])
+                node_feats_on_gpu = nfeat_buffs[:node_uniq.shape[0]].cuda(non_blocking=True)
+            else:
+                node_feats_on_gpu = node_feats[node_uniq].to('cuda', non_blocking=True)
+        time_stats['1_transfer_node_feat'] = t.last_duration
+        with Timer() as t:
+            offset = 0
+            for b in mfgs_on_gpu_0:
+                n = b.num_src_nodes()
+                b.srcdata['pos'] = inv[offset:offset+n]
+                offset += n
+        time_stats['2_transfer_node_mapping'] = t.last_duration
+        
+        
+        count_stats['unique_node_id_count'] = node_uniq.shape[0]
+        count_stats['total_node_id_count'] = cat_src.shape[0]
 
     edge_feats_on_gpu = None
     edge_uniq = None
     if edge_feats is not None:
-        cat_edge = torch.cat([b.edata['ID'] for mfg in mfgs_on_same_device_as_feat for b in mfg], dim=0)
-        edge_uniq, inv = torch.unique(cat_edge, sorted=False, return_inverse=True)  # 和feat相同的设备上做
-        inv = inv.to('cuda', non_blocking=True)
-        if pinned:
-            torch.index_select(edge_feats, 0, edge_uniq, out=efeat_buffs[:edge_uniq.shape[0]])
-            edge_feats_on_gpu = efeat_buffs[:edge_uniq.shape[0]].cuda(non_blocking=True)
-        else:
-            edge_feats_on_gpu = edge_feats[edge_uniq].to('cuda', non_blocking=True)  # GPU 上做
-        offset = 0
-        for mfg in mfgs_on_gpu:
-            for b in mfg:
-                n = b.num_edges()
-                b.edata['pos'] = inv[offset:offset+n]
-                offset += n
+        with Timer() as t:
+            cat_edge = torch.cat([b.edata['ID'] for mfg in mfgs_on_same_device_as_feat for b in mfg], dim=0)
+            edge_uniq, inv = torch.unique(cat_edge, sorted=False, return_inverse=True)  # 和feat相同的设备上做
+            inv = inv.to('cuda', non_blocking=True)
+        time_stats['0_compute_uniq_edge_id'] = t.last_duration
+        
+        with Timer() as t:   
+            if pinned:
+                torch.index_select(edge_feats, 0, edge_uniq, out=efeat_buffs[:edge_uniq.shape[0]])
+                edge_feats_on_gpu = efeat_buffs[:edge_uniq.shape[0]].cuda(non_blocking=True)
+            else:
+                edge_feats_on_gpu = edge_feats[edge_uniq].to('cuda', non_blocking=True)  # GPU 上做
+        time_stats['1_transfer_edge_feat'] = t.last_duration
+        with Timer() as t:
+            offset = 0
+            for mfg in mfgs_on_gpu:
+                for b in mfg:
+                    n = b.num_edges()
+                    b.edata['pos'] = inv[offset:offset+n]
+                    offset += n
+        time_stats['2_transfer_edge_mapping'] = t.last_duration
+        
+        
+        count_stats['unique_edge_id_count'] = edge_uniq.shape[0]
+        count_stats['total_edge_id_count'] = cat_edge.shape[0]
+        
+        if profiler is not None:
+            profiler.increase_times(time_stats)
+            profiler.increase_counts(count_stats)
 
     return mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq
 

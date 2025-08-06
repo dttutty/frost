@@ -4,10 +4,8 @@ from layers import TimeEncode
 from torch_scatter import scatter
 from dataclasses import dataclass, field
 from typing import Optional, Literal
-unique_memory_id_count = 0
-total_memory_id_count = 0
-total_mailbox_id_count, unique_mailbox_id_count = 0, 0
-batch = 0
+from profiler import profiler, Timer
+from torch_scatter import scatter_max
 @dataclass
 class MemoryParams:
     type: Optional[Literal["node"]] = "node"
@@ -155,9 +153,11 @@ class MemoryMailbox():
                 
                 src_tensor = item['src']
                 pinned_list =  getattr(self, item['pinned'], None)
+                can_use_pinned = use_pinned_buffers and hist_id < len(pinned_list)
+                
                 if not can_deduplication:
                     
-                    can_use_pinned = use_pinned_buffers and hist_id < len(pinned_list)
+                    
                     if can_use_pinned:
                         # --- Use Pinned Memory Buffers ---
                         pinned_buffer = pinned_list[hist_id]
@@ -177,17 +177,22 @@ class MemoryMailbox():
                     # Assign the prepared data to the DGL block's source nodes.
                     hist_block.srcdata[name] = gpu_data
                 elif name == 'mem':
-                    if can_use_pinned:
-                        torch.index_select(src_tensor, 0, node_uniq, out=pinned_buffer[:node_uniq.shape[0]])
-                        deduplicated_mem = pinned_buffer[:node_uniq.shape[0]].cuda(non_blocking=True)
-                    else:
-                        deduplicated_mem = src_tensor[node_uniq].to('cuda', non_blocking=True)
+                    with Timer() as t:
+                        if can_use_pinned:
+                            torch.index_select(src_tensor, 0, node_uniq, out=pinned_buffer[:node_uniq.shape[0]])
+                            deduplicated_mem = pinned_buffer[:node_uniq.shape[0]].cuda(non_blocking=True)
+                        else:
+                            deduplicated_mem = src_tensor[node_uniq].to('cuda', non_blocking=True)
+                    profiler.increase_times({'3_transfer_node_mem': t.last_duration})
                 elif name == 'mem_input':
-                    if can_use_pinned:
-                        torch.index_select(src_tensor, 0, node_uniq, out=pinned_buffer[:node_uniq.shape[0]])
-                        deduplicated_mem_input = pinned_buffer[:node_uniq.shape[0]].cuda(non_blocking=True)
-                    else:
-                        deduplicated_mem_input = src_tensor[node_uniq].to('cuda', non_blocking=True)
+                    with Timer() as t:
+                        if can_use_pinned:
+                            torch.index_select(src_tensor, 0, node_uniq, out=pinned_buffer[:node_uniq.shape[0]])
+                            deduplicated_mem_input = pinned_buffer[:node_uniq.shape[0]].cuda(non_blocking=True)
+                        else:
+                            deduplicated_mem_input = src_tensor[node_uniq].to('cuda', non_blocking=True)
+                        deduplicated_mem_input = deduplicated_mem_input.reshape(node_uniq.shape[0], -1)
+                    profiler.increase_times({'4_transfer_node_mail': t.last_duration})
         return deduplicated_mem, deduplicated_mem_input
 
 
@@ -196,32 +201,35 @@ class MemoryMailbox():
 
     @torch.no_grad()
     def update_memory(self, nid, memory, root_nodes, ts, neg_samples=1):
-        global unique_memory_id_count, total_memory_id_count
         if nid is None:
             return
         num_true_src_dst = root_nodes.shape[0] // (neg_samples + 2) * 2
         nid = nid[:num_true_src_dst].to(self.device)
         
-        total_memory_id_count += nid.shape[0]
-        unique_memory_id_count += torch.unique(nid).shape[0]
-        # print(f"[Memory Update]Node ID : Unique/Total: {int(unique_memory_id_count/batch)}/{int(total_memory_id_count/batch)}")
+        
         nid = nid.long()[:num_true_src_dst]   # shape: [N]
         memory = memory[:num_true_src_dst]    # shape: [N, D]
         ts = ts[:num_true_src_dst]            # shape: [N]
         idx = torch.arange(nid.size(0), device=nid.device)
-        from torch_scatter import scatter_max
+        
 
         _, last_occurrence_idx = scatter_max(idx, nid)
-        uniq_nid = torch.unique(nid)
-        selected_idx = last_occurrence_idx[uniq_nid]
-
-        self.node_memory[uniq_nid] = memory[selected_idx].to(self.device)
+        with Timer() as t:
+            uniq_nid = torch.unique(nid)
+            selected_idx = last_occurrence_idx[uniq_nid]
+        with Timer() as t:
+            self.node_memory[uniq_nid] = memory[selected_idx].to(self.device)
+        profiler.increase_times({'6_compute_uniq_root_node_id_for_mem_update': t.last_duration, '7_transfer_back_root_node_mem': t.last_duration})
         self.node_memory_ts[uniq_nid] = ts[selected_idx].to(self.device)
+        
+        
+        profiler.increase_counts({'unique_root_node_count': uniq_nid.shape[0],'total_root_node_count': nid.shape[0]})
+        
+            # 'unique_root_node_count': 0,
+            # 'total_root_node_count': 0
 
     @torch.no_grad()
     def update_mailbox(self, nid, memory: torch.Tensor, root_nodes, ts, edge_feats, mail_delivery_block, neg_samples=1):
-        global total_mailbox_id_count, unique_mailbox_id_count, batch
-        batch += 1
         # print(f"[Mailbox Update]Batch: {batch}")
         # before update mailbox, we need to prepare the memory 
         # e.g. number_edges(5,6) = num_src(1,2) = num_src(3,4) = 2, mem_dim = 2 edge_dim = 3
@@ -242,9 +250,7 @@ class MemoryMailbox():
         # every nodes can have as many mail positions(slots) as they want, typically 1 or 10
         idx = unique_node_ids.long()
         
-        total_mailbox_id_count += idx.shape[0]
-        unique_mailbox_id_count += torch.unique(idx).shape[0]
-        # print(f"[Mailbox Update]Node ID : Unique/Total: {int(unique_mailbox_id_count/batch)}/{int(total_mailbox_id_count/batch)}")
+
         
         
         self.mails[idx, self.next_mail_pos[idx]] = mail
@@ -255,6 +261,8 @@ class MemoryMailbox():
             else:
                 nid = idx
                 self.next_mail_pos[nid] = (self.next_mail_pos[nid] + 1) % self.memory_param.mailbox_size
+                
+                
 
 
     def update_next_mail_pos(self):
