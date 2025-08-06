@@ -159,10 +159,10 @@ def eval(mode='val'):
                 mfgs_same_device_as_feat = node_to_dgl_blocks(root_nodes, ts, cuda=train_param.all_on_gpu)
             # show mfgs device
             mfgs_on_gpu = mfgs_to_cuda(mfgs_same_device_as_feat)
-            _, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
+            _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(mfgs_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
             if mailbox is not None:
-                mailbox.prep_input_mails(mfgs_on_gpu[0])
-            pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu,  neg_samples=neg_samples)
+                deduplicated_mem,  deduplicated_mem_input = mailbox.prep_input_mails(mfgs_on_gpu[0], node_uniq)
+            pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem,  deduplicated_mem_input, neg_samples=neg_samples)
             total_loss += creterion(pred_pos, torch.ones_like(pred_pos))
             total_loss += creterion(pred_neg, torch.zeros_like(pred_neg))
             y_pred = torch.cat([pred_pos, pred_neg], dim=0).sigmoid().cpu()
@@ -280,12 +280,12 @@ for e in range(train_param.epoch):
             else:
                 mfgs_same_device_as_feat = node_to_dgl_blocks(root_nodes, ts, cuda=train_param.all_on_gpu)
             mfgs_on_gpu = mfgs_to_cuda(mfgs_same_device_as_feat)
-            _, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
+            _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(mfgs_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
             if mailbox is not None:
-                mailbox.prep_input_mails(mfgs_on_gpu[0])
+                deduplicated_mem,  deduplicated_mem_input = mailbox.prep_input_mails(mfgs_on_gpu[0], node_uniq)
             time_prep += time.time() - t_prep_s
             optimizer.zero_grad()
-            pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu)
+            pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem,  deduplicated_mem_input)
             loss = creterion(pred_pos, torch.ones_like(pred_pos))
             loss += creterion(pred_neg, torch.zeros_like(pred_neg))
             total_loss += float(loss) * train_param.batch_size

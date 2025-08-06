@@ -139,13 +139,13 @@ if args.local_rank < args.num_gpus:
         multi_mfgs = [None] * (args.num_gpus + 1)
         torch.distributed.scatter_object_list(my_mfgs, multi_mfgs, src=args.num_gpus)
         mfgs = mfgs_to_cuda(my_mfgs[0])
-        _, node_feats_on_gpu, edge_feats_on_gpu= prepare_mfgs(mfgs, node_feats, edge_feats)
+        _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq= prepare_mfgs(mfgs, node_feats, edge_feats)
         if my_model_state[0] == 0:
             model.train()
             optimizer.zero_grad()
             if mailbox is not None:
-                mailbox.prep_input_mails(mfgs[0])
-            pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu)
+                deduplicated_mem,  deduplicated_mem_input = mailbox.prep_input_mails(mfgs[0], node_uniq)
+            pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem,  deduplicated_mem_input)
             loss = creterion(pred_pos, torch.ones_like(pred_pos))
             loss += creterion(pred_neg, torch.zeros_like(pred_neg))
             loss.backward()
@@ -182,8 +182,8 @@ if args.local_rank < args.num_gpus:
             model.eval()
             with torch.no_grad():
                 if mailbox is not None:
-                    mailbox.prep_input_mails(mfgs[0])
-                pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu)
+                    deduplicated_mem,  deduplicated_mem_input = mailbox.prep_input_mails(mfgs[0], node_uniq)
+                pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem,  deduplicated_mem_input)
                 if mailbox is not None:
                     my_root = [None]
                     multi_root = [None] * (args.num_gpus + 1)
@@ -220,7 +220,7 @@ if args.local_rank < args.num_gpus:
             model.eval()
             with torch.no_grad():
                 if mailbox is not None:
-                    mailbox.prep_input_mails(mfgs[0])
+                    deduplicated_mem,  deduplicated_mem_input = mailbox.prep_input_mails(mfgs[0], node_uniq)
                 emb = model.module.get_emb(mfgs).detach().cpu()
                 torch.distributed.gather_object(emb, None, dst=args.num_gpus)
 else:

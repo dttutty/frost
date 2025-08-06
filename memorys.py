@@ -99,7 +99,7 @@ class MemoryMailbox():
             self.pinned_mailbox_buffs.append(torch.zeros([limit_of_n_nodes, mailbox_size, mail_dim], pin_memory=True))
             self.pinned_mailbox_ts_buffs.append(torch.zeros([limit_of_n_nodes, mailbox_size], pin_memory=True))
 
-    def prep_input_mails(self, mfg, use_pinned_buffers=False):
+    def prep_input_mails(self, mfg, node_uniq, use_pinned_buffers=False):
         # example: memory_mailbox.prep_input_mails(mfgs[0])
         # history = 2
         # mfgs = [[block1,block2],[block3,block4],[block5,block6]]
@@ -147,30 +147,51 @@ class MemoryMailbox():
             # print(f"[Send Memory and Mail to GPU]Node ID : Unique/Total: {unique_id_count}/{total_id_count}")
             
             n_nodes = idx.shape[0]
+            deduplicated_mem = None
+            deduplicated_mem_input = None
             for item in data_map:
                 name = item['name']
+                can_deduplication = name in ['mem', 'mem_input']
+                
                 src_tensor = item['src']
                 pinned_list =  getattr(self, item['pinned'], None)
-                
-                can_use_pinned = use_pinned_buffers and hist_id < len(pinned_list)
-                if can_use_pinned:
-                    # --- Use Pinned Memory Buffers ---
-                    pinned_buffer = pinned_list[hist_id]
-                    # Select data into the pinned buffer (CPU operation).
-                    # we can see that the length of pinned_buffer[history_i] need to be larger than size of block.srcdata['ID']
-                    torch.index_select(src_tensor, 0, idx, out=pinned_buffer[:n_nodes])
-                    # Copy the selected data from pinned buffer to GPU (non-blocking).
-                    gpu_data = pinned_buffer[:n_nodes].cuda(non_blocking=True)
-                else:
-                    # --- Standard Method (No Pinned Buffers) ---
-                    # Select data and directly copy to GPU.
-                    gpu_data = src_tensor[idx].cuda()
-                    # Reshape mailbox data if needed.
-                if name == 'mem_input':
-                    gpu_data = gpu_data.reshape(n_nodes, -1)
+                if not can_deduplication:
+                    
+                    can_use_pinned = use_pinned_buffers and hist_id < len(pinned_list)
+                    if can_use_pinned:
+                        # --- Use Pinned Memory Buffers ---
+                        pinned_buffer = pinned_list[hist_id]
+                        # Select data into the pinned buffer (CPU operation).
+                        # we can see that the length of pinned_buffer[history_i] need to be larger than size of block.srcdata['ID']
+                        torch.index_select(src_tensor, 0, idx, out=pinned_buffer[:n_nodes])
+                        # Copy the selected data from pinned buffer to GPU (non-blocking).
+                        gpu_data = pinned_buffer[:n_nodes].cuda(non_blocking=True)
+                    else:
+                        # --- Standard Method (No Pinned Buffers) ---
+                        # Select data and directly copy to GPU.
+                        gpu_data = src_tensor[idx].cuda()
+                        # Reshape mailbox data if needed.
+                    if name == 'mem_input':
+                        gpu_data = gpu_data.reshape(n_nodes, -1)
 
-                # Assign the prepared data to the DGL block's source nodes.
-                hist_block.srcdata[name] = gpu_data
+                    # Assign the prepared data to the DGL block's source nodes.
+                    hist_block.srcdata[name] = gpu_data
+                elif name == 'mem':
+                    if can_use_pinned:
+                        torch.index_select(src_tensor, 0, node_uniq, out=pinned_buffer[:node_uniq.shape[0]])
+                        deduplicated_mem = pinned_buffer[:node_uniq.shape[0]].cuda(non_blocking=True)
+                    else:
+                        deduplicated_mem = src_tensor[node_uniq].to('cuda', non_blocking=True)
+                elif name == 'mem_input':
+                    if can_use_pinned:
+                        torch.index_select(src_tensor, 0, node_uniq, out=pinned_buffer[:node_uniq.shape[0]])
+                        deduplicated_mem_input = pinned_buffer[:node_uniq.shape[0]].cuda(non_blocking=True)
+                    else:
+                        deduplicated_mem_input = src_tensor[node_uniq].to('cuda', non_blocking=True)
+        return deduplicated_mem, deduplicated_mem_input
+
+
+
 
 
     @torch.no_grad()

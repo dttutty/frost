@@ -267,16 +267,17 @@ def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feat
     
     # create a set to store unique node IDs
     node_feats_on_gpu = None
+    node_uniq = None
     if node_feats is not None:
         # create a set to store unique node IDs
         cat_src = torch.cat([b.srcdata['ID'] for b in mfgs_on_same_device_as_feat_0], dim=0)
-        uniq, inv = torch.unique(cat_src, sorted=False, return_inverse=True)  # 和feat相同的设备上做
+        node_uniq, inv = torch.unique(cat_src, sorted=False, return_inverse=True)  # 和feat相同的设备上做
         inv = inv.to('cuda', non_blocking=True)
         if pinned:
-            torch.index_select(node_feats, 0, uniq, out=nfeat_buffs[:uniq.shape[0]])
-            node_feats_on_gpu = nfeat_buffs[:uniq.shape[0]].cuda(non_blocking=True)
+            torch.index_select(node_feats, 0, node_uniq, out=nfeat_buffs[:node_uniq.shape[0]])
+            node_feats_on_gpu = nfeat_buffs[:node_uniq.shape[0]].cuda(non_blocking=True)
         else:
-            node_feats_on_gpu = node_feats[uniq].to('cuda', non_blocking=True)
+            node_feats_on_gpu = node_feats[node_uniq].to('cuda', non_blocking=True)
         offset = 0
         for b in mfgs_on_gpu_0:
             n = b.num_src_nodes()
@@ -284,15 +285,16 @@ def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feat
             offset += n
 
     edge_feats_on_gpu = None
+    edge_uniq = None
     if edge_feats is not None:
         cat_edge = torch.cat([b.edata['ID'] for mfg in mfgs_on_same_device_as_feat for b in mfg], dim=0)
-        uniq, inv = torch.unique(cat_edge, sorted=False, return_inverse=True)  # 和feat相同的设备上做
+        edge_uniq, inv = torch.unique(cat_edge, sorted=False, return_inverse=True)  # 和feat相同的设备上做
         inv = inv.to('cuda', non_blocking=True)
         if pinned:
-            torch.index_select(edge_feats, 0, uniq, out=efeat_buffs[:uniq.shape[0]])
-            edge_feats_on_gpu = efeat_buffs[:uniq.shape[0]].cuda(non_blocking=True)
+            torch.index_select(edge_feats, 0, edge_uniq, out=efeat_buffs[:edge_uniq.shape[0]])
+            edge_feats_on_gpu = efeat_buffs[:edge_uniq.shape[0]].cuda(non_blocking=True)
         else:
-            edge_feats_on_gpu = edge_feats[uniq].to('cuda', non_blocking=True)  # GPU 上做
+            edge_feats_on_gpu = edge_feats[edge_uniq].to('cuda', non_blocking=True)  # GPU 上做
         offset = 0
         for mfg in mfgs_on_gpu:
             for b in mfg:
@@ -300,7 +302,7 @@ def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feat
                 b.edata['pos'] = inv[offset:offset+n]
                 offset += n
 
-    return mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu
+    return mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq
 
 
 

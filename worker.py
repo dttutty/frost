@@ -85,7 +85,7 @@ def train_from_prefetch(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
     # with get_tracer().log_event("Train: model forward and backward"):
     model.train()
     optimizer.zero_grad()
-    pred_pos, pred_neg = model(prev_thread.async_mfgs)
+    pred_pos, pred_neg = model(prev_thread.async_mfgs, prev_thread.node_feats_on_gpu, prev_thread.edge_feats_on_gpu, prev_thread.deduplicated_mem,  prev_thread.deduplicated_mem_input)
     loss = creterion(pred_pos, torch.ones_like(pred_pos))
     loss += creterion(pred_neg, torch.zeros_like(pred_neg))
     loss.backward()
@@ -115,16 +115,16 @@ def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
     received_data : TransferData = scatter_receive()
     mfgs_on_cpu = received_data.mfgs
     mfgs_on_gpu = mfgs_to_cuda(mfgs_on_cpu)
-    _, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(mfgs_on_gpu, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=deduplicate_mfg_src, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
+    _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(mfgs_on_gpu, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=deduplicate_mfg_src, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
     try:
 
         model.eval()
         with torch.no_grad():
             if memory_mailbox is not None:
-                memory_mailbox.prep_input_mails(mfgs_on_gpu[0])
+                deduplicated_mem,  deduplicated_mem_input = memory_mailbox.prep_input_mails(mfgs_on_gpu[0], node_uniq)
             # with get_tracer().log_event("Eval: model forward"):
             #     print(f"Eval: model forward, local_rank={local_rank}")
-            pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu)
+            pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem,  deduplicated_mem_input)
             if memory_mailbox is not None:
                 
                 mem_edge_feats = edge_feats[received_data.eid] if edge_feats is not None else None

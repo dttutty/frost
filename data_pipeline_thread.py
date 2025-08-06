@@ -58,9 +58,9 @@ class DataPipelineThread(threading.Thread):
             # print(local_rank, 'start thread')
             nids, eids = get_ids(self.mfgs_on_cpu, self.node_feats, self.edge_feats)
             mfgs_on_gpu = mfgs_to_cuda(self.mfgs_on_cpu)
-            mfgs, node_feats_on_gpu, edge_feats_on_gpu = prepare_mfgs(self.mfgs_on_cpu, mfgs_on_gpu, self.node_feats, self.edge_feats, deduplicate_mfg_src=self.deduplicate_mfg_src, pinned=True, nfeat_buffs=self.pinned_nfeat_buffs, efeat_buffs=self.pinned_efeat_buffs, nids=nids, eids=eids)
+            mfgs, self.node_feats_on_gpu, self.edge_feats_on_gpu, self.node_uniq, self.edge_uniq = prepare_mfgs(self.mfgs_on_cpu, mfgs_on_gpu, self.node_feats, self.edge_feats, deduplicate_mfg_src=self.deduplicate_mfg_src, pinned=True, nfeat_buffs=self.pinned_nfeat_buffs, efeat_buffs=self.pinned_efeat_buffs, nids=nids, eids=eids)
             if self.mailbox is not None:
-                self.mailbox.prep_input_mails(mfgs_on_gpu[0], use_pinned_buffers=True)
+                self.deduplicated_mem,  self.deduplicated_mem_input = self.mailbox.prep_input_mails(mfgs_on_gpu[0], self.node_uniq, use_pinned_buffers=True)
             self.async_mfgs = mfgs_on_gpu
 
     def clear_tensors(self):
