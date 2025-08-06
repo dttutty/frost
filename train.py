@@ -18,6 +18,7 @@ parser.add_argument('--rand_node_features', type=int, default=128, help='use ran
 parser.add_argument('--eval_neg_samples', type=int, default=1, help='how many negative samples to use at inference. Note: this will change the metric of test set to AP+AUC to AP+MRR!')
 parser.add_argument('--early_stop_patience', type=int, default=5, help='patience for early stopping. 0 to disable.')
 parser.add_argument('--train_neg_link_sampler', type=str, default='tgl_random', choices=['tgl_random', 'real', 'avoid_info_leak'], help='Type of negative link sampler to use for training')
+parser.add_argument('--neighbor', type=int, default=10, help='number of neighbors per layer')
 args=parser.parse_args()
 
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -104,7 +105,8 @@ if  train_param.all_on_gpu:
         edge_feats = edge_feats.cuda()
     if mailbox is not None:
         mailbox.move_to_gpu()
-
+level_number = len(sample_param.neighbor)
+sample_param.neighbor = [args.neighbor] * level_number
 sampler = None
 if not sample_param.no_sample:
     sampler = ParallelSampler(g['indptr'], g['indices'], g['eid'], g['ts'].astype(np.float32),
