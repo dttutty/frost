@@ -213,13 +213,15 @@ class MemoryMailbox():
         idx = torch.arange(nid.size(0), device=nid.device)
         
 
-        _, last_occurrence_idx = scatter_max(idx, nid)
         with Timer() as t:
+            _, last_occurrence_idx = scatter_max(idx, nid)
             uniq_nid = torch.unique(nid)
             selected_idx = last_occurrence_idx[uniq_nid]
+        profiler.increase_times({'6_compute_uniq_root_node_id_for_mem_update': t.last_duration})
+
         with Timer() as t:
             self.node_memory[uniq_nid] = memory[selected_idx].to(self.device)
-        profiler.increase_times({'6_compute_uniq_root_node_id_for_mem_update': t.last_duration, '7_transfer_back_root_node_mem': t.last_duration})
+        profiler.increase_times({'7_transfer_back_root_node_mem': t.last_duration})
         self.node_memory_ts[uniq_nid] = ts[selected_idx].to(self.device)
         
         

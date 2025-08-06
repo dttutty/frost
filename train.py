@@ -245,6 +245,7 @@ for e in range(train_param.epoch):
         batch_num = 0
         
         while True:
+            
             current_batch_indices = batch_plan_queue.get()
             
 
@@ -327,7 +328,7 @@ for e in range(train_param.epoch):
         print(f'The best model was from epoch {best_e} with validation AP {best_ap:.4f}.')
         break # Exit the training loop
 
-profiler.report()
+    profiler.report()
 
 print('Loading model at epoch {}...'.format(best_e))
 model.load_state_dict(torch.load(path_saver))
