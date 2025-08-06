@@ -12,6 +12,8 @@ parser.add_argument('--lr', type=float, default=0.001)
 parser.add_argument('--gpu', type=str, default='0', help='which GPU to use')
 parser.add_argument('--model', type=str, default='', help='name of stored model to load')
 parser.add_argument('--posneg', default=False, action='store_true', help='for positive negative detection, whether to sample negative nodes')
+parser.add_argument('--deduplication', action='store_true', help='enable deduplication')
+
 args=parser.parse_args()
 
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -102,7 +104,7 @@ def generate_temporal_embeddings(ldf, emb_file_name):
             else:
                 mfgs = node_to_dgl_blocks(root_nodes, ts, cuda=True)
                 
-            mfgs, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(mfgs, node_np, edge_np, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
+            mfgs, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(args.deduplication, mfgs, node_np, edge_np, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
             if mailbox is not None:
                 deduplicated_mem,  deduplicated_mem_input = mailbox.prep_input_mails(mfgs[0], node_uniq)
             with torch.no_grad():
@@ -129,7 +131,7 @@ def generate_temporal_embeddings(ldf, emb_file_name):
             mfgs = to_dgl_blocks(ret, sample_param.history, cuda=True)
         else: # why aggragate?
             mfgs = node_to_dgl_blocks(root_nodes, ts, cuda=True)
-        mfgs, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(mfgs, node_np, edge_np, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
+        mfgs, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(args.deduplication, mfgs, node_np, edge_np, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
         if mailbox is not None:
             deduplicated_mem,  deduplicated_mem_input = mailbox.prep_input_mails(mfgs[0], node_uniq)
         with torch.no_grad():

@@ -16,6 +16,8 @@ parser.add_argument('--data', type=str, help='dataset name')
 parser.add_argument('--config', type=str, help='path to config file')
 parser.add_argument('--seed', type=int, default=0, help='random seed to use')
 parser.add_argument('--omp_num_threads', type=int, default=8)
+parser.add_argument('--deduplication', action='store_true', help='enable deduplication')
+
 args=parser.parse_args()
 dist.init_process_group(backend='gloo', timeout=datetime.timedelta(0, 3600))
 
@@ -149,6 +151,6 @@ if memory_param.type != 'none':
 
 
 if local_rank == world_size - 1:
-    run_host(sample_param, memory_param, gnn_param, train_param, g, df, memory_mailbox)
+    run_host(args.deduplication, sample_param, memory_param, gnn_param, train_param, g, df, memory_mailbox)
 else:
-    run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, memory_mailbox, node_feat_dim, edge_feat_dim, path_saver, node_feats, edge_feats)
+    run_worker(args.deduplication, sample_param, memory_param, gnn_param, train_param, nccl_group, memory_mailbox, node_feat_dim, edge_feat_dim, path_saver, node_feats, edge_feats)

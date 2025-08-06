@@ -41,7 +41,7 @@ class Profiler:
         self.counts['batch_count'] += 1
 
 
-    def increase_times(self, time_stats: dict):
+    def increase_time(self, time_stats: dict):
         """Accumulate timing stats from a dictionary."""
         for key, value in time_stats.items():
             if key in self.times:
@@ -50,7 +50,7 @@ class Profiler:
                 print(f"Warning: Timing metric '{key}' not defined in Profiler.")
 
                 
-    def increase_counts(self, count_stats: dict):
+    def increase_count(self, count_stats: dict):
         """Accumulate count stats from a dictionary."""
         for key, value in count_stats.items():
             if key in self.counts:

@@ -49,7 +49,8 @@ def irecv_object(src=host_rank):
 
 
 
-def run_training_step(stream,
+def run_training_step(deduplication,
+                      stream,
                       prev_thread: DataPipelineThread,
                       mailbox: MemoryMailbox, 
                       memory_param: MemoryParams, 
@@ -65,7 +66,7 @@ def run_training_step(stream,
                       deduplicate_mfg_src):
     received_data: TransferData = scatter_receive()
     # data_ready_event = threading.Event()
-    curr_thread = DataPipelineThread(received_data, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src)
+    curr_thread = DataPipelineThread(deduplication, received_data, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src)
     curr_thread.start()
     if prev_thread is not None:
         prev_thread, tot_loss = train_from_prefetch(prev_thread, mailbox, memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread)
@@ -106,7 +107,7 @@ def train_from_prefetch(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
     return prev_thread, tot_loss
 
 
-def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryMailbox,  memory_param, model: DDP|GeneralModel, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, node_feats, tot_loss, deduplicate_mfg_src):
+def run_evaluation_step(deduplication, prev_thread: DataPipelineThread, memory_mailbox: MemoryMailbox,  memory_param, model: DDP|GeneralModel, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, node_feats, tot_loss, deduplicate_mfg_src):
     memory_updater: GRUMemoryUpdater|RNNMemoryUpdater|TransformerMemoryUpdater = model.module.memory_updater
     if prev_thread is not None:
         # finish last training mini-batch
@@ -115,7 +116,7 @@ def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
     received_data : TransferData = scatter_receive()
     mfgs_on_cpu = received_data.mfgs
     mfgs_on_gpu = mfgs_to_cuda(mfgs_on_cpu)
-    _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(mfgs_on_gpu, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=deduplicate_mfg_src, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
+    _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(deduplication, mfgs_on_gpu, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=deduplicate_mfg_src, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
     try:
 
         model.eval()
@@ -152,9 +153,9 @@ def run_evaluation_step(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
     return prev_thread, tot_loss
 
 
-def alc_pin_nfeat_efeat_buf(sample_param, batch_size, node_feats, edge_feats):
-    pinned_nfeat_buffs = list()
-    pinned_efeat_buffs = list()
+def alc_pin_nfeat_efeat_buf_w_deduplication(sample_param, batch_size, node_feats, edge_feats):
+    pinned_nfeat_buffs = None
+    pinned_efeat_buffs = None
     limit = int(batch_size * 3.3)
     if sample_param.neighbor is not None and edge_feats is not None:
         edge_space = 0
@@ -162,6 +163,26 @@ def alc_pin_nfeat_efeat_buf(sample_param, batch_size, node_feats, edge_feats):
             limit = limit * (i + 1)
             edge_space += limit * sample_param.history
         pinned_efeat_buffs = torch.zeros((edge_space, edge_feats.shape[1]), pin_memory=True)
+
+    if node_feats is not None:
+        pinned_nfeat_buffs = torch.zeros((limit * sample_param.history, node_feats.shape[1]), pin_memory=True))
+
+    return pinned_nfeat_buffs, pinned_efeat_buffs
+
+
+
+
+def alc_pin_nfeat_efeat_buf_no_deduplication(sample_param, batch_size, node_feats, edge_feats):
+    pinned_nfeat_buffs = list()
+    pinned_efeat_buffs = list()
+    limit = int(batch_size * 3.3)
+    if sample_param.neighbor is not None:
+        for i in sample_param.neighbor:
+            limit *= i + 1
+            
+            if edge_feats is not None:
+                for _ in range(sample_param.history):
+                    pinned_efeat_buffs.insert(0, torch.zeros((limit, edge_feats.shape[1]), pin_memory=True))
     # if history = 3, neighbor = [10, 10]
     
     # pinned_efeat_buffs[5].torch.shape [3.3b*11*11, edge_feats.shape[1]]
@@ -172,7 +193,8 @@ def alc_pin_nfeat_efeat_buf(sample_param, batch_size, node_feats, edge_feats):
     # pinned_efeat_buffs[1].torch.shape [3.3b*11, edge_feats.shape[1]]
     # pinned_efeat_buffs[0].torch.shape [3.3b*11, edge_feats.shape[1]]
     if node_feats is not None:
-        pinned_nfeat_buffs = torch.zeros((limit * sample_param.history, node_feats.shape[1]), pin_memory=True))
+        for _ in range(sample_param.history):
+            pinned_nfeat_buffs.insert(0, torch.zeros((limit, node_feats.shape[1]), pin_memory=True))
     # if history = 3
     # pinned_nfeat_buffs[2].torch.shape [3.3b*11*11, node_feats.shape[1]]
     # pinned_nfeat_buffs[1].torch.shape [3.3b*11*11, node_feats.shape[1]]
@@ -184,8 +206,10 @@ def alc_pin_nfeat_efeat_buf(sample_param, batch_size, node_feats, edge_feats):
 # 128 --->GPU3 tm28-tm32
 # 128 --->GPU1 tm32-tm48
 
+
+
 # GPU worker process
-def run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, memory_mailbox: MemoryMailbox, node_feat_dim, edge_feat_dim, path_saver, node_feats, edge_feats):
+def run_worker(deduplication, sample_param, memory_param, gnn_param, train_param, nccl_group, memory_mailbox: MemoryMailbox, node_feat_dim, edge_feat_dim, path_saver, node_feats, edge_feats):
     # stream position 1 
     stream = torch.cuda.Stream()
     model = GeneralModel(node_feat_dim, edge_feat_dim, sample_param, memory_param, gnn_param, train_param, combined=train_param.combine_neighs).cuda() #try by sqp17
@@ -197,9 +221,12 @@ def run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, m
     optimizer = torch.optim.Adam(model.parameters(), lr=train_param.lr)
     
     # buffer for features and mem_mailbox
-    pinned_nfeat_buffs, pinned_efeat_buffs = alc_pin_nfeat_efeat_buf(sample_param, train_param.batch_size, node_feats, edge_feats)
+    if deduplication:
+        pinned_nfeat_buffs, pinned_efeat_buffs = alc_pin_nfeat_efeat_buf_w_deduplication(sample_param, train_param.batch_size, node_feats, edge_feats)
+    else:
+        pinned_nfeat_buffs, pinned_efeat_buffs = alc_pin_nfeat_efeat_buf_no_deduplication(sample_param, train_param.batch_size, node_feats, edge_feats)
     if memory_mailbox is not None:
-        memory_mailbox.alc_pin_mem_mailbox_buf(sample_param, train_param.batch_size)
+        memory_mailbox.alc_pin_mem_mailbox_buf(sample_param, deduplication, train_param.batch_size)
     
     tot_loss = 0
     prev_thread = None
@@ -212,9 +239,9 @@ def run_worker(sample_param, memory_param, gnn_param, train_param, nccl_group, m
             case 0:# train
                 # stream position 2
                 # stream = torch.cuda.Stream()
-                prev_thread, tot_loss = run_training_step(stream, prev_thread, memory_mailbox,  memory_param, model, optimizer, creterion, node_feats, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, tot_loss, train_param.deduplicate_mfg_src)
+                prev_thread, tot_loss = run_training_step(deduplication, stream, prev_thread, memory_mailbox,  memory_param, model, optimizer, creterion, node_feats, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, tot_loss, train_param.deduplicate_mfg_src)
             case 1:# eval
-                prev_thread, tot_loss = run_evaluation_step(prev_thread, memory_mailbox, memory_param, model, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, node_feats, tot_loss, train_param.deduplicate_mfg_src)
+                prev_thread, tot_loss = run_evaluation_step(deduplication, prev_thread, memory_mailbox, memory_param, model, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, nccl_group, node_feats, tot_loss, train_param.deduplicate_mfg_src)
             case 2:# save model
                 if local_rank == 0:
                     torch.save(model.state_dict(), path_saver)

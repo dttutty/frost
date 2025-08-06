@@ -120,26 +120,27 @@ class GeneralModel(torch.nn.Module):
         # predictor header
         return hist_out
     
-    def forward(self, mfgs, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem,  deduplicated_mem_input, neg_samples=1):
-        with Timer() as t:
-            if node_feats_on_gpu is not None:
-                for block in mfgs[0]:
-                        block.srcdata['h'] = node_feats_on_gpu[block.srcdata['pos']]
-                del node_feats_on_gpu
-            if deduplicated_mem is not None:
-                for block in mfgs[0]:
-                    block.srcdata['mem'] = deduplicated_mem[block.srcdata['pos']]
-                del deduplicated_mem
-            if deduplicated_mem_input is not None:
-                for block in mfgs[0]:
-                    block.srcdata['mem_input'] = deduplicated_mem_input[block.srcdata['pos']]
-                del deduplicated_mem_input
-            if edge_feats_on_gpu is not None:
-                for blocks in mfgs:
-                    for block in blocks:
-                            block.edata['f'] = edge_feats_on_gpu[block.edata['pos']]
-                del edge_feats_on_gpu
-        profiler.increase_times({'5_mapping_back': t.last_duration})
+    def forward(self, deduplication, mfgs, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem,  deduplicated_mem_input, neg_samples=1):
+        if deduplication:
+            with Timer() as t:
+                if node_feats_on_gpu is not None:
+                    for block in mfgs[0]:
+                            block.srcdata['h'] = node_feats_on_gpu[block.srcdata['pos']]
+                    del node_feats_on_gpu
+                if deduplicated_mem is not None:
+                    for block in mfgs[0]:
+                        block.srcdata['mem'] = deduplicated_mem[block.srcdata['pos']]
+                    del deduplicated_mem
+                if deduplicated_mem_input is not None:
+                    for block in mfgs[0]:
+                        block.srcdata['mem_input'] = deduplicated_mem_input[block.srcdata['pos']]
+                    del deduplicated_mem_input
+                if edge_feats_on_gpu is not None:
+                    for blocks in mfgs:
+                        for block in blocks:
+                                block.edata['f'] = edge_feats_on_gpu[block.edata['pos']]
+                    del edge_feats_on_gpu
+            profiler.increase_time({'5_mapping_back': t.last_duration})
         hist_out = self.get_emb(mfgs)
         return self.edge_predictor(hist_out, neg_samples=neg_samples)
 

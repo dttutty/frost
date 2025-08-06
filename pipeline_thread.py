@@ -14,7 +14,7 @@ def scatter_receive(src=host_rank):
 
 import  torch.distributed as dist
 class DataPipelineThread(threading.Thread):
-    def __init__(self, data_received_event: threading.Event, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox: MemoryMailbox, memory_param, deduplicate_mfg_src, prev_mailbox_memory_update_thread):
+    def __init__(self, deduplication, data_received_event: threading.Event, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox: MemoryMailbox, memory_param, deduplicate_mfg_src, prev_mailbox_memory_update_thread):
         
         
         super(DataPipelineThread, self).__init__()
@@ -31,6 +31,7 @@ class DataPipelineThread(threading.Thread):
         self.memory_param = memory_param
         self.deduplicate_mfg_src = deduplicate_mfg_src
         self.prev_mailbox_memory_update_thread = prev_mailbox_memory_update_thread
+        self.deduplication = deduplication
 
     def run(self):
         self.received_data = scatter_receive()
@@ -40,7 +41,7 @@ class DataPipelineThread(threading.Thread):
         with torch.cuda.stream(self.stream):
             nids, eids = get_ids(self.raw_mfgs, self.node_feats, self.edge_feats)
             gnn_mfgs = mfgs_to_cuda(self.raw_mfgs)
-            prepare_mfgs(gnn_mfgs, self.node_feats, self.edge_feats, deduplicate_mfg_src=self.deduplicate_mfg_src, pinned=True, nfeat_buffs=self.pinned_nfeat_buffs, efeat_buffs=self.pinned_efeat_buffs, nids=nids, eids=eids)
+            prepare_mfgs(self.deduplication, gnn_mfgs, self.node_feats, self.edge_feats, deduplicate_mfg_src=self.deduplicate_mfg_src, pinned=True, nfeat_buffs=self.pinned_nfeat_buffs, efeat_buffs=self.pinned_efeat_buffs, nids=nids, eids=eids)
             self.prev_mailbox_memory_update_thread.join() if self.prev_mailbox_memory_update_thread is not None else None
             if self.mailbox is not None:
                 self.mailbox.prep_input_mails(gnn_mfgs[0], use_pinned_buffers=True)

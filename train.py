@@ -8,13 +8,15 @@ parser.add_argument('--config', type=str, help='path to config file')
 parser.add_argument('--gpu', type=str, default='0', help='which GPU to use')
 parser.add_argument('--model_name', type=str, default='', help='name of stored model')
 parser.add_argument('--use_inductive', action='store_true')
+parser.add_argument('--batch_size', type=int, help='batch size for training')
+parser.add_argument('--level_number', type=int, help='number of levels in the model')
 parser.add_argument('--rand_edge_features', type=int, default=128, help='use random edge featrues')
 parser.add_argument('--rand_node_features', type=int, default=128, help='use random node featrues')
 parser.add_argument('--eval_neg_samples', type=int, default=1, help='how many negative samples to use at inference. Note: this will change the metric of test set to AP+AUC to AP+MRR!')
 parser.add_argument('--early_stop_patience', type=int, default=5, help='patience for early stopping. 0 to disable.')
 parser.add_argument('--train_neg_link_sampler', type=str, default='tgl_random', choices=['tgl_random', 'real', 'avoid_info_leak'], help='Type of negative link sampler to use for training')
 parser.add_argument('--neighbor', type=int, default=10, help='number of neighbors per layer')
-
+parser.add_argument('--deduplication', action='store_true', help='enable deduplication')
 args=parser.parse_args()
 
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -41,6 +43,8 @@ def set_seed(seed):
 node_feats, edge_feats = load_feat(args.data, args.rand_edge_features, args.rand_node_features)
 g, df = load_graph(args.data)
 sample_param, memory_param, gnn_param, train_param = parse_config(args.config)
+if args.batch_size is not None:
+    train_param.batch_size = args.batch_size
 train_edge_end = df[df['ext_roll'].gt(0)].index[0]
 val_edge_end = df[df['ext_roll'].gt(1)].index[0]
 # ext_roll有三种 0 1 2
@@ -104,6 +108,8 @@ if  train_param.all_on_gpu:
         mailbox.move_to_gpu()
 
 level_number = len(sample_param.neighbor)
+if args.level_number is not None:
+    level_number = args.level_number
 sample_param.neighbor = [args.neighbor] * level_number
 sampler = None
 if not sample_param.no_sample:
@@ -157,12 +163,15 @@ def eval(mode='val'):
                 mfgs_same_device_as_feat = to_dgl_blocks(ret, sample_param.history, cuda=train_param.all_on_gpu)
             else:
                 mfgs_same_device_as_feat = node_to_dgl_blocks(root_nodes, ts, cuda=train_param.all_on_gpu)
+            # there seems to be sth wrong
             # show mfgs device
             mfgs_on_gpu = mfgs_to_cuda(mfgs_same_device_as_feat)
-            _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(mfgs_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
+            _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(args.deduplication, mfgs_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
             if mailbox is not None:
-                deduplicated_mem, deduplicated_mem_input = mailbox.prep_input_mails(mfgs_on_gpu[0], node_uniq)
-            pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem, deduplicated_mem_input, neg_samples=neg_samples)
+                deduplicated_mem, deduplicated_mem_input = mailbox.prep_input_mails(args.deduplication, mfgs_on_gpu[0], node_uniq)
+            else:
+                deduplicated_mem, deduplicated_mem_input = None, None
+            pred_pos, pred_neg = model(args.deduplication, mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem, deduplicated_mem_input, neg_samples=neg_samples)
             total_loss += creterion(pred_pos, torch.ones_like(pred_pos))
             total_loss += creterion(pred_neg, torch.zeros_like(pred_neg))
             y_pred = torch.cat([pred_pos, pred_neg], dim=0).sigmoid().cpu()
@@ -179,7 +188,7 @@ def eval(mode='val'):
                 if memory_param.deliver_to == 'neighbors':
                     block = to_dgl_blocks(ret, sample_param.history, reverse=True, cuda=train_param.all_on_gpu)[0][0]
                 mailbox.update_mailbox(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, ts, mem_edge_feats, block, neg_samples=neg_samples)
-                mailbox.update_memory(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, model.memory_updater.last_updated_ts, neg_samples=neg_samples)
+                mailbox.update_memory(args.deduplication, model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, model.memory_updater.last_updated_ts, neg_samples=neg_samples)
         if mode == 'val':
             val_losses.append(float(total_loss))
     ap = float(torch.tensor(aps).mean())
@@ -213,7 +222,7 @@ if train_param.reorder is not None:
     for i in range(1, train_param.reorder):
         additional_idx = np.zeros(train_param.batch_size // train_param.reorder * i) - 1
         group_indexes.append(np.concatenate([additional_idx, base_idx])[:base_idx.shape[0]])
-for e in range(train_param.epoch):
+for e in range(3):
     print('Epoch {:d}:'.format(e))
     total_sampling_time = 0
     time_prep = 0
@@ -245,12 +254,14 @@ for e in range(train_param.epoch):
         else:
             mfgs_same_device_as_feat = node_to_dgl_blocks(root_nodes, ts, cuda=train_param.all_on_gpu)
         mfgs_on_gpu = mfgs_to_cuda(mfgs_same_device_as_feat)
-        _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(mfgs_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
+        _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(args.deduplication, mfgs_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src))
         if mailbox is not None:
-            deduplicated_mem, deduplicated_mem_input = mailbox.prep_input_mails(mfgs_on_gpu[0], node_uniq)
+            deduplicated_mem, deduplicated_mem_input = mailbox.prep_input_mails(args.deduplication, mfgs_on_gpu[0], node_uniq)
+        else:
+            deduplicated_mem, deduplicated_mem_input = None, None
         time_prep += time.time() - t_prep_s
         optimizer.zero_grad()
-        pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem, deduplicated_mem_input)
+        pred_pos, pred_neg = model(args.deduplication, mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem, deduplicated_mem_input)
         loss = creterion(pred_pos, torch.ones_like(pred_pos))
         loss += creterion(pred_neg, torch.zeros_like(pred_neg))
         total_loss += float(loss) * train_param.batch_size
@@ -264,7 +275,7 @@ for e in range(train_param.epoch):
             if memory_param.deliver_to == 'neighbors':
                 block = to_dgl_blocks(ret, sample_param.history, reverse=True)[0][0]
             mailbox.update_mailbox(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, ts, mem_edge_feats, block)
-            mailbox.update_memory(model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, model.memory_updater.last_updated_ts)
+            mailbox.update_memory(args.deduplication, model.memory_updater.last_updated_nid, model.memory_updater.last_updated_memory, root_nodes, model.memory_updater.last_updated_ts)
         time_prep += time.time() - t_prep_s
         time_tot += time.time() - t_tot_s
     ap, auc = eval('val')

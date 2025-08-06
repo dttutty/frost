@@ -207,14 +207,7 @@ from typing import List, Optional
 
 
 
-            # '0_compute_uniq_node_id': 0.0,
-            # '1_transfer_node_feat': 0.0,
-            # '2_transfer_node_mapping': 0.0,
-            
-            # '0_compute_uniq_edge_id': 0.0,
-            # '1_transfer_edge_feat': 0.0,
-            # '2_transfer_edge_mapping': 0.0,
-def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=False, pinned=False, nfeat_buffs=None, efeat_buffs=None, nids=None, eids=None):
+def prepare_mfgs(deduplication, mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=False, pinned=False, nfeat_buffs=None, efeat_buffs=None, nids=None, eids=None):
 
     time_stats = {}
     count_stats = {}
@@ -269,66 +262,112 @@ def prepare_mfgs(mfgs_on_same_device_as_feat, mfgs_on_gpu, node_feats, edge_feat
     # create a set to store unique node IDs
     node_feats_on_gpu = None
     node_uniq = None
-    if node_feats is not None:
-        with Timer() as t:
-        # create a set to store unique node IDs
-            cat_src = torch.cat([b.srcdata['ID'] for b in mfgs_on_same_device_as_feat_0], dim=0)
-            node_uniq, inv = torch.unique(cat_src, sorted=False, return_inverse=True)  # 和feat相同的设备上做
-            inv = inv.to('cuda', non_blocking=True)
-        time_stats['0_compute_uniq_node_id'] = t.last_duration
-        with Timer() as t:
-            if pinned:
-                torch.index_select(node_feats, 0, node_uniq, out=nfeat_buffs[:node_uniq.shape[0]])
-                node_feats_on_gpu = nfeat_buffs[:node_uniq.shape[0]].cuda(non_blocking=True)
-            else:
-                node_feats_on_gpu = node_feats[node_uniq].to('cuda', non_blocking=True)
-        time_stats['1_transfer_node_feat'] = t.last_duration
-        with Timer() as t:
-            offset = 0
-            for b in mfgs_on_gpu_0:
-                n = b.num_src_nodes()
-                b.srcdata['pos'] = inv[offset:offset+n]
-                offset += n
-        time_stats['2_transfer_node_mapping'] = t.last_duration
-        
-        
-        count_stats['unique_node_id_count'] = node_uniq.shape[0]
-        count_stats['total_node_id_count'] = cat_src.shape[0]
-
     edge_feats_on_gpu = None
     edge_uniq = None
-    if edge_feats is not None:
-        with Timer() as t:
-            cat_edge = torch.cat([b.edata['ID'] for mfg in mfgs_on_same_device_as_feat for b in mfg], dim=0)
-            edge_uniq, inv = torch.unique(cat_edge, sorted=False, return_inverse=True)  # 和feat相同的设备上做
-            inv = inv.to('cuda', non_blocking=True)
-        time_stats['0_compute_uniq_edge_id'] = t.last_duration
-        
-        with Timer() as t:   
-            if pinned:
-                torch.index_select(edge_feats, 0, edge_uniq, out=efeat_buffs[:edge_uniq.shape[0]])
-                edge_feats_on_gpu = efeat_buffs[:edge_uniq.shape[0]].cuda(non_blocking=True)
-            else:
-                edge_feats_on_gpu = edge_feats[edge_uniq].to('cuda', non_blocking=True)  # GPU 上做
-        time_stats['1_transfer_edge_feat'] = t.last_duration
-        with Timer() as t:
-            offset = 0
-            for mfg in mfgs_on_gpu:
-                for b in mfg:
-                    n = b.num_edges()
-                    b.edata['pos'] = inv[offset:offset+n]
+    if deduplication: 
+        if node_feats is not None:
+            with Timer() as t:
+            # create a set to store unique node IDs
+                cat_src = torch.cat([b.srcdata['ID'] for b in mfgs_on_same_device_as_feat_0], dim=0)
+                node_uniq, inv = torch.unique(cat_src, sorted=False, return_inverse=True)  # 和feat相同的设备上做
+                inv = inv.to('cuda', non_blocking=True)
+            time_stats['0_compute_uniq_node_id'] = t.last_duration
+            with Timer() as t:
+                if pinned:
+                    torch.index_select(node_feats, 0, node_uniq, out=nfeat_buffs[:node_uniq.shape[0]])
+                    node_feats_on_gpu = nfeat_buffs[:node_uniq.shape[0]].cuda(non_blocking=True)
+                else:
+                    node_feats_on_gpu = node_feats[node_uniq].to('cuda', non_blocking=True)
+            time_stats['1_transfer_node_feat'] = t.last_duration
+            with Timer() as t:
+                offset = 0
+                for b in mfgs_on_gpu_0:
+                    n = b.num_src_nodes()
+                    b.srcdata['pos'] = inv[offset:offset+n]
                     offset += n
-        time_stats['2_transfer_edge_mapping'] = t.last_duration
-        
-        
-        count_stats['unique_edge_id_count'] = edge_uniq.shape[0]
-        count_stats['total_edge_id_count'] = cat_edge.shape[0]
-        
-        if profiler is not None:
-            profiler.increase_times(time_stats)
-            profiler.increase_counts(count_stats)
+            time_stats['2_transfer_node_mapping'] = t.last_duration
+            
+            
+            count_stats['unique_node_id_count'] = node_uniq.shape[0]
+            count_stats['total_node_id_count'] = cat_src.shape[0]
 
+
+        if edge_feats is not None:
+            with Timer() as t:
+                edges = [
+                    b.edata['ID']
+                    for mfg in mfgs_on_same_device_as_feat
+                    for b in mfg
+                    if 'ID' in b.edata
+                ]
+                cat_edge = torch.cat(edges, dim=0) if edges else torch.tensor([], dtype=torch.long)
+                edge_uniq, inv = torch.unique(cat_edge, sorted=False, return_inverse=True)  # 和feat相同的设备上做
+                inv = inv.to('cuda', non_blocking=True)
+            time_stats['0_compute_uniq_edge_id'] = t.last_duration
+            
+            with Timer() as t:   
+                if pinned:
+                    torch.index_select(edge_feats, 0, edge_uniq, out=efeat_buffs[:edge_uniq.shape[0]])
+                    edge_feats_on_gpu = efeat_buffs[:edge_uniq.shape[0]].cuda(non_blocking=True)
+                else:
+                    edge_feats_on_gpu = edge_feats[edge_uniq].to('cuda', non_blocking=True)  # GPU 上做
+            time_stats['1_transfer_edge_feat'] = t.last_duration
+            with Timer() as t:
+                offset = 0
+                for mfg in mfgs_on_gpu:
+                    for b in mfg:
+                        n = b.num_edges()
+                        b.edata['pos'] = inv[offset:offset+n]
+                        offset += n
+            time_stats['2_transfer_edge_mapping'] = t.last_duration
+            
+            
+            count_stats['unique_edge_id_count'] = edge_uniq.shape[0]
+            count_stats['total_edge_id_count'] = cat_edge.shape[0]
+            
+
+
+
+    else:
+
+        i = 0
+        if node_feats is not None:
+            for block in mfgs_on_gpu_0:
+                with Timer() as t:   
+                    if pinned:
+                        idx = block.srcdata['ID'].cpu().long()
+                        torch.index_select(node_feats, 0, idx, out=nfeat_buffs[i][:idx.shape[0]])
+                        block.srcdata['h'] = nfeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
+                        i += 1
+                    else:
+                        idx = block.srcdata['ID'].long()
+                        srch = node_feats[idx.to(node_feats.device)].float()
+                        block.srcdata['h'] = srch.cuda()
+                time_stats['1_transfer_node_feat'] = t.last_duration
+
+        
+        
+        i = 0
+        if edge_feats is not None:
+            for mfg in mfgs_on_gpu:
+                for block in mfg:
+                    if block.num_src_nodes() > block.num_dst_nodes():
+                        with Timer() as t:   
+                            if pinned:
+                                idx = block.edata['ID'].cpu().long()
+                                
+                                total_edge_id_count += idx.shape[0]
+                                unique_edge_id_count += torch.unique(idx).shape[0]
+                                torch.index_select(edge_feats, 0, idx, out=efeat_buffs[i][:idx.shape[0]])
+                                block.edata['f'] = efeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
+                                i += 1
+                            else:
+                                idx = block.edata['ID'].long()
+                                srch = edge_feats[idx.to(edge_feats.device)].float()
+                                block.edata['f'] = srch.cuda()
+                        time_stats['1_transfer_edge_feat'] = t.last_duration
+
+    if profiler is not None:
+        profiler.increase_time(time_stats)
+        profiler.increase_count(count_stats)
     return mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq
-
-
-

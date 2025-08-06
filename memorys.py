@@ -73,31 +73,58 @@ class MemoryMailbox():
 
 
     
-    def alc_pin_mem_mailbox_buf(self, sample_param, batch_size):
-        limit_of_n_nodes = int(batch_size * 3.3)
-        if sample_param.neighbor is not None:
-            for i in sample_param.neighbor:
-                limit_of_n_nodes *= i + 1
-        # e.g. neighbor = [10, 10] 
-        # limit_of_n_nodes = 3.3 * batch_size * (10 + 1) * (10 + 1) = 3.3 * batch_size * 11 * 11
-        # limit_of_n_nodes, i.e. the length of pinned_buffer[history_i], need to be larger than size of blocks[history_i].srcdata['ID']
-        self.pinned_node_memory_buffs = list()
-        self.pinned_node_memory_ts_buffs = list()
-        self.pinned_mailbox_buffs = list()
-        self.pinned_mailbox_ts_buffs = list()
-        
-        mem_dim = self.node_memory.shape[1]
-        mailbox_size = self.mails.shape[1]
-        mail_dim = self.mails.shape[2]
-        
-        for _ in range(sample_param.history):
-            # if history = 2, we need 2 buffers for each type
-            self.pinned_node_memory_buffs.append(torch.zeros([limit_of_n_nodes, mem_dim], pin_memory=True))
-            self.pinned_node_memory_ts_buffs.append(torch.zeros([limit_of_n_nodes], pin_memory=True))
-            self.pinned_mailbox_buffs.append(torch.zeros([limit_of_n_nodes, mailbox_size, mail_dim], pin_memory=True))
-            self.pinned_mailbox_ts_buffs.append(torch.zeros([limit_of_n_nodes, mailbox_size], pin_memory=True))
+    def alc_pin_mem_mailbox_buf(self, deduplication, sample_param, batch_size):
+        if not deduplication:
+            limit_of_n_nodes = int(batch_size * 3.3)
+            if sample_param.neighbor is not None:
+                for i in sample_param.neighbor:
+                    limit_of_n_nodes *= i + 1
+            # e.g. neighbor = [10, 10] 
+            # limit_of_n_nodes = 3.3 * batch_size * (10 + 1) * (10 + 1) = 3.3 * batch_size * 11 * 11
+            # limit_of_n_nodes, i.e. the length of pinned_buffer[history_i], need to be larger than size of blocks[history_i].srcdata['ID']
+            self.pinned_node_memory_buffs = list()
+            self.pinned_node_memory_ts_buffs = list()
+            self.pinned_mailbox_buffs = list()
+            self.pinned_mailbox_ts_buffs = list()
+            
+            mem_dim = self.node_memory.shape[1]
+            mailbox_size = self.mails.shape[1]
+            mail_dim = self.mails.shape[2]
+            
+            for _ in range(sample_param.history):
+                # if history = 2, we need 2 buffers for each type
+                self.pinned_node_memory_buffs.append(torch.zeros([limit_of_n_nodes, mem_dim], pin_memory=True))
+                self.pinned_node_memory_ts_buffs.append(torch.zeros([limit_of_n_nodes], pin_memory=True))
+                self.pinned_mailbox_buffs.append(torch.zeros([limit_of_n_nodes, mailbox_size, mail_dim], pin_memory=True))
+                self.pinned_mailbox_ts_buffs.append(torch.zeros([limit_of_n_nodes, mailbox_size], pin_memory=True))
+        else:
+            limit_of_n_nodes = int(batch_size * 3.3)
+            if sample_param.neighbor is not None:
+                for i in sample_param.neighbor:
+                    limit_of_n_nodes *= i + 1
+            # e.g. neighbor = [10, 10] 
+            # limit_of_n_nodes = 3.3 * batch_size * (10 + 1) * (10 + 1) = 3.3 * batch_size * 11 * 11
+            # limit_of_n_nodes, i.e. the length of pinned_buffer[history_i], need to be larger than size of blocks[history_i].srcdata['ID']
+            self.pinned_node_memory_buffs_size = 0
+            self.pinned_node_memory_ts_buffs = list()
+            self.pinned_mailbox_buffs_size = 0
+            self.pinned_mailbox_ts_buffs = list()
+            
+            mem_dim = self.node_memory.shape[1]
+            mailbox_size = self.mails.shape[1]
+            mail_dim = self.mails.shape[2]
+            
+            for _ in range(sample_param.history):
+                # if history = 2, we need 2 buffers for each type
+                self.pinned_node_memory_buffs_size += limit_of_n_nodes
+                self.pinned_node_memory_ts_buffs.append(torch.zeros([limit_of_n_nodes], pin_memory=True))
+                self.pinned_mailbox_buffs_size += limit_of_n_nodes
+                self.pinned_mailbox_ts_buffs.append(torch.zeros([limit_of_n_nodes, mailbox_size], pin_memory=True))
+            self.pinned_node_memory_ts_buffs =  torch.zeros([self.pinned_node_memory_buffs_size, mem_dim], pin_memory=True)
+            self.pinned_mailbox_buffs = torch.zeros([self.pinned_mailbox_buffs_size, mailbox_size, mail_dim], pin_memory=True)
 
-    def prep_input_mails(self, mfg, node_uniq, use_pinned_buffers=False):
+
+    def prep_input_mails(self, deduplication, mfg, node_uniq, use_pinned_buffers=False):
         # example: memory_mailbox.prep_input_mails(mfgs[0])
         # history = 2
         # mfgs = [[block1,block2],[block3,block4],[block5,block6]]
@@ -108,91 +135,64 @@ class MemoryMailbox():
             {'name': 'mem_input','src': self.mails, 'pinned': 'pinned_mailbox_buffs', },
             {'name': 'mail_ts','src': self.mail_ts, 'pinned': 'pinned_mailbox_ts_buffs'},
         ]
-        # def find_unique_idx(idx):
-        #     # find unique node ids in idx, and return the unique node ids and their inverse indices
-        #     unique_node_ids, inverse_indices = torch.unique(idx, return_inverse=True)
-        #     return unique_node_ids, inverse_indices
-        # def find_unique_idx_in_all_mfg(mfgs):
-        #     # find unique node ids in all mfgs, and return the unique node ids and their inverse indices
-        #     all_ids = torch.cat([block.srcdata['ID'].cpu().long() for block in mfgs])
-        #     return find_unique_idx(all_ids)
-        # def send_data_to_gpu(data, idx, pinned_buffer):
-        #     n_nodes = idx.shape[0]
-        #     if use_pinned_buffers:
-        #         # Use Pinned Memory Buffers
-        #         # Select data into the pinned buffer (CPU operation).
-        #         torch.index_select(data, 0, idx, out=pinned_buffer[:n_nodes])
-        #         # Copy the selected data from pinned buffer to GPU (non-blocking).
-        #         return pinned_buffer[:n_nodes].cuda(non_blocking=True)
-        #     else:
-        #         # Standard Method (No Pinned Buffers)
-        #         return data[idx].cuda()
-        # unique_idx_in_all_mfg = find_unique_idx_in_all_mfg(mfg)
-        # for item in data_map:
-        #     name = item['name']
-        #     src_tensor = item['src']
-        #     pinned_list = getattr(self, item['pinned'], None)
-            
-        #     can_use_pinned = use_pinned_buffers and len(pinned_list) > 0
-        #     if can_use_pinned:
-        #         # Use Pinned Memory Buffers
-        #         pinned_buffer = pinned_list[0]
+        deduplicated_mem = None
+        deduplicated_mem_input = None
         for hist_id, hist_block in enumerate(mfg):
             idx = hist_block.srcdata['ID'].cpu().long()
-            
-            total_id_count = idx.shape[0]
-            unique_id_count = torch.unique(idx).shape[0]
-            # print(f"[Send Memory and Mail to GPU]Node ID : Unique/Total: {unique_id_count}/{total_id_count}")
-            
             n_nodes = idx.shape[0]
-            deduplicated_mem = None
-            deduplicated_mem_input = None
             for item in data_map:
                 name = item['name']
-                can_deduplication = name in ['mem', 'mem_input']
-                
-                src_tensor = item['src']
-                pinned_list =  getattr(self, item['pinned'], None)
-                can_use_pinned = use_pinned_buffers and hist_id < len(pinned_list)
-                
-                if not can_deduplication:
-                    
-                    
-                    if can_use_pinned:
-                        # --- Use Pinned Memory Buffers ---
-                        pinned_buffer = pinned_list[hist_id]
-                        # Select data into the pinned buffer (CPU operation).
-                        # we can see that the length of pinned_buffer[history_i] need to be larger than size of block.srcdata['ID']
-                        torch.index_select(src_tensor, 0, idx, out=pinned_buffer[:n_nodes])
-                        # Copy the selected data from pinned buffer to GPU (non-blocking).
-                        gpu_data = pinned_buffer[:n_nodes].cuda(non_blocking=True)
-                    else:
-                        # --- Standard Method (No Pinned Buffers) ---
-                        # Select data and directly copy to GPU.
-                        gpu_data = src_tensor[idx].cuda()
-                        # Reshape mailbox data if needed.
-                    if name == 'mem_input':
-                        gpu_data = gpu_data.reshape(n_nodes, -1)
+                if not deduplication or name not in ['mem', 'mem_input']:
+                    src_tensor = item['src']
+                    pinned_list =  getattr(self, item['pinned'], None)
+                    can_use_pinned = use_pinned_buffers and hist_id < len(pinned_list)
+                    with Timer() as t:
+                        if can_use_pinned:
+                            # --- Use Pinned Memory Buffers ---
+                            pinned_buffer = pinned_list[hist_id]
+                            # Select data into the pinned buffer (CPU operation).
+                            # we can see that the length of pinned_buffer[history_i] need to be larger than size of block.srcdata['ID']
+                            torch.index_select(src_tensor, 0, idx, out=pinned_buffer[:n_nodes])
+                            # Copy the selected data from pinned buffer to GPU (non-blocking).
+                            gpu_data = pinned_buffer[:n_nodes].cuda(non_blocking=True)
+                        else:
+                            # --- Standard Method (No Pinned Buffers) ---
+                            # Select data and directly copy to GPU.
+                            gpu_data = src_tensor[idx].cuda()
+                            # Reshape mailbox data if needed.
+                        if name == 'mem_input':
+                            gpu_data = gpu_data.reshape(n_nodes, -1)
 
-                    # Assign the prepared data to the DGL block's source nodes.
-                    hist_block.srcdata[name] = gpu_data
-                elif name == 'mem':
-                    with Timer() as t:
-                        if can_use_pinned:
-                            torch.index_select(src_tensor, 0, node_uniq, out=pinned_buffer[:node_uniq.shape[0]])
-                            deduplicated_mem = pinned_buffer[:node_uniq.shape[0]].cuda(non_blocking=True)
-                        else:
-                            deduplicated_mem = src_tensor[node_uniq].to('cuda', non_blocking=True)
-                    profiler.increase_times({'3_transfer_node_mem': t.last_duration})
-                elif name == 'mem_input':
-                    with Timer() as t:
-                        if can_use_pinned:
-                            torch.index_select(src_tensor, 0, node_uniq, out=pinned_buffer[:node_uniq.shape[0]])
-                            deduplicated_mem_input = pinned_buffer[:node_uniq.shape[0]].cuda(non_blocking=True)
-                        else:
-                            deduplicated_mem_input = src_tensor[node_uniq].to('cuda', non_blocking=True)
-                        deduplicated_mem_input = deduplicated_mem_input.reshape(node_uniq.shape[0], -1)
-                    profiler.increase_times({'4_transfer_node_mail': t.last_duration})
+                        # Assign the prepared data to the DGL block's source nodes.
+                        hist_block.srcdata[name] = gpu_data
+                    
+                    if name == 'mem':
+                        profiler.increase_time({'3_transfer_node_mem': t.last_duration})
+                    elif name == 'mem_input':
+                        profiler.increase_time({'4_transfer_node_mail': t.last_duration})
+        if deduplication:
+            src_tensor = self.node_memory
+            pinned_buffer =  getattr(self, 'pinned_node_memory_buffs', None)
+            with Timer() as t:
+                if use_pinned_buffers:
+                    torch.index_select(src_tensor, 0, node_uniq, out=pinned_buffer[:node_uniq.shape[0]])
+                    deduplicated_mem = pinned_buffer[:node_uniq.shape[0]].cuda(non_blocking=True)
+                else:
+                    deduplicated_mem = src_tensor[node_uniq].to('cuda', non_blocking=True)
+            profiler.increase_time({'3_transfer_node_mem': t.last_duration})
+            
+            src_tensor = self.mails
+            pinned_buffer =  getattr(self, 'pinned_mailbox_buffs', None)
+            with Timer() as t:
+                if use_pinned_buffers:
+                    torch.index_select(src_tensor, 0, node_uniq, out=pinned_buffer[:node_uniq.shape[0]])
+                    deduplicated_mem_input = pinned_buffer[:node_uniq.shape[0]].cuda(non_blocking=True)
+                else:
+                    deduplicated_mem_input = src_tensor[node_uniq].to('cuda', non_blocking=True)
+                deduplicated_mem_input = deduplicated_mem_input.reshape(node_uniq.shape[0], -1)
+            profiler.increase_time({'4_transfer_node_mail': t.last_duration})
+
+
         return deduplicated_mem, deduplicated_mem_input
 
 
@@ -200,35 +200,43 @@ class MemoryMailbox():
 
 
     @torch.no_grad()
-    def update_memory(self, nid, memory, root_nodes, ts, neg_samples=1):
+    def update_memory(self, deduplication, nid, memory, root_nodes, ts, neg_samples=1):
         if nid is None:
             return
         num_true_src_dst = root_nodes.shape[0] // (neg_samples + 2) * 2
         nid = nid[:num_true_src_dst].to(self.device)
         
+        if deduplication:
         
-        nid = nid.long()[:num_true_src_dst]   # shape: [N]
-        memory = memory[:num_true_src_dst]    # shape: [N, D]
-        ts = ts[:num_true_src_dst]            # shape: [N]
-        idx = torch.arange(nid.size(0), device=nid.device)
-        
+            nid = nid.long()[:num_true_src_dst]   # shape: [N]
+            memory = memory[:num_true_src_dst]    # shape: [N, D]
+            ts = ts[:num_true_src_dst]            # shape: [N]
+            idx = torch.arange(nid.size(0), device=nid.device)
+            
 
-        with Timer() as t:
-            _, last_occurrence_idx = scatter_max(idx, nid)
-            uniq_nid = torch.unique(nid)
-            selected_idx = last_occurrence_idx[uniq_nid]
-        profiler.increase_times({'6_compute_uniq_root_node_id_for_mem_update': t.last_duration})
+            with Timer() as t:
+                _, last_occurrence_idx = scatter_max(idx, nid)
+                uniq_nid = torch.unique(nid)
+                selected_idx = last_occurrence_idx[uniq_nid]
+            profiler.increase_time({'6_compute_uniq_root_node_id_for_mem_update': t.last_duration})
 
-        with Timer() as t:
-            self.node_memory[uniq_nid] = memory[selected_idx].to(self.device)
-        profiler.increase_times({'7_transfer_back_root_node_mem': t.last_duration})
-        self.node_memory_ts[uniq_nid] = ts[selected_idx].to(self.device)
-        
-        
-        profiler.increase_counts({'unique_root_node_count': uniq_nid.shape[0],'total_root_node_count': nid.shape[0]})
-        
-            # 'unique_root_node_count': 0,
-            # 'total_root_node_count': 0
+            with Timer() as t:
+                self.node_memory[uniq_nid] = memory[selected_idx].to(self.device)
+            profiler.increase_time({'7_transfer_back_root_node_mem': t.last_duration})
+            self.node_memory_ts[uniq_nid] = ts[selected_idx].to(self.device)
+            
+            
+            profiler.increase_count({'unique_root_node_count': uniq_nid.shape[0],'total_root_node_count': nid.shape[0]})
+            
+        else:
+            with Timer() as t:
+                memory = memory[:num_true_src_dst].to(self.device)
+                self.node_memory[nid.long()] = memory
+                ts = ts[:num_true_src_dst].to(self.device)
+                self.node_memory_ts[nid.long()] = ts
+            profiler.increase_time({'7_transfer_back_root_node_mem': t.last_duration})
+
+
 
     @torch.no_grad()
     def update_mailbox(self, nid, memory: torch.Tensor, root_nodes, ts, edge_feats, mail_delivery_block, neg_samples=1):
