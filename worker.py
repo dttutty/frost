@@ -8,6 +8,7 @@ import torch.distributed as dist
 from memorys import  MemoryMailbox, MemoryParams
 from pipeline_thread import DataPipelineThread, MailboxUpdateThread
 from dgl.heterograph import DGLBlock
+import threading
 from dataclasses import dataclass
 from typing import List, Optional
 import torch
@@ -66,7 +67,7 @@ def run_training_step(deduplication,
                       ):
     # received_data: TransferData = scatter_receive()
     data_ready_event = threading.Event()
-    curr_thread = DataPipelineThread(data_ready_event, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src, prev_mailbox_memory_update_thread)
+    curr_thread = DataPipelineThread(deduplication, data_ready_event, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src, prev_mailbox_memory_update_thread)
     curr_thread.start()
     if prev_thread is not None:
         prev_thread, tot_loss, prev_mailbox_memory_update_thread = train_from_prefetch(deduplication, prev_thread, mailbox, memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread, prev_mailbox_memory_update_thread)

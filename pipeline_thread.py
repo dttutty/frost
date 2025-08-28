@@ -53,9 +53,10 @@ class DataPipelineThread(threading.Thread):
 
 
 class MailboxUpdateThread(threading.Thread):
-    def __init__(self, memory_mailbox, nid, memory, root_nodes, ts, mem_edge_feats, block):
+    def __init__(self, deduplication, memory_mailbox: MemoryMailbox, nid, memory, root_nodes, ts, mem_edge_feats, block):
         super().__init__()
         # --- Store all the necessary data for the update ---
+        self.deduplication = deduplication
         self.memory_mailbox = memory_mailbox
         self.nid = nid
         self.memory = memory
@@ -72,6 +73,6 @@ class MailboxUpdateThread(threading.Thread):
         # These two operations are safe to run in a separate thread.
         # They primarily involve tensor manipulations that PyTorch can handle concurrently.
         self.memory_mailbox.update_mailbox(self.nid, self.memory, self.root_nodes, self.ts, self.mem_edge_feats, self.block)
-        self.memory_mailbox.update_memory(self.nid, self.memory, self.root_nodes, self.ts)
+        self.memory_mailbox.update_memory(self.deduplication, self.nid, self.memory, self.root_nodes, self.ts)
 
         
