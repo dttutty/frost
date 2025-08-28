@@ -19,8 +19,6 @@ from memorys import GRUMemoryUpdater, RNNMemoryUpdater, TransformerMemoryUpdater
 local_rank = dist.get_rank()
 world_size = dist.get_world_size()
 host_rank = world_size - 1
-import time
-import threading
 
 def scatter_receive(src=host_rank):
     my = [None]
@@ -69,16 +67,16 @@ def run_training_step(deduplication,
     curr_thread = DataPipelineThread(deduplication, received_data, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src)
     curr_thread.start()
     if prev_thread is not None:
-        prev_thread, tot_loss = train_from_prefetch(prev_thread, mailbox, memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread)
+        prev_thread, tot_loss = train_from_prefetch(deduplication, prev_thread, mailbox, memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread)
     else:
         prev_thread = curr_thread
     # data_ready_event.wait() 
     return prev_thread, tot_loss
         
         
-        
+# forward(self, deduplication, mfgs, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem,  deduplicated_mem_input, neg_samples=1):
 
-def train_from_prefetch(prev_thread: DataPipelineThread, memory_mailbox: MemoryMailbox, memory_param: MemoryParams, model: DDP|GeneralModel, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread):
+def train_from_prefetch(is_deduplication, prev_thread: DataPipelineThread, memory_mailbox: MemoryMailbox, memory_param: MemoryParams, model: DDP|GeneralModel, optimizer, creterion, edge_feats, nccl_group, tot_loss, curr_thread):
     memory_updater = model.module.memory_updater
     prev_th_hold_notmoved_data = prev_thread.received_data
     prev_thread.join()
@@ -86,7 +84,7 @@ def train_from_prefetch(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
     # with get_tracer().log_event("Train: model forward and backward"):
     model.train()
     optimizer.zero_grad()
-    pred_pos, pred_neg = model(prev_thread.async_mfgs, prev_thread.node_feats_on_gpu, prev_thread.edge_feats_on_gpu, prev_thread.deduplicated_mem,  prev_thread.deduplicated_mem_input)
+    pred_pos, pred_neg = model(is_deduplication, prev_thread.async_mfgs, prev_thread.node_feats_on_gpu, prev_thread.edge_feats_on_gpu, prev_thread.deduplicated_mem,  prev_thread.deduplicated_mem_input)
     loss = creterion(pred_pos, torch.ones_like(pred_pos))
     loss += creterion(pred_neg, torch.zeros_like(pred_neg))
     loss.backward()
@@ -97,7 +95,7 @@ def train_from_prefetch(prev_thread: DataPipelineThread, memory_mailbox: MemoryM
         with torch.no_grad():
             mem_edge_feats = edge_feats[prev_th_hold_notmoved_data.eid] if edge_feats is not None else None
             memory_mailbox.update_mailbox(memory_updater.last_updated_nid, memory_updater.last_updated_memory, prev_th_hold_notmoved_data.root, prev_th_hold_notmoved_data.ts, mem_edge_feats, prev_th_hold_notmoved_data.block)
-            memory_mailbox.update_memory(memory_updater.last_updated_nid, memory_updater.last_updated_memory, prev_th_hold_notmoved_data.root, memory_updater.last_updated_ts)
+            memory_mailbox.update_memory(is_deduplication, memory_updater.last_updated_nid, memory_updater.last_updated_memory, prev_th_hold_notmoved_data.root, memory_updater.last_updated_ts)
             if memory_param.deliver_to == 'neighbors':
                 dist.barrier(group=nccl_group)
                 if local_rank == 0:
@@ -111,27 +109,27 @@ def run_evaluation_step(deduplication, prev_thread: DataPipelineThread, memory_m
     memory_updater: GRUMemoryUpdater|RNNMemoryUpdater|TransformerMemoryUpdater = model.module.memory_updater
     if prev_thread is not None:
         # finish last training mini-batch
-        prev_thread, tot_loss = train_from_prefetch( prev_thread, memory_mailbox,  memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, None)
+        prev_thread, tot_loss = train_from_prefetch(deduplication, prev_thread, memory_mailbox,  memory_param, model, optimizer, creterion, edge_feats, nccl_group, tot_loss, None)
         
     received_data : TransferData = scatter_receive()
     mfgs_on_cpu = received_data.mfgs
     mfgs_on_gpu = mfgs_to_cuda(mfgs_on_cpu)
-    _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(deduplication, mfgs_on_gpu, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=deduplicate_mfg_src, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
+    _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(deduplication, mfgs_on_cpu, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=deduplicate_mfg_src, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
     try:
 
         model.eval()
         with torch.no_grad():
             if memory_mailbox is not None:
-                deduplicated_mem,  deduplicated_mem_input = memory_mailbox.prep_input_mails(mfgs_on_gpu[0], node_uniq)
+                deduplicated_mem,  deduplicated_mem_input = memory_mailbox.prep_input_mails(deduplication, mfgs_on_gpu[0], node_uniq)
             # with get_tracer().log_event("Eval: model forward"):
             #     print(f"Eval: model forward, local_rank={local_rank}")
-            pred_pos, pred_neg = model(mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem,  deduplicated_mem_input)
+            pred_pos, pred_neg = model(deduplication, mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem,  deduplicated_mem_input)
             if memory_mailbox is not None:
                 
                 mem_edge_feats = edge_feats[received_data.eid] if edge_feats is not None else None
 
                 memory_mailbox.update_mailbox(memory_updater.last_updated_nid, memory_updater.last_updated_memory, received_data.root, received_data.ts, mem_edge_feats, received_data.block)
-                memory_mailbox.update_memory(memory_updater.last_updated_nid, memory_updater.last_updated_memory, received_data.root, memory_updater.last_updated_ts)
+                memory_mailbox.update_memory(deduplication, memory_updater.last_updated_nid, memory_updater.last_updated_memory, received_data.root, memory_updater.last_updated_ts)
                 
                 if memory_param.deliver_to == 'neighbors':
                     dist.barrier(group=nccl_group)
@@ -165,7 +163,7 @@ def alc_pin_nfeat_efeat_buf_w_deduplication(sample_param, batch_size, node_feats
         pinned_efeat_buffs = torch.zeros((edge_space, edge_feats.shape[1]), pin_memory=True)
 
     if node_feats is not None:
-        pinned_nfeat_buffs = torch.zeros((limit * sample_param.history, node_feats.shape[1]), pin_memory=True))
+        pinned_nfeat_buffs = torch.zeros((limit * sample_param.history, node_feats.shape[1]), pin_memory=True)
 
     return pinned_nfeat_buffs, pinned_efeat_buffs
 
@@ -226,7 +224,7 @@ def run_worker(deduplication, sample_param, memory_param, gnn_param, train_param
     else:
         pinned_nfeat_buffs, pinned_efeat_buffs = alc_pin_nfeat_efeat_buf_no_deduplication(sample_param, train_param.batch_size, node_feats, edge_feats)
     if memory_mailbox is not None:
-        memory_mailbox.alc_pin_mem_mailbox_buf(sample_param, deduplication, train_param.batch_size)
+        memory_mailbox.alc_pin_mem_mailbox_buf(deduplication, sample_param, train_param.batch_size)
     
     tot_loss = 0
     prev_thread = None

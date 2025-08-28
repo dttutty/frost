@@ -120,7 +120,7 @@ class MemoryMailbox():
                 self.pinned_node_memory_ts_buffs.append(torch.zeros([limit_of_n_nodes], pin_memory=True))
                 self.pinned_mailbox_buffs_size += limit_of_n_nodes
                 self.pinned_mailbox_ts_buffs.append(torch.zeros([limit_of_n_nodes, mailbox_size], pin_memory=True))
-            self.pinned_node_memory_ts_buffs =  torch.zeros([self.pinned_node_memory_buffs_size, mem_dim], pin_memory=True)
+            self.pinned_node_memory_buffs =  torch.zeros([self.pinned_node_memory_buffs_size, mem_dim], pin_memory=True)
             self.pinned_mailbox_buffs = torch.zeros([self.pinned_mailbox_buffs_size, mailbox_size, mail_dim], pin_memory=True)
 
 

@@ -90,14 +90,18 @@ class Profiler:
             
         print("="*80)
         
-        self.reset()
+
         
-    def reset(self):
-        """Reset all timing and count statistics."""
-        for key in self.times:
-            self.times[key] = 0.0
+
+    
+    def reset_counts(self):
+        """Reset only the count statistics."""
         for key in self.counts:
             self.counts[key] = 0
+    def reset_times(self):
+        """Reset only the timing statistics."""
+        for key in self.times:
+            self.times[key] = 0.0
 
 # Also include your Timer class here if it's in the same file
 class Timer:

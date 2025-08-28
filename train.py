@@ -7,15 +7,18 @@ parser.add_argument('--data', type=str, help='dataset name')
 parser.add_argument('--config', type=str, help='path to config file')
 parser.add_argument('--gpu', type=str, default='0', help='which GPU to use')
 parser.add_argument('--model_name', type=str, default='', help='name of stored model')
+parser.add_argument('--mem_dim', type=int, help='memory dimension=hidden dimension=gnn dimension')
 parser.add_argument('--use_inductive', action='store_true')
 parser.add_argument('--batch_size', type=int, help='batch size for training')
-parser.add_argument('--level_number', type=int, help='number of levels in the model')
+parser.add_argument('--n_layer', type=int, help='number of levels in the model')
+parser.add_argument('--n_history', type=int, help='number of history in the model')
+parser.add_argument('--history_duration', type=int, help='length of history in the model')
 parser.add_argument('--rand_edge_features', type=int, default=128, help='use random edge featrues')
 parser.add_argument('--rand_node_features', type=int, default=128, help='use random node featrues')
 parser.add_argument('--eval_neg_samples', type=int, default=1, help='how many negative samples to use at inference. Note: this will change the metric of test set to AP+AUC to AP+MRR!')
 parser.add_argument('--early_stop_patience', type=int, default=5, help='patience for early stopping. 0 to disable.')
 parser.add_argument('--train_neg_link_sampler', type=str, default='tgl_random', choices=['tgl_random', 'real', 'avoid_info_leak'], help='Type of negative link sampler to use for training')
-parser.add_argument('--neighbor', type=int, default=10, help='number of neighbors per layer')
+parser.add_argument('--n_neighbor', type=int, default=10, help='number of neighbors per layer')
 parser.add_argument('--deduplication', action='store_true', help='enable deduplication')
 args=parser.parse_args()
 
@@ -43,6 +46,15 @@ def set_seed(seed):
 node_feats, edge_feats = load_feat(args.data, args.rand_edge_features, args.rand_node_features)
 g, df = load_graph(args.data)
 sample_param, memory_param, gnn_param, train_param = parse_config(args.config)
+if args.n_history is not None:
+    sample_param.history = args.n_history
+if args.history_duration is not None:
+    sample_param.duration = args.history_duration
+if args.mem_dim is not None:
+    if memory_param.dim_out == 100:
+        memory_param.dim_out = args.mem_dim
+    if gnn_param.dim_out == 100:
+        gnn_param.dim_out = args.mem_dim
 if args.batch_size is not None:
     train_param.batch_size = args.batch_size
 train_edge_end = df[df['ext_roll'].gt(0)].index[0]
@@ -107,10 +119,11 @@ if  train_param.all_on_gpu:
     if mailbox is not None:
         mailbox.move_to_gpu()
 
-level_number = len(sample_param.neighbor)
-if args.level_number is not None:
-    level_number = args.level_number
-sample_param.neighbor = [args.neighbor] * level_number
+
+if args.n_layer is not None:
+    sample_param.layer = args.n_layer
+    sample_param.neighbor = [args.n_neighbor] * args.n_layer
+    gnn_param.layer = args.n_layer
 sampler = None
 if not sample_param.no_sample:
     sampler = ParallelSampler(g['indptr'], g['indices'], g['eid'], g['ts'].astype(np.float32),
@@ -222,7 +235,7 @@ if train_param.reorder is not None:
     for i in range(1, train_param.reorder):
         additional_idx = np.zeros(train_param.batch_size // train_param.reorder * i) - 1
         group_indexes.append(np.concatenate([additional_idx, base_idx])[:base_idx.shape[0]])
-for e in range(3):
+for e in range(5):
     print('Epoch {:d}:'.format(e))
     total_sampling_time = 0
     time_prep = 0

@@ -14,7 +14,7 @@ def scatter_receive(src=host_rank):
 
 import  torch.distributed as dist
 class DataPipelineThread(threading.Thread):
-    def __init__(self, received_data, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox: MemoryMailbox, memory_param, deduplicate_mfg_src):
+    def __init__(self,deduplication, received_data, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox: MemoryMailbox, memory_param, deduplicate_mfg_src):
         
         
         super(DataPipelineThread, self).__init__()
@@ -33,6 +33,7 @@ class DataPipelineThread(threading.Thread):
         self.mailbox = mailbox
         self.memory_param = memory_param
         self.deduplicate_mfg_src = deduplicate_mfg_src
+        self.deduplication = deduplication
 
     def run(self):
         # # 1. 等待主数据接收完成
@@ -58,9 +59,9 @@ class DataPipelineThread(threading.Thread):
             # print(local_rank, 'start thread')
             nids, eids = get_ids(self.mfgs_on_cpu, self.node_feats, self.edge_feats)
             mfgs_on_gpu = mfgs_to_cuda(self.mfgs_on_cpu)
-            mfgs, self.node_feats_on_gpu, self.edge_feats_on_gpu, self.node_uniq, self.edge_uniq = prepare_mfgs(self.mfgs_on_cpu, mfgs_on_gpu, self.node_feats, self.edge_feats, deduplicate_mfg_src=self.deduplicate_mfg_src, pinned=True, nfeat_buffs=self.pinned_nfeat_buffs, efeat_buffs=self.pinned_efeat_buffs, nids=nids, eids=eids)
+            mfgs, self.node_feats_on_gpu, self.edge_feats_on_gpu, self.node_uniq, self.edge_uniq = prepare_mfgs(self.deduplication, self.mfgs_on_cpu, mfgs_on_gpu, self.node_feats, self.edge_feats, deduplicate_mfg_src=self.deduplicate_mfg_src, pinned=True, nfeat_buffs=self.pinned_nfeat_buffs, efeat_buffs=self.pinned_efeat_buffs, nids=nids, eids=eids)
             if self.mailbox is not None:
-                self.deduplicated_mem,  self.deduplicated_mem_input = self.mailbox.prep_input_mails(mfgs_on_gpu[0], self.node_uniq, use_pinned_buffers=True)
+                self.deduplicated_mem,  self.deduplicated_mem_input = self.mailbox.prep_input_mails(self.deduplication, mfgs_on_gpu[0], self.node_uniq, use_pinned_buffers=True)
             self.async_mfgs = mfgs_on_gpu
 
     def clear_tensors(self):
