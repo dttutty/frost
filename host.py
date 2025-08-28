@@ -96,7 +96,7 @@ def sample_and_dispatch_batch(edges, memory_mailbox: MemoryMailbox, sampler: Par
 import pickle
 def sample_and_scatter_batch(edges, memory_mailbox: MemoryMailbox, sampler: ParallelSampler|None, neg_link_sampler, gnn_param, memory_param, num_gpus, sample_param : SampleParams,
                                    batch_to_send, local_rank, mode='eval', total_sample_time=None, ap_tot=None, auc_tot=None):
-    root_nodes = np.concatenate([edges.src.values, edges.dst.values, neg_link_sampler.sample(edges.src.values, edges.time.values)]).astype(np.int32)
+    root_nodes = np.concatenate([edges.src.values, edges.dst.values, neg_link_sampler.sample(edges.src.values, edges.time.values, edges.time.values)]).astype(np.int32)
     ts = np.concatenate([edges.time.values, edges.time.values, edges.time.values]).astype(np.float32)
     
     # example
@@ -342,6 +342,7 @@ def run_host(deduplication, sample_param, memory_param, gnn_param, train_param, 
 
 
     best_ap = best_e = tap = tauc = 0
+    
     for e in range(train_param.epoch):
         best_ap, best_e, tap, tauc = run_epoch(e, sampler, memory_mailbox, df, train_edge_end, val_edge_end, gnn_param, memory_param,
                                       cfg_batch_size, sample_param, train_param, train_neg_link_sampler, eval_neg_link_sampler,

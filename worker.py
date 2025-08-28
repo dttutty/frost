@@ -16,7 +16,7 @@ from numpy.typing import NDArray
 import numpy as np
 from torch.nn.parallel import DistributedDataParallel as DDP
 from memorys import GRUMemoryUpdater, RNNMemoryUpdater, TransformerMemoryUpdater
-# from viztracer import get_tracer
+from viztracer import get_tracer
 local_rank = dist.get_rank()
 world_size = dist.get_world_size()
 host_rank = world_size - 1
@@ -93,6 +93,7 @@ def train_from_prefetch(is_deduplication, prev_cpu_to_gpu_thread: DataPipelineTh
     optimizer.step()
     with torch.no_grad():
         tot_loss += float(loss)
+
     if memory_mailbox is not None:
         with torch.no_grad():
             mem_edge_feats = edge_feats[prev_th_hold_notmoved_data.eid] if edge_feats is not None else None

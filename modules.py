@@ -92,7 +92,6 @@ class GeneralModel(torch.nn.Module):
         # memory part
         if self.memory_param.type == 'node':
             # in place update memory of mfgs[0]
-            # only propagate 1 step, so mfgs[0] is enough
             self.memory_updater(mfgs[0]) 
         hist_out = list()
         
