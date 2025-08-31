@@ -93,10 +93,11 @@ def sample_and_dispatch_batch(edges, memory_mailbox: MemoryMailbox, sampler: Par
         return ap_tot, auc_tot
     else:
         return total_sample_time
+    
 import pickle
 def sample_and_scatter_batch(edges, memory_mailbox: MemoryMailbox, sampler: ParallelSampler|None, neg_link_sampler, gnn_param, memory_param, num_gpus, sample_param : SampleParams,
                                    batch_to_send, local_rank, mode='eval', total_sample_time=None, ap_tot=None, auc_tot=None):
-    root_nodes = np.concatenate([edges.src.values, edges.dst.values, neg_link_sampler.sample(edges.src.values, edges.time.values, edges.time.values)]).astype(np.int32)
+    root_nodes = np.concatenate([edges.src.values, edges.dst.values, neg_link_sampler.sample(edges.src.values, edges.time.values)]).astype(np.int32)
     ts = np.concatenate([edges.time.values, edges.time.values, edges.time.values]).astype(np.float32)
     
     # example
@@ -269,7 +270,7 @@ def plan_gpu_batches(num_samples, target_batch_size, ngpus=1):
 
 
     
-def run_epoch(e, sampler: ParallelSampler|None, memory_mailbox: MemoryMailbox|None, df, train_edge_end, val_edge_end, gnn_param, memory_param, cfg_batch_size, sample_param, train_param, neg_link_sampler, neg_link_sampler_for_eval, best_ap, best_e, tap, tauc, local_rank): 
+def run_epoch(e, sampler: ParallelSampler|None, memory_mailbox: MemoryMailbox|None, df, train_edge_end, val_edge_end, gnn_param, memory_param, cfg_batch_size, sample_param, train_param, train_neg_link_sampler, neg_link_sampler_for_eval, best_ap, best_e, tap, tauc, local_rank): 
 
     train_df = df[:train_edge_end]
     val_df = df[train_edge_end:val_edge_end]
@@ -304,7 +305,7 @@ def run_epoch(e, sampler: ParallelSampler|None, memory_mailbox: MemoryMailbox|No
         batches_assignment = batches_assignment_0
         for _, edges in train_df.groupby(batches_assignment):
             t_tot_s = time.time()
-            total_sample_time = sample_and_scatter_batch(edges, memory_mailbox, sampler, neg_link_sampler, gnn_param, memory_param, ngpus, sample_param,
+            total_sample_time = sample_and_scatter_batch(edges, memory_mailbox, sampler, train_neg_link_sampler, gnn_param, memory_param, ngpus, sample_param,
                                    batch_to_send, local_rank, mode='train', total_sample_time=total_sample_time)
             time_tot += time.time() - t_tot_s
             pbar.update(1)

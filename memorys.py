@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from typing import Optional, Literal
 from profiler import profiler, Timer
 from torch_scatter import scatter_max
+import numpy as np
+import torch
+
 @dataclass
 class MemoryParams:
     type: Optional[Literal["node"]] = "node"
@@ -296,7 +299,11 @@ class MemoryMailbox():
         
     def _prepare_mail_and_node_ids(self, root_nodes, ts, n_src, mail_delivery_block, src_mail, dst_mail):
         mail = None
-        mail_ts = None
+        
+        if isinstance(ts, np.ndarray):
+            mail_ts =  torch.from_numpy(ts[:n_src * 2]).to(self.device)
+        else:
+            mail_ts = ts[:n_src * 2].to(self.device)
         # TGN/JODIE
         if self.memory_param.deliver_to == 'self':
             src = torch.from_numpy(root_nodes[:n_src]).to(self.device) # e.g [1,2]
@@ -314,7 +321,7 @@ class MemoryMailbox():
             # nid = tensor([[1, 3], [2, 4]])
             # after reshape:
             # nid = tensor([1, 3, 2, 4])
-            mail_ts = ts[:n_src * 2].to(self.device)
+
             if mail_ts.dtype == torch.float64:
                 import pdb; pdb.set_trace()
             # find unique nid to update mailbox
@@ -327,7 +334,6 @@ class MemoryMailbox():
             unique_node_ids, inverse_indices = torch.unique(recipients_nid, return_inverse=True)
             src_of_edge = mail_delivery_block.edges()[0]
             mail = torch.cat([mail, mail[src_of_edge.long()]], dim=0)
-            mail_ts = ts[:n_src * 2].to(self.device)
             mail_ts = torch.cat([mail_ts, mail_ts[src_of_edge.long()]], dim=0)
         else:
             raise NotImplementedError
@@ -382,8 +388,9 @@ class BasicMemoryUpdater(torch.nn.Module):
             if self.dim_time > 0:
                 time_feat = self.time_enc(block.srcdata['ts'] - block.srcdata['mem_ts'])
                 block.srcdata['mem_input'] = torch.cat([block.srcdata['mem_input'], time_feat], dim=1)
-                
+
             updated_memory = self.updater(block.srcdata['mem_input'], block.srcdata['mem'])
+
             
             self.last_updated_ts = block.srcdata['ts'].detach().clone()
             self.last_updated_memory = updated_memory.detach().clone()

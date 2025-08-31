@@ -41,16 +41,36 @@ class DataPipelineThread(threading.Thread):
         with torch.cuda.stream(self.stream):
             nids, eids = get_ids(self.raw_mfgs, self.node_feats, self.edge_feats)
             gnn_mfgs = mfgs_to_cuda(self.raw_mfgs)
-            prepare_mfgs(self.deduplication, gnn_mfgs, self.node_feats, self.edge_feats, deduplicate_mfg_src=self.deduplicate_mfg_src, pinned=True, nfeat_buffs=self.pinned_nfeat_buffs, efeat_buffs=self.pinned_efeat_buffs, nids=nids, eids=eids)
-            self.prev_mailbox_memory_update_thread.join() if self.prev_mailbox_memory_update_thread is not None else None
+            _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(self.deduplication, self.raw_mfgs, gnn_mfgs, self.node_feats, self.edge_feats, deduplicate_mfg_src=self.deduplicate_mfg_src, pinned=True, nfeat_buffs=self.pinned_nfeat_buffs, efeat_buffs=self.pinned_efeat_buffs, nids=nids, eids=eids)
+            if self.prev_mailbox_memory_update_thread is not None:
+                self.prev_mailbox_memory_update_thread.join()
+                self.prev_mailbox_memory_update_thread.cleanup()
+                self.prev_mailbox_memory_update_thread = None
             if self.mailbox is not None:
-                self.mailbox.prep_input_mails(gnn_mfgs[0], use_pinned_buffers=True)
+                deduplicated_mem,  deduplicated_mem_input = self.mailbox.prep_input_mails(self.deduplication, gnn_mfgs[0], node_uniq, use_pinned_buffers=True)
+                    # def prep_input_mails(self, deduplication, mfg, node_uniq, use_pinned_buffers=False):
+
             self.async_mfgs = gnn_mfgs
+            self.node_feats_on_gpu = node_feats_on_gpu
+            self.edge_feats_on_gpu = edge_feats_on_gpu
+            self.node_uniq = node_uniq
+            self.edge_uniq = edge_uniq
+            self.deduplicated_mem = deduplicated_mem if self.mailbox is not None else None
+            self.deduplicated_mem_input = deduplicated_mem_input if self.mailbox is not None else None
 
-    def clear_tensors(self):
-        self.async_mfgs.clear()
-        # self.raw_mfgs.clear()
+    def cleanup(self):
+        self.async_mfgs = None
+        self.node_feats_on_gpu = None
+        self.edge_feats_on_gpu = None
+        self.node_uniq = None
+        self.edge_uniq = None
+        self.deduplicated_mem = None
+        self.deduplicated_mem_input = None
 
+        # --- 同时清理在CPU上的大型原始数据 ---
+        # 这些对象也可能占用大量RAM
+        self.received_data = None
+        self.raw_mfgs = None
 
 class MailboxUpdateThread(threading.Thread):
     def __init__(self, deduplication, memory_mailbox: MemoryMailbox, nid, memory, root_nodes, ts, mem_edge_feats, block):
@@ -75,4 +95,14 @@ class MailboxUpdateThread(threading.Thread):
         self.memory_mailbox.update_mailbox(self.nid, self.memory, self.root_nodes, self.ts, self.mem_edge_feats, self.block)
         self.memory_mailbox.update_memory(self.deduplication, self.nid, self.memory, self.root_nodes, self.ts)
 
-        
+    def cleanup(self):
+        """
+        Explicitly clear all tensor references held by this thread object.
+        """
+        self.nid = None
+        self.memory = None
+        self.root_nodes = None
+        self.ts = None
+        self.mem_edge_feats = None
+        self.block = None
+        # 其他可能持有的张量也在这里设为 None
