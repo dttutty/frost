@@ -18,6 +18,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from memorys import GRUMemoryUpdater, RNNMemoryUpdater, TransformerMemoryUpdater
 from torch.profiler import profile, record_function, ProfilerActivity
 import pickle
+import os, debugpy, time
+
 
 from viztracer import get_tracer
 local_rank = dist.get_rank()
@@ -73,18 +75,35 @@ def run_training_step(deduplication,
     curr_cpu_to_gpu_thread = DataPipelineThread(deduplication, data_ready_event, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src, prev_mailbox_memory_update_thread)
     curr_cpu_to_gpu_thread.start()
     if prev_cpu_to_gpu_thread is not None:
-         tot_loss, prev_mailbox_memory_update_thread = train_from_prefetch(deduplication, prev_cpu_to_gpu_thread, mailbox, model, optimizer, creterion, edge_feats, tot_loss)
+
+        prev_cpu_to_gpu_thread, tot_loss, prev_mailbox_memory_update_thread = train_from_prefetch(deduplication, prev_cpu_to_gpu_thread, mailbox, model, optimizer, creterion, edge_feats, tot_loss, curr_cpu_to_gpu_thread)
+    else:
+        prev_cpu_to_gpu_thread = curr_cpu_to_gpu_thread
     data_ready_event.wait() 
-    return curr_cpu_to_gpu_thread, tot_loss, prev_mailbox_memory_update_thread
+    return prev_cpu_to_gpu_thread, tot_loss, prev_mailbox_memory_update_thread
         
         
-def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: DataPipelineThread, memory_mailbox: MemoryMailbox, model: DDP|GeneralModel, optimizer, creterion, edge_feats, tot_loss):
+def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: DataPipelineThread, memory_mailbox: MemoryMailbox, model: DDP|GeneralModel, optimizer, creterion, edge_feats, tot_loss, curr_cpu_to_gpu_thread):
     memory_updater = model.module.memory_updater
     prev_th_hold_notmoved_data = cpu_to_gpu_thread.received_data
     cpu_to_gpu_thread.join()
 
     model.train()
     optimizer.zero_grad()
+    # print cpu_to_gpu_thread.async_mfgs
+    # print(f"--- [Rank {local_rank}] Checking devices before model call ---")
+    # if cpu_to_gpu_thread.async_mfgs:
+    #     # DGLBlock的device属性可以这么拿
+    #     print(f"  - async_mfgs[0].device: {cpu_to_gpu_thread.async_mfgs[0][0].device}")
+    # if cpu_to_gpu_thread.node_feats_on_gpu is not None:
+    #     print(f"  - node_feats_on_gpu.device: {cpu_to_gpu_thread.node_feats_on_gpu.device}")
+    # if cpu_to_gpu_thread.edge_feats_on_gpu is not None:
+    #     print(f"  - edge_feats_on_gpu.device: {cpu_to_gpu_thread.edge_feats_on_gpu.device}")
+    # if cpu_to_gpu_thread.deduplicated_mem is not None:
+    #     print(f"  - deduplicated_mem.device: {cpu_to_gpu_thread.deduplicated_mem.device}")
+    # if cpu_to_gpu_thread.deduplicated_mem_input is not None:
+    #     print(f"  - deduplicated_mem_input.device: {cpu_to_gpu_thread.deduplicated_mem_input.device}")
+    # print(f"----------------------------------------------------------")
     pred_pos, pred_neg = model(is_deduplication, cpu_to_gpu_thread.async_mfgs, cpu_to_gpu_thread.node_feats_on_gpu, cpu_to_gpu_thread.edge_feats_on_gpu, cpu_to_gpu_thread.deduplicated_mem,  cpu_to_gpu_thread.deduplicated_mem_input)
     cpu_to_gpu_thread.cleanup()
     cpu_to_gpu_thread = None
@@ -122,8 +141,8 @@ def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: DataPipelineThread,
 
 
     
-    
-    return tot_loss, mailbox_memory_update_thread
+    prev_cpu_to_gpu_thread = curr_cpu_to_gpu_thread
+    return prev_cpu_to_gpu_thread, tot_loss, mailbox_memory_update_thread
 
 
 def run_evaluation_step(deduplication, prev_cup_to_gpu_thread: DataPipelineThread|MailboxUpdateThread, memory_mailbox: MemoryMailbox,  memory_param, model: DDP|GeneralModel, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, tot_loss, deduplicate_mfg_src, prev_mailbox_memory_update_thread):
@@ -131,11 +150,17 @@ def run_evaluation_step(deduplication, prev_cup_to_gpu_thread: DataPipelineThrea
     if isinstance(prev_cup_to_gpu_thread, DataPipelineThread):
         # def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: DataPipelineThread, memory_mailbox: MemoryMailbox, model: DDP|GeneralModel, optimizer, creterion, edge_feats, tot_loss):
 
-        _, prev_mailbox_memory_update_thread = train_from_prefetch(deduplication, prev_cup_to_gpu_thread, memory_mailbox,   model, optimizer, creterion, edge_feats, tot_loss)
-        prev_cup_to_gpu_thread.cleanup()
+        prev_cup_to_gpu_thread, _, prev_mailbox_memory_update_thread = train_from_prefetch(deduplication, prev_cup_to_gpu_thread, memory_mailbox,   model, optimizer, creterion, edge_feats, tot_loss, None)
+        
+        if prev_cup_to_gpu_thread is not None:
+            prev_cup_to_gpu_thread.cleanup()
         prev_cup_to_gpu_thread = None
     prev_th_hold_notmoved_data : TransferData = scatter_receive()
     mfgs_on_cpu = prev_th_hold_notmoved_data.mfgs
+    if not mfgs_on_cpu or len(mfgs_on_cpu) == 0:
+        print(f"Rank {local_rank}: Received empty batch during evaluation, skipping step.")
+        # 该函数需要返回三个值，对于跳过的情况，返回 None, tot_loss, None 是合适的
+        return None, tot_loss, None
     mfgs_on_gpu = mfgs_to_cuda(mfgs_on_cpu)
     _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(deduplication, mfgs_on_cpu, mfgs_on_gpu, node_feats, edge_feats, deduplicate_mfg_src=deduplicate_mfg_src, pinned=True, nfeat_buffs=pinned_nfeat_buffs, efeat_buffs=pinned_efeat_buffs)
     
@@ -147,8 +172,9 @@ def run_evaluation_step(deduplication, prev_cup_to_gpu_thread: DataPipelineThrea
             prev_mailbox_memory_update_thread = None
         if memory_mailbox is not None:
             deduplicated_mem,  deduplicated_mem_input = memory_mailbox.prep_input_mails(deduplication, mfgs_on_gpu[0], node_uniq)
-        # with get_tracer().log_event("Eval: model forward"):
-        #     print(f"Eval: model forward, local_rank={local_rank}")
+
+
+
         pred_pos, pred_neg = model(deduplication, mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem,  deduplicated_mem_input)
         if memory_mailbox is not None:
             
@@ -245,7 +271,7 @@ def run_worker(deduplication, sample_param, memory_param, gnn_param, train_param
     find_unused_parameters = True if sample_param.history > 1 else False
     
     # ddp model
-    model = DDP(model, device_ids=[local_rank], process_group=nccl_group, output_device=local_rank, find_unused_parameters=find_unused_parameters)
+    model = DDP(model, device_ids=[0], process_group=nccl_group, output_device=local_rank, find_unused_parameters=find_unused_parameters)
     creterion = torch.nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=train_param.lr)
     

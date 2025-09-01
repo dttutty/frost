@@ -265,13 +265,20 @@ def prepare_mfgs(deduplication, mfgs_on_same_device_as_feat, mfgs_on_gpu, node_f
     edge_feats_on_gpu = None
     edge_uniq = None
     if deduplication: 
+        with Timer() as t:
+        # create a set to store unique node IDs
+            cat_src = torch.cat([b.srcdata['ID'] for b in mfgs_on_same_device_as_feat_0], dim=0)
+            node_uniq, inv = torch.unique(cat_src, sorted=False, return_inverse=True)  # 和feat相同的设备上做
+            inv = inv.to('cuda', non_blocking=True)
+        time_stats['0_compute_uniq_node_id'] = t.last_duration
+        with Timer() as t:
+            offset = 0
+            for b in mfgs_on_gpu_0:
+                n = b.num_src_nodes()
+                b.srcdata['pos'] = inv[offset:offset+n]
+                offset += n
+        time_stats['2_transfer_node_mapping'] = t.last_duration
         if node_feats is not None:
-            with Timer() as t:
-            # create a set to store unique node IDs
-                cat_src = torch.cat([b.srcdata['ID'] for b in mfgs_on_same_device_as_feat_0], dim=0)
-                node_uniq, inv = torch.unique(cat_src, sorted=False, return_inverse=True)  # 和feat相同的设备上做
-                inv = inv.to('cuda', non_blocking=True)
-            time_stats['0_compute_uniq_node_id'] = t.last_duration
             with Timer() as t:
                 if pinned:
                     torch.index_select(node_feats, 0, node_uniq, out=nfeat_buffs[:node_uniq.shape[0]])
@@ -279,13 +286,7 @@ def prepare_mfgs(deduplication, mfgs_on_same_device_as_feat, mfgs_on_gpu, node_f
                 else:
                     node_feats_on_gpu = node_feats[node_uniq].to('cuda', non_blocking=True)
             time_stats['1_transfer_node_feat'] = t.last_duration
-            with Timer() as t:
-                offset = 0
-                for b in mfgs_on_gpu_0:
-                    n = b.num_src_nodes()
-                    b.srcdata['pos'] = inv[offset:offset+n]
-                    offset += n
-            time_stats['2_transfer_node_mapping'] = t.last_duration
+
             
             
             count_stats['unique_node_id_count'] = node_uniq.shape[0]

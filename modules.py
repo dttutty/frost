@@ -120,28 +120,48 @@ class GeneralModel(torch.nn.Module):
         return hist_out
     
     def forward(self, deduplication, mfgs, node_feats_on_gpu, edge_feats_on_gpu, deduplicated_mem,  deduplicated_mem_input, neg_samples=1):
+        
+        import torch.distributed as dist
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        # print(f"rank={rank}, world_size={world_size}")
+        # print("GeneralModel forward")
         if deduplication:
+
             with Timer() as t:
                 if node_feats_on_gpu is not None:
                     for block in mfgs[0]:
-                            block.srcdata['h'] = node_feats_on_gpu[block.srcdata['pos']]
+                        # assert block.srcdata['pos'] is within the range of node_feats_on_gpu
+                        # print(f"1.block.srcdata['pos']: {block.srcdata['pos']}")
+                        assert torch.max(block.srcdata['pos']) < node_feats_on_gpu.shape[0], f"block.srcdata['pos'] max {torch.max(block.srcdata['pos'])} >= node_feats_on_gpu.shape[0] {node_feats_on_gpu.shape[0]}"
+                        block.srcdata['h'] = node_feats_on_gpu[block.srcdata['pos']]
                     del node_feats_on_gpu
                 if deduplicated_mem is not None:
                     for block in mfgs[0]:
+                        # print(f"2.block.srcdata['pos']: {block.srcdata['pos']}")
+                        assert torch.max(block.srcdata['pos']) < deduplicated_mem.shape[0], f"block.srcdata['pos'] max {torch.max(block.srcdata['pos'])} >= deduplicated_mem.shape[0] {deduplicated_mem.shape[0]}"
                         block.srcdata['mem'] = deduplicated_mem[block.srcdata['pos']]
                     del deduplicated_mem
                 if deduplicated_mem_input is not None:
                     for block in mfgs[0]:
+                        # print(f"3.block.srcdata['pos']: {block.srcdata['pos']}")
+                        assert torch.max(block.srcdata['pos']) < deduplicated_mem_input.shape[0], f"block.srcdata['pos'] max {torch.max(block.srcdata['pos'])} >= deduplicated_mem_input.shape[0] {deduplicated_mem_input.shape[0]}"
                         block.srcdata['mem_input'] = deduplicated_mem_input[block.srcdata['pos']]
                     del deduplicated_mem_input
                 if edge_feats_on_gpu is not None:
                     for blocks in mfgs:
                         for block in blocks:
-                                block.edata['f'] = edge_feats_on_gpu[block.edata['pos']]
+                            # print(f"4.block.edata['pos']: {block.edata['pos']}")
+                            assert torch.max(block.edata['pos']) < edge_feats_on_gpu.shape[0], f"block.edata['pos'] max {torch.max(block.edata['pos'])} >= edge_feats_on_gpu.shape[0] {edge_feats_on_gpu.shape[0]}"
+                            block.edata['f'] = edge_feats_on_gpu[block.edata['pos']]
                     del edge_feats_on_gpu
             profiler.increase_time({'5_mapping_back': t.last_duration})
+        # print("6.after deduplication")
         hist_out = self.get_emb(mfgs)
-        return self.edge_predictor(hist_out, neg_samples=neg_samples)
+        # print("7.fter get_emb")
+        return_value = self.edge_predictor(hist_out, neg_samples=neg_samples)
+        # print("8.after edge_predictor")
+        return return_value
 
 
 class NodeClassificationModel(torch.nn.Module):

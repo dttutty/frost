@@ -8,6 +8,8 @@ from profiler import profiler, Timer
 from torch_scatter import scatter_max
 import numpy as np
 import torch
+import torch.distributed as dist
+
 
 @dataclass
 class MemoryParams:
