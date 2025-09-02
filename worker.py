@@ -6,7 +6,8 @@ from modules import GeneralModel, GNNParams
 from utils import   mfgs_to_cuda, prepare_mfgs
 import torch.distributed as dist
 from memorys import  MemoryMailbox, MemoryParams
-from pipeline_thread import DataPipelineThread, MailboxUpdateThread
+from pipeline.move_data_to_gpu import MoveDataToGPU, TransferData
+from pipeline.mailbox_memory_update import update_mailbox_memory
 from dgl.heterograph import DGLBlock
 import threading
 from dataclasses import dataclass
@@ -32,13 +33,7 @@ def scatter_receive(src=host_rank):
     dist.scatter_object_list(my, [None] * world_size, src=src)
     return my[0]
 
-@dataclass
-class TransferData:
-    mfgs: Optional[List[List[DGLBlock]]]  = None
-    root: Optional[NDArray[np.int32]] = None
-    ts: Optional[NDArray[np.float32]] = None
-    eid: Optional[List] = None
-    block: Optional[List[List[DGLBlock]]]  = None
+
 
 def irecv_object(src=host_rank):
     """Initiates a non-blocking receive of an object and returns the request handle."""
@@ -56,7 +51,7 @@ def irecv_object(src=host_rank):
 
 def run_training_step(deduplication,
                       stream,
-                      prev_cpu_to_gpu_thread: DataPipelineThread,
+                      prev_cpu_to_gpu_thread: MoveDataToGPU,
                       mailbox: MemoryMailbox, 
                       memory_param: MemoryParams, 
                       model: DDP, 
@@ -68,22 +63,22 @@ def run_training_step(deduplication,
                       pinned_efeat_buffs, 
                       tot_loss,
                       deduplicate_mfg_src,
-                      prev_mailbox_memory_update_thread
-                      ):
+                      prev_mailbox_memory_update_thread, 
+                      nccl_group):
     # received_data: TransferData = scatter_receive()
     data_ready_event = threading.Event()
-    curr_cpu_to_gpu_thread = DataPipelineThread(deduplication, data_ready_event, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src, prev_mailbox_memory_update_thread)
+    curr_cpu_to_gpu_thread = MoveDataToGPU(deduplication, data_ready_event, host_rank, stream, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, edge_feats, mailbox, memory_param, deduplicate_mfg_src, prev_mailbox_memory_update_thread)
     curr_cpu_to_gpu_thread.start()
     if prev_cpu_to_gpu_thread is not None:
 
-        prev_cpu_to_gpu_thread, tot_loss, prev_mailbox_memory_update_thread = train_from_prefetch(deduplication, prev_cpu_to_gpu_thread, mailbox, model, optimizer, creterion, edge_feats, tot_loss, curr_cpu_to_gpu_thread)
+        prev_cpu_to_gpu_thread, tot_loss, prev_mailbox_memory_update_thread = train_from_prefetch(deduplication, prev_cpu_to_gpu_thread, mailbox, model, optimizer, creterion, edge_feats, tot_loss, curr_cpu_to_gpu_thread, memory_param, nccl_group)
     else:
         prev_cpu_to_gpu_thread = curr_cpu_to_gpu_thread
     data_ready_event.wait() 
     return prev_cpu_to_gpu_thread, tot_loss, prev_mailbox_memory_update_thread
         
         
-def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: DataPipelineThread, memory_mailbox: MemoryMailbox, model: DDP|GeneralModel, optimizer, creterion, edge_feats, tot_loss, curr_cpu_to_gpu_thread):
+def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: MoveDataToGPU, memory_mailbox: MemoryMailbox, model: DDP|GeneralModel, optimizer, creterion, edge_feats, tot_loss, curr_cpu_to_gpu_thread, memory_param,nccl_group):
     memory_updater = model.module.memory_updater
     prev_th_hold_notmoved_data = cpu_to_gpu_thread.received_data
     cpu_to_gpu_thread.join()
@@ -122,7 +117,7 @@ def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: DataPipelineThread,
             last_updated_ts = memory_updater.last_updated_ts.clone()
             #    def __init__(self, deduplication, memory_mailbox: MemoryMailbox, nid, memory, root_nodes, ts, mem_edge_feats, block):
 
-            mailbox_memory_update_thread = MailboxUpdateThread(
+            mailbox_memory_update_thread = update_mailbox_memory(
                 deduplication=is_deduplication,
                 memory_mailbox=memory_mailbox,
                 nid=last_updated_nid,
@@ -135,6 +130,7 @@ def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: DataPipelineThread,
             
             mailbox_memory_update_thread.start()
             # if memory_param.deliver_to == 'neighbors':
+            #     mailbox_memory_update_thread.join()
             #     dist.barrier(group=nccl_group)
             #     if local_rank == 0:
             #         memory_mailbox.update_next_mail_pos()
@@ -145,12 +141,12 @@ def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: DataPipelineThread,
     return prev_cpu_to_gpu_thread, tot_loss, mailbox_memory_update_thread
 
 
-def run_evaluation_step(deduplication, prev_cup_to_gpu_thread: DataPipelineThread|MailboxUpdateThread, memory_mailbox: MemoryMailbox,  memory_param, model: DDP|GeneralModel, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, tot_loss, deduplicate_mfg_src, prev_mailbox_memory_update_thread):
+def run_evaluation_step(deduplication, prev_cup_to_gpu_thread: MoveDataToGPU|update_mailbox_memory, memory_mailbox: MemoryMailbox,  memory_param, model: DDP|GeneralModel, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, tot_loss, deduplicate_mfg_src, prev_mailbox_memory_update_thread, nccl_group):
     memory_updater: GRUMemoryUpdater|RNNMemoryUpdater|TransformerMemoryUpdater = model.module.memory_updater
-    if isinstance(prev_cup_to_gpu_thread, DataPipelineThread):
-        # def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: DataPipelineThread, memory_mailbox: MemoryMailbox, model: DDP|GeneralModel, optimizer, creterion, edge_feats, tot_loss):
+    if isinstance(prev_cup_to_gpu_thread, MoveDataToGPU):
+        # def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: DataPipelineThread, memory_mailbox: MemoryMailbox, model: DDP|GeneralModel, optimizer, creterion, edge_feats, tot_loss, memory_param):
 
-        prev_cup_to_gpu_thread, _, prev_mailbox_memory_update_thread = train_from_prefetch(deduplication, prev_cup_to_gpu_thread, memory_mailbox,   model, optimizer, creterion, edge_feats, tot_loss, None)
+        prev_cup_to_gpu_thread, _, prev_mailbox_memory_update_thread = train_from_prefetch(deduplication, prev_cup_to_gpu_thread, memory_mailbox,   model, optimizer, creterion, edge_feats, tot_loss, None, memory_param, nccl_group)
         
         if prev_cup_to_gpu_thread is not None:
             prev_cup_to_gpu_thread.cleanup()
@@ -168,6 +164,10 @@ def run_evaluation_step(deduplication, prev_cup_to_gpu_thread: DataPipelineThrea
     with torch.no_grad():
         if prev_mailbox_memory_update_thread is not None:
             prev_mailbox_memory_update_thread.join()
+            if memory_param.deliver_to == 'neighbors':
+                dist.barrier(group=nccl_group)
+                if local_rank == 0:
+                    memory_mailbox.update_next_mail_pos()
             prev_mailbox_memory_update_thread.cleanup()
             prev_mailbox_memory_update_thread = None
         if memory_mailbox is not None:
@@ -183,7 +183,7 @@ def run_evaluation_step(deduplication, prev_cup_to_gpu_thread: DataPipelineThrea
             last_updated_nid  = memory_updater.last_updated_nid.clone()
             last_updated_memory = memory_updater.last_updated_memory.clone()
             last_updated_ts = memory_updater.last_updated_ts.clone()
-            curr_mailbox_memory_update_thread = MailboxUpdateThread(
+            curr_mailbox_memory_update_thread = update_mailbox_memory(
                 deduplication=deduplication,
                 memory_mailbox=memory_mailbox,
                 nid=last_updated_nid,
@@ -295,9 +295,9 @@ def run_worker(deduplication, sample_param, memory_param, gnn_param, train_param
             case 0:# train
                 # stream position 2
                 # stream = torch.cuda.Stream()
-                prev_cup_to_gpu_thread, tot_loss, prev_mailbox_memory_update_thread = run_training_step(deduplication, stream, prev_cup_to_gpu_thread, memory_mailbox,  memory_param, model, optimizer, creterion, node_feats, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, tot_loss, train_param.deduplicate_mfg_src, prev_mailbox_memory_update_thread)
+                prev_cup_to_gpu_thread, tot_loss, prev_mailbox_memory_update_thread = run_training_step(deduplication, stream, prev_cup_to_gpu_thread, memory_mailbox,  memory_param, model, optimizer, creterion, node_feats, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, tot_loss, train_param.deduplicate_mfg_src, prev_mailbox_memory_update_thread, nccl_group)
             case 1:# eval
-                prev_cup_to_gpu_thread, tot_loss, prev_mailbox_memory_update_thread = run_evaluation_step(deduplication, prev_cup_to_gpu_thread, memory_mailbox, memory_param, model, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, tot_loss, train_param.deduplicate_mfg_src, prev_mailbox_memory_update_thread)
+                prev_cup_to_gpu_thread, tot_loss, prev_mailbox_memory_update_thread = run_evaluation_step(deduplication, prev_cup_to_gpu_thread, memory_mailbox, memory_param, model, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, tot_loss, train_param.deduplicate_mfg_src, prev_mailbox_memory_update_thread, nccl_group)
             case 2:# save model
                 if local_rank == 0:
                     torch.save(model.state_dict(), path_saver)

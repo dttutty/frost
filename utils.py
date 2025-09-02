@@ -357,8 +357,8 @@ def prepare_mfgs(deduplication, mfgs_on_same_device_as_feat, mfgs_on_gpu, node_f
                             if pinned:
                                 idx = block.edata['ID'].cpu().long()
                                 
-                                total_edge_id_count += idx.shape[0]
-                                unique_edge_id_count += torch.unique(idx).shape[0]
+                                # total_edge_id_count += idx.shape[0]
+                                # unique_edge_id_count += torch.unique(idx).shape[0]
                                 torch.index_select(edge_feats, 0, idx, out=efeat_buffs[i][:idx.shape[0]])
                                 block.edata['f'] = efeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
                                 i += 1
