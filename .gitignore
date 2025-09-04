@@ -11,3 +11,5 @@ __pycache__/
 models/
 *.pt
 traces/
+temp/
+logs/

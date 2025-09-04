@@ -339,11 +339,12 @@ def prepare_mfgs(deduplication, mfgs_on_same_device_as_feat, mfgs_on_gpu, node_f
                         idx = block.srcdata['ID'].cpu().long()
                         torch.index_select(node_feats, 0, idx, out=nfeat_buffs[i][:idx.shape[0]])
                         block.srcdata['h'] = nfeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
-                        i += 1
                     else:
                         idx = block.srcdata['ID'].long()
                         srch = node_feats[idx.to(node_feats.device)].float()
                         block.srcdata['h'] = srch.cuda()
+                    
+                    i += 1
                 time_stats['1_transfer_node_feat'] = t.last_duration
 
         
@@ -361,11 +362,12 @@ def prepare_mfgs(deduplication, mfgs_on_same_device_as_feat, mfgs_on_gpu, node_f
                                 # unique_edge_id_count += torch.unique(idx).shape[0]
                                 torch.index_select(edge_feats, 0, idx, out=efeat_buffs[i][:idx.shape[0]])
                                 block.edata['f'] = efeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
-                                i += 1
                             else:
                                 idx = block.edata['ID'].long()
                                 srch = edge_feats[idx.to(edge_feats.device)].float()
                                 block.edata['f'] = srch.cuda()
+
+                            i += 1
                         time_stats['1_transfer_edge_feat'] = t.last_duration
 
     if profiler is not None:

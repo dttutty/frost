@@ -71,6 +71,10 @@ class MoveDataToGPU(threading.Thread):
             self.deduplicated_mem_input = deduplicated_mem_input if self.mailbox is not None else None
 
     def cleanup(self):
+        # finish all work enqueued on this stream
+        if getattr(self, "stream", None) is not None:
+            self.stream.synchronize()
+            
         # clear data on GPU side
         self.async_mfgs = None
         self.node_feats_on_gpu = None
@@ -83,3 +87,9 @@ class MoveDataToGPU(threading.Thread):
         # clear data on CPU side
         self.received_data = None
         self.mfgss_on_cpu = None
+        
+        # optional: drop the stream itself if this object won't be reused
+        if getattr(self, "stream", None) is not None:
+            s = self.stream
+            self.stream = None
+            del s

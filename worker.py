@@ -79,7 +79,8 @@ def run_training_step(deduplication,
         
         
 def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: MoveDataToGPU, memory_mailbox: MemoryMailbox, model: DDP|GeneralModel, optimizer, creterion, edge_feats, tot_loss, curr_cpu_to_gpu_thread, memory_param,nccl_group):
-    memory_updater = model.module.memory_updater
+    if memory_param.type != 'none':
+        memory_updater = model.module.memory_updater
     prev_th_hold_notmoved_data = cpu_to_gpu_thread.received_data
     cpu_to_gpu_thread.join()
 
@@ -99,6 +100,7 @@ def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: MoveDataToGPU, memo
     # if cpu_to_gpu_thread.deduplicated_mem_input is not None:
     #     print(f"  - deduplicated_mem_input.device: {cpu_to_gpu_thread.deduplicated_mem_input.device}")
     # print(f"----------------------------------------------------------")
+    torch.cuda.current_stream().wait_stream(cpu_to_gpu_thread.stream)
     pred_pos, pred_neg = model(is_deduplication, cpu_to_gpu_thread.async_mfgs, cpu_to_gpu_thread.node_feats_on_gpu, cpu_to_gpu_thread.edge_feats_on_gpu, cpu_to_gpu_thread.deduplicated_mem,  cpu_to_gpu_thread.deduplicated_mem_input)
     cpu_to_gpu_thread.cleanup()
     cpu_to_gpu_thread = None
@@ -108,7 +110,7 @@ def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: MoveDataToGPU, memo
     optimizer.step()
     with torch.no_grad():
         tot_loss += loss.item()
-
+    mailbox_memory_update_thread = None
     if memory_mailbox is not None:
         with torch.no_grad():
             mem_edge_feats = edge_feats[prev_th_hold_notmoved_data.eid] if edge_feats is not None else None
@@ -142,7 +144,8 @@ def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: MoveDataToGPU, memo
 
 
 def run_evaluation_step(deduplication, prev_cup_to_gpu_thread: MoveDataToGPU|update_mailbox_memory, memory_mailbox: MemoryMailbox,  memory_param, model: DDP|GeneralModel, optimizer, creterion, edge_feats, pinned_nfeat_buffs, pinned_efeat_buffs, node_feats, tot_loss, deduplicate_mfg_src, prev_mailbox_memory_update_thread, nccl_group):
-    memory_updater: GRUMemoryUpdater|RNNMemoryUpdater|TransformerMemoryUpdater = model.module.memory_updater
+    if memory_param.type != 'none':
+        memory_updater: GRUMemoryUpdater|RNNMemoryUpdater|TransformerMemoryUpdater = model.module.memory_updater
     if isinstance(prev_cup_to_gpu_thread, MoveDataToGPU):
         # def train_from_prefetch(is_deduplication, cpu_to_gpu_thread: DataPipelineThread, memory_mailbox: MemoryMailbox, model: DDP|GeneralModel, optimizer, creterion, edge_feats, tot_loss, memory_param):
 
@@ -162,6 +165,9 @@ def run_evaluation_step(deduplication, prev_cup_to_gpu_thread: MoveDataToGPU|upd
     
     model.eval()
     with torch.no_grad():
+        deduplicated_mem =  None
+        deduplicated_mem_input = None
+        curr_mailbox_memory_update_thread = None
         if prev_mailbox_memory_update_thread is not None:
             prev_mailbox_memory_update_thread.join()
             if memory_param.deliver_to == 'neighbors':
@@ -304,10 +310,85 @@ def run_worker(deduplication, sample_param, memory_param, gnn_param, train_param
             case 3:# load model
                 model.load_state_dict(torch.load(path_saver, map_location=torch.device('cuda:0')))
             case 4:# pass
-                pass
+                recv = [None]
+                dist.scatter_object_list(recv, None, src=host_rank)
+                continue
             case 5:# reduce loss
                 dist.gather_object(float(tot_loss), None, dst=host_rank)
                 tot_loss = 0
+            case 6:  # sync barrier
+                dist.barrier()
+                continue
+            case 7:  # cleanup: join threads, flush CUDA, free buffers
+                try:
+                    stream.synchronize()
+                except Exception:
+                    pass
+                # join the in-flight prefetch thread if any
+                if prev_cup_to_gpu_thread is not None:
+                    prev_cup_to_gpu_thread.join()
+                    try:
+                        prev_cup_to_gpu_thread.cleanup()
+                    except Exception:
+                        pass
+                    prev_cup_to_gpu_thread = None
+                    
+                if prev_mailbox_memory_update_thread is not None:
+                    prev_mailbox_memory_update_thread.join()
+                    try:
+                        prev_mailbox_memory_update_thread.cleanup()
+                    except Exception:
+                        pass
+                    prev_mailbox_memory_update_thread = None
+
+                # flush mailbox pinned buffers if you have an API; otherwise skip
+                try:
+                    if memory_mailbox is not None and hasattr(memory_mailbox, "finalize"):
+                        memory_mailbox.finalize()
+                except Exception:
+                    pass
+
+                # make sure CUDA stream and device are drained
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+                continue
+            case 8:  # abort now
+                import sys, os
+                sys.exit(130)  # or: os._exit(130)
+            case 9:  # abort_ok
+                import sys, os, time
+                # 尽量把还在排队的本地活清一下（如果你没有前面的 'cleanup'）
+                try: torch.cuda.synchronize()
+                except: pass
+                sys.stdout.flush(); sys.stderr.flush()
+                time.sleep(0.02)
+                os._exit(0)
             case _:
-                raise ValueError(f"Unhandled state: {int(state_buf.item())}")
+                pass
             
+
+    # graceful shutdown (after loop break)
+    try:
+        # ensure model/optim are freed so communicators can tear down
+        del optimizer
+        # DDP wrapper keeps refs; drop it so NCCL communicators can close
+        model = None
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+    # 进入与 host 对齐的最终 barrier（默认组）
+    dist.barrier()
+
+    # 如果你创建过自定义进程组 nccl_group，单独销毁它
+    try:
+        if nccl_group is not None:
+            dist.destroy_process_group(nccl_group)
+    except Exception:
+        pass
+
+    dist.destroy_process_group()  # 默认组
+

@@ -15,6 +15,8 @@ parser=argparse.ArgumentParser()
 parser.add_argument('--data', type=str, help='dataset name')
 parser.add_argument('--config', type=str, help='path to config file')
 parser.add_argument('--seed', type=int, default=0, help='random seed to use')
+parser.add_argument('--rand_edge_features', type=int, default=128, help='use random edge featrues')
+parser.add_argument('--rand_node_features', type=int, default=128, help='use random node featrues')
 parser.add_argument('--omp_num_threads', type=int, default=8)
 parser.add_argument('--deduplication', action='store_true', help='enable deduplication')
 
@@ -25,6 +27,8 @@ local_rank = dist.get_rank()
 world_size = dist.get_world_size()
 assert world_size == device_count + 1, "world size should be num_gpus + 1"
 nccl_group = dist.new_group(ranks=list(range(world_size - 1)), backend='nccl')
+
+os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
 
 os.environ['OMP_NUM_THREADS'] = str(args.omp_num_threads)
 os.environ['MKL_NUM_THREADS'] = str(args.omp_num_threads)
@@ -101,7 +105,7 @@ def init_shared_array(name, tensor_on_rank0=None):
 set_seed(args.seed)
 # inside main init
 if local_rank == 0:
-    node_np, edge_np = load_feat(args.data)
+    node_np, edge_np = load_feat(args.data, args.rand_edge_features, args.rand_node_features)
 else:
     node_np = edge_np = None
 # create/get shared arrays
@@ -117,6 +121,7 @@ if local_rank == world_size - 1:
     
 num_nodes = bget_node_count_from_graph(g if local_rank == world_size - 1 else None)
 sample_param, memory_param, gnn_param, train_param = parse_config(args.config)
+train_param.batch_size = int(train_param.batch_size)
 
 
 def init_shared(name, shape, dtype):

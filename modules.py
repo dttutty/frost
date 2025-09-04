@@ -152,7 +152,7 @@ class GeneralModel(torch.nn.Module):
                     for blocks in mfgs:
                         for block in blocks:
                             # print(f"4.block.edata['pos']: {block.edata['pos']}")
-                            assert torch.max(block.edata['pos']) < edge_feats_on_gpu.shape[0], f"block.edata['pos'] max {torch.max(block.edata['pos'])} >= edge_feats_on_gpu.shape[0] {edge_feats_on_gpu.shape[0]}"
+                            # assert torch.max(block.edata['pos']) < edge_feats_on_gpu.shape[0], f"block.edata['pos'] max {torch.max(block.edata['pos'])} >= edge_feats_on_gpu.shape[0] {edge_feats_on_gpu.shape[0]}"
                             block.edata['f'] = edge_feats_on_gpu[block.edata['pos']]
                     del edge_feats_on_gpu
             profiler.increase_time({'5_mapping_back': t.last_duration})

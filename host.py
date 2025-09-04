@@ -49,8 +49,8 @@ def sample_and_dispatch_batch(edges, memory_mailbox: MemoryMailbox, sampler: Par
     """Samples data and dispatches it to workers as tensor dictionaries."""
     root_nodes = np.concatenate([edges.src.values, edges.dst.values, neg_link_sampler.sample(edges.src.values, edges.time.values)]).astype(np.int32)
     ts = np.concatenate([edges.time.values, edges.time.values, edges.time.values]).astype(np.float32)
-    
-    ret, _ = sampler_wrapper(sample_param.no_neg, root_nodes, sampler, ts, total_sample_time)
+    if sampler is not None:
+        ret, _ = sampler_wrapper(sample_param.no_neg, root_nodes, sampler, ts, total_sample_time)
     
     if gnn_param.arch != 'identity':
         grouped_mfgs = to_dgl_blocks(ret, sample_param.history, cuda=False)
@@ -107,7 +107,8 @@ def sample_and_scatter_batch(edges, memory_mailbox: MemoryMailbox, sampler: Para
     #                         sample_param.history, float(sample_param.duration))
 
     # print('Sample nodes:', root_nodes.shape[0], 'edges:', edges.shape[0], 'ts:', ts.shape[0])
-    ret, total_sample_time = sampler_wrapper(sample_param.no_neg, root_nodes,  sampler, ts, total_sample_time)
+    if sampler is not None:
+        ret, total_sample_time = sampler_wrapper(sample_param.no_neg, root_nodes,  sampler, ts, total_sample_time)
     # print('Sampled blocks:', len(ret), 'total sample time:', total_sample_time)
     if gnn_param.arch != 'identity':
         # eg. if sample_param.history = 3, sample_param.layer = 2, ret = [block1,block2, block3,block4, block5,block6]
@@ -254,12 +255,18 @@ def broadcast_state(state, src=local_rank):
         'save': 2,
         'load': 3,
         'pass': 4,
-        'loss_reduce': 5
+        'loss_reduce': 5,
+        'sync': 6,  # <-- add this
+        'cleanup': 7,  # <-- add this
+        'abort': 8,
+        
+        'abort_ok': 9,   # 新增：无错退出
     }
     state_buf.fill_(map[state])
     dist.broadcast(state_buf, src=src)
 
 def plan_gpu_batches(num_samples, target_batch_size, ngpus=1):
+    target_batch_size = int(target_batch_size)          # <--- add
     # This is to ensure the total number of training iterations is an integer multiple of the number of GPUs
     # eg: num_samples = 13345, target_batch_size = 1000, ngpus = 4
     approx_iterations = num_samples // target_batch_size # approximate number of iterations, 13
@@ -275,10 +282,15 @@ def run_epoch(e, sampler: ParallelSampler|None, memory_mailbox: MemoryMailbox|No
     train_df = df[:train_edge_end]
     val_df = df[train_edge_end:val_edge_end]
     test_df = df[val_edge_end:]
-    print('Epoch {:d}:'.format(e))
+    now_ts = time.time()
+    local_time = time.localtime(now_ts)
+    ms = int((now_ts - int(now_ts)) * 1000)
+    time_str = time.strftime("%Y-%m-%d %H:%M:%S", local_time) + f".{ms:03d}"
+    print(f"{time_str} Epoch {e}:")
     total_sample_time = 0
     time_tot = 0
-    sampler.reset()
+    if sampler is not None:
+        sampler.reset()
     if memory_mailbox is not None:
         memory_mailbox.reset()
     # training
@@ -349,8 +361,34 @@ def run_host(deduplication, sample_param, memory_param, gnn_param, train_param, 
                                       cfg_batch_size, sample_param, train_param, train_neg_link_sampler, eval_neg_link_sampler,
                                       best_ap, best_e, tap, tauc, local_rank)
 
-    print('Best model at epoch {}.'.format(best_e))
+    
+    now_ts = time.time()
+    local_time = time.localtime(now_ts)
+    ms = int((now_ts - int(now_ts)) * 1000)
+    time_str = time.strftime("%Y-%m-%d %H:%M:%S", local_time) + f".{ms:03d}"
+    print('{} Best model at epoch {}.'.format(time_str, best_e))
     print('\ttest ap:{:4f}  test auc:{:4f}'.format(tap, tauc))
+    broadcast_state('abort')
 
-    # let all process exit
-    broadcast_state('exit')
+    # broadcast_state('cleanup')   # map['cleanup'] = 7
+
+    # # let all process exit
+    # broadcast_state('pass')
+    # scatter_send([None] * ngpus)     # all ranks will call scatter
+    
+    # broadcast_state('sync')  
+    # dist.barrier() 
+    # # Now safely exit
+    # broadcast_state('exit')
+    # dist.barrier() 
+    
+    # try:
+    #     if sampler is not None and hasattr(sampler, "close"):
+    #         sampler.close()
+    #     if memory_mailbox is not None and hasattr(memory_mailbox, "finalize"):
+    #         memory_mailbox.finalize()
+    # except Exception:
+    #     pass
+    
+    # dist.destroy_process_group()
+

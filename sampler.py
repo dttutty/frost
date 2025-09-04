@@ -24,7 +24,6 @@ class SampleParams:
     no_sample: Optional[bool] = False
     no_neg: Optional[bool] = False
 
-    
 class NegLinkSampler:
 
     def __init__(self, g):
