@@ -1,5 +1,5 @@
 #!/bin/bash
-source ~/miniconda3/etc/profile.d/conda.sh
+source ~/miniforge3/etc/profile.d/conda.sh
 conda activate simple_py310
 # 最终版自动消融实验运行脚本
 # 说明：

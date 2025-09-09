@@ -2,7 +2,7 @@
 
 # --- Configuration ---
 # 请确保这里的路径是正确的
-TORCHRUN_BIN="/home/sqp17/miniconda3/envs/simple_py310/bin/torchrun"
+TORCHRUN_BIN="/home/sqp17/miniforge3/envs/simple_py310/bin/torchrun"
 CONFIG_DIR="/home/sqp17/Projects/tgl/config"
 DATASET="WIKI"
 

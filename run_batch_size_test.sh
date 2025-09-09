@@ -19,7 +19,7 @@ BATCH_SIZES=(500 1000 1500 2000 2500 3000 3500 4000 4500 5000)
 # BATCH_SIZES=(500 )
 
 # 请确保这里的路径是正确的
-PYTHON_BIN="/home/sqp17/miniconda3/envs/simple_py310/bin/python"
+PYTHON_BIN="/home/sqp17/miniforge3/envs/simple_py310/bin/python"
 PROGRAM_PATH="/home/sqp17/Projects/tgl/train.py"
 CONFIG_DIR="/home/sqp17/Projects/tgl/config"
 DATASET="LASTFM"

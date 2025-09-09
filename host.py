@@ -368,27 +368,27 @@ def run_host(deduplication, sample_param, memory_param, gnn_param, train_param, 
     time_str = time.strftime("%Y-%m-%d %H:%M:%S", local_time) + f".{ms:03d}"
     print('{} Best model at epoch {}.'.format(time_str, best_e))
     print('\ttest ap:{:4f}  test auc:{:4f}'.format(tap, tauc))
-    broadcast_state('abort')
+    # broadcast_state('abort')
 
-    # broadcast_state('cleanup')   # map['cleanup'] = 7
+    broadcast_state('cleanup')   # map['cleanup'] = 7
 
-    # # let all process exit
-    # broadcast_state('pass')
-    # scatter_send([None] * ngpus)     # all ranks will call scatter
+    # let all process exit
+    broadcast_state('pass')
+    scatter_send([None] * ngpus)     # all ranks will call scatter
     
-    # broadcast_state('sync')  
-    # dist.barrier() 
-    # # Now safely exit
-    # broadcast_state('exit')
-    # dist.barrier() 
+    broadcast_state('sync')  
+    dist.barrier() 
+    # Now safely exit
+    broadcast_state('exit')
+    dist.barrier() 
     
-    # try:
-    #     if sampler is not None and hasattr(sampler, "close"):
-    #         sampler.close()
-    #     if memory_mailbox is not None and hasattr(memory_mailbox, "finalize"):
-    #         memory_mailbox.finalize()
-    # except Exception:
-    #     pass
+    try:
+        if sampler is not None and hasattr(sampler, "close"):
+            sampler.close()
+        if memory_mailbox is not None and hasattr(memory_mailbox, "finalize"):
+            memory_mailbox.finalize()
+    except Exception:
+        pass
     
-    # dist.destroy_process_group()
+    dist.destroy_process_group()
 

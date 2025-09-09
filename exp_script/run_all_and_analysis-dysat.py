@@ -9,30 +9,31 @@ import subprocess
 from pathlib import Path
 from statistics import mean, stdev
 from datetime import datetime
-
+import shutil
 # ===== Fixed configuration =====
 WORKDIR = Path.cwd()
-CONFIG_DIR = Path("/home/sqp17/Projects/tgl/config/dist")
+
+CONFIG_DIR = WORKDIR / "config" / "dist"
 
 DATASETS = ["LASTFM", "MOOC", "REDDIT", "WIKI"]
 DATASETS = ["LASTFM"]
 CONFIG_NAMES = ["APAN", "DySAT", "JODIE", "TGAT", "TGN"]
-CONFIG_NAMES = ["DySAT"]
+CONFIG_NAMES = ["TGN"]
 
 
-OVERRIDE_EPOCHS = 5
+OVERRIDE_EPOCHS = 50
 
-TORCHRUN = Path("/home/sqp17/miniconda3/envs/simple_py310/bin/torchrun")
+TORCHRUN = shutil.which("torchrun") or f"{sys.executable} -m torch.distributed.run"
 NPROC_PER_NODE = 3
 MASTER_ADDR = "127.0.0.1"
 MASTER_PORT = 29500
 
-CUDA_VISIBLE_DEVICES = "4,5"
+CUDA_VISIBLE_DEVICES = "0,1"
 TORCH_DISTRIBUTED_DEBUG = "DETAIL"
 USE_DEDUPLICATION = True
 
 # Feature sweep
-FEATURE_DIMS = [64, 128, 192, 256]
+FEATURE_DIMS = [64, 128, 192, 256, 512]
 EDGE_DIMS = FEATURE_DIMS
 NODE_DIMS = FEATURE_DIMS
 CROSS_PRODUCT = False  # True => all edge x node; False => pair by index
@@ -45,14 +46,15 @@ SAMPLING_COMBOS = [
     # (1, [80]),
     (2, [10, 10]),
     (2, [10, 25]),
+    (2, [25, 25]),
     # (3, [5, 5, 5]),
 ]
 
 # Sampling single-parameter sweeps
-SAMPLING_HISTORY = [2, 3, 4]
-SAMPLING_DURATION = [10000, 20000, 30000]
+SAMPLING_HISTORY = [2, 3, 4, 5, 6]
+SAMPLING_DURATION = [10000, 20000, 30000,40000, 50000]
 SAMPLING_STRATEGY = ["uniform"]
-BATCH_SIZE = [1000, 2000, 4000, 8000]
+BATCH_SIZE = [1000, 2000, 4000, 8000, 16000, 32000]
 # =================================
 
 # Regex patterns for parsing logs
