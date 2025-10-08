@@ -31,8 +31,7 @@ def eval(eval_df,  memory_mailbox: MemoryMailbox, sampler: ParallelSampler|None,
     
     batch_to_send = []
     for _, rows in eval_df.groupby(batches_assignment):
-        ap_tot, auc_tot = sample_and_scatter_batch(rows, memory_mailbox, sampler, neg_link_sampler, gnn_param, memory_param, ngpus, sample_param,
-                                   batch_to_send, local_rank, mode='eval', ap_tot=ap_tot, auc_tot=auc_tot)
+        ap_tot, auc_tot = sample_and_scatter_batch(rows, memory_mailbox, sampler, neg_link_sampler, gnn_param, memory_param, ngpus, sample_param, batch_to_send, local_rank, mode='eval', ap_tot=ap_tot, auc_tot=auc_tot)
         pbar.update(1)
     ap = float(torch.tensor(ap_tot).mean())
     auc = float(torch.tensor(auc_tot).mean())
@@ -95,7 +94,7 @@ def sample_and_dispatch_batch(edges, memory_mailbox: MemoryMailbox, sampler: Par
         return total_sample_time
     
 import pickle
-def sample_and_scatter_batch(edges, memory_mailbox: MemoryMailbox, sampler: ParallelSampler|None, neg_link_sampler, gnn_param, memory_param, num_gpus, sample_param : SampleParams,
+def sample_and_scatter_batch(edges, memory_mailbox: MemoryMailbox | None, sampler: ParallelSampler|None, neg_link_sampler, gnn_param, memory_param, num_gpus, sample_param : SampleParams,
                                    batch_to_send, local_rank, mode='eval', total_sample_time=None, ap_tot=None, auc_tot=None):
     root_nodes = np.concatenate([edges.src.values, edges.dst.values, neg_link_sampler.sample(edges.src.values, edges.time.values)]).astype(np.int32)
     ts = np.concatenate([edges.time.values, edges.time.values, edges.time.values]).astype(np.float32)
@@ -262,6 +261,7 @@ def broadcast_state(state, src=local_rank):
         
         'abort_ok': 9,   # 新增：无错退出
     }
+    print(f"Host: Broadcasting state '{state}' ({map[state]}) to all workers...")
     state_buf.fill_(map[state])
     dist.broadcast(state_buf, src=src)
 
@@ -369,18 +369,26 @@ def run_host(deduplication, sample_param, memory_param, gnn_param, train_param, 
     print('{} Best model at epoch {}.'.format(time_str, best_e))
     print('\ttest ap:{:4f}  test auc:{:4f}'.format(tap, tauc))
     # broadcast_state('abort')
-
+    print("Host: Broadcasting CLEANUP command...")
     broadcast_state('cleanup')   # map['cleanup'] = 7
 
-    # let all process exit
-    broadcast_state('pass')
-    scatter_send([None] * ngpus)     # all ranks will call scatter
-    
-    broadcast_state('sync')  
-    dist.barrier() 
-    # Now safely exit
+    print("Host: Broadcasting EXIT command...")
     broadcast_state('exit')
-    dist.barrier() 
+
+
+
+    print("Host: Entering final barrier...")
+    dist.barrier()
+    print("Host: All processes reached the final barrier.")
+
+    # let all process exit
+    # broadcast_state('pass')
+    # scatter_send([None] * ngpus)     # all ranks will call scatter
+    
+    # broadcast_state('sync')  
+    # dist.barrier() 
+    # # Now safely exit
+    # dist.barrier() 
     
     try:
         if sampler is not None and hasattr(sampler, "close"):

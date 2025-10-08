@@ -118,4 +118,22 @@ class Timer:
         end_time = time.perf_counter()
         self.last_duration = end_time - self.start_time
         
+# @contextmanager
+# def Timer():
+#     class _Timer:
+#         def __init__(self):
+#             self.duration = 0
+#         @property
+#         def last_duration(self):
+#             return self.duration
+#     t = _Timer()
+#     start = torch.cuda.Event(enable_timing=True)
+#     end = torch.cuda.Event(enable_timing=True)
+#     start.record()
+#     yield t
+#     end.record()
+#     torch.cuda.synchronize()
+#     t.duration = start.elapsed_time(end) / 1000.0
+
+
 profiler = Profiler()

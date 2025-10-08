@@ -21,7 +21,7 @@ CONFIG_NAMES = ["APAN", "DySAT", "JODIE", "TGAT", "TGN"]
 CONFIG_NAMES = ["TGN"]
 
 
-OVERRIDE_EPOCHS = 50
+OVERRIDE_EPOCHS = 10
 
 TORCHRUN = shutil.which("torchrun") or f"{sys.executable} -m torch.distributed.run"
 NPROC_PER_NODE = 3

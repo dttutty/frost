@@ -18,15 +18,15 @@ CONFIG_DIR = WORKDIR / "config" / "dist"
 DATASETS = ["LASTFM", "MOOC", "REDDIT", "WIKI"]
 DATASETS = ["LASTFM"]
 CONFIG_NAMES = ["APAN", "DySAT", "JODIE", "TGAT", "TGN"]
-CONFIG_NAMES = ["TGN"]
+CONFIG_NAMES = ["TGAT"]
 
 
-OVERRIDE_EPOCHS = 50
+OVERRIDE_EPOCHS = 11
 
 TORCHRUN = shutil.which("torchrun") or f"{sys.executable} -m torch.distributed.run"
 NPROC_PER_NODE = 3
 MASTER_ADDR = "127.0.0.1"
-MASTER_PORT = 29500
+MASTER_PORT = 29501
 
 CUDA_VISIBLE_DEVICES = "0,1"
 TORCH_DISTRIBUTED_DEBUG = "DETAIL"
@@ -40,10 +40,11 @@ CROSS_PRODUCT = False  # True => all edge x node; False => pair by index
 
 # Sampling combination sweep (layer, neighbor_list)
 SAMPLING_COMBOS = [
-    # (1, [10]),
-    # (1, [20]),
-    # (1, [40]),
-    # (1, [80]),
+    (1, [10]),
+    (1, [20]),
+    (1, [40]),
+    (1, [80]),
+    (1, [160]),
     (2, [10, 10]),
     (2, [10, 25]),
     (2, [25, 25]),
@@ -51,9 +52,9 @@ SAMPLING_COMBOS = [
 ]
 
 # Sampling single-parameter sweeps
-SAMPLING_HISTORY = [2, 3, 4, 5, 6]
-SAMPLING_DURATION = [10000, 20000, 30000,40000, 50000]
-SAMPLING_STRATEGY = ["uniform"]
+SAMPLING_HISTORY = []
+SAMPLING_DURATION = []
+SAMPLING_STRATEGY = ['uniform', 'recent']
 BATCH_SIZE = [1000, 2000, 4000, 8000, 16000, 32000]
 # =================================
 
