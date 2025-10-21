@@ -1,11 +1,13 @@
 # train_worker.py (key excerpts)
+import numpy as np
 import torch
 import torch.distributed as dist
+from sampler_core import ParallelSampler
+from tqdm import tqdm
+
 from dist_loader import TemporalEdgesDataset, plan_gpu_batches
 from dist_sampler import DistSampler
-from sampler_core import ParallelSampler
-import numpy as np
-from tqdm import tqdm
+
 
 def run_epoch_worker(
     e,
@@ -25,7 +27,7 @@ def run_epoch_worker(
     optimizer,
     loss_fn,
     local_rank,
-    world_size
+    world_size,
 ):
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
@@ -50,11 +52,16 @@ def run_epoch_worker(
         # ---- Train ----
         for edges in train_ds.iter_rank(local_rank, world_size):
             # root nodes and timestamps
-            root_nodes = np.concatenate([
-                edges.src.values, edges.dst.values,
-                train_neg_link_sampler.sample(edges.src.values, edges.time.values)
-            ]).astype(np.int32)
-            ts = np.concatenate([edges.time.values, edges.time.values, edges.time.values]).astype(np.float32)
+            root_nodes = np.concatenate(
+                [
+                    edges.src.values,
+                    edges.dst.values,
+                    train_neg_link_sampler.sample(edges.src.values, edges.time.values),
+                ]
+            ).astype(np.int32)
+            ts = np.concatenate(
+                [edges.time.values, edges.time.values, edges.time.values]
+            ).astype(np.float32)
 
             # sample with shared pointers
             blocks, sparse_updates = dist_sampler.sample_with_ptr(root_nodes, ts)
@@ -75,7 +82,9 @@ def run_epoch_worker(
                 pbar.update(1)
 
         # loss reduce
-        loss_tensor = torch.tensor([total_loss_local], dtype=torch.float64, device=device)
+        loss_tensor = torch.tensor(
+            [total_loss_local], dtype=torch.float64, device=device
+        )
         dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
         total_loss = float(loss_tensor.item())
 
@@ -85,11 +94,18 @@ def run_epoch_worker(
             ap_local, auc_local = 0.0, 0.0
             cnt_local = 0
             for edges in val_ds.iter_rank(local_rank, world_size):
-                root_nodes = np.concatenate([
-                    edges.src.values, edges.dst.values,
-                    eval_neg_link_sampler.sample(edges.src.values, edges.time.values)
-                ]).astype(np.int32)
-                ts = np.concatenate([edges.time.values, edges.time.values, edges.time.values]).astype(np.float32)
+                root_nodes = np.concatenate(
+                    [
+                        edges.src.values,
+                        edges.dst.values,
+                        eval_neg_link_sampler.sample(
+                            edges.src.values, edges.time.values
+                        ),
+                    ]
+                ).astype(np.int32)
+                ts = np.concatenate(
+                    [edges.time.values, edges.time.values, edges.time.values]
+                ).astype(np.float32)
 
                 blocks, sparse_updates = dist_sampler.sample_with_ptr(root_nodes, ts)
                 dist_sampler.sync_and_apply_updates(sparse_updates)
@@ -101,7 +117,11 @@ def run_epoch_worker(
                     pbar.update(1)
 
             # reduce metrics
-            m = torch.tensor([ap_local, auc_local, float(cnt_local)], device=device, dtype=torch.float64)
+            m = torch.tensor(
+                [ap_local, auc_local, float(cnt_local)],
+                device=device,
+                dtype=torch.float64,
+            )
             dist.all_reduce(m, op=dist.ReduceOp.SUM)
             ap = float(m[0].item() / max(m[2].item(), 1.0))
             auc = float(m[1].item() / max(m[2].item(), 1.0))

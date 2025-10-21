@@ -10,6 +10,7 @@ from pathlib import Path
 from statistics import mean, stdev
 from datetime import datetime
 import shutil
+
 # ===== Fixed configuration =====
 WORKDIR = Path.cwd()
 
@@ -30,7 +31,7 @@ MASTER_PORT = 29502
 
 CUDA_VISIBLE_DEVICES = "0,1"
 TORCH_DISTRIBUTED_DEBUG = "DETAIL"
-USE_DEDUPLICATION = True
+USE_dedup = True
 
 # Feature sweep
 FEATURE_DIMS = [64, 128, 192, 256, 512]
@@ -54,20 +55,22 @@ SAMPLING_COMBOS = [
 # Sampling single-parameter sweeps
 SAMPLING_HISTORY = []
 SAMPLING_DURATION = []
-SAMPLING_STRATEGY = ['uniform', 'recent']
+SAMPLING_STRATEGY = ["uniform", "recent"]
 BATCH_SIZE = [1000, 2000, 4000, 8000, 16000, 32000]
 # =================================
 
 # Regex patterns for parsing logs
-PAT_EPOCH_TS = re.compile(r'^\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+Epoch\s+(\d+)', re.M)
-PAT_TRAIN_TIME = re.compile(r'Training time:\s*([0-9.]+)')
-PAT_SAMPLE_TIME = re.compile(r'sample time:\s*([0-9.]+)s', re.I)
-PAT_BEST = re.compile(r'^\s*\d{4}-\d{2}-\d{2}.*Best model at epoch\s+(\d+)\.?', re.M)
-PAT_BEST_TS = re.compile(
-    r'^\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+).*Best model at epoch\s+(\d+)\.?',
-    re.M
+PAT_EPOCH_TS = re.compile(
+    r"^\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+Epoch\s+(\d+)", re.M
 )
-PAT_TEST = re.compile(r'test ap:\s*([0-9.]+)\s+test auc:\s*([0-9.]+)', re.I)
+PAT_TRAIN_TIME = re.compile(r"Training time:\s*([0-9.]+)")
+PAT_SAMPLE_TIME = re.compile(r"sample time:\s*([0-9.]+)s", re.I)
+PAT_BEST = re.compile(r"^\s*\d{4}-\d{2}-\d{2}.*Best model at epoch\s+(\d+)\.?", re.M)
+PAT_BEST_TS = re.compile(
+    r"^\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+).*Best model at epoch\s+(\d+)\.?",
+    re.M,
+)
+PAT_TEST = re.compile(r"test ap:\s*([0-9.]+)\s+test auc:\s*([0-9.]+)", re.I)
 
 try:
     import yaml
@@ -104,7 +107,9 @@ def ensure_sampling(cfg: dict) -> dict:
     return cfg
 
 
-def override_sampling_layer_neighbor(cfg: dict, layer: int, neighbors: list[int]) -> dict:
+def override_sampling_layer_neighbor(
+    cfg: dict, layer: int, neighbors: list[int]
+) -> dict:
     cfg = ensure_sampling(cfg)
     s0 = cfg["sampling"][0]
     s0["layer"] = int(layer)
@@ -172,7 +177,7 @@ def parse_log(text: str):
     # 1) epoch timestamps
     epoch_ts = []
     for m in PAT_EPOCH_TS.finditer(text):
-        ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S.%f')
+        ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f")
         ep = int(m.group(2))
         epoch_ts.append((ep, ts))
     epoch_ts.sort(key=lambda x: x[0])
@@ -206,7 +211,7 @@ def parse_log(text: str):
     best_epoch = None
     best_ts = None
     for m in PAT_BEST_TS.finditer(text):
-        best_ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S.%f')
+        best_ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f")
         best_epoch = int(m.group(2))
     if best_epoch is None:
         m_best = PAT_BEST.search(text)
@@ -269,7 +274,9 @@ def get_log_dir(dataset: str, cfg_name: str) -> Path:
     return WORKDIR / "logs" / dataset / cfg_name
 
 
-def append_summary_to_log(logfile: Path, summary, best_epoch, test_ap, test_auc, meta_lines: list[str]):
+def append_summary_to_log(
+    logfile: Path, summary, best_epoch, test_ap, test_auc, meta_lines: list[str]
+):
     with logfile.open("a", encoding="utf-8") as lf:
         lf.write("\n=== Summary (auto) ===\n")
         for ln in meta_lines:
@@ -277,13 +284,26 @@ def append_summary_to_log(logfile: Path, summary, best_epoch, test_ap, test_auc,
         if summary is None:
             lf.write("No epoch timestamps found.\n")
         else:
-            def fmt(x): return "NA" if x is None else f"{x:.6f}"
+
+            def fmt(x):
+                return "NA" if x is None else f"{x:.6f}"
+
             lf.write(f"Excluded first epoch: {summary['exclude_first_epoch']}\n")
-            lf.write(f"Training time mean/std (s): {fmt(summary['train_time_mean'])} / {fmt(summary['train_time_std'])}\n")
-            lf.write(f"Sample time mean/std   (s): {fmt(summary['sample_time_mean'])} / {fmt(summary['sample_time_std'])}\n")
-            lf.write(f"Delta-to-next mean/std (s): {fmt(summary['delta_next_mean'])} / {fmt(summary['delta_next_std'])}\n")
-            lf.write(f"Best model epoch: {best_epoch if best_epoch is not None else 'NA'}\n")
-            lf.write(f"test ap: {test_ap if test_ap is not None else 'NA'}  test auc: {test_auc if test_auc is not None else 'NA'}\n")
+            lf.write(
+                f"Training time mean/std (s): {fmt(summary['train_time_mean'])} / {fmt(summary['train_time_std'])}\n"
+            )
+            lf.write(
+                f"Sample time mean/std   (s): {fmt(summary['sample_time_mean'])} / {fmt(summary['sample_time_std'])}\n"
+            )
+            lf.write(
+                f"Delta-to-next mean/std (s): {fmt(summary['delta_next_mean'])} / {fmt(summary['delta_next_std'])}\n"
+            )
+            lf.write(
+                f"Best model epoch: {best_epoch if best_epoch is not None else 'NA'}\n"
+            )
+            lf.write(
+                f"test ap: {test_ap if test_ap is not None else 'NA'}  test auc: {test_auc if test_auc is not None else 'NA'}\n"
+            )
         lf.write("=======================\n")
 
 
@@ -295,7 +315,8 @@ def append_row_to_csv(csv_path: Path, header: list[str], row: list):
         if write_header:
             wr.writerow(header)
         wr.writerow(row)
-        
+
+
 def classify_returncode(rc: int, log_text: str) -> str:
     """
     Returns one of: "ok", "aborted", "failed".
@@ -313,7 +334,9 @@ def classify_returncode(rc: int, log_text: str) -> str:
     # torchrun often returns rc=1 with ChildFailedError on SIGINT;
     # treat as aborted if we already printed final metrics.
     text = log_text or ""
-    saw_final = ("Best model at epoch" in text) or (re.search(r"test ap:\s*[0-9.]+\s+test auc:\s*[0-9.]+", text, re.I) is not None)
+    saw_final = ("Best model at epoch" in text) or (
+        re.search(r"test ap:\s*[0-9.]+\s+test auc:\s*[0-9.]+", text, re.I) is not None
+    )
     if rc == 1 and "ChildFailedError" in text and saw_final:
         return "aborted"
 
@@ -388,29 +411,43 @@ def run_one(
 
     cmd = [
         str(TORCHRUN),
-        "--nproc_per_node", str(NPROC_PER_NODE),
-        "--master_addr", MASTER_ADDR,
-        "--master_port", str(MASTER_PORT),
+        "--nproc_per_node",
+        str(NPROC_PER_NODE),
+        "--master_addr",
+        MASTER_ADDR,
+        "--master_port",
+        str(MASTER_PORT),
         "train_dist.py",
-        "--data", dataset,
-        "--config", str(temp_cfg),
+        "--data",
+        dataset,
+        "--config",
+        str(temp_cfg),
     ]
     if phase == "feat":
-        cmd += ["--rand_edge_features", str(edge_dim), "--rand_node_features", str(node_dim)]
-    if USE_DEDUPLICATION:
-        cmd.append("--deduplication")
+        cmd += [
+            "--rand_edge_features",
+            str(edge_dim),
+            "--rand_node_features",
+            str(node_dim),
+        ]
+    if USE_dedup:
+        cmd.append("--dedup")
 
     start = time.perf_counter()
     proc = subprocess.Popen(
-        cmd, cwd=str(WORKDIR),
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1
+        cmd,
+        cwd=str(WORKDIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
     )
     rc = stream_and_log(proc, logfile)
     elapsed = time.perf_counter() - start
-    
-    
+
     text = logfile.read_text(encoding="utf-8", errors="replace")
-    epoch_ts, train_time_map, sample_time_map, delta_next_map, best_ep, ap, auc = parse_log(text)
+    epoch_ts, train_time_map, sample_time_map, delta_next_map, best_ep, ap, auc = (
+        parse_log(text)
+    )
     summary = summarize(epoch_ts, train_time_map, sample_time_map, delta_next_map)
     status = classify_returncode(rc, text)
 
@@ -423,8 +460,6 @@ def run_one(
     with logfile.open("a", encoding="utf-8") as lf:
         sys.stdout.write(footer)
         lf.write(footer)
-        
-        
 
     footer = (
         f"\nEnd Time   : {time.asctime()}\n"
@@ -443,9 +478,15 @@ def run_one(
     # Append to log
     meta_lines = []
     if phase == "feat":
-        meta_lines += [f"rand_edge_features: {edge_dim}", f"rand_node_features: {node_dim}"]
+        meta_lines += [
+            f"rand_edge_features: {edge_dim}",
+            f"rand_node_features: {node_dim}",
+        ]
     if phase == "sampling_combo":
-        meta_lines += [f"sampling.layer: {sampling_layer}", f"sampling.neighbor: {sampling_neighbors}"]
+        meta_lines += [
+            f"sampling.layer: {sampling_layer}",
+            f"sampling.neighbor: {sampling_neighbors}",
+        ]
     if phase == "sampling_history":
         meta_lines += [f"sampling.history: {sampling_history}"]
     if phase == "sampling_duration":
@@ -460,28 +501,66 @@ def run_one(
     if phase == "feat":
         csv_path = log_dir / "feature_size_sweep.csv"
         header = [
-            "run_stamp", "dataset", "config",
-            "rand_edge_features", "rand_node_features",
-            "best_epoch", "test_ap", "test_auc",
-            "train_mean_s", "train_std_s", "n_train",
-            "sample_mean_s", "sample_std_s", "n_sample",
-            "delta_next_mean_s", "delta_next_std_s", "n_delta",
+            "run_stamp",
+            "dataset",
+            "config",
+            "rand_edge_features",
+            "rand_node_features",
+            "best_epoch",
+            "test_ap",
+            "test_auc",
+            "train_mean_s",
+            "train_std_s",
+            "n_train",
+            "sample_mean_s",
+            "sample_std_s",
+            "n_sample",
+            "delta_next_mean_s",
+            "delta_next_std_s",
+            "n_delta",
             "logfile",
         ]
         row = [
-            stamp, dataset, cfg_name,
-            edge_dim, node_dim,
+            stamp,
+            dataset,
+            cfg_name,
+            edge_dim,
+            node_dim,
             (best_ep if best_ep is not None else ""),
             (f"{ap:.6f}" if ap is not None else ""),
             (f"{auc:.6f}" if auc is not None else ""),
-            (f"{summary['train_time_mean']:.6f}" if summary and summary['train_time_mean'] is not None else ""),
-            (f"{summary['train_time_std']:.6f}" if summary and summary['train_time_std'] is not None else ""),
+            (
+                f"{summary['train_time_mean']:.6f}"
+                if summary and summary["train_time_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['train_time_std']:.6f}"
+                if summary and summary["train_time_std"] is not None
+                else ""
+            ),
             (summary["n_train"] if summary else 0),
-            (f"{summary['sample_time_mean']:.6f}" if summary and summary['sample_time_mean'] is not None else ""),
-            (f"{summary['sample_time_std']:.6f}" if summary and summary['sample_time_std'] is not None else ""),
+            (
+                f"{summary['sample_time_mean']:.6f}"
+                if summary and summary["sample_time_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['sample_time_std']:.6f}"
+                if summary and summary["sample_time_std"] is not None
+                else ""
+            ),
             (summary["n_sample"] if summary else 0),
-            (f"{summary['delta_next_mean']:.6f}" if summary and summary['delta_next_mean'] is not None else ""),
-            (f"{summary['delta_next_std']:.6f}" if summary and summary['delta_next_std'] is not None else ""),
+            (
+                f"{summary['delta_next_mean']:.6f}"
+                if summary and summary["delta_next_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['delta_next_std']:.6f}"
+                if summary and summary["delta_next_std"] is not None
+                else ""
+            ),
             (summary["n_delta"] if summary else 0),
             str(logfile),
         ]
@@ -491,28 +570,66 @@ def run_one(
         csv_path = log_dir / "sampling_combination_sweep.csv"
         nb = "-".join(str(x) for x in (sampling_neighbors or []))
         header = [
-            "run_stamp", "dataset", "config",
-            "sampling_layer", "sampling_neighbors",
-            "best_epoch", "test_ap", "test_auc",
-            "train_mean_s", "train_std_s", "n_train",
-            "sample_mean_s", "sample_std_s", "n_sample",
-            "delta_next_mean_s", "delta_next_std_s", "n_delta",
+            "run_stamp",
+            "dataset",
+            "config",
+            "sampling_layer",
+            "sampling_neighbors",
+            "best_epoch",
+            "test_ap",
+            "test_auc",
+            "train_mean_s",
+            "train_std_s",
+            "n_train",
+            "sample_mean_s",
+            "sample_std_s",
+            "n_sample",
+            "delta_next_mean_s",
+            "delta_next_std_s",
+            "n_delta",
             "logfile",
         ]
         row = [
-            stamp, dataset, cfg_name,
-            sampling_layer, nb,
+            stamp,
+            dataset,
+            cfg_name,
+            sampling_layer,
+            nb,
             (best_ep if best_ep is not None else ""),
             (f"{ap:.6f}" if ap is not None else ""),
             (f"{auc:.6f}" if auc is not None else ""),
-            (f"{summary['train_time_mean']:.6f}" if summary and summary['train_time_mean'] is not None else ""),
-            (f"{summary['train_time_std']:.6f}" if summary and summary['train_time_std'] is not None else ""),
+            (
+                f"{summary['train_time_mean']:.6f}"
+                if summary and summary["train_time_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['train_time_std']:.6f}"
+                if summary and summary["train_time_std"] is not None
+                else ""
+            ),
             (summary["n_train"] if summary else 0),
-            (f"{summary['sample_time_mean']:.6f}" if summary and summary['sample_time_mean'] is not None else ""),
-            (f"{summary['sample_time_std']:.6f}" if summary and summary['sample_time_std'] is not None else ""),
+            (
+                f"{summary['sample_time_mean']:.6f}"
+                if summary and summary["sample_time_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['sample_time_std']:.6f}"
+                if summary and summary["sample_time_std"] is not None
+                else ""
+            ),
             (summary["n_sample"] if summary else 0),
-            (f"{summary['delta_next_mean']:.6f}" if summary and summary['delta_next_mean'] is not None else ""),
-            (f"{summary['delta_next_std']:.6f}" if summary and summary['delta_next_std'] is not None else ""),
+            (
+                f"{summary['delta_next_mean']:.6f}"
+                if summary and summary["delta_next_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['delta_next_std']:.6f}"
+                if summary and summary["delta_next_std"] is not None
+                else ""
+            ),
             (summary["n_delta"] if summary else 0),
             str(logfile),
         ]
@@ -521,28 +638,64 @@ def run_one(
     elif phase == "sampling_history":
         csv_path = log_dir / "sampling_history_sweep.csv"
         header = [
-            "run_stamp", "dataset", "config",
+            "run_stamp",
+            "dataset",
+            "config",
             "sampling_history",
-            "best_epoch", "test_ap", "test_auc",
-            "train_mean_s", "train_std_s", "n_train",
-            "sample_mean_s", "sample_std_s", "n_sample",
-            "delta_next_mean_s", "delta_next_std_s", "n_delta",
+            "best_epoch",
+            "test_ap",
+            "test_auc",
+            "train_mean_s",
+            "train_std_s",
+            "n_train",
+            "sample_mean_s",
+            "sample_std_s",
+            "n_sample",
+            "delta_next_mean_s",
+            "delta_next_std_s",
+            "n_delta",
             "logfile",
         ]
         row = [
-            stamp, dataset, cfg_name,
+            stamp,
+            dataset,
+            cfg_name,
             sampling_history,
             (best_ep if best_ep is not None else ""),
             (f"{ap:.6f}" if ap is not None else ""),
             (f"{auc:.6f}" if auc is not None else ""),
-            (f"{summary['train_time_mean']:.6f}" if summary and summary['train_time_mean'] is not None else ""),
-            (f"{summary['train_time_std']:.6f}" if summary and summary['train_time_std'] is not None else ""),
+            (
+                f"{summary['train_time_mean']:.6f}"
+                if summary and summary["train_time_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['train_time_std']:.6f}"
+                if summary and summary["train_time_std"] is not None
+                else ""
+            ),
             (summary["n_train"] if summary else 0),
-            (f"{summary['sample_time_mean']:.6f}" if summary and summary['sample_time_mean'] is not None else ""),
-            (f"{summary['sample_time_std']:.6f}" if summary and summary['sample_time_std'] is not None else ""),
+            (
+                f"{summary['sample_time_mean']:.6f}"
+                if summary and summary["sample_time_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['sample_time_std']:.6f}"
+                if summary and summary["sample_time_std"] is not None
+                else ""
+            ),
             (summary["n_sample"] if summary else 0),
-            (f"{summary['delta_next_mean']:.6f}" if summary and summary['delta_next_mean'] is not None else ""),
-            (f"{summary['delta_next_std']:.6f}" if summary and summary['delta_next_std'] is not None else ""),
+            (
+                f"{summary['delta_next_mean']:.6f}"
+                if summary and summary["delta_next_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['delta_next_std']:.6f}"
+                if summary and summary["delta_next_std"] is not None
+                else ""
+            ),
             (summary["n_delta"] if summary else 0),
             str(logfile),
         ]
@@ -551,28 +704,64 @@ def run_one(
     elif phase == "sampling_duration":
         csv_path = log_dir / "sampling_duration_sweep.csv"
         header = [
-            "run_stamp", "dataset", "config",
+            "run_stamp",
+            "dataset",
+            "config",
             "sampling_duration",
-            "best_epoch", "test_ap", "test_auc",
-            "train_mean_s", "train_std_s", "n_train",
-            "sample_mean_s", "sample_std_s", "n_sample",
-            "delta_next_mean_s", "delta_next_std_s", "n_delta",
+            "best_epoch",
+            "test_ap",
+            "test_auc",
+            "train_mean_s",
+            "train_std_s",
+            "n_train",
+            "sample_mean_s",
+            "sample_std_s",
+            "n_sample",
+            "delta_next_mean_s",
+            "delta_next_std_s",
+            "n_delta",
             "logfile",
         ]
         row = [
-            stamp, dataset, cfg_name,
+            stamp,
+            dataset,
+            cfg_name,
             sampling_duration,
             (best_ep if best_ep is not None else ""),
             (f"{ap:.6f}" if ap is not None else ""),
             (f"{auc:.6f}" if auc is not None else ""),
-            (f"{summary['train_time_mean']:.6f}" if summary and summary['train_time_mean'] is not None else ""),
-            (f"{summary['train_time_std']:.6f}" if summary and summary['train_time_std'] is not None else ""),
+            (
+                f"{summary['train_time_mean']:.6f}"
+                if summary and summary["train_time_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['train_time_std']:.6f}"
+                if summary and summary["train_time_std"] is not None
+                else ""
+            ),
             (summary["n_train"] if summary else 0),
-            (f"{summary['sample_time_mean']:.6f}" if summary and summary['sample_time_mean'] is not None else ""),
-            (f"{summary['sample_time_std']:.6f}" if summary and summary['sample_time_std'] is not None else ""),
+            (
+                f"{summary['sample_time_mean']:.6f}"
+                if summary and summary["sample_time_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['sample_time_std']:.6f}"
+                if summary and summary["sample_time_std"] is not None
+                else ""
+            ),
             (summary["n_sample"] if summary else 0),
-            (f"{summary['delta_next_mean']:.6f}" if summary and summary['delta_next_mean'] is not None else ""),
-            (f"{summary['delta_next_std']:.6f}" if summary and summary['delta_next_std'] is not None else ""),
+            (
+                f"{summary['delta_next_mean']:.6f}"
+                if summary and summary["delta_next_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['delta_next_std']:.6f}"
+                if summary and summary["delta_next_std"] is not None
+                else ""
+            ),
             (summary["n_delta"] if summary else 0),
             str(logfile),
         ]
@@ -581,58 +770,130 @@ def run_one(
     elif phase == "sampling_strategy":
         csv_path = log_dir / "sampling_strategy_sweep.csv"
         header = [
-            "run_stamp", "dataset", "config",
+            "run_stamp",
+            "dataset",
+            "config",
             "sampling_strategy",
-            "best_epoch", "test_ap", "test_auc",
-            "train_mean_s", "train_std_s", "n_train",
-            "sample_mean_s", "sample_std_s", "n_sample",
-            "delta_next_mean_s", "delta_next_std_s", "n_delta",
+            "best_epoch",
+            "test_ap",
+            "test_auc",
+            "train_mean_s",
+            "train_std_s",
+            "n_train",
+            "sample_mean_s",
+            "sample_std_s",
+            "n_sample",
+            "delta_next_mean_s",
+            "delta_next_std_s",
+            "n_delta",
             "logfile",
         ]
         row = [
-            stamp, dataset, cfg_name,
+            stamp,
+            dataset,
+            cfg_name,
             sampling_strategy,
             (best_ep if best_ep is not None else ""),
             (f"{ap:.6f}" if ap is not None else ""),
             (f"{auc:.6f}" if auc is not None else ""),
-            (f"{summary['train_time_mean']:.6f}" if summary and summary['train_time_mean'] is not None else ""),
-            (f"{summary['train_time_std']:.6f}" if summary and summary['train_time_std'] is not None else ""),
+            (
+                f"{summary['train_time_mean']:.6f}"
+                if summary and summary["train_time_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['train_time_std']:.6f}"
+                if summary and summary["train_time_std"] is not None
+                else ""
+            ),
             (summary["n_train"] if summary else 0),
-            (f"{summary['sample_time_mean']:.6f}" if summary and summary['sample_time_mean'] is not None else ""),
-            (f"{summary['sample_time_std']:.6f}" if summary and summary['sample_time_std'] is not None else ""),
+            (
+                f"{summary['sample_time_mean']:.6f}"
+                if summary and summary["sample_time_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['sample_time_std']:.6f}"
+                if summary and summary["sample_time_std"] is not None
+                else ""
+            ),
             (summary["n_sample"] if summary else 0),
-            (f"{summary['delta_next_mean']:.6f}" if summary and summary['delta_next_mean'] is not None else ""),
-            (f"{summary['delta_next_std']:.6f}" if summary and summary['delta_next_std'] is not None else ""),
+            (
+                f"{summary['delta_next_mean']:.6f}"
+                if summary and summary["delta_next_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['delta_next_std']:.6f}"
+                if summary and summary["delta_next_std"] is not None
+                else ""
+            ),
             (summary["n_delta"] if summary else 0),
             str(logfile),
         ]
         append_row_to_csv(csv_path, header, row)
-        
+
     elif phase == "batch_size":
         csv_path = log_dir / "batch_size_sweep.csv"
         header = [
-            "run_stamp", "dataset", "config",
+            "run_stamp",
+            "dataset",
+            "config",
             "batch_size",
-            "best_epoch", "test_ap", "test_auc",
-            "train_mean_s", "train_std_s", "n_train",
-            "sample_mean_s", "sample_std_s", "n_sample",
-            "delta_next_mean_s", "delta_next_std_s", "n_delta",
+            "best_epoch",
+            "test_ap",
+            "test_auc",
+            "train_mean_s",
+            "train_std_s",
+            "n_train",
+            "sample_mean_s",
+            "sample_std_s",
+            "n_sample",
+            "delta_next_mean_s",
+            "delta_next_std_s",
+            "n_delta",
             "logfile",
         ]
         row = [
-            stamp, dataset, cfg_name,
+            stamp,
+            dataset,
+            cfg_name,
             batch_size,
             (best_ep if best_ep is not None else ""),
             (f"{ap:.6f}" if ap is not None else ""),
             (f"{auc:.6f}" if auc is not None else ""),
-            (f"{summary['train_time_mean']:.6f}" if summary and summary['train_time_mean'] is not None else ""),
-            (f"{summary['train_time_std']:.6f}" if summary and summary['train_time_std'] is not None else ""),
+            (
+                f"{summary['train_time_mean']:.6f}"
+                if summary and summary["train_time_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['train_time_std']:.6f}"
+                if summary and summary["train_time_std"] is not None
+                else ""
+            ),
             (summary["n_train"] if summary else 0),
-            (f"{summary['sample_time_mean']:.6f}" if summary and summary['sample_time_mean'] is not None else ""),
-            (f"{summary['sample_time_std']:.6f}" if summary and summary['sample_time_std'] is not None else ""),
+            (
+                f"{summary['sample_time_mean']:.6f}"
+                if summary and summary["sample_time_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['sample_time_std']:.6f}"
+                if summary and summary["sample_time_std"] is not None
+                else ""
+            ),
             (summary["n_sample"] if summary else 0),
-            (f"{summary['delta_next_mean']:.6f}" if summary and summary['delta_next_mean'] is not None else ""),
-            (f"{summary['delta_next_std']:.6f}" if summary and summary['delta_next_std'] is not None else ""),
+            (
+                f"{summary['delta_next_mean']:.6f}"
+                if summary and summary["delta_next_mean"] is not None
+                else ""
+            ),
+            (
+                f"{summary['delta_next_std']:.6f}"
+                if summary and summary["delta_next_std"] is not None
+                else ""
+            ),
             (summary["n_delta"] if summary else 0),
             str(logfile),
         ]
@@ -670,13 +931,21 @@ def main():
                     save_yaml(cfg_obj, tmp_path)
 
                     rc = run_one(
-                        dataset=ds, base_cfg=cfg_path, temp_cfg=tmp_path,
-                        phase="feat", edge_dim=ed, node_dim=nd
+                        dataset=ds,
+                        base_cfg=cfg_path,
+                        temp_cfg=tmp_path,
+                        phase="feat",
+                        edge_dim=ed,
+                        node_dim=nd,
                     )
                     if rc != 0:
-                        failures.append((f"feat/{ds}/{cfg_path.name}/ed{ed}/nd{nd}", rc))
+                        failures.append(
+                            (f"feat/{ds}/{cfg_path.name}/ed{ed}/nd{nd}", rc)
+                        )
                 except Exception as e:
-                    failures.append((f"feat/{ds}/{cfg_path.name}/ed{ed}/nd{nd}", f"exception:{e}"))
+                    failures.append(
+                        (f"feat/{ds}/{cfg_path.name}/ed{ed}/nd{nd}", f"exception:{e}")
+                    )
 
     # Phase B: sampling combination sweep (override layer+neighbor; no rand params)
     for ds in DATASETS:
@@ -685,20 +954,36 @@ def main():
                 try:
                     cfg_obj = load_yaml(cfg_path)
                     cfg_obj = set_train_epoch(cfg_obj, OVERRIDE_EPOCHS)
-                    cfg_obj = override_sampling_layer_neighbor(cfg_obj, layer=layer, neighbors=neigh)
+                    cfg_obj = override_sampling_layer_neighbor(
+                        cfg_obj, layer=layer, neighbors=neigh
+                    )
                     tmp_name = f"{cfg_path.stem}_{uuid.uuid4().hex[:8]}.yml"
                     tmp_path = WORKDIR / "temp" / ds / cfg_path.stem / tmp_name
                     tmp_path.parent.mkdir(parents=True, exist_ok=True)
                     save_yaml(cfg_obj, tmp_path)
 
                     rc = run_one(
-                        dataset=ds, base_cfg=cfg_path, temp_cfg=tmp_path,
-                        phase="sampling_combo", sampling_layer=layer, sampling_neighbors=neigh
+                        dataset=ds,
+                        base_cfg=cfg_path,
+                        temp_cfg=tmp_path,
+                        phase="sampling_combo",
+                        sampling_layer=layer,
+                        sampling_neighbors=neigh,
                     )
                     if rc != 0:
-                        failures.append((f"samp_combo/{ds}/{cfg_path.name}/sl{layer}/nb{'-'.join(map(str,neigh))}", rc))
+                        failures.append(
+                            (
+                                f"samp_combo/{ds}/{cfg_path.name}/sl{layer}/nb{'-'.join(map(str,neigh))}",
+                                rc,
+                            )
+                        )
                 except Exception as e:
-                    failures.append((f"samp_combo/{ds}/{cfg_path.name}/sl{layer}/nb{'-'.join(map(str,neigh))}", f"exception:{e}"))
+                    failures.append(
+                        (
+                            f"samp_combo/{ds}/{cfg_path.name}/sl{layer}/nb{'-'.join(map(str,neigh))}",
+                            f"exception:{e}",
+                        )
+                    )
 
     # Phase C: sampling.history sweep (only override history)
     for ds in DATASETS:
@@ -714,13 +999,18 @@ def main():
                     save_yaml(cfg_obj, tmp_path)
 
                     rc = run_one(
-                        dataset=ds, base_cfg=cfg_path, temp_cfg=tmp_path,
-                        phase="sampling_history", sampling_history=h
+                        dataset=ds,
+                        base_cfg=cfg_path,
+                        temp_cfg=tmp_path,
+                        phase="sampling_history",
+                        sampling_history=h,
                     )
                     if rc != 0:
                         failures.append((f"samp_hist/{ds}/{cfg_path.name}/h{h}", rc))
                 except Exception as e:
-                    failures.append((f"samp_hist/{ds}/{cfg_path.name}/h{h}", f"exception:{e}"))
+                    failures.append(
+                        (f"samp_hist/{ds}/{cfg_path.name}/h{h}", f"exception:{e}")
+                    )
 
     # Phase D: sampling.duration sweep (only override duration)
     for ds in DATASETS:
@@ -736,13 +1026,18 @@ def main():
                     save_yaml(cfg_obj, tmp_path)
 
                     rc = run_one(
-                        dataset=ds, base_cfg=cfg_path, temp_cfg=tmp_path,
-                        phase="sampling_duration", sampling_duration=d
+                        dataset=ds,
+                        base_cfg=cfg_path,
+                        temp_cfg=tmp_path,
+                        phase="sampling_duration",
+                        sampling_duration=d,
                     )
                     if rc != 0:
                         failures.append((f"samp_dur/{ds}/{cfg_path.name}/d{d}", rc))
                 except Exception as e:
-                    failures.append((f"samp_dur/{ds}/{cfg_path.name}/d{d}", f"exception:{e}"))
+                    failures.append(
+                        (f"samp_dur/{ds}/{cfg_path.name}/d{d}", f"exception:{e}")
+                    )
 
     # Phase E: sampling.strategy sweep (only override strategy)
     for ds in DATASETS:
@@ -758,16 +1053,19 @@ def main():
                     save_yaml(cfg_obj, tmp_path)
 
                     rc = run_one(
-                        dataset=ds, base_cfg=cfg_path, temp_cfg=tmp_path,
-                        phase="sampling_strategy", sampling_strategy=s
+                        dataset=ds,
+                        base_cfg=cfg_path,
+                        temp_cfg=tmp_path,
+                        phase="sampling_strategy",
+                        sampling_strategy=s,
                     )
                     if rc != 0:
                         failures.append((f"samp_strat/{ds}/{cfg_path.name}/{s}", rc))
                 except Exception as e:
-                    failures.append((f"samp_strat/{ds}/{cfg_path.name}/{s}", f"exception:{e}"))
-                    
-                    
-                    
+                    failures.append(
+                        (f"samp_strat/{ds}/{cfg_path.name}/{s}", f"exception:{e}")
+                    )
+
     # Phase F: batch.size sweep (only override batch size)
     for ds in DATASETS:
         for cfg_path in config_paths:
@@ -782,13 +1080,18 @@ def main():
                     save_yaml(cfg_obj, tmp_path)
 
                     rc = run_one(
-                        dataset=ds, base_cfg=cfg_path, temp_cfg=tmp_path,
-                        phase="batch_size", batch_size=s
+                        dataset=ds,
+                        base_cfg=cfg_path,
+                        temp_cfg=tmp_path,
+                        phase="batch_size",
+                        batch_size=s,
                     )
                     if rc != 0:
                         failures.append((f"train_bs/{ds}/{cfg_path.name}/{s}", rc))
                 except Exception as e:
-                    failures.append((f"train_bs/{ds}/{cfg_path.name}/{s}", f"exception:{e}"))
+                    failures.append(
+                        (f"train_bs/{ds}/{cfg_path.name}/{s}", f"exception:{e}")
+                    )
 
     if failures:
         print("\nSome runs failed:", file=sys.stderr)

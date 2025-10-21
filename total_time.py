@@ -1,5 +1,6 @@
 import re
 
+
 def calculate_average_total_time(file_path):
     """
     计算日志文件中'total time'的平均值。
@@ -12,10 +13,10 @@ def calculate_average_total_time(file_path):
     """
     total_times = []
     try:
-        with open(file_path, 'r') as f:
+        with open(file_path, "r") as f:
             for line in f:
                 # 使用正则表达式匹配 'total time:X.XXs' 并提取时间
-                match = re.search(r'total time:(\d+\.\d+)s', line)
+                match = re.search(r"total time:(\d+\.\d+)s", line)
                 if match:
                     try:
                         time_value = float(match.group(1))
@@ -38,6 +39,7 @@ def calculate_average_total_time(file_path):
         print("未在文件中找到 'total time' 数据。")
         return None
 
+
 # 示例用法:
 # 假设您的日志数据保存在 'training_log.txt' 文件中
 # 您可以将您提供的日志数据复制并粘贴到一个名为 'training_log.txt' 的文件中。
@@ -53,7 +55,9 @@ def calculate_average_total_time(file_path):
 # ... (其余日志数据)
 
 # log_file = 'training_log.txt' # 请将此路径替换为您的实际文件路径
-avg_total_time = calculate_average_total_time('/home/sqp17/Projects/tgl/tgl_batch_plan_logs/LASTFM_TGN.log')
+avg_total_time = calculate_average_total_time(
+    "/home/sqp17/Projects/tgl/tgl_batch_plan_logs/LASTFM_TGN.log"
+)
 
 # if avg_total_time is not None:
 #     print(f"平均 'total time': {avg_total_time:.2f} 秒")

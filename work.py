@@ -1,10 +1,12 @@
-import os
 import argparse
-import threading
+import os
 import queue
+import threading
 import time
 from collections import defaultdict
+
 import torch
+
 
 # Optional torch.distributed support
 try:

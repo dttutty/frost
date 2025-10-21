@@ -1,16 +1,18 @@
-import torch
 import os
-import yaml
-import dgl
 import time
-import pandas as pd
-import numpy as np
-from profiler import Timer, profiler
+from typing import List
 
+import dgl
+import numpy as np
+import pandas as pd
+import torch
+import yaml
+from dgl.heterograph import DGLBlock
+
+from profiler import Timer
 
 # In utils.py
-import dgl
-import torch
+from schemas.datatypes import GNNCFG, Config, MemoryCFG, SampleCFG, TrainCFG
 
 
 def dgl_blocks_to_tensor_dicts(blocks):
@@ -64,7 +66,9 @@ def get_ids(mfgs, node_feats, edge_feats):
     return nids, eids
 
 
-def load_feat(d, rand_de=128, rand_dn=128):
+def load_feat(
+    d, rand_de=128, rand_dn=128
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     node_feats = None
     if os.path.exists("DATA/{}/node_features.pt".format(d)):
         node_feats = torch.load("DATA/{}/node_features.pt".format(d))
@@ -88,24 +92,19 @@ def load_feat(d, rand_de=128, rand_dn=128):
     return node_feats, edge_feats
 
 
-def load_graph(d):
-    df = pd.read_csv("DATA/{}/edges.csv".format(d))
+def load_graph(d) -> tuple[dict, pd.DataFrame]:
     g = np.load("DATA/{}/ext_full.npz".format(d))
+    df = pd.read_csv("DATA/{}/edges.csv".format(d))
     return g, df
-
-
-from sampler import SampleParams
-from memorys import MemoryParams
-from modules import GNNParams, TrainParams
 
 
 def parse_config(f, fashion="new"):
     conf = yaml.safe_load(open(f, "r"))
     if fashion == "new":
-        sample_param = SampleParams(**conf["sampling"][0])
-        memory_param = MemoryParams(**conf["memory"][0])
-        gnn_param = GNNParams(**conf["gnn"][0])
-        train_param = TrainParams(**conf["train"][0])
+        sample_param = SampleCFG(**conf["sampling"][0])
+        memory_param = MemoryCFG(**conf["memory"][0])
+        gnn_param = GNNCFG(**conf["gnn"][0])
+        train_param = TrainCFG(**conf["train"][0])
         print(
             f"Parsed config: {sample_param}, {memory_param}, {gnn_param}, {train_param}"
         )
@@ -116,7 +115,9 @@ def parse_config(f, fashion="new"):
         train_param = conf["train"][0]
 
     # print(f"Parsed config: {sample_param}, {memory_param}, {gnn_param}, {train_param}")
-    return sample_param, memory_param, gnn_param, train_param
+    cfg = Config(s=sample_param, m=memory_param, g=gnn_param, t=train_param)
+    cfg.t.batch_size = int(cfg.t.batch_size)
+    return cfg
 
 
 def get_shape_and_dtype(meta_payload):
@@ -160,25 +161,20 @@ def get_node_count_from_graph(g):
 from sampler_core import ParallelSampler
 
 
-def sampler_wrapper(
-    no_neg, root_nodes, sampler: ParallelSampler | None, ts, total_sample_time=None
-):
+def sampler_wrapper(no_neg, root_nodes, sampler: ParallelSampler | None, ts):
     if no_neg:
         pos_root_end = root_nodes.shape[0] * 2 // 3
         sampler.sample(root_nodes[:pos_root_end], ts[:pos_root_end])
     else:
         sampler.sample(root_nodes, ts)
     ret = sampler.get_ret()
-    if total_sample_time is not None:
-        total_sample_time += ret[0].sample_time()
-    return ret, total_sample_time
+    sample_time = ret[0].sample_time()
+    return ret, sample_time
 
 
-from typing import List
-from dgl.heterograph import DGLBlock
-
-
-def to_dgl_blocks(ret, history, reverse=False, cuda=True) -> List[List[DGLBlock]]:
+def to_dgl_blocks(
+    ret, history, reverse=False, save_on_pgu=True
+) -> List[List[DGLBlock]]:
     # eg. if sample_param.history = 3, sample_param.layer = 2, ret = [Ly1His1, Ly1His2, Ly1His3, Ly2His1, Ly2His2, Ly2His3]
     # then grouped_mfgs = [[Ly1His1, Ly1His2], [Ly1His3, Ly2His1, [Ly2His2, Ly2His3]]
     mfgs = list()
@@ -207,7 +203,7 @@ def to_dgl_blocks(ret, history, reverse=False, cuda=True) -> List[List[DGLBlock]
         block.edata["dt"] = tgb_dts[dt_slice_start:]
         block.edata["ID"] = tgb_eid
 
-        mfgs.append(block.to("cuda:0") if cuda == True else block)
+        mfgs.append(block.to("cuda:0") if save_on_pgu == True else block)
     # [[Ly1His1, Ly1His2], [Ly1His3, Ly2His1, [Ly2His2, Ly2His3]]
     grouped_mfgs = list(map(list, zip(*[iter(mfgs)] * history)))
     grouped_mfgs.reverse()
@@ -236,10 +232,10 @@ def mfgs_to_cuda(mfgs):
     return new_mfgs
 
 
+from typing import List
+
 import torch
-import dgl
-from typing import List, Optional
-from contextlib import contextmanager
+
 
 # @contextmanager
 # def Timer():
@@ -382,7 +378,7 @@ def _fetch_features_no_dedup(
     mfgss_on_gpu, all_features, entity_type, pinned, buffers, profiler=None
 ):
     """
-    Fetches features for each block individually without global deduplication.
+    Fetches features for each block individually without global dedup.
     """
     time_stats = {}
     is_node = entity_type == "node"
@@ -424,8 +420,11 @@ def _fetch_features_no_dedup(
             profiler.increase_time(time_stats)
 
 
+from schemas.datatypes import PrevCache
+
+
 def prepare_mfgs(
-    deduplication,
+    dedup,
     mfgss_on_cpu,
     mfgss_on_gpu,
     node_feats,
@@ -435,16 +434,18 @@ def prepare_mfgs(
     nfeat_buffs=None,
     efeat_buffs=None,
     profiler=None,
-    prev_node_uniq=None,
-    prev_edge_uniq=None,
-    prev_node_feats_on_gpu=None,
-    prev_edge_feats_on_gpu=None,
+    prev_cache: PrevCache | None = None,
     # Incremental update arguments
 ):
+    (prev_node_uniq, prev_edge_uniq, prev_node_feats_on_gpu, prev_edge_feats_on_gpu) = (
+        prev_cache.uniqn,
+        prev_cache.uniqe,
+        prev_cache.gpunfeat,
+        prev_cache.gpuefeat,
+    )
 
     # Path 1: Incremental update logic (if previous batch data is provided)
     if prev_node_uniq is not None:
-
         return _prepare_mfgs_incremental(
             mfgss_on_gpu,
             mfgss_on_cpu,
@@ -465,8 +466,8 @@ def prepare_mfgs(
     node_feats_on_gpu, edge_feats_on_gpu = None, None
     node_uniq, edge_uniq = None, None
 
-    # Step 2: Fetch features based on the deduplication strategy
-    if deduplication:
+    # Step 2: Fetch features based on the dedup strategy
+    if dedup:
         if node_feats is not None:
             node_feats_on_gpu, node_uniq = _fetch_features_deduplicated(
                 mfgss_on_gpu,
@@ -487,7 +488,7 @@ def prepare_mfgs(
                 efeat_buffs,
                 profiler,
             )
-    else:  # No global deduplication
+    else:  # No global dedup
         if node_feats is not None:
             _fetch_features_no_dedup(
                 mfgss_on_gpu, node_feats, "node", pinned, nfeat_buffs, profiler

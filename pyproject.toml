@@ -5,3 +5,13 @@ requires = [
   "pybind11>=2.6.0"
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length =88
+indent-width = 4
+
+[tool.ruff.lint.isort]
+known-first-party = ["tgl"]  # 本地包名
+combine-as-imports = true
+force-single-line = false
+lines-after-imports = 2

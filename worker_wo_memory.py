@@ -1,14 +1,14 @@
-import torch
-from sklearn.metrics import average_precision_score, roc_auc_score
-from modules import GeneralModel
-from utils import mfgs_to_cuda, prepare_mfgs
-import torch.distributed as dist
-from pipeline.data_mover import DataMover, TransferData
 import threading
+
 import torch
+import torch.distributed as dist
+from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from viztracer import get_tracer
+from modules import GeneralModel
+from utils import mfgs_to_cuda, prepare_mfgs
+from worker.h2d import TransferData, h2d
+
 
 local_rank = dist.get_rank()
 world_size = dist.get_world_size()
@@ -36,9 +36,9 @@ def irecv_object(src=host_rank):
 
 
 def run_training_step(
-    deduplication,
+    dedup,
     stream,
-    prev_cpu_to_gpu_thread: DataMover,
+    prev_cpu_to_gpu_thread: h2d,
     mailbox: MemoryMailbox,
     memory_param: MemoryParams,
     model: DDP,
@@ -55,8 +55,8 @@ def run_training_step(
 ):
     # received_data: TransferData = scatter_receive()
     data_ready_event = threading.Event()
-    curr_cpu_to_gpu_thread = DataMover(
-        deduplication,
+    curr_cpu_to_gpu_thread = h2d(
+        dedup,
         data_ready_event,
         host_rank,
         stream,
@@ -71,10 +71,9 @@ def run_training_step(
     )
     curr_cpu_to_gpu_thread.start()
     if prev_cpu_to_gpu_thread is not None:
-
         prev_cpu_to_gpu_thread, tot_loss, prev_mailbox_mem_updater = (
             train_from_prefetch(
-                deduplication,
+                dedup,
                 prev_cpu_to_gpu_thread,
                 mailbox,
                 model,
@@ -94,8 +93,8 @@ def run_training_step(
 
 
 def train_from_prefetch(
-    is_deduplication,
-    cpu_to_gpu_thread: DataMover,
+    is_dedup,
+    cpu_to_gpu_thread: h2d,
     memory_mailbox: MemoryMailbox,
     model: DDP | GeneralModel,
     optimizer,
@@ -127,7 +126,7 @@ def train_from_prefetch(
     #     print(f"  - deduplicated_mem_input.device: {cpu_to_gpu_thread.deduplicated_mem_input.device}")
     # print(f"----------------------------------------------------------")
     pred_pos, pred_neg = model(
-        is_deduplication,
+        is_dedup,
         cpu_to_gpu_thread.mfgss_on_gpu,
         cpu_to_gpu_thread.node_feats_on_gpu,
         cpu_to_gpu_thread.edge_feats_on_gpu,
@@ -148,8 +147,8 @@ def train_from_prefetch(
 
 
 def run_evaluation_step(
-    deduplication,
-    prev_cup_to_gpu_thread: DataMover,
+    dedup,
+    prev_cup_to_gpu_thread: h2d,
     model: DDP | GeneralModel,
     optimizer,
     creterion,
@@ -162,11 +161,9 @@ def run_evaluation_step(
     prev_mailbox_mem_updater,
     nccl_group,
 ):
-
-    if isinstance(prev_cup_to_gpu_thread, DataMover):
-
+    if isinstance(prev_cup_to_gpu_thread, h2d):
         prev_cup_to_gpu_thread, _ = train_from_prefetch(
-            deduplication,
+            dedup,
             prev_cup_to_gpu_thread,
             model,
             optimizer,
@@ -181,7 +178,7 @@ def run_evaluation_step(
             prev_cup_to_gpu_thread.cleanup()
         prev_cup_to_gpu_thread = None
     prev_th_hold_notmoved_data: TransferData = scatter_receive()
-    mfgs_on_cpu = prev_th_hold_notmoved_data.mfgs
+    mfgs_on_cpu = prev_th_hold_notmoved_data.mfgss
     if not mfgs_on_cpu or len(mfgs_on_cpu) == 0:
         print(
             f"Rank {local_rank}: Received empty batch during evaluation, skipping step."
@@ -190,7 +187,7 @@ def run_evaluation_step(
         return None, tot_loss, None
     mfgs_on_gpu = mfgs_to_cuda(mfgs_on_cpu)
     _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(
-        deduplication,
+        dedup,
         mfgs_on_cpu,
         mfgs_on_gpu,
         node_feats,
@@ -203,9 +200,8 @@ def run_evaluation_step(
 
     model.eval()
     with torch.no_grad():
-
         pred_pos, pred_neg = model(
-            deduplication, mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu
+            dedup, mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu
         )
 
         y_pred = torch.cat([pred_pos, pred_neg], dim=0).sigmoid().cpu()
@@ -219,9 +215,7 @@ def run_evaluation_step(
     return None, tot_loss
 
 
-def alc_pin_nfeat_efeat_buf_w_deduplication(
-    sample_param, batch_size, node_feats, edge_feats
-):
+def alc_pin_nfeat_efeat_buf_w_dedup(sample_param, batch_size, node_feats, edge_feats):
     pinned_nfeat_buffs = None
     pinned_efeat_buffs = None
     limit = int(batch_size * 3.3)
@@ -242,9 +236,7 @@ def alc_pin_nfeat_efeat_buf_w_deduplication(
     return pinned_nfeat_buffs, pinned_efeat_buffs
 
 
-def alc_pin_nfeat_efeat_buf_no_deduplication(
-    sample_param, batch_size, node_feats, edge_feats
-):
+def alc_pin_nfeat_efeat_buf_no_dedup(sample_param, batch_size, node_feats, edge_feats):
     pinned_nfeat_buffs = list()
     pinned_efeat_buffs = list()
     limit = int(batch_size * 3.3)
@@ -286,7 +278,7 @@ def alc_pin_nfeat_efeat_buf_no_deduplication(
 
 # GPU worker process
 def run_worker(
-    deduplication,
+    dedup,
     sample_param,
     memory_param,
     gnn_param,
@@ -308,7 +300,7 @@ def run_worker(
         memory_param,
         gnn_param,
         train_param,
-        combined=train_param.combine_neighs,
+        combined=train_param.merge_src,
     ).cuda()  # try by sqp17
     find_unused_parameters = True if sample_param.history > 1 else False
 
@@ -324,17 +316,13 @@ def run_worker(
     optimizer = torch.optim.Adam(model.parameters(), lr=train_param.lr)
 
     # buffer for features and mem_mailbox
-    if deduplication:
-        pinned_nfeat_buffs, pinned_efeat_buffs = (
-            alc_pin_nfeat_efeat_buf_w_deduplication(
-                sample_param, train_param.batch_size, node_feats, edge_feats
-            )
+    if dedup:
+        pinned_nfeat_buffs, pinned_efeat_buffs = alc_pin_nfeat_efeat_buf_w_dedup(
+            sample_param, train_param.batch_size, node_feats, edge_feats
         )
     else:
-        pinned_nfeat_buffs, pinned_efeat_buffs = (
-            alc_pin_nfeat_efeat_buf_no_deduplication(
-                sample_param, train_param.batch_size, node_feats, edge_feats
-            )
+        pinned_nfeat_buffs, pinned_efeat_buffs = alc_pin_nfeat_efeat_buf_no_dedup(
+            sample_param, train_param.batch_size, node_feats, edge_feats
         )
 
     tot_loss = 0
@@ -351,7 +339,7 @@ def run_worker(
                 # stream = torch.cuda.Stream()
                 prev_cup_to_gpu_thread, tot_loss, prev_mailbox_mem_updater = (
                     run_training_step(
-                        deduplication,
+                        dedup,
                         stream,
                         prev_cup_to_gpu_thread,
                         memory_mailbox,
@@ -372,7 +360,7 @@ def run_worker(
             case 1:  # eval
                 prev_cup_to_gpu_thread, tot_loss, prev_mailbox_mem_updater = (
                     run_evaluation_step(
-                        deduplication,
+                        dedup,
                         prev_cup_to_gpu_thread,
                         memory_mailbox,
                         memory_param,
