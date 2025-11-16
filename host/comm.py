@@ -28,32 +28,34 @@ class Distributor:
         # 3. 状态缓冲区也由类实例管理
         self.state_buf: torch.Tensor = torch.empty(1, dtype=torch.int32, device="cpu")
 
-    def broadcast_state(self, state: WorkerState):
-        """
-        Host (self) 向所有进程广播一个状态。
+    # def broadcast_state(self, state: WorkerState):
+    #     """
+    #     Host (self) 向所有进程广播一个状态。
 
-        Args:
-            state (WorkerState): 要广播的枚举状态。
-        """
-        assert self.local_rank == self.HOST_RANK, "只有 Host 进程可以广播状态"
+    #     Args:
+    #         state (WorkerState): 要广播的枚举状态。
+    #     """
+    #     assert self.local_rank == self.HOST_RANK, "只有 Host 进程可以广播状态"
 
-        # [修改] 不再需要字典查找。
-        # 直接从 Enum 成员获取其整数值。
-        if not isinstance(state, WorkerState):
-            raise TypeError(
-                f"broadcast_state 期望一个 WorkerState 枚举成员，但收到了 {type(state)}"
-            )
+    #     # [修改] 不再需要字典查找。
+    #     # 直接从 Enum 成员获取其整数值。
+    #     if not isinstance(state, WorkerState):
+    #         raise TypeError(
+    #             f"broadcast_state 期望一个 WorkerState 枚举成员，但收到了 {type(state)}"
+    #         )
 
-        val = state.value
+    #     val = state.value
 
-        print(
-            f"Host (Rank {self.HOST_RANK}): Broadcasting state {state.name} ({val}) ..."
-        )
-        self.state_buf.fill_(val)
+    #     print(
+    #         f"Host (Rank {self.HOST_RANK}): Broadcasting state {state.name} ({val}) ..."
+    #     )
+    #     self.state_buf.fill_(val)
 
-        dist.broadcast(self.state_buf, src=self.HOST_RANK)
+    #     dist.broadcast(self.state_buf, src=self.HOST_RANK)
 
-    def scatter_send(self, batch_payloads: List[Any]):
+    def scatter_send(
+        self, work_state: WorkerState, batch_payloads: List[Any] | None = None
+    ):
         """
         Host (self) 向所有 Workers scatter 数据。
 
@@ -63,16 +65,28 @@ class Distributor:
                           payloads[1] 发给 Rank 1
                           ...
         """
+        if batch_payloads is None:
+            batch_payloads = [None] * self.ngpus
         assert self.local_rank == self.HOST_RANK, "只有 Host 进程可以 scatter"
         assert len(batch_payloads) == self.ngpus, (
             f"需要为 {self.ngpus} 个 GPU worker 准备 payload, 但你给了 {len(batch_payloads)} 个"
         )
 
-        print(f"Host (Rank {self.HOST_RANK}): Scattering to {self.ngpus} workers...")
+        mids = [bp.mid for bp in batch_payloads]
+        print(
+            f"Host (Rank {self.HOST_RANK}): Scattering {mids} to {self.ngpus} workers..."
+        )
 
+        batch_payloads = [
+            {"work_state": work_state, "data": batch_payloads[i]}
+            for i in range(self.ngpus)
+        ]
         # 构造长度 world_size 的列表
         scatter_list = list(batch_payloads) + [None]  # Host 自己的槽位放 None
 
+        print(
+            f"Host (Rank {self.HOST_RANK}): Scatter list prepared: {batch_payloads} + [None]"
+        )
         # Host 自己也必须参与 collective
         dist.scatter_object_list(
             [None],  # Host 自己的接收缓冲区（没用）

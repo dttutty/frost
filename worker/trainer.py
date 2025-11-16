@@ -1,6 +1,6 @@
 # worker/trainer.py
-from threading import Event
-from typing import Optional
+from queue import Queue
+from typing import Any, Optional
 
 import torch
 from sklearn.metrics import average_precision_score, roc_auc_score
@@ -10,8 +10,9 @@ from memorys import BasicMemoryUpdater, MemoryMailbox, TransformerMemoryUpdater
 from modules import GeneralModel
 from schemas.datatypes import DistEnv
 from train_dist import Config
-from worker.d2h import MailTask, d2h
+from worker.d2h import d2h
 from worker.h2d import GPUData, TransferData
+from worker.mmfn_1step import MMFN
 
 
 # -------------------- Trainer --------------------
@@ -25,6 +26,9 @@ class Trainer:
         mm: Optional[MemoryMailbox],
         mail_worker: d2h,
         env: DistEnv,
+        comps: Any,
+        comms: Any,
+        mmq: Queue,
     ):
         self._cfg = cfg
         self._dedup = dedup
@@ -33,10 +37,13 @@ class Trainer:
         self._mail_worker = mail_worker
         self.nccl_group = nccl_group
         self.env = env
+        self.comps = comps
+        self.comms = comms
+        self.mmfn = MMFN(mmq)
 
         ndim, edim = cfg.t.ndim, cfg.t.edim
 
-        model = GeneralModel(ndim, edim, cfg).cuda()
+        model = GeneralModel(ndim, edim, cfg, comps, comms, mmfn).cuda()
         self._model: DDP = DDP(
             model,
             device_ids=[0],
@@ -71,22 +78,6 @@ class Trainer:
         with torch.no_grad():
             self.tot_loss += float(loss.item())
 
-        # Mail 投递
-        if (self._mm is not None) and (self.mu is not None):
-            with torch.no_grad():
-                mu_efeats = self._efeat[td.eid] if self._efeat is not None else None
-                task = MailTask(
-                    mid=td.mid,
-                    root=td.root,
-                    block=td.block,
-                    nid=self.mu.last_updated_nid.clone(),
-                    memory=self.mu.last_updated_memory.clone(),
-                    ts=self.mu.last_updated_ts.clone(),
-                    mem_edge_feats=mu_efeats,
-                    done=Event(),
-                )
-                self._mail_worker.enqueue(task)
-
         print(f"[Rank {self.env.local_rank}], mid {td.mid}, loss {loss.item()}")
 
     def eval(
@@ -102,28 +93,10 @@ class Trainer:
         with torch.no_grad():
             pred_pos, pred_neg = self._model(gpudata)
 
-            # 评估阶段也能选择投递 mailbox（按需）
-            if (self._mm is not None) and (self.mu is not None):
-                mem_edge_feats = (
-                    self._efeat[td.eid] if self._efeat is not None else None
-                )
-                task = MailTask(
-                    mid=td.mid,
-                    nid=self.mu.last_updated_nid.clone(),
-                    memory=self.mu.last_updated_memory.clone(),
-                    ts=self.mu.last_updated_ts.clone(),
-                    root=td.root,
-                    block=td.block,
-                    mem_edge_feats=mem_edge_feats,
-                    done=Event(),
-                )
-                self._mail_worker.enqueue(task)
-
             y_pred = torch.cat([pred_pos, pred_neg], dim=0).sigmoid().cpu()
             y_true = torch.cat(
                 [torch.ones(pred_pos.size(0)), torch.zeros(pred_neg.size(0))], dim=0
             )
-
             ap = average_precision_score(y_true, y_pred)
             auc = roc_auc_score(y_true, y_pred)
 

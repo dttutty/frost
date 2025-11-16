@@ -3,7 +3,6 @@ import threading
 from typing import Optional
 
 import torch
-import torch.distributed as dist
 
 from memorys import MemoryCFG, MemoryMailbox
 from schemas.datatypes import GPUData, PrevCache, TransferData
@@ -24,6 +23,8 @@ class h2d(threading.Thread):
         mm: MemoryMailbox | None,
         mcfg: MemoryCFG,
         merge_src,
+        rx_q: queue.Queue,
+        ready_q: queue.Queue,
         max_inflight: int = 2,  # 目前未用；可扩展成多缓冲
         gate: Optional[GlobalMicrobatchGate] = None,
         comm_lock: threading.Lock = threading.Lock(),  # 用于保护 dist 通信
@@ -43,35 +44,13 @@ class h2d(threading.Thread):
         self.gate: Optional[GlobalMicrobatchGate] = gate
         self.deliver_to = mcfg.deliver_to
         self.comm_lock = comm_lock
+        self.rx_q = rx_q
 
         # 复用缓存（上一批 uniqn/uniqe 及其 GPU 切片）
         self.prev_cache = PrevCache(None, None, None, None)
 
         # 接口队列
-        self.submit_q = queue.Queue(maxsize=0)
         self.ready_q = queue.Queue(maxsize=1)
-
-    def submit(self):
-        """训练侧调用：请求预取下一批（由 mover 内部收主机的 TransferData 并做 H2D）"""
-        self.submit_q.put(object(), block=True)
-
-    def get_ready(self, block=True, timeout=None):
-        """训练侧调用：拿到 (GPUData, done_ev, td)"""
-        return self.ready_q.get(block=block, timeout=timeout)
-
-    def _recv_transfer_data(self) -> Optional[TransferData]:
-        def scatter_receive(host_rank):
-            """
-            Worker 端用 scatter_object_list 接收 host 分发的对象。
-            注意：worker 只传 obj_list（长度=1），scatter_list 必须由 src 端提供。
-            """
-            recv = [None]
-            dist.scatter_object_list(recv, None, src=host_rank)
-            return recv[0]
-
-        # 简单阻塞式接收即可；如需更高吞吐，可以改造为 irecv + 双缓冲
-        td: Optional[TransferData] = scatter_receive(self.host_rank)
-        return td
 
     def run(self):
         # 当前进程已将 CUDA_VISIBLE_DEVICES 收窄为 1，这里直接用当前 device
@@ -80,13 +59,9 @@ class h2d(threading.Thread):
         while not self.stop_ev.is_set():
             # 等训练侧提交
             try:
-                self.submit_q.get(timeout=0.1)
+                td: TransferData = self.rx_q.get(timeout=0.1)
             except queue.Empty:
                 continue
-
-            # 1) 从 host 接 TransferData（CPU 上）
-            with self.comm_lock:
-                td: Optional[TransferData] = self._recv_transfer_data()
 
             if td is None or (td.mfgss is None) or (len(td.mfgss) == 0):
                 # 通知训练侧“无数据/结束”
@@ -150,6 +125,117 @@ class h2d(threading.Thread):
                 gpumail=gpumail,
             )
             self.ready_q.put((gpu_data, done_ev, td), block=True)
+
+    def prepmm(self, dedup, mfg, node_uniq, use_buf=False):
+        mm: MemoryMailbox = self.mm
+        # example: memory_mailbox.prep_input_mails(mfgs[0])
+        # history = 2
+        # mfgs = [[block1,block2],[block3,block4],[block5,block6]]
+        # receive mfg = [block1,block2] if 2 history
+        data_map = [
+            {
+                "name": "mem",
+                "src": mm.node_memory,
+                "pinned": "pinned_node_memory_buffs",
+            },
+            {
+                "name": "mem_ts",
+                "src": mm.node_memory_ts,
+                "pinned": "pinned_node_memory_ts_buffs",
+            },
+            {
+                "name": "mem_input",
+                "src": mm.mails,
+                "pinned": "pinned_mailbox_buffs",
+            },
+            {
+                "name": "mail_ts",
+                "src": mm.mail_ts,
+                "pinned": "pinned_mailbox_ts_buffs",
+            },
+        ]
+        deduplicated_mem = None
+        deduplicated_mem_input = None
+        for hist_id, hist_block in enumerate(mfg):
+            idx = hist_block.srcdata["ID"].cpu().long()
+            n_nodes = idx.shape[0]
+            for item in data_map:
+                name = item["name"]
+                if not dedup or name not in ["mem", "mem_input"]:
+                    src_tensor = item["src"]
+                    pinned_list = getattr(self, item["pinned"], None)
+                    can_use_pinned = use_buf and hist_id < len(pinned_list)
+                    with Timer() as t:
+                        if can_use_pinned:
+                            # --- Use Pinned Memory Buffers ---
+                            pinned_buffer = pinned_list[hist_id]
+                            # Select data into the pinned buffer (CPU operation).
+                            # we can see that the length of pinned_buffer[history_i] need to be larger than size of block.srcdata['ID']
+                            torch.index_select(
+                                src_tensor, 0, idx, out=pinned_buffer[:n_nodes]
+                            )
+                            # Copy the selected data from pinned buffer to GPU (non-blocking).
+                            gpu_data = pinned_buffer[:n_nodes].cuda(non_blocking=True)
+                        else:
+                            # --- Standard Method (No Pinned Buffers) ---
+                            # Select data and directly copy to GPU.
+                            gpu_data = src_tensor[idx].cuda()
+                            # Reshape mailbox data if needed.
+                        if name == "mem_input":
+                            gpu_data = gpu_data.reshape(n_nodes, -1)
+
+                        # Assign the prepared data to the DGL block's source nodes.
+                        hist_block.srcdata[name] = gpu_data
+
+                    # if name == "mem":
+                    # profiler.increase_time({"3_transfer_node_mem": t.last_duration})
+                    # elif name == "mem_input":
+                    #     profiler.increase_time(
+                    #         {"4_transfer_node_mail": t.last_duration}
+                    #     )
+        if dedup:
+            src_tensor = mm.node_memory
+            pinned_buffer = getattr(self, "pinned_node_memory_buffs", None)
+            with Timer() as t:
+                if use_buf:
+                    torch.index_select(
+                        src_tensor,
+                        0,
+                        node_uniq,
+                        out=pinned_buffer[: node_uniq.shape[0]],
+                    )
+                    deduplicated_mem = pinned_buffer[: node_uniq.shape[0]].cuda(
+                        non_blocking=True
+                    )
+                else:
+                    deduplicated_mem = src_tensor[node_uniq].to(
+                        "cuda", non_blocking=True
+                    )
+            # profiler.increase_time({"3_transfer_node_mem": t.last_duration})
+
+            src_tensor = self.mails
+            pinned_buffer = getattr(self, "pinned_mailbox_buffs", None)
+            with Timer() as t:
+                if use_buf:
+                    torch.index_select(
+                        src_tensor,
+                        0,
+                        node_uniq,
+                        out=pinned_buffer[: node_uniq.shape[0]],
+                    )
+                    deduplicated_mem_input = pinned_buffer[: node_uniq.shape[0]].cuda(
+                        non_blocking=True
+                    )
+                else:
+                    deduplicated_mem_input = src_tensor[node_uniq].to(
+                        "cuda", non_blocking=True
+                    )
+                deduplicated_mem_input = deduplicated_mem_input.reshape(
+                    node_uniq.shape[0], -1
+                )
+            # profiler.increase_time({"4_transfer_node_mail": t.last_duration})
+
+        return deduplicated_mem, deduplicated_mem_input
 
     def stop(self):
         self.stop_ev.set()

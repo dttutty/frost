@@ -96,13 +96,14 @@ class Config:
 class MailTask:
     bid: Optional[int] = None  # batch id（用于 gate 的 batch 粒度节流）
     mid: Optional[int] = None  # microbatch id（用于 gate 的微批粒度完成信号）
-    root: Optional[NDArray[np.int32]] = None
+    root_nodes: Optional[NDArray[np.int32]] = None
     block: Optional[object] = None
-    nid: Optional[torch.Tensor] = None
-    memory: Optional[torch.Tensor] = None
+    last_updated_nid: Optional[torch.Tensor] = None
+    last_updated_memory: Optional[torch.Tensor] = None
     ts: Optional[NDArray[np.float32]] = None
     mem_edge_feats: Optional[torch.Tensor] = None
     done: Optional[Event] = None
+    last_updated_ts: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -166,6 +167,28 @@ class GPUData:
 
 
 @dataclass
+class DataTsNid:
+    nid: torch.Tensor
+    data: torch.Tensor
+    ts: Optional[torch.Tensor] = None
+    ct: Optional[torch.Tensor] = None
+
+
+    def keep_latest():
+        pass
+
+    def keep_mean():
+        
+
+
+@dataclass
+class MailboxTsNid:
+    nid: torch.Tensor
+    ts: torch.Tensor
+    data: torch.Tensor
+
+
+@dataclass
 class Data4Train:
     mid: Optional[int]
     mfgs: Optional[List[DGLBlock]]
@@ -182,11 +205,26 @@ class Data4Train:
 class TransferData:
     mid: int
     bid: int
-    mfgss: Optional[List[List[DGLBlock]]] = None
-    root: Optional[NDArray[np.int32]] = None
-    ts: Optional[NDArray[np.float32]] = None
+    mfgss: List[List[DGLBlock]]
+    root: NDArray[np.int32]
+    ts: NDArray[np.float32]
     eid: Optional[List] = None
     block: Optional[DGLBlock] = None
+    next_pos_root_nodes: Optional[List] = None  # 这是src, dst
+    next_all_nodes: Optional[List] = (
+        None  # 这是src, dst, neg_dst + (src, dst, neg_dst)采样得到的
+    )
+
+
+@dataclass
+class Peer2Peer:
+    memplan: torch.Tensor
+    mem2disk: torch.Tensor
+
+    mailplan: torch.Tensor
+    mail2disk: torch.Tensor
+
+    featplan: torch.Tensor
 
 
 Role = Literal["worker", "host"]

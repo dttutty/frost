@@ -9,8 +9,8 @@ import torch.distributed as dist
 from sampler_core import ParallelSampler
 from tqdm import tqdm
 
-import wandb
 from common.state import WorkerState
+from gpu_distance import find_all_gpu_distances
 from host.comm import Distributor
 from host.scheduler import (
     batches_assign,
@@ -81,13 +81,19 @@ class HostTrainer:
         """
         公共的训练入口方法
         """
-        wandb.init(
-            project="my_tgl",
-            config=self.cfg.dict(),
-        )
+        # wandb.init(
+        #     project="my_tgl",
+        #     config=self.cfg.dict(),
+        # )
 
         for e in range(self.tcfg.epoch):
             self._run_epoch(e)
+
+        self.tap, self.tauc = self._eval(self.te_df, "test")
+
+        # 更新 wandb summary
+        # wandb.summary["test_ap_at_best"] = self.tap
+        # wandb.summary["test_auc_at_best"] = self.tauc
 
         # 训练结束，打印最终结果
         now_ts = time.time()
@@ -101,7 +107,7 @@ class HostTrainer:
 
         # 5. 清理和退出
         self._cleanup()
-        wandb.finish()
+        # wandb.finish()
 
     def _run_epoch(self, e: int):
         """
@@ -129,7 +135,7 @@ class HostTrainer:
         # —— Val ——
         print("Validating...")
         # 注意：_eval 内部会使用和更新 self.m_id
-        ap, auc = self._eval(self.va_df)
+        ap, auc = self._eval(self.va_df, "val")
 
         if ap > self.best_ap:
             print(
@@ -138,27 +144,24 @@ class HostTrainer:
             self.best_e = e
             self.best_ap = ap
 
-            self.comm.broadcast_state(WorkerState.SAVE_MODEL)
+            # wandb.summary["best_val_ap"] = self.best_ap
+            # wandb.summary["best_val_auc"] = auc
+            # wandb.summary["best_epoch"] = self.best_e
+            # self.comm.broadcast_state(WorkerState.SAVE_MODEL)
+            # self.comm.scatter_send
             # 注意：_eval 内部会使用和更新 self.m_id
-            self.tap, self.tauc = self._eval(self.te_df)
-
-            # 更新 wandb summary
-            wandb.summary["best_val_ap"] = self.best_ap
-            wandb.summary["best_val_auc"] = auc
-            wandb.summary["best_epoch"] = self.best_e
-            wandb.summary["test_ap_at_best"] = self.tap
-            wandb.summary["test_auc_at_best"] = self.tauc
+            # --- Test ---
 
         print(f"\ttrain loss:{t_loss:.4f} \tval ap:{ap:4f} \tval auc:{auc:4f}")
         print(f"\ttotal time:{time_tot:.2f}s sample time:{sample_tot:.2f}s")
-        wandb.log(
-            {
-                "epoch": e,
-                "train_loss": t_loss,
-                "val_ap": ap,
-                "val_auc": auc,
-            }
-        )
+        # wandb.log(
+        #     {
+        #         "epoch": e,
+        #         "train_loss": t_loss,
+        #         "val_ap": ap,
+        #         "val_auc": auc,
+        #     }
+        # )
 
     def _train(self, df):
         # 训练批次规划 (注意这里用 self.tcfg)
@@ -198,24 +201,13 @@ class HostTrainer:
             self.m_id += 1
             time_tot += time.time() - t0
 
-        if batch_to_send:
-            print(
-                f"Host: Scattering remaining {len(batch_to_send)} tail batches (train)..."
-            )
-            # 1. 用 None 填充，使其长度等于 ngpus
-            padding_count = self.env.ngpus - len(batch_to_send)
-            batch_to_send.extend([None] * padding_count)  # 填充 None
-
-            # 2. 像往常一样发送
-            self.comm.broadcast_state(WorkerState.TRAIN)
-            self.comm.scatter_send(batch_to_send)  # 现在 batch_to_send 长度为 ngpus
-            batch_to_send.clear()
+        assert len(batch_to_send) == 0, "batch plan出错,不应该还有剩余的batch没有发送"
 
         print("Training time:", time_tot)
-        self.comm.broadcast_state(WorkerState.REDUCE_LOSS)
-        gathered_loss = self.comm.gather_receive()
-        total_loss = float(np.sum(np.array(gathered_loss) * adjusted_train_batch_size))
-
+        # self.comm.broadcast_state(WorkerState.REDUCE_LOSS)
+        # gathered_loss = self.comm.gather_receive()
+        total_loss = 1.0
+        # total_loss = float(np.sum(np.array(gathered_loss) * adjusted_train_batch_size))
         return total_loss, sample_tot, time_tot
 
     def sample_and_pack(self, edges, ns, nbatchs: List[TransferData]):
@@ -255,18 +247,43 @@ class HostTrainer:
             )[0][0]
 
         nbatchs.append(tran_data)
+
+        nbatches_len = len(nbatchs)
+        if len(nbatchs) >= self.env.ngpus:
+            nbatchs[nbatches_len - self.env.ngpus].next_mfgss = mfgss
         return nbatchs, s_time
+
+    def _plan_next(self, batchs):
+        gpu_distances = find_all_gpu_distances
+        ngpus = len(batchs) / 2
+        gpus_groups = [[[0, 1], [2, 3]], [[5, 6], [7, 8]]]
+        dim = gpus_groups.dim()
+        list_nid_i_all_nodes_set = [] * ngpus
+        list_nid_i_need_all_nodes_set = [] * ngpus
+        for i, batch in iter(batchs[0:ngpus]):
+            n_srcs = len(batch.roots) / 2
+            batch.next_all_nodes = _all_node(batchs[ngpus + i].mfgss)
+            what_is_need_for_next_big_batch = set(batch.next_all_node)
+            i_all_nodes_set = set(batch.all_nodes)
+            i_need_all_nodes_set = what_is_need_for_next_big_batch - i_all_nodes_set
+
+        pass
 
     def _dispatch_train(self, edges, ns, batchs: List[TransferData]) -> float:
         batchs, s_time = self.sample_and_pack(edges, ns, batchs)
 
-        if len(batchs) == self.env.ngpus:
-            m_ids = [nbatch.mid for nbatch in batchs]
+        if len(batchs) == self.env.ngpus * 2:
+            batchs = _plan_next(batchs)
+            batch_to_send = []
+            for _ in range(self.env.ngpus):  # 删除3个元素
+                batch_to_send.append(batchs.pop())  # 默认删除最后一个
+            m_ids = [nbatch.mid for nbatch in batch_to_send]
             print(f"Host: Scattering batch {m_ids} (train) to all workers...")
-            self.comm.broadcast_state(WorkerState.TRAIN)
-            print(f"Host: Scatter batch {self.m_id} ...")
-            self.comm.scatter_send(batchs)  # <-- 真正的一次性 scatter
-            batchs.clear()
+            # self.comm.broadcast_state(WorkerState.TRAIN)
+            # print(f"Host: Scatter batch {self.m_id} ...")
+            self.comm.scatter_send(
+                WorkerState.TRAIN, batch_to_send
+            )  # <-- 真正的一次性 scatter
 
         return s_time
 
@@ -283,24 +300,26 @@ class HostTrainer:
         edges,
         ns,
         batchs: List[TransferData],
+        split: str,
     ) -> tuple[float, float, float]:
         batchs, s_time = self.sample_and_pack(edges, ns, batchs)
         ap = auc = 0.0
         if len(batchs) == self.env.ngpus:
             m_ids = [nbatch.mid for nbatch in batchs]
             print(f"Host: Scattering batch {m_ids} (eval) to all workers...")
-            self.comm.broadcast_state(WorkerState.EVAL)
-            print(f"Host: Scatter batch {self.m_id} ...")
-            self.comm.scatter_send(batchs)
-            ap_list = self.comm.gather_receive()
-            auc_list = self.comm.gather_receive()
-            ap = self.safe_mean(ap_list)
-            auc = self.safe_mean(auc_list)
+            ws = WorkerState.VAL if split != "val" else WorkerState.TEST
+            # self.comm.broadcast_state(WorkerState.EVAL)
+            # print(f"Host: Scatter batch {self.m_id} ...")
+            self.comm.scatter_send(WorkerState.VAL, batchs)
+            # ap_list = self.comm.gather_receive()
+            # auc_list = self.comm.gather_receive()
+            # ap = self.safe_mean(ap_list)
+            # auc = self.safe_mean(auc_list)
             batchs.clear()
 
         return ap, auc, s_time
 
-    def _eval(self, eval_df: pd.DataFrame) -> tuple[float, float]:
+    def _eval(self, eval_df: pd.DataFrame, split: str) -> tuple[float, float]:
         """
         This is for valid and test split
         """
@@ -313,36 +332,15 @@ class HostTrainer:
         batch_to_send = []
         grouped = eval_df.groupby(batches_assignment)
         for _, edges in tqdm(grouped, total=grouped.ngroups, desc="Evaluating..."):
-            ap, auc, s_time = self._dispatch_eval(edges, self.e_ns, batch_to_send)
+            ap, auc, s_time = self._dispatch_eval(
+                edges, self.e_ns, batch_to_send, split
+            )
             self.m_id += 1
             if ap > 0 or auc > 0:
                 ap_tot.append(ap)
                 auc_tot.append(auc)
 
-        if batch_to_send:
-            print(
-                f"Host: Scattering remaining {len(batch_to_send)} tail batches (eval)..."
-            )
-
-            # 1. 用 None 填充
-            padding_count = self.env.ngpus - len(batch_to_send)
-            batch_to_send.extend([None] * padding_count)
-
-            # 2. 正常分发和收集
-            self.comm.broadcast_state(WorkerState.EVAL)
-            self.comm.scatter_send(batch_to_send)
-
-            ap_list = self.comm.gather_receive()
-            auc_list = self.comm.gather_receive()
-
-            # 3. (重要!) 使用 safe_mean 过滤掉来自 None-batch 的 0.0
-            ap = self.safe_mean(ap_list)
-            auc = self.safe_mean(auc_list)
-
-            if ap > 0 or auc > 0:
-                ap_tot.append(ap)
-                auc_tot.append(auc)
-            # batch_to_send.clear() # 不需要了，函数即将退出
+        assert len(batch_to_send) == 0, "batch plan出错,不应该还有剩余的batch没有发送"
 
         ap = self.safe_mean(ap_tot)
         auc = self.safe_mean(auc_tot)
@@ -353,9 +351,8 @@ class HostTrainer:
         私有的清理逻辑
         """
         print("Host: Broadcasting CLEANUP command...")
-        self.comm.broadcast_state(WorkerState.CLEANUP)
-        print("Host: Broadcasting EXIT command...")
-        self.comm.broadcast_state(WorkerState.EXIT)
+        # self.comm.broadcast_state(WorkerState.CLEANUP)
+        self.comm.scatter_send(WorkerState.CLEANUP)
         print("Host: Entering final barrier...")
         dist.barrier()
         print("Host: All processes reached the final barrier.")
