@@ -5,9 +5,9 @@ import torch.distributed as dist
 from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from modules import GeneralModel
-from utils import mfgs_to_cuda, prepare_mfgs
-from worker.h2d import TransferData, h2d
+from gnn.base import BaseModel
+from utils import blocks_to_cuda, prepare_blocks
+from worker.h2d import H2D, Meta
 
 
 local_rank = dist.get_rank()
@@ -38,7 +38,7 @@ def irecv_object(src=host_rank):
 def run_training_step(
     dedup,
     stream,
-    prev_cpu_to_gpu_thread: h2d,
+    prev_cpu_to_gpu_thread: H2D,
     mailbox: MemoryMailbox,
     memory_param: MemoryParams,
     model: DDP,
@@ -49,13 +49,13 @@ def run_training_step(
     pinned_nfeat_buffs,
     pinned_efeat_buffs,
     tot_loss,
-    deduplicate_mfg_src,
+    deduplicate_block_src,
     prev_mailbox_mem_updater,
     nccl_group,
 ):
     # received_data: TransferData = scatter_receive()
     data_ready_event = threading.Event()
-    curr_cpu_to_gpu_thread = h2d(
+    curr_cpu_to_gpu_thread = H2D(
         dedup,
         data_ready_event,
         host_rank,
@@ -66,7 +66,7 @@ def run_training_step(
         edge_feats,
         mailbox,
         memory_param,
-        deduplicate_mfg_src,
+        deduplicate_block_src,
         prev_mailbox_mem_updater,
     )
     curr_cpu_to_gpu_thread.start()
@@ -94,9 +94,9 @@ def run_training_step(
 
 def train_from_prefetch(
     is_dedup,
-    cpu_to_gpu_thread: h2d,
+    cpu_to_gpu_thread: H2D,
     memory_mailbox: MemoryMailbox,
-    model: DDP | GeneralModel,
+    model: DDP | BaseModel,
     optimizer,
     creterion,
     edge_feats,
@@ -111,11 +111,11 @@ def train_from_prefetch(
 
     model.train()
     optimizer.zero_grad()
-    # print cpu_to_gpu_thread.mfgss_on_gpu
+    # print cpu_to_gpu_thread.blockss_on_gpu
     # print(f"--- [Rank {local_rank}] Checking devices before model call ---")
-    # if cpu_to_gpu_thread.mfgss_on_gpu:
+    # if cpu_to_gpu_thread.blockss_on_gpu:
     #     # DGLBlock的device属性可以这么拿
-    #     print(f"  - mfgss_on_gpu[0].device: {cpu_to_gpu_thread.mfgss_on_gpu[0][0].device}")
+    #     print(f"  - blockss_on_gpu[0].device: {cpu_to_gpu_thread.blockss_on_gpu[0][0].device}")
     # if cpu_to_gpu_thread.node_feats_on_gpu is not None:
     #     print(f"  - node_feats_on_gpu.device: {cpu_to_gpu_thread.node_feats_on_gpu.device}")
     # if cpu_to_gpu_thread.edge_feats_on_gpu is not None:
@@ -127,7 +127,7 @@ def train_from_prefetch(
     # print(f"----------------------------------------------------------")
     pred_pos, pred_neg = model(
         is_dedup,
-        cpu_to_gpu_thread.mfgss_on_gpu,
+        cpu_to_gpu_thread.blockss_on_gpu,
         cpu_to_gpu_thread.node_feats_on_gpu,
         cpu_to_gpu_thread.edge_feats_on_gpu,
         cpu_to_gpu_thread.deduplicated_mem,
@@ -148,8 +148,8 @@ def train_from_prefetch(
 
 def run_evaluation_step(
     dedup,
-    prev_cup_to_gpu_thread: h2d,
-    model: DDP | GeneralModel,
+    prev_cup_to_gpu_thread: H2D,
+    model: DDP | BaseModel,
     optimizer,
     creterion,
     edge_feats,
@@ -157,11 +157,11 @@ def run_evaluation_step(
     pinned_efeat_buffs,
     node_feats,
     tot_loss,
-    deduplicate_mfg_src,
+    deduplicate_block_src,
     prev_mailbox_mem_updater,
     nccl_group,
 ):
-    if isinstance(prev_cup_to_gpu_thread, h2d):
+    if isinstance(prev_cup_to_gpu_thread, H2D):
         prev_cup_to_gpu_thread, _ = train_from_prefetch(
             dedup,
             prev_cup_to_gpu_thread,
@@ -177,22 +177,22 @@ def run_evaluation_step(
         if prev_cup_to_gpu_thread is not None:
             prev_cup_to_gpu_thread.cleanup()
         prev_cup_to_gpu_thread = None
-    prev_th_hold_notmoved_data: TransferData = scatter_receive()
-    mfgs_on_cpu = prev_th_hold_notmoved_data.mfgss
-    if not mfgs_on_cpu or len(mfgs_on_cpu) == 0:
+    prev_th_hold_notmoved_data: Meta = scatter_receive()
+    blocks_on_cpu = prev_th_hold_notmoved_data.blockss
+    if not blocks_on_cpu or len(blocks_on_cpu) == 0:
         print(
             f"Rank {local_rank}: Received empty batch during evaluation, skipping step."
         )
         # 该函数需要返回三个值，对于跳过的情况，返回 None, tot_loss, None 是合适的
         return None, tot_loss, None
-    mfgs_on_gpu = mfgs_to_cuda(mfgs_on_cpu)
-    _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(
+    blocks_on_gpu = blocks_to_cuda(blocks_on_cpu)
+    _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_blocks(
         dedup,
-        mfgs_on_cpu,
-        mfgs_on_gpu,
+        blocks_on_cpu,
+        blocks_on_gpu,
         node_feats,
         edge_feats,
-        deduplicate_mfg_src=deduplicate_mfg_src,
+        deduplicate_block_src=deduplicate_block_src,
         pinned=True,
         nfeat_buffs=pinned_nfeat_buffs,
         efeat_buffs=pinned_efeat_buffs,
@@ -201,7 +201,7 @@ def run_evaluation_step(
     model.eval()
     with torch.no_grad():
         pred_pos, pred_neg = model(
-            dedup, mfgs_on_gpu, node_feats_on_gpu, edge_feats_on_gpu
+            dedup, blocks_on_gpu, node_feats_on_gpu, edge_feats_on_gpu
         )
 
         y_pred = torch.cat([pred_pos, pred_neg], dim=0).sigmoid().cpu()
@@ -293,7 +293,7 @@ def run_worker(
 ):
     # stream position 1
     stream = torch.cuda.Stream()
-    model = GeneralModel(
+    model = BaseModel(
         node_feat_dim,
         edge_feat_dim,
         sample_param,
@@ -352,7 +352,7 @@ def run_worker(
                         pinned_nfeat_buffs,
                         pinned_efeat_buffs,
                         tot_loss,
-                        train_param.deduplicate_mfg_src,
+                        train_param.deduplicate_block_src,
                         prev_mailbox_mem_updater,
                         nccl_group,
                     )
@@ -372,7 +372,7 @@ def run_worker(
                         pinned_efeat_buffs,
                         node_feats,
                         tot_loss,
-                        train_param.deduplicate_mfg_src,
+                        train_param.deduplicate_block_src,
                         prev_mailbox_mem_updater,
                         nccl_group,
                     )

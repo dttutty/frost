@@ -49,8 +49,8 @@ struct ThreadSamplingBuffers {
         NodeIDType local_dst_id = nodes_data.size(); // 当前线程的源节点在当前层输出节点中的相对ID
         row_data.push_back(local_src_id);        // 源节点在当前层输出节点中的相对ID
         col_data.push_back(local_dst_id);// 目标节点在下一层输入节点中的相对ID (即当前已采样的邻居数)
-        EdgeIDType global_eid = eid[picked]; // 采样到的边的原始ID
-        eid_data.push_back(global_eid);        // 边的原始ID
+        EdgeIDType _ID = eid[picked]; // 采样到的边的原始ID
+        eid_data.push_back(_ID);        // 边的原始ID
         if (prop_time)                  // 如果 prop_time 为 true 是否将父节点的时间戳传播给子节点采样的边
             ts_data.push_back(src_ts);     // 使用源节点的时间戳作为这条采样边的时间戳
         else
@@ -71,7 +71,7 @@ public:
     std::vector<TimeStampType> ts;  // 边的时间戳列表 (或传播过来的时间戳)
     std::vector<TimeStampType> dts; // 边的时间差列表 (源节点时间戳 - 边原始时间戳)
     std::vector<NodeIDType> nodes;  // 块中包含的节点ID列表 (原始图中的ID)
-    NodeIDType dim_in, dim_out;
+    NodeIDType dim_in, d_hid;
     double ptr_time = 0;            // 更新时间指针所用时间
     double search_time = 0;         // 搜索邻居范围所用时间
     double sample_time = 0;         // 采样邻居所用时间
@@ -88,10 +88,10 @@ public:
         std::vector<TimeStampType>& _dts,
         std::vector<NodeIDType>& _nodes,
         NodeIDType _dim_in,
-        NodeIDType _dim_out
+        NodeIDType _d_hid
     ) :
         row(_row), col(_col), eid(_eid), ts(_ts), dts(_dts),
-        nodes(_nodes), dim_in(_dim_in), dim_out(_dim_out) {
+        nodes(_nodes), dim_in(_dim_in), d_hid(_d_hid) {
     }
 };
 
@@ -293,7 +293,7 @@ public:
 
         }
         tgb.dim_in = tgb.nodes.size();    // 当前层采样得到的子图所包含的所有唯一节点的总数
-        tgb.dim_out = cum_row.back();      // root_nodes数量
+        tgb.d_hid = cum_row.back();      // root_nodes数量
     }
 
     // 对一层进行邻居采样
@@ -493,7 +493,7 @@ PYBIND11_MODULE(sampler_core, m)
         .def("dts", [](const TemporalGraphBlock& tgb) { return vec2npy(tgb.dts); })
         .def("nodes", [](const TemporalGraphBlock& tgb) { return vec2npy(tgb.nodes); })
         .def("dim_in", [](const TemporalGraphBlock& tgb) { return tgb.dim_in; })
-        .def("dim_out", [](const TemporalGraphBlock& tgb) { return tgb.dim_out; })
+        .def("d_hid", [](const TemporalGraphBlock& tgb) { return tgb.d_hid; })
         .def("tot_time", [](const TemporalGraphBlock& tgb) { return tgb.tot_time; })
         .def("ptr_time", [](const TemporalGraphBlock& tgb) { return tgb.ptr_time; })
         .def("search_time", [](const TemporalGraphBlock& tgb) { return tgb.search_time; })

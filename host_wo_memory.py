@@ -5,13 +5,13 @@ import time
 import numpy as np
 import torch
 import torch.distributed as dist
+from host.host_sampler import sample_and_scatter_batch
 from sampler_core import ParallelSampler
 from tqdm import tqdm
 
-from host.host_sampler import sample_and_scatter_batch
 from memorys import MemoryMailbox
 from sampler import NegLinkSampler
-from schemas.datatypes import TransferData
+from schemas.datatypes import Env
 from utils import node_to_dgl_blocks, to_dgl_blocks
 
 
@@ -32,7 +32,7 @@ def eval(
     cfg_batch_size,
     sample_param,
     pbar,
-    env: DistEnv,
+    env: Env,
 ):
     _, batch_size = plan_gpu_batches(len(eval_df), cfg_batch_size, ngpus)
 
@@ -108,13 +108,15 @@ def sample_and_dispatch_batch(
     )
 
     if gnn_param.arch != "identity":
-        grouped_mfgs = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
+        grouped_blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
     else:
-        grouped_mfgs = node_to_dgl_blocks(root_nodes, ts, cuda=False)
+        grouped_blocks = node_to_dgl_blocks(root_nodes, ts, cuda=False)
 
     # Deconstruct DGL blocks into tensor representations
     # This is the KEY change for performance
-    mfgs_tensors = [dgl_blocks_to_tensor_dicts(mfg_list) for mfg_list in grouped_mfgs]
+    blocks_tensors = [
+        dgl_blocks_to_tensor_dicts(block_list) for block_list in grouped_blocks
+    ]
 
     # --- 【新增】处理 memory_mailbox 需要的特殊 block ---
     special_block_tensors = None
@@ -129,7 +131,7 @@ def sample_and_dispatch_batch(
 
     payload = {
         "mode": mode,  # <--- NEW: 告诉 worker 当前的模式
-        "mfgs_tensors": mfgs_tensors,
+        "blocks_tensors": blocks_tensors,
         "special_block_tensors": special_block_tensors,  # <--- NEW: 加入特殊 block 的张量字典
         "root": torch.from_numpy(root_nodes),
         "ts": torch.from_numpy(ts),
@@ -191,22 +193,22 @@ def sample_and_scatter_batch(
     # print('Sampled blocks:', len(ret), 'total sample time:', total_sample_time)
     if gnn_param.arch != "identity":
         # eg. if sample_param.history = 3, sample_param.layer = 2, ret = [block1,block2, block3,block4, block5,block6]
-        # then grouped_mfgs = [[block1,block2],[block3,block4],[block5,block6]]
-        grouped_mfgs = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
+        # then grouped_blocks = [[block1,block2],[block3,block4],[block5,block6]]
+        grouped_blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
     else:
-        # eg. grouped_mfgs = [[block]]
-        grouped_mfgs = node_to_dgl_blocks(root_nodes, ts, cuda=False)
+        # eg. grouped_blocks = [[block]]
+        grouped_blocks = node_to_dgl_blocks(root_nodes, ts, cuda=False)
 
-    data_to_send = TransferData(
-        mfgss=grouped_mfgs,
-        root=root_nodes,
-        ts=ts,
-        eid=edges["Unnamed: 0"].values,
-        block=None,
+    data_to_send = td(
+        blockss=grouped_blocks,
+        roots=root_nodes,
+        pos_edge_ts=ts,
+        pos_eid=edges["Unnamed: 0"].values,
+        mdb=None,
     )
     if memory_mailbox is not None and memory_param.deliver_to == "neighbors":
         # only deliver to neighbors in history[1]
-        data_to_send.block = to_dgl_blocks(
+        data_to_send.mdb = to_dgl_blocks(
             ret, sample_param.history, reverse=True, save_on_pgu=False
         )[0][0]
     batch_to_send.append(data_to_send)

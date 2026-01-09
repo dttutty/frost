@@ -1,11 +1,11 @@
-import torch
-import dgl
 import math
+
+import dgl
 import numpy as np
+import torch
 
 
 class TimeEncode(torch.nn.Module):
-
     def __init__(self, dim):
         super(TimeEncode, self).__init__()
         self.dim = dim
@@ -22,7 +22,6 @@ class TimeEncode(torch.nn.Module):
 
 
 class EdgePredictor(torch.nn.Module):
-
     def __init__(self, dim_in):
         super(EdgePredictor, self).__init__()
         self.dim_in = dim_in
@@ -43,70 +42,58 @@ class EdgePredictor(torch.nn.Module):
         return self.out_fc(h_pos_edge), self.out_fc(h_neg_edge)
 
 
-from torch import nn
-
-
 class TransfomerAttentionLayer(torch.nn.Module):
-
     def __init__(
         self,
-        dim_node_feat,
-        dim_edge_feat,
-        dim_time,
-        num_head,
+        ndim,
+        edim,
+        d_time,
+        att_h,
         dropout,
-        att_dropout,
-        dim_out,
+        d_hid,
         combined=False,
     ):
         super(TransfomerAttentionLayer, self).__init__()
-        self.num_head = num_head
-        self.dim_node_feat = dim_node_feat
-        self.dim_edge_feat = dim_edge_feat
-        self.dim_time = dim_time
-        self.dim_out = dim_out
+        self.num_head = att_h
+        self.ndim = ndim
+        self.dim_edge_feat = edim
+        self.d_time = d_time
+        self.d_hid = d_hid
         self.combined = combined
 
         self.dropout = torch.nn.Dropout(dropout)
-        self.att_dropout = torch.nn.Dropout(att_dropout)
         self.att_act = torch.nn.LeakyReLU(0.2)
-        self.layer_norm = torch.nn.LayerNorm(dim_out)
+        self.layer_norm = torch.nn.LayerNorm(d_hid)
 
-        if dim_time > 0:
-            self.time_enc = TimeEncode(dim_time)
-
-        self.att_dropout = torch.nn.Dropout(att_dropout)
+        if d_time > 0:
+            self.time_enc = TimeEncode(d_time)
 
         if combined:
-            if dim_node_feat > 0:
-                self.w_q_n = torch.nn.Linear(dim_node_feat, dim_out)
-                self.w_k_n = torch.nn.Linear(dim_node_feat, dim_out)
-                self.w_v_n = torch.nn.Linear(dim_node_feat, dim_out)
-            if dim_edge_feat > 0:
-                self.w_k_e = torch.nn.Linear(dim_edge_feat, dim_out)
-                self.w_v_e = torch.nn.Linear(dim_edge_feat, dim_out)
-            if dim_time > 0:
-                self.w_q_t = torch.nn.Linear(dim_time, dim_out)
-                self.w_k_t = torch.nn.Linear(dim_time, dim_out)
-                self.w_v_t = torch.nn.Linear(dim_time, dim_out)
+            if ndim > 0:
+                self.w_q_n = torch.nn.Linear(ndim, d_hid)
+                self.w_k_n = torch.nn.Linear(ndim, d_hid)
+                self.w_v_n = torch.nn.Linear(ndim, d_hid)
+            if edim > 0:
+                self.w_k_e = torch.nn.Linear(edim, d_hid)
+                self.w_v_e = torch.nn.Linear(edim, d_hid)
+            if d_time > 0:
+                self.w_q_t = torch.nn.Linear(d_time, d_hid)
+                self.w_k_t = torch.nn.Linear(d_time, d_hid)
+                self.w_v_t = torch.nn.Linear(d_time, d_hid)
         else:
-            if dim_node_feat + dim_time > 0:
-                self.w_q = torch.nn.Linear(dim_node_feat + dim_time, dim_out)
-            self.w_k = torch.nn.Linear(
-                dim_node_feat + dim_edge_feat + dim_time, dim_out
-            )
-            self.w_v = torch.nn.Linear(
-                dim_node_feat + dim_edge_feat + dim_time, dim_out
-            )
-        self.w_out = torch.nn.Linear(dim_node_feat + dim_out, dim_out)
+            if ndim + d_time > 0:
+                self.w_q = torch.nn.Linear(ndim + d_time, d_hid)
+            self.w_k = torch.nn.Linear(ndim + edim + d_time, d_hid)
+            self.w_v = torch.nn.Linear(ndim + edim + d_time, d_hid)
+        self.w_out = torch.nn.Linear(ndim + d_hid, d_hid)
 
     def forward(self, b):
-        assert self.dim_time + self.dim_node_feat + self.dim_edge_feat > 0
+        assert self.d_time + self.ndim + self.dim_edge_feat > 0
         if b.num_edges() == 0:
             return torch.zeros(
-                (b.num_dst_nodes(), self.dim_out), device=torch.device("cuda:0")
+                (b.num_dst_nodes(), self.d_hid), device=torch.device("cuda:0")
             )
-        if self.dim_time > 0:
+        if self.d_time > 0:
             time_feat = self.time_enc(b.edata["dt"])
             zero_time_feat = self.time_enc(
                 torch.zeros(
@@ -123,43 +110,37 @@ class TransfomerAttentionLayer(torch.nn.Module):
         # dst: 0, 1
         # src: 2, 3, 4
         if self.combined:
-            Q = torch.zeros(
-                (b.num_edges(), self.dim_out), device=torch.device("cuda:0")
-            )
-            K = torch.zeros(
-                (b.num_edges(), self.dim_out), device=torch.device("cuda:0")
-            )
-            V = torch.zeros(
-                (b.num_edges(), self.dim_out), device=torch.device("cuda:0")
-            )
-            if self.dim_node_feat > 0:
+            Q = torch.zeros((b.num_edges(), self.d_hid), device=torch.device("cuda:0"))
+            K = torch.zeros((b.num_edges(), self.d_hid), device=torch.device("cuda:0"))
+            V = torch.zeros((b.num_edges(), self.d_hid), device=torch.device("cuda:0"))
+            if self.ndim > 0:
                 Q += self.w_q_n(dst_h)[dst_indices]
                 K += self.w_k_n(src_h)[src_indices]
                 V += self.w_v_n(src_h)[src_indices]
             if self.dim_edge_feat > 0:
                 K += self.w_k_e(b.edata["f"])
                 V += self.w_v_e(b.edata["f"])
-            if self.dim_time > 0:
+            if self.d_time > 0:
                 Q += self.w_q_t(zero_time_feat)[dst_indices]
                 K += self.w_k_t(time_feat)
                 V += self.w_v_t(time_feat)
         else:
             q_input = []
             kv_input = []
-            if self.dim_node_feat > 0:
+            if self.ndim > 0:
                 # if the src_h size_0 not equal to edge number, it will cause error
                 q_input.append(dst_h)
                 kv_input.append(src_h)
             if self.dim_edge_feat > 0:
-                kv_input.append(b.edata["f"])
-            if self.dim_time > 0:
+                kv_input.append(b.edata["feat"])
+            if self.d_time > 0:
                 q_input.append(zero_time_feat)
                 kv_input.append(time_feat)
             Q = (
                 self.w_q(torch.cat(q_input, dim=1))[dst_indices]
                 if len(q_input) > 0
                 else torch.ones(
-                    (b.num_edges(), self.dim_out), device=torch.device("cuda:0")
+                    (b.num_edges(), self.d_hid), device=torch.device("cuda:0")
                 )
             )
             K = self.w_k(torch.cat(kv_input, dim=1))
@@ -168,7 +149,7 @@ class TransfomerAttentionLayer(torch.nn.Module):
         K = torch.reshape(K, (K.shape[0], self.num_head, -1))
         V = torch.reshape(V, (V.shape[0], self.num_head, -1))
         att = dgl.ops.edge_softmax(b, self.att_act(torch.sum(Q * K, dim=2)))
-        att = self.att_dropout(att)
+        att = self.dropout(att)
         V = torch.reshape(V * att[:, :, None], (V.shape[0], -1))
         if self.combined:
             b.edata["v"] = V
@@ -180,7 +161,7 @@ class TransfomerAttentionLayer(torch.nn.Module):
             b.srcdata["v"] = torch.cat([dst_dummy, V], dim=0)
             b.update_all(dgl.function.copy_u("v", "m"), dgl.function.sum("m", "h"))
 
-        if self.dim_node_feat != 0:
+        if self.ndim != 0:
             rst = torch.cat([b.dstdata["h"], dst_h], dim=1)
         else:
             rst = b.dstdata["h"]
@@ -190,20 +171,18 @@ class TransfomerAttentionLayer(torch.nn.Module):
 
 
 class IdentityNormLayer(torch.nn.Module):
-
-    def __init__(self, dim_out):
+    def __init__(self, d_hid):
         super(IdentityNormLayer, self).__init__()
-        self.norm = torch.nn.LayerNorm(dim_out)
+        self.norm = torch.nn.LayerNorm(d_hid)
 
     def forward(self, b):
         return self.norm(b.srcdata["h"])
 
 
 class JODIETimeEmbedding(torch.nn.Module):
-
-    def __init__(self, dim_out):
+    def __init__(self, d_hid):
         super(JODIETimeEmbedding, self).__init__()
-        self.dim_out = dim_out
+        self.d_hid = d_hid
 
         class NormalLinear(torch.nn.Linear):
             # From Jodie code
@@ -213,7 +192,7 @@ class JODIETimeEmbedding(torch.nn.Module):
                 if self.bias is not None:
                     self.bias.data.normal_(0, stdv)
 
-        self.time_emb = NormalLinear(1, dim_out)
+        self.time_emb = NormalLinear(1, d_hid)
 
     def forward(self, h, mem_ts, ts):
         time_diff = (ts - mem_ts) / (ts + 1)

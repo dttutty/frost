@@ -169,11 +169,13 @@ def create_task_package(
     ret, _ = sampler_wrapper(sample_param.no_neg, root_nodes, sampler, ts, None)
 
     if gnn_param.arch != "identity":
-        grouped_mfgs = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
+        grouped_blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
     else:
-        grouped_mfgs = node_to_dgl_blocks(root_nodes, ts, cuda=False)
+        grouped_blocks = node_to_dgl_blocks(root_nodes, ts, cuda=False)
 
-    mfgs_tensors = [dgl_blocks_to_tensor_dicts(mfg_list) for mfg_list in grouped_mfgs]
+    blocks_tensors = [
+        dgl_blocks_to_tensor_dicts(block_list) for block_list in grouped_blocks
+    ]
 
     special_block_tensors = None
     if memory_param.deliver_to == "neighbors":  # Simplified check
@@ -186,7 +188,7 @@ def create_task_package(
     payload = {
         "mode": mode,
         "data": {
-            "mfgs_tensors": mfgs_tensors,
+            "blocks_tensors": blocks_tensors,
             "special_block_tensors": special_block_tensors,
             "root": torch.from_numpy(root_nodes),
             "ts": torch.from_numpy(ts),
@@ -231,9 +233,9 @@ def run_worker(rank, world_size):
         data = task_package["data"]
 
         # 2. Reconstruct DGL blocks and move data to GPU
-        mfgs = [
-            tensor_dicts_to_dgl_blocks(mfg_tensors, device)
-            for mfg_tensors in data["mfgs_tensors"]
+        blocks = [
+            tensor_dicts_to_dgl_blocks(block_tensors, device)
+            for block_tensors in data["blocks_tensors"]
         ]
 
         special_block = None
@@ -250,7 +252,7 @@ def run_worker(rank, world_size):
         if mode == "train":
             # model.train()
             # optimizer.zero_grad()
-            # pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu, root_nodes, ts, eids, special_block)
+            # pred_pos, pred_neg = model(blocks, node_feats_on_gpu, edge_feats_on_gpu, root_nodes, ts, eids, special_block)
             # loss = calculate_loss(pred_pos, pred_neg)
             # loss.backward() # DDP handles gradient sync
             # optimizer.step()
@@ -261,7 +263,7 @@ def run_worker(rank, world_size):
         elif mode == "eval":
             # model.eval()
             with torch.no_grad():
-                # pred_pos, pred_neg = model(mfgs, node_feats_on_gpu, edge_feats_on_gpu,  root_nodes, ts, eids, special_block)
+                # pred_pos, pred_neg = model(blocks, node_feats_on_gpu, edge_feats_on_gpu,  root_nodes, ts, eids, special_block)
                 # local_ap, local_auc = calculate_metrics(pred_pos, pred_neg)
                 # Send metrics back to host for this specific batch
                 dist.send_object(

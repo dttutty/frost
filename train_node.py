@@ -36,7 +36,7 @@ import torch
 from sklearn.metrics import average_precision_score, f1_score
 from tqdm import tqdm
 
-from modules import *
+from gnn.base import *
 from sampler import *
 from utils import *
 
@@ -63,7 +63,7 @@ def generate_temporal_embeddings(ldf, emb_file_name):
     _, node_feat_dim, _, _, edge_feat_dim, _ = get_node_edge_dimensions(
         node_np, edge_np
     )
-    model = GeneralModel(
+    model = BaseModel(
         node_feat_dim,
         edge_feat_dim,
         sample_param,
@@ -73,17 +73,17 @@ def generate_temporal_embeddings(ldf, emb_file_name):
         combined=bool(train_param.merge_src),
     ).cuda()
     shared_cfg = {
-        "node_memory": ([num_nodes, memory_param.dim_out], torch.float32),
+        "node_memory": ([num_nodes, memory_param.d_hid], torch.float32),
         "node_memory_ts": ([num_nodes], torch.float32),
         "mails": (
             [
                 num_nodes,
-                memory_param.mailbox_size,
-                2 * memory_param.dim_out + edge_feat_dim,
+                memory_param.boxsize,
+                2 * memory_param.d_hid + edge_feat_dim,
             ],
             torch.float32,
         ),
-        "mail_ts": ([num_nodes, memory_param.mailbox_size], torch.float32),
+        "mail_ts": ([num_nodes, memory_param.boxsize], torch.float32),
         "next_mail_pos": ([num_nodes], torch.long),
         "mail_pos_update_pending_flag": ([num_nodes], torch.int8),
     }
@@ -148,25 +148,25 @@ def generate_temporal_embeddings(ldf, emb_file_name):
             if sampler is not None:
                 ret, _ = sampler_wrapper(sample_param.no_neg, root_nodes, sampler, ts)
             if gnn_param.arch != "identity":
-                mfgs = to_dgl_blocks(ret, sample_param.history, save_on_pgu=True)
+                blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=True)
             else:
-                mfgs = node_to_dgl_blocks(root_nodes, ts, cuda=True)
+                blocks = node_to_dgl_blocks(root_nodes, ts, cuda=True)
 
-            mfgs, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = (
-                prepare_mfgs(
+            blocks, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = (
+                prepare_blocks(
                     args.dedup,
-                    mfgs,
+                    blocks,
                     node_np,
                     edge_np,
-                    deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src),
+                    deduplicate_block_src=bool(train_param.deduplicate_block_src),
                 )
             )
             if mailbox is not None:
                 deduplicated_mem, deduplicated_mem_input = mailbox.prepmm(
-                    mfgs[0], node_uniq
+                    blocks[0], node_uniq
                 )
             with torch.no_grad():
-                pred_pos, pred_neg = model(mfgs)
+                pred_pos, pred_neg = model(blocks)
                 if mailbox is not None:
                     eid = rows["Unnamed: 0"].values
                     mem_edge_feats = edge_np[eid] if edge_np is not None else None
@@ -199,22 +199,24 @@ def generate_temporal_embeddings(ldf, emb_file_name):
             sampler.sample(root_nodes, ts)
             ret = sampler.get_ret()
         if gnn_param.arch != "identity":
-            mfgs = to_dgl_blocks(ret, sample_param.history, save_on_pgu=True)
+            blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=True)
         else:  # why aggragate?
-            mfgs = node_to_dgl_blocks(root_nodes, ts, cuda=True)
-        mfgs, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(
-            args.dedup,
-            mfgs,
-            node_np,
-            edge_np,
-            deduplicate_mfg_src=bool(train_param.deduplicate_mfg_src),
+            blocks = node_to_dgl_blocks(root_nodes, ts, cuda=True)
+        blocks, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = (
+            prepare_blocks(
+                args.dedup,
+                blocks,
+                node_np,
+                edge_np,
+                deduplicate_block_src=bool(train_param.deduplicate_block_src),
+            )
         )
         if mailbox is not None:
             deduplicated_mem, deduplicated_mem_input = mailbox.prepmm(
-                mfgs[0], node_uniq
+                blocks[0], node_uniq
             )
         with torch.no_grad():
-            ret = model.get_emb(mfgs)
+            ret = model.get_emb(blocks)
         return ret.detach().cpu()
 
     emb = list()

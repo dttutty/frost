@@ -9,15 +9,14 @@ sampling:
     num_thread: 64
     no_neg: True
 memory: 
-  - type: 'node'
-    dim_time: 100
+  - d_time: 100
     deliver_to: 'neighbors'
     mail_combine: 'last'
     memory_update: 'transformer'
     attention_head: 2
-    mailbox_size: 10
+    boxsize: 10
     combine_node_feature: False
-    dim_out: 100
+    d_hid: 100
 gnn:
   - arch: 'identity'
 train:

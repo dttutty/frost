@@ -1,37 +1,29 @@
 import argparse
-
-# 允许 CUDA_VISIBLE_DEVICES 为空（CPU-only 或者容器里没设置）
-# _raw_cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-# cuda_visible_devices = [x for x in _raw_cvd.split(",") if x != ""] if _raw_cvd else []
-# device_count = len(cuda_visible_devices)
-# ---------- Torch / Dist ----------
 import datetime
 import logging
 import os
 import random
 import socket
-from functools import wraps
-from typing import Optional
+import time
+from typing import Any
 
 import numpy as np
 import torch
 import torch.distributed as dist
-from dgl.utils.shared_mem import create_shared_mem_array, get_shared_mem_array
+from dgl.utils.shared_mem import (
+    create_shared_mem_array as csm,
+    get_shared_mem_array as gsm,
+)
 
-from memorys import MemoryMailbox
-
-# 把重依赖模块的导入尽量往后放，避免潜在循环导入风险
-from modules import Config
-from schemas.datatypes import DistEnv, SharedMailboxArrays
+from schemas.datatypes import Env, Shared
 from utils import (
-    get_model_save_path,
-    get_node_count_from_graph,
-    get_node_edge_dimensions,
-    get_shape_and_dtype,
     load_feat,
     load_graph,
     parse_config,
 )
+
+
+start = time.time()
 
 
 # ---------- Logging ----------
@@ -56,248 +48,204 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
-def rank_broadcast(env, func=None, *, src_rank=0):
-    def decorator(fn):
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            payload = [None]
-            if env.local_rank == src_rank:
-                payload[0] = fn(*args, **kwargs)
-            dist.broadcast_object_list(payload, src=src_rank)
-            return payload[0]
-
-        return wrapper
-
-    return decorator if func is None else decorator(func)
-
-
-def init_process_group(timeout_s: int = 3600, backend: str = "gloo"):
-    if not dist.is_initialized():
-        dist.init_process_group(
-            backend=backend, timeout=datetime.timedelta(seconds=timeout_s)
-        )
-
-
-def create_memory_mailbox(cfg: Config, n, edim, local_rank) -> Optional[MemoryMailbox]:
-    """
-    根据配置初始化并返回一个共享的 MemoryMailbox。
-    如果配置为 'none'，则返回 None。
-    """
-    if cfg.m.type == "none":
-        return None
-
-    # (init_shared 函数定义在这里或外面) ...
-    def init_shared(name, shape, dtype):
-        # ... (和之前一样) ...
-        if local_rank == 0:
-            arr = create_shared_mem_array(name, torch.Size(shape), dtype=dtype)
-        dist.barrier()
-        if local_rank != 0:
-            arr = get_shared_mem_array(name, torch.Size(shape), dtype=dtype)
-        return arr
-
-    # 1. 定义配置 (和之前一样)
-    shared_cfg = {
-        "node_memory": ([n, cfg.m.dim_out], torch.float32),
-        "node_memory_ts": ([n], torch.float32),
-        "mails": (
-            [n, cfg.m.mailbox_size, 2 * cfg.m.dim_out + edim],
-            torch.float32,
-        ),
-        "mail_ts": ([n, cfg.m.mailbox_size], torch.float32),
-        "next_mail_pos": ([n], torch.long),
-        "mail_pos_update_pending_flag": ([n], torch.int8),
-    }
-
-    # 2. 【关键改动】
-    #    不再创建字典，而是调用 dataclass 的工厂方法
-    #    它内部完成了 create, barrier, zero, 和打包
-    shared_arrays_obj = SharedMailboxArrays.create_from_config(
-        shared_cfg, init_shared, local_rank
-    )
-
-    # 3. 传入强类型的 dataclass 实例，而不是字典
-    return MemoryMailbox(cfg.m, shared_cfg, edim, shared_arrays_obj)
+def broadcast_data(data=None, src=0) -> Any:
+    payload = [data]
+    dist.broadcast_object_list(payload, src=src)
+    return payload[0]
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=str, help="dataset name")
+    parser.add_argument("--dataset", type=str, help="dataset name")
     parser.add_argument("--config", type=str, help="path to config file")
-    parser.add_argument("--seed", type=int, default=0, help="random seed to use")
-    parser.add_argument("--rand_edge_features", type=int, default=128)
-    parser.add_argument("--rand_node_features", type=int, default=128)
-    parser.add_argument("--omp_num_threads", type=int, default=8)
-    parser.add_argument("--dedup", action="store_true", help="enable dedup")
-    args = parser.parse_args()
-    # if torch.cuda.device_count() > 0:
-    #     # worker 进程此时只看到 1 张 ⇒ 设 0 就好；host 进程看到 0 张，会跳过
-    #     torch.cuda.set_device(0)
+    parser.add_argument(
+        "--seed", action="store_const", const=42, default=None, help="set random seed"
+    )
+    parser.add_argument(
+        "--rnd_edim", type=int, default=128
+    )  # if your dataset has no edge features, set rnd_edim > 0 to use random edge features
+    parser.add_argument(
+        "--rnd_ndim", type=int, default=128
+    )  # if your dataset has no node features, set rnd_ndim > 0 to use random node features
+    # parser.add_argument(
+    #     "--history", type=int, default=1
+    # )  # number of history(snapshot) windows, used for sampling and gnn training
+    # s_cfg = parser.add_argument_group("Sampler Settings")
+    # s_cfg.add_argument(
+    #     "--sample_neighbors", nargs="+", type=int
+    # )  # a list of integers indicating how many neighbors are sampled in each layer, sample_layers can be calculted from sample_neighbors
+    # s_cfg.add_argument(
+    #     "--sample_strategy", type=str, default="recent", choices=["recent", "uniform"]
+    # )  # 'recent' that samples most recent neighbors or 'uniform' that uniformly samples neighbors form the past
+    # s_cfg.add_argument("--sample_prop_time", type=bool, default=False)
+    # s_cfg.add_argument("--sample_duration", type=int, default=0)
+    # s_cfg.add_argument("--sample_thread", type=int, default=32)
+    # s_cfg.add_argument("--sample_neg_ratio", type=int, default=1)
 
-    # 覆盖线程数（如有需要）
+    parser.add_argument("--omp_num_threads", type=int, default=8)
+    parser.add_argument(
+        "--model", type=str, choices=["apan", "tgn", "dysat", "jodie", "tgat"]
+    )
+    args = parser.parse_args()
+
+    # match args.model:
+    #     case "apan":
+    # if args.sample_neighbors is not None:
+    #     args.sample_leyer = len(args.sample_neighbors)
+    #     assert args.sample_neg_ratio is not None
+    #     assert args.sample_prop_time is not None
+    # if args.history > 1:
+    #     assert args.sample_duration > 0
+
     os.environ["OMP_NUM_THREADS"] = str(args.omp_num_threads)
     os.environ["MKL_NUM_THREADS"] = str(args.omp_num_threads)
 
-    # 进程组初始化（CPU后端，兼容 host）
-    init_process_group(timeout_s=3600)
+    # initialize distributed environment
+    dist.init_process_group(backend="gloo", timeout=datetime.timedelta(seconds=3600))
+    env = Env.initial()
+    print(f"env: {env}")
+    worker_ranks = list(range(0, env.world_size - 1))
+    all_ranks = list(range(0, env.world_size))
+    print(f"Rank {env.local_rank}: Creating worker NCCL groups...")
+    gloo = dist.new_group(ranks=all_ranks, backend="gloo")
+    nccl_p2p = dist.new_group(ranks=worker_ranks, backend="nccl")
+    nccl_ddp = dist.new_group(ranks=worker_ranks, backend="nccl")
+    nccl_pg = dist.new_group(ranks=worker_ranks, backend="nccl")
+    if args.seed is not None:
+        set_seed(args.seed)
 
-    if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-        # worker 会执行 (device_count=1)，host 会跳过 (device_count=0)
-        torch.cuda.set_device(0)
-
-    env = DistEnv.initialize()
-
-    # world_size = GPU 工人数 + 1(host)
-    # if device_count > 0:
-    #     expected = device_count + 1
-    #     if env.world_size != expected:
-    #         raise RuntimeError(
-    #             f"world_size({env.world_size}) != num_gpus({device_count}) + 1; "
-    #             f"请用 torchrun --nproc_per_node={expected} 启动（单机假设）。"
-    #         )
-    # else:
-    #     # CPU-only 调试模式：允许 world_size == 1（只有 host）
-    #     if env.world_size != 1:
-    #         log.warning(
-    #             "未检测到 CUDA_VISIBLE_DEVICES，建议仅以 1 个进程运行作为 CPU 调试。"
-    #         )
-
-    # 对 GPU 工人绑定 device=0（因上面把可见设备约束为单张卡）
-    # is_gpu_worker = device_count > 0 and (env.local_rank < device_count)
-    # if is_gpu_worker and torch.cuda.is_available():
-    #     torch.cuda.set_device(0)
-
-    # 仅 GPU 工人参与 NCCL 通信；host 不加入
-    # nccl_group = None
-    # if device_count > 0:
-    #     worker_ranks = list(range(max(0, env.world_size - 1)))
-    #     if len(worker_ranks) > 0:
-    #         nccl_group = dist.new_group(ranks=worker_ranks, backend="nccl")
-
-    nccl_group = None
-    # [修改] 使用 env.global_ngpus (在所有进程中值相同)
-    if env.ngpus > 0:
-        worker_ranks = list(range(env.ngpus))  # ngpus = global_ngpus
-        # [注意] 所有进程 (包括 host) 都必须调用 new_group
-        nccl_group = dist.new_group(ranks=worker_ranks, backend="nccl")
-
-    # 包装需要在特定 rank 执行后广播结果的函数
-    bget_shape_and_dtype = rank_broadcast(env, get_shape_and_dtype, src_rank=0)
-    bget_node_edge_dimensions = rank_broadcast(
-        env, get_node_edge_dimensions, src_rank=0
-    )
-    bget_model_save_path = rank_broadcast(env, get_model_save_path, src_rank=0)
-    # 统计点数由 host(rank = world_size-1) 负责
-    host_rank = env.world_size - 1
-    bget_node_count_from_graph = rank_broadcast(
-        env, get_node_count_from_graph, src_rank=host_rank
-    )
-
-    def init_shared_array(name, tensor_on_rank0: torch.Tensor | None):
-        """
-        Rank 0: create + copy; others: 等待 meta 后 get。
-        返回当前进程可用的共享张量（或 None）。
-        """
-        arr_for_current_rank: torch.Tensor
-        if env.local_rank == 0:
-            if tensor_on_rank0 is not None:
-                current_shape = tuple(tensor_on_rank0.shape)
-                current_dtype = tensor_on_rank0.dtype
-                arr_for_current_rank = create_shared_mem_array(
-                    name, current_shape, dtype=current_dtype
-                )
-                arr_for_current_rank.copy_(tensor_on_rank0)
-                meta_payload = {"shape": current_shape, "dtype": current_dtype}
-            else:
-                meta_payload = {"shape": None, "dtype": None}
-        else:
-            meta_payload = None
-
-        # 广播 meta
-        final_shape, final_dtype = bget_shape_and_dtype(meta_payload)
-
-        if final_shape is None or final_dtype is None:
-            return None
-
-        # 稳一点：确保 rank0 已创建好
-        dist.barrier()
-        if env.local_rank != 0:
-            arr_for_current_rank = get_shared_mem_array(
-                name, final_shape, dtype=final_dtype
-            )
-
-        return arr_for_current_rank
-
-    set_seed(args.seed)
-
-    # 只有 rank0 读入特征，然后通过共享内存分发
-    if env.local_rank == 0:
-        node_np, edge_np = load_feat(
-            args.data, args.rand_edge_features, args.rand_node_features
+    # host load graph and features, then broadcast to workers
+    my_data = None
+    if env.is_host:  # only host hold the graph and dataframe(edges)
+        g, df, n_nodes, n_edges = load_graph(args.dataset)
+        edge_np, edim, edtype = load_feat(
+            args.dataset,
+            "edge",
+            n_edges,
+            args.rnd_edim,
         )
-    else:
-        node_np = edge_np = None
+        node_np, ndim, ndtype = load_feat(
+            args.dataset,
+            "node",
+            n_nodes,
+            args.rnd_ndim,
+        )
+        if not os.path.isdir("models"):
+            os.mkdir("models")
+        config_base_name = os.path.basename(args.config)
+        save_to = "models/{}_{}_{}.pkl".format(
+            args.dataset, config_base_name, time.time()
+        )
+        if node_np is not None:
+            nfeat = csm("nfeat", [n_nodes, ndim], dtype=node_np.dtype)
+            nfeat.copy_(node_np)
+        if edge_np is not None:
+            efeat = csm("efeat", [n_edges, edim], dtype=edge_np.dtype)
+            efeat.copy_(edge_np)
+        port = get_free_port()
+        my_data = (n_nodes, n_edges, ndim, edim, ndtype, edtype, save_to, port)
+    dist.barrier()
+    n_nodes, n_edges, ndim, edim, ndtype, edtype, save_to, port = broadcast_data(
+        my_data, src=env.host_rank
+    )
 
-    # 创建/获取共享特征
-    efeat = init_shared_array("edge_feats", tensor_on_rank0=edge_np)
-    nfeat = init_shared_array("node_feats", tensor_on_rank0=node_np)
+    if not env.is_host:
+        nfeat = None
+        efeat = None
+        if ndim > 0:
+            nfeat = gsm("nfeat", [n_nodes, ndim], dtype=ndtype)
+        if edim > 0:
+            efeat = gsm("efeat", [n_edges, edim], dtype=edtype)
 
-    # 维度信息（由 rank0 计算并广播）
-    _, ndim, _, _, edim, _ = bget_node_edge_dimensions(node_np, edge_np)
-
-    config_base_name = os.path.basename(args.config)
-    path_saver = bget_model_save_path(args.data, config_base_name)
-
-    # host 进程加载图并持有
-    if env.is_host:
-        g, df = load_graph(args.data)
-    else:
-        g = df = None
-
-    # 由 host 统计 num_nodes 并广播
-    n = bget_node_count_from_graph(g)
-
-    # 解析配置（每个进程各自做，避免传大对象）
     cfg = parse_config(args.config)
-    cfg.t.dedup = bool(args.dedup)
     cfg.t.ndim = ndim
     cfg.t.edim = edim
+    cfg.g.d_in = cfg.m.d_mem if cfg.m is not None else ndim
+    if cfg.g.d_out is None and cfg.m is not None:
+        cfg.g.d_out = cfg.m.d_mem
+    if cfg.s is not None:
+        assert cfg.s.layer == len(cfg.s.neighbor)
 
-    mm = create_memory_mailbox(cfg, n, edim, env.local_rank)
+    n_epoch = cfg.t.epoch
+    # initialize shared memory for memory and mailbox
+    shared = None
+    if cfg.m is not None:
+        mail_shape = [n_nodes, cfg.m.boxsize, 2 * cfg.m.d_mem + edim]
+        F32 = torch.float32
+        I64 = torch.int64
+        # shared.box_next_pos should be int
+        if env.local_rank == 0:
+            mem = csm("mem", [n_nodes, cfg.m.d_mem], F32)
+            mem_ts = csm("mem_ts", [n_nodes], F32)
+            box = csm(
+                "mail",
+                mail_shape,
+                F32,
+            )
+            box_ts = csm("mail_ts", [n_nodes, cfg.m.boxsize], F32)
+            box_next_pos = csm("mail_next_pos", [n_nodes], torch.int32)
+            total_epoch = csm("total_epoch", [1], torch.int32)
+        dist.barrier()
+        if env.local_rank != 0:
+            mem = gsm("mem", [n_nodes, cfg.m.d_mem], F32)
+            mem_ts = gsm("mem_ts", [n_nodes], F32)
+            box = gsm(
+                "mail",
+                mail_shape,
+                F32,
+            )
+            box_ts = gsm("mail_ts", [n_nodes, cfg.m.boxsize], F32)
+            box_next_pos = gsm("mail_next_pos", [n_nodes], torch.int32)
+            total_epoch = gsm("total_epoch", [1], torch.int32)
 
-    from worker.gate import GlobalMicrobatchGate
-
-    port_payload = [0]  # 用列表作为可变容器
-    if env.rank == 0:
-        port_payload[0] = get_free_port()
-        log.info(f"Rank 0 found free port for gate: {port_payload[0]}")
-
-    dist.broadcast_object_list(port_payload, src=0)
-    gate_port = port_payload[0]
-    master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
-    log.info(
-        f"Rank {env.rank}: Initializing TCPStore for Gate at {master_addr}:{gate_port}"
-    )
-
-    try:
-        store = dist.TCPStore(
-            host_name=master_addr,
-            port=gate_port,
-            world_size=env.world_size,  # 确保 world_size 是总进程数
-            is_master=(env.rank == 0),
-            timeout=datetime.timedelta(seconds=300),  # 设置超时
+        shared = Shared(
+            mem=mem,
+            mem_ts=mem_ts,
+            box=box,
+            box_ts=box_ts,
+            box_next_pos=box_next_pos,
+            total_epoch=total_epoch,
         )
-    except RuntimeError as e:
-        log.error(f"Rank {env.rank}: Failed to init TCPStore for gate: {e}")
-        raise e
 
-    gate = GlobalMicrobatchGate(store=store, m_per_b=env.ngpus, gap=4)
-    from run_host import HostTrainer
-    from run_worker import run_worker
+    if shared is not None:
+        if env.local_rank == 0:
+            shared.total_epoch[0] = n_epoch
+    dist.barrier()
 
-    # 分工：最后一个 rank 作为 host（采样+分发），其余为 GPU worker
     if env.is_host:
-        trainer = HostTrainer(cfg, g, df, mm, env)
-        trainer.train()
+        from run_host import Host
+
+        print("Host: Initializing host process...")
+
+        host = Host(
+            cfg,
+            g,
+            df,
+            env,
+            shared,
+            start,
+            gloo,
+        )
+        host.run()
     else:
-        run_worker(cfg, nccl_group, mm, path_saver, nfeat, efeat, env, gate)
+        from run_worker import Worker
+
+        print("Worker: Initializing worker process...")
+
+        worker = Worker(
+            cfg,
+            shared,
+            save_to,
+            nfeat,
+            efeat,
+            env,
+            nccl_p2p,
+            nccl_ddp,
+            nccl_pg,
+            gloo,
+        )
+        worker.run()
+
+
+if __name__ == "__main__":
+    main()

@@ -8,19 +8,19 @@ sampling:
     num_thread: <number of threads of the sampler>
 memory: 
   - type: <'node', we only support node memory now>
-    dim_time: <an integer, the dimension of the time embedding>
+    d_time: <an integer, the dimension of the time embedding>
     deliver_to: <'self' that delivers the mails only to involved nodes or 'neighbors' that deliver the mails to neighbors>
     mail_combine: <'last' that use the latest latest mail as the input to the memory updater>
     memory_update: <'gru' or 'rnn'>
-    mailbox_size: <an integer, the size of the mailbox for each node>
+    boxsize: <an integer, the size of the mailbox for each node>
     combine_node_feature: <False or True that specifies whether to combine node features (with the updated memory) as the input to the GNN.
-    dim_out: <an integer, the dimension of the output node memory>
+    d_hid: <an integer, the dimension of the output node memory>
 gnn:
-  - arch: <'transformer_attention' or 'identity' (no GNN)>
+  - arch: <'attn' or 'identity' (no GNN)>
     layer: <an integer, number of layers>
-    att_head: <an integer, number of attention heads>
-    dim_time: <an integer, the dimension of the time embedding>
-    dim_out: <an integer, the dimension of the output dynamic node embedding>
+    att_h: <an integer, number of attention heads>
+    d_time: <an integer, the dimension of the time embedding>
+    d_hid: <an integer, the dimension of the output dynamic node embedding>
 train:
   - epoch: <an integer, number of epochs to train>
     batch_size: <an integer, the batch size (of edges); for multi-gpu training, this is the local batchsize>

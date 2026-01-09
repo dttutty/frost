@@ -1,359 +1,317 @@
 import copy
-import random
+import math
 import time
-from typing import List
+from typing import List, Literal
 
 import numpy as np
 import pandas as pd
+import torch
 import torch.distributed as dist
 from sampler_core import ParallelSampler
 from tqdm import tqdm
 
-from common.state import WorkerState
-from gpu_distance import find_all_gpu_distances
 from host.comm import Distributor
-from host.scheduler import (
-    batches_assign,
-    plan_gpu_batches,
-)
-from memorys import MemoryMailbox
+from planner import Planner
 from sampler import NegLinkSampler, create_sampler
-from schemas.datatypes import Config, DistEnv, TransferData
+from schemas.datatypes import Config, Env, Meta
 from utils import node_to_dgl_blocks, sampler_wrapper, to_dgl_blocks
 
 
-class HostTrainer:
+class Host:
     def __init__(
         self,
         cfg: Config,
-        g: dict,
+        graph: dict,
         df: pd.DataFrame,
-        mm: MemoryMailbox | None,
-        env: DistEnv,
+        env: Env,
+        shared,
+        start,
+        gloo=None,
     ):
         """
-        在构造函数中初始化所有组件和数据
+        initialize the host with configuration, graph data, edge dataframe, and environment settings
         """
+        self.start_time = start
         self.cfg = cfg
+        self.has_nfeat = cfg.t.ndim > 0
+        self.has_efeat = cfg.t.edim > 0
+        self.has_memory_and_mailbox = cfg.m is not None
+        assert self.cfg.s is not None  # 采样器配置不能为空
         self.env = env
-        self.mm = mm
-        (self.scfg, _, _, self.tcfg) = cfg.s, cfg.m, cfg.g, cfg.t
-        self.tcfg = copy.deepcopy(cfg.t)  # tcfg 会在 run_epoch 中被修改，所以拷贝一份
+        self.t_cfg = copy.deepcopy(cfg.t)  # tcfg 会在 run_epoch 中被修改，所以拷贝一份
 
         # 1. 初始化通信器
-        self.comm = Distributor()
 
+        self.gloo = gloo
+        self.comm = Distributor(env, group=self.gloo)
         # 2. 拆分数据集
+        df["src"] = df["src"].astype(np.int64)
+        df["dst"] = df["dst"].astype(np.int64)
+        t_min = df["time"].min()
+        df["time"] = (df["time"] - t_min).astype(np.float32)
         train_edge_end = df[df["ext_roll"].gt(0)].index[0]
         val_edge_end = df[df["ext_roll"].gt(1)].index[0]
         self.tr_df = df[:train_edge_end]
         self.va_df = df[train_edge_end:val_edge_end]
         self.te_df = df[val_edge_end:]
+        gpu_topo = [0, 1]
+        if self.cfg.m is not None:
+            self.planner = Planner(
+                gpu_topo,
+                has_nfeat=self.has_nfeat,
+                has_efeat=self.has_efeat,
+                has_memory_and_mailbox=self.has_memory_and_mailbox,
+                mail_strategy=self.cfg.m.mail_combine,
+                deliver_to=self.cfg.m.deliver_to,
+            )
+        else:
+            self.planner = Planner(gpu_topo)
 
         # 3. 初始化采样器
-        self.ps = None
-        if not self.scfg.no_sample:
-            self.ps = ParallelSampler(
-                g["indptr"],
-                g["indices"],
-                g["eid"],
-                g["ts"].astype(np.float32),
-                self.scfg.num_thread,
+        self.pos_sampler = None
+        if self.cfg.s is not None:
+            self.pos_sampler = ParallelSampler(
+                graph["indptr"],
+                graph["indices"],
+                graph["eid"],
+                graph["ts"].astype(np.float32),
+                self.cfg.s.num_thread,
                 1,
-                self.scfg.layer,
-                self.scfg.neighbor,
-                self.scfg.strategy == "recent",
-                self.scfg.prop_time,
-                self.scfg.history,
-                float(self.scfg.duration),
+                self.cfg.s.layer,
+                self.cfg.s.neighbor,
+                self.cfg.s.strategy == "recent",
+                self.cfg.s.prop_time,
+                self.cfg.s.history,
+                float(self.cfg.s.duration),
             )
-        self.e_ns = create_sampler(g)
-        self.t_ns = NegLinkSampler(g)
+            if self.cfg.s.neg_samples > 0:
+                self.neg_sampler = NegLinkSampler(graph)
+        self.e_ns = create_sampler(graph)
+        self.curr_minibatch_id = 0
+        self.curr_epoch = 0
+        self.meta_q: List[Meta] = list()  # 待分发的批次列表
+        self.deliver_to = self.cfg.m.deliver_to if self.cfg.m else None
+        self.total_epoch = int(shared.total_epoch[0].item())
 
-        # 4. 初始化状态变量
-        self.best_ap = 0.0
-        self.best_e = 0.0
-        self.tap = 0.0
-        self.tauc = 0.0
-        self.m_id = 0  # 消息 ID 作为实例状态
-
-    def train(self):
+    def run(self):
         """
         公共的训练入口方法
         """
-        # wandb.init(
-        #     project="my_tgl",
-        #     config=self.cfg.dict(),
-        # )
+        for e in range(self.t_cfg.epoch):
+            print(f"Epoch {e}:")
+            self._handle_a_split(self.tr_df, "train")
+            print("Validating...")
+            self._handle_a_split(self.va_df, "val")
+            print("Testing...")
+            self._handle_a_split(self.te_df, "test")
 
-        for e in range(self.tcfg.epoch):
-            self._run_epoch(e)
-
-        self.tap, self.tauc = self._eval(self.te_df, "test")
-
-        # 更新 wandb summary
-        # wandb.summary["test_ap_at_best"] = self.tap
-        # wandb.summary["test_auc_at_best"] = self.tauc
-
-        # 训练结束，打印最终结果
-        now_ts = time.time()
-        local_time = time.localtime(now_ts)
-        ms = int((now_ts - int(now_ts)) * 1000)
-        time_str = time.strftime("%Y-%m-%d %H:%M:%S", local_time) + f".{ms:03d}"
-        print("{} Best model at epoch {}.".format(time_str, int(self.best_e)))
-        print(
-            "\ttest ap:{:4f}  test auc:{:4f}".format(float(self.tap), float(self.tauc))
-        )
-
-        # 5. 清理和退出
         self._cleanup()
         # wandb.finish()
 
-    def _run_epoch(self, e: int):
+    @staticmethod
+    def plan_gpu_batches(num_samples, target_batch_size, ngpus=1):
         """
-        私有的 epoch 运行逻辑，签名非常干净
+        this is to ensure iterations number is divisible by number of gpus
         """
-        now_ts = time.time()
-        local_time = time.localtime(now_ts)
-        ms = int((now_ts - int(now_ts)) * 1000)
-        time_str = time.strftime("%Y-%m-%d %H:%M:%S", local_time) + f".{ms:03d}"
-        print(f"{time_str} Epoch {e}:")
+        target_batch_size = int(target_batch_size)  # <--- add
+        # This is to ensure the total number of training iterations is an integer multiple of the number of GPUs
+        # eg: num_samples = 13345, target_batch_size = 1000, ngpus = 4
+        approx_iterations = (
+            num_samples // target_batch_size
+        )  # approximate number of iterations, 13
+        nbatch_per_gpu = max(
+            approx_iterations // ngpus, 1
+        )  # The approximate number of batches that each GPU needs to process, 3
+        iteration_total = nbatch_per_gpu * ngpus  # total batches, 12
+        adjusted_batch_size = math.ceil(num_samples / iteration_total)  # 1113
+        return iteration_total, adjusted_batch_size
 
-        sample_tot = 0.0
-        time_tot = 0.0
+    @staticmethod
+    def batches_assign(index, batch_size):
+        return index // batch_size
 
-        if self.ps is not None:
-            self.ps.reset()
-        if self.mm is not None:
-            self.mm.reset()
-
-        # —— Train ——
-        t_loss, t_s_time, t_time = self._train(self.tr_df)
-        sample_tot += t_s_time
-        time_tot += t_time
-
-        # —— Val ——
-        print("Validating...")
-        # 注意：_eval 内部会使用和更新 self.m_id
-        ap, auc = self._eval(self.va_df, "val")
-
-        if ap > self.best_ap:
-            print(
-                f"New best model found at epoch {e} (val ap {ap:.4f}, auc {auc:.4f}), saving..."
-            )
-            self.best_e = e
-            self.best_ap = ap
-
-            # wandb.summary["best_val_ap"] = self.best_ap
-            # wandb.summary["best_val_auc"] = auc
-            # wandb.summary["best_epoch"] = self.best_e
-            # self.comm.broadcast_state(WorkerState.SAVE_MODEL)
-            # self.comm.scatter_send
-            # 注意：_eval 内部会使用和更新 self.m_id
-            # --- Test ---
-
-        print(f"\ttrain loss:{t_loss:.4f} \tval ap:{ap:4f} \tval auc:{auc:4f}")
-        print(f"\ttotal time:{time_tot:.2f}s sample time:{sample_tot:.2f}s")
-        # wandb.log(
-        #     {
-        #         "epoch": e,
-        #         "train_loss": t_loss,
-        #         "val_ap": ap,
-        #         "val_auc": auc,
-        #     }
-        # )
-
-    def _train(self, df):
+    def _handle_a_split(self, df: pd.DataFrame, split: Literal["train", "val", "test"]):
         # 训练批次规划 (注意这里用 self.tcfg)
-        _, adjusted_train_batch_size = plan_gpu_batches(
-            len(df), self.tcfg.batch_size, ngpus=self.env.ngpus
+        df = df.reset_index(drop=True)
+
+        iteration_total, adjusted_train_batch_size = self.plan_gpu_batches(
+            len(df), self.t_cfg.batch_size, ngpus=self.env.n_gpu
         )
+        batches_assignment = df.index // adjusted_train_batch_size
+        # this will be improved for future random group training
+        grouped_df = df.groupby(batches_assignment)
+        this_split_n_minibatches = grouped_df.ngroups
+        assert this_split_n_minibatches % self.env.n_gpu == 0
+        this_split_n_macrobatches = this_split_n_minibatches // self.env.n_gpu
+        assert this_split_n_macrobatches >= 3, "need at least 3 macro batches"
 
-        batches_assignment_0 = batches_assign(df.index, adjusted_train_batch_size)
-        # reorder = self.tcfg.reorder if self.tcfg.reorder is not None else 1
-        self.group_indexes = [batches_assignment_0]
-        # if self.tcfg.reorder is not None:
-        #     self.group_indexes.append(
-        #         generate_reordered_indexes_1(
-        #             reorder,
-        #             adjusted_train_batch_size,
-        #             len(df),
-        #             batches_assignment_0,
-        #         )
-        #     )
-        #     self.group_indexes.extend(
-        #         generate_reordered_indexes_2(
-        #             reorder,
-        #             adjusted_train_batch_size,
-        #             batches_assignment_0,
-        #         )
-        #     )
+        # this is total macro batches for current epoch, including train num_macro_batches, val num_macro_batches and test num_macro_batches
+        for this_split_curr_minibatch_id, (group_key, edges) in enumerate(
+            tqdm(
+                grouped_df,
+                total=this_split_n_minibatches,
+                desc=f"Host processing {split} split",
+            )
+        ):
+            this_split_curr_macrobatch_bid = (
+                this_split_curr_minibatch_id // self.env.n_gpu
+            )
+            mark = None
+            print(
+                "this_split_curr_minibatch_id",
+                this_split_curr_minibatch_id,
+                "this_split_curr_macrobatch_bid",
+                this_split_curr_macrobatch_bid,
+                "this_split_n_macrobatches",
+                this_split_n_macrobatches,
+            )
+            if this_split_curr_macrobatch_bid + 1 == this_split_n_macrobatches:
+                mark = "last"
+            elif this_split_curr_macrobatch_bid == 0:
+                mark = "first"
+            self._add_to_td_list(
+                edges,
+                split,
+                mark,
+                this_split_curr_minibatch_id,
+                this_split_curr_macrobatch_bid,
+            )
+            self.curr_minibatch_id += 1
 
-        sample_tot = time_tot = 0.0
-        batch_to_send = []
-        batches_assignment = self.group_indexes[
-            random.randint(0, len(self.group_indexes) - 1)
-        ]
-        grouped = df.groupby(batches_assignment)
-        for _, edges in tqdm(grouped, total=grouped.ngroups, desc="Training"):
-            t0 = time.time()
-            sample_tot += self._dispatch_train(edges, self.t_ns, batch_to_send)
-            self.m_id += 1
-            time_tot += time.time() - t0
+            # scatter when batches are enough for plan
+            # enough for plan: size == n_gpu * 2
+            if len(self.meta_q) == self.env.n_gpu * 2:
+                self.meta_q = self.planner.plan_next(
+                    self.meta_q,
+                    is_last_macrobatch=False,
+                    deliver_to=self.deliver_to,
+                )
+                meta_2_scatter = self.meta_q[: self.env.n_gpu]
+                # only send n_gpus batches
+                mini_ids = [td.mini_bid for td in meta_2_scatter]
+                split_info = [td.split for td in meta_2_scatter]
+                mark_info = [td.mark for td in meta_2_scatter]
+                print(
+                    f"Host: Scattering batch {mini_ids} ({split_info}, {mark_info})..."
+                )
+                assert len(meta_2_scatter) == self.env.n_gpu
+                meta_2_scatter = copy.deepcopy(meta_2_scatter)
+                for meta in meta_2_scatter:
+                    assert meta.plan_set is not None, (
+                        "plan_set should not be None before scatter"
+                    )
+                self.comm.scatter_send(meta_2_scatter)
+                self.meta_q = self.meta_q[self.env.n_gpu :]  # only keep next batches
 
-        assert len(batch_to_send) == 0, "batch plan出错,不应该还有剩余的batch没有发送"
+        if split == "test":
+            self.meta_q = self.planner.plan_next(
+                self.meta_q,
+                is_last_macrobatch=True,
+                deliver_to=self.deliver_to,
+            )
+            for meta in self.meta_q:
+                assert meta.plan_set is not None, (
+                    "plan_set should not be None before scatter"
+                )
+            meta_2_scatter = self.meta_q  # only send n_gpus batches
 
-        print("Training time:", time_tot)
-        # self.comm.broadcast_state(WorkerState.REDUCE_LOSS)
-        # gathered_loss = self.comm.gather_receive()
-        total_loss = 1.0
-        # total_loss = float(np.sum(np.array(gathered_loss) * adjusted_train_batch_size))
-        return total_loss, sample_tot, time_tot
+            mini_ids = [td.mini_bid for td in meta_2_scatter]
+            split_info = [td.split for td in meta_2_scatter]
+            mark_info = [td.mark for td in meta_2_scatter]
+            print(f"Host: Scattering batch {mini_ids} ({split_info}, {mark_info})...")
+            meta_2_scatter = copy.deepcopy(meta_2_scatter)
+            for meta in meta_2_scatter:
+                assert meta.plan_set is not None, (
+                    "plan_set should not be None before scatter"
+                )
+            self.comm.scatter_send(meta_2_scatter)
+            self.reset_end_of_epoch_states()
 
-    def sample_and_pack(self, edges, ns, nbatchs: List[TransferData]):
-        roots = np.concatenate(
-            [
-                edges.src.values,
-                edges.dst.values,
-                ns.sample(edges.src.values, edges.time.values),
-            ]
-        ).astype(np.int32)
-        ts = np.concatenate(
-            [edges.time.values, edges.time.values, edges.time.values]
-        ).astype(np.float32)
+    def reset_end_of_epoch_states(self):
+        if self.pos_sampler is not None:
+            self.pos_sampler.reset()
+        self.planner.reset()
+        self.meta_q = []
+        self.curr_minibatch_id = 0
+        self.curr_epoch += 1
 
-        if self.ps is not None:
-            ret, s_time = sampler_wrapper(self.cfg.s.no_neg, roots, self.ps, ts)
+    def _add_to_td_list(
+        self,
+        edges: pd.DataFrame,
+        split: Literal["train", "val", "test"],
+        mark: Literal["first", "last"] | None,
+        curr_mini_bid_of_this_split: int,
+        curr_macro_bid_of_this_split: int,
+    ):
+        assert split is not None
+        assert curr_mini_bid_of_this_split is not None
+        assert curr_macro_bid_of_this_split is not None
+        src_nid = torch.as_tensor(edges.src.values, dtype=torch.long)
+        dst_nid = torch.as_tensor(edges.dst.values, dtype=torch.long)
+        pos_edge_ts = torch.as_tensor(edges.time.values, dtype=torch.long)
+
+        neg_dst_nid = self.neg_sampler.sample(src_nid, dst_nid)
+
+        pos_edge = torch.stack([src_nid, dst_nid], dim=1)
+        pos_edge_id = torch.as_tensor(edges.index.values, dtype=torch.long)
+
+        roots = torch.cat([src_nid, dst_nid, neg_dst_nid])
+        ts = torch.cat([pos_edge_ts, pos_edge_ts, pos_edge_ts])
+
+        ret, _ = sampler_wrapper(
+            self.cfg.s.neg_samples == 0, roots.numpy(), self.pos_sampler, ts.numpy()
+        )
 
         if self.cfg.g.arch != "identity":
-            mfgss = to_dgl_blocks(ret, self.cfg.s.history, save_on_pgu=False)
+            blockss = to_dgl_blocks(ret, self.cfg.s.history, save_on_pgu=False)
         else:
-            mfgss = node_to_dgl_blocks(roots, ts, cuda=False)
+            blockss = node_to_dgl_blocks(roots, ts, cuda=False)  # for APAN and JODIE
 
-        tran_data = TransferData(
-            mfgss=mfgss,
-            root=roots,
-            ts=ts,
-            eid=edges.index.values,  # 如果你的 df 没这列，这里改成 edges.index.values
-            block=None,
-            mid=self.m_id,
-            bid=self.m_id // self.env.ngpus,
+        meta = Meta(
+            blockss=blockss,
+            mini_bid=self.curr_minibatch_id,
+            macro_bid=self.curr_minibatch_id // self.env.n_gpu,
+            pos_edge=pos_edge,
+            pos_edge_ts=pos_edge_ts,
+            pos_edge_id=pos_edge_id,
+            mdb=None,
+            split=split,
+            mark=mark,
+            curr_mini_bid_of_this_split=curr_mini_bid_of_this_split,
+            curr_macro_bid_of_this_split=curr_macro_bid_of_this_split,
+            last_epoch=False,
         )
 
-        if (self.mm is not None) and (self.cfg.m.deliver_to == "neighbors"):
-            # 只把 history[1] 的反向 block 交给 mailbox
-            tran_data.block = to_dgl_blocks(
+        if self.curr_epoch + 1 == self.total_epoch:
+            meta.last_epoch = True
+        if self.cfg.m and self.cfg.m.deliver_to == "neighbors":
+            assert self.cfg.s is not None
+            assert self.cfg.s.history == 1
+            # 只把 history[1] 的反向 block 交给 mailbox, APAN 和 JODIE 专用, only support history=1
+            meta.mdb = to_dgl_blocks(
                 ret, self.cfg.s.history, reverse=True, save_on_pgu=False
             )[0][0]
 
-        nbatchs.append(tran_data)
-
-        nbatches_len = len(nbatchs)
-        if len(nbatchs) >= self.env.ngpus:
-            nbatchs[nbatches_len - self.env.ngpus].next_mfgss = mfgss
-        return nbatchs, s_time
-
-    def _plan_next(self, batchs):
-        gpu_distances = find_all_gpu_distances
-        ngpus = len(batchs) / 2
-        gpus_groups = [[[0, 1], [2, 3]], [[5, 6], [7, 8]]]
-        dim = gpus_groups.dim()
-        list_nid_i_all_nodes_set = [] * ngpus
-        list_nid_i_need_all_nodes_set = [] * ngpus
-        for i, batch in iter(batchs[0:ngpus]):
-            n_srcs = len(batch.roots) / 2
-            batch.next_all_nodes = _all_node(batchs[ngpus + i].mfgss)
-            what_is_need_for_next_big_batch = set(batch.next_all_node)
-            i_all_nodes_set = set(batch.all_nodes)
-            i_need_all_nodes_set = what_is_need_for_next_big_batch - i_all_nodes_set
-
-        pass
-
-    def _dispatch_train(self, edges, ns, batchs: List[TransferData]) -> float:
-        batchs, s_time = self.sample_and_pack(edges, ns, batchs)
-
-        if len(batchs) == self.env.ngpus * 2:
-            batchs = _plan_next(batchs)
-            batch_to_send = []
-            for _ in range(self.env.ngpus):  # 删除3个元素
-                batch_to_send.append(batchs.pop())  # 默认删除最后一个
-            m_ids = [nbatch.mid for nbatch in batch_to_send]
-            print(f"Host: Scattering batch {m_ids} (train) to all workers...")
-            # self.comm.broadcast_state(WorkerState.TRAIN)
-            # print(f"Host: Scatter batch {self.m_id} ...")
-            self.comm.scatter_send(
-                WorkerState.TRAIN, batch_to_send
-            )  # <-- 真正的一次性 scatter
-
-        return s_time
-
-    @staticmethod
-    def safe_mean(data_list: list) -> float:
-        """计算列表的平均值，如果列表为空则返回 0.0"""
-        valid_data = [x for x in data_list if x is not None and x != 0.0]
-        if not valid_data:
-            return 0.0
-        return sum(valid_data) / len(valid_data)
-
-    def _dispatch_eval(
-        self,
-        edges,
-        ns,
-        batchs: List[TransferData],
-        split: str,
-    ) -> tuple[float, float, float]:
-        batchs, s_time = self.sample_and_pack(edges, ns, batchs)
-        ap = auc = 0.0
-        if len(batchs) == self.env.ngpus:
-            m_ids = [nbatch.mid for nbatch in batchs]
-            print(f"Host: Scattering batch {m_ids} (eval) to all workers...")
-            ws = WorkerState.VAL if split != "val" else WorkerState.TEST
-            # self.comm.broadcast_state(WorkerState.EVAL)
-            # print(f"Host: Scatter batch {self.m_id} ...")
-            self.comm.scatter_send(WorkerState.VAL, batchs)
-            # ap_list = self.comm.gather_receive()
-            # auc_list = self.comm.gather_receive()
-            # ap = self.safe_mean(ap_list)
-            # auc = self.safe_mean(auc_list)
-            batchs.clear()
-
-        return ap, auc, s_time
-
-    def _eval(self, eval_df: pd.DataFrame, split: str) -> tuple[float, float]:
-        """
-        This is for valid and test split
-        """
-        _, adjusted_val_batch_size = plan_gpu_batches(
-            len(eval_df), self.tcfg.batch_size, ngpus=self.env.ngpus
-        )
-        batches_assignment = batches_assign(eval_df.index, adjusted_val_batch_size)
-
-        ap_tot, auc_tot = [], []
-        batch_to_send = []
-        grouped = eval_df.groupby(batches_assignment)
-        for _, edges in tqdm(grouped, total=grouped.ngroups, desc="Evaluating..."):
-            ap, auc, s_time = self._dispatch_eval(
-                edges, self.e_ns, batch_to_send, split
-            )
-            self.m_id += 1
-            if ap > 0 or auc > 0:
-                ap_tot.append(ap)
-                auc_tot.append(auc)
-
-        assert len(batch_to_send) == 0, "batch plan出错,不应该还有剩余的batch没有发送"
-
-        ap = self.safe_mean(ap_tot)
-        auc = self.safe_mean(auc_tot)
-        return ap, auc
+        self.meta_q.append(meta)
 
     def _cleanup(self):
-        """
-        私有的清理逻辑
-        """
         print("Host: Broadcasting CLEANUP command...")
-        # self.comm.broadcast_state(WorkerState.CLEANUP)
-        self.comm.scatter_send(WorkerState.CLEANUP)
-        print("Host: Entering final barrier...")
-        dist.barrier()
+
+        # 【新增】: 构造一个由 None 组成的列表，发送给所有 Worker
+        # 这会解除 Worker 端 Receiver 线程在 scatter_object_list 上的阻塞
+        stop_signal = [None for _ in range(self.env.n_gpu + 1)]
+
+        # 注意：这里需要使用底层的 scatter_object_list，或者确保你的 comm.scatter_send 能处理 None
+        # 假设 self.gloo 是你的通信组
+        dist.scatter_object_list(
+            [None], stop_signal, src=dist.get_rank(), group=self.gloo
+        )
+
+        print("Host: Stop signal sent. Entering final barrier...")
+        dist.barrier()  # 建议指定 group=self.gloo 或者 nccl_pg，通常 gloo 用于控制流
         print("Host: All processes reached the final barrier.")
+        end = time.time()
+
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            print(f"Elapsed time: {end - self.start_timetart:.2f} seconds")
         dist.destroy_process_group()

@@ -1,19 +1,20 @@
 import argparse
-import yaml
+
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-from sampler_core import ParallelSampler
+import torch
+import yaml
 from numba import njit, prange
+from sampler_core import ParallelSampler
+from tqdm import tqdm
 
 
 class NegLinkSampler:
-
     def __init__(self, g):
         self.num_nodes = g["indptr"].shape[0] - 1
 
     def sample(self, src_ids, src_tss, num_neg=1):
-        return np.random.randint(self.num_nodes, size=len(src_ids) * num_neg)
+        return torch.randint(0, self.num_nodes, (len(src_ids) * num_neg,))
 
 
 class NegLinkInductiveSampler:
@@ -71,9 +72,6 @@ class NegLinkInductiveSampler:
 #         src_cross = np.tile(src_ids, num_neg_sample)
 #         neg_cross = neg_matrix.T.reshape(-1)
 #         return neg_cross
-
-import numpy as np
-from numba import njit, prange
 
 
 # Numba-accelerated helper to fetch CSR neighbors\
@@ -220,11 +218,11 @@ if __name__ == "__main__":
         sea_time += ret[0].search_time()
         sam_time += ret[0].sample_time()
         # for i in range(sample_config['history']):
-        #     total_nodes += ret[i].dim_in() - ret[i].dim_out()
-        #     unique_nodes += ret[i].dim_in() - ret[i].dim_out()
-        #     if ret[i].dim_in() > ret[i].dim_out():
-        #         ts = torch.from_numpy(ret[i].ts()[ret[i].dim_out():])
-        #         nid = torch.from_numpy(ret[i].nodes()[ret[i].dim_out():]).float()
+        #     total_nodes += ret[i].dim_in() - ret[i].d_hid()
+        #     unique_nodes += ret[i].dim_in() - ret[i].d_hid()
+        #     if ret[i].dim_in() > ret[i].d_hid():
+        #         ts = torch.from_numpy(ret[i].ts()[ret[i].d_hid():])
+        #         nid = torch.from_numpy(ret[i].nodes()[ret[i].d_hid():]).float()
         #         nts = torch.stack([ts,nid],dim=1).cuda()
         #         uni_t_s = time.time()
         #         unts, idx = torch.unique(nts, dim=0, return_inverse=True)

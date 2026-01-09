@@ -82980,7 +82980,7 @@
     {
       "ph": "X",
       "cat": "python_function",
-      "name": "utils.py(198): mfgs_to_cuda",
+      "name": "utils.py(198): blocks_to_cuda",
       "pid": 87155,
       "tid": 90945,
       "ts": 1756492826848043,
@@ -84815,7 +84815,7 @@
     {
       "ph": "X",
       "cat": "python_function",
-      "name": "utils.py(210): prepare_mfgs",
+      "name": "utils.py(210): prepare_blocks",
       "pid": 87155,
       "tid": 90945,
       "ts": 1756492826849273,

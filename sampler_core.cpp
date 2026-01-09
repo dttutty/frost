@@ -23,7 +23,7 @@ public:
     std::vector<TimeStampType> ts;
     std::vector<TimeStampType> dts;
     std::vector<NodeIDType> nodes;
-    NodeIDType dim_in, dim_out;
+    NodeIDType dim_in, d_hid;
     double ptr_time = 0;
     double search_time = 0;
     double sample_time = 0;
@@ -35,9 +35,9 @@ public:
     TemporalGraphBlock(std::vector<NodeIDType>& _row, std::vector<NodeIDType>& _col,
         std::vector<EdgeIDType>& _eid, std::vector<TimeStampType>& _ts,
         std::vector<TimeStampType>& _dts, std::vector<NodeIDType>& _nodes,
-        NodeIDType _dim_in, NodeIDType _dim_out) :
+        NodeIDType _dim_in, NodeIDType _d_hid) :
         row(_row), col(_col), eid(_eid), ts(_ts), dts(_dts),
-        nodes(_nodes), dim_in(_dim_in), dim_out(_dim_out) {
+        nodes(_nodes), dim_in(_dim_in), d_hid(_d_hid) {
     }
 };
 
@@ -196,7 +196,7 @@ public:
             delete _nodes[tid];
         }
         _ret.dim_in = _ret.nodes.size();
-        _ret.dim_out = cum_row.back();
+        _ret.d_hid = cum_row.back();
     }
 
     void sample_layer(std::vector<NodeIDType>& _root_nodes, std::vector<TimeStampType>& _root_ts,
@@ -441,7 +441,7 @@ PYBIND11_MODULE(sampler_core, m)
         .def("dts", [](const TemporalGraphBlock& tgb) { return vec2npy(tgb.dts); })
         .def("nodes", [](const TemporalGraphBlock& tgb) { return vec2npy(tgb.nodes); })
         .def("dim_in", [](const TemporalGraphBlock& tgb) { return tgb.dim_in; })
-        .def("dim_out", [](const TemporalGraphBlock& tgb) { return tgb.dim_out; })
+        .def("d_hid", [](const TemporalGraphBlock& tgb) { return tgb.d_hid; })
         .def("tot_time", [](const TemporalGraphBlock& tgb) { return tgb.tot_time; })
         .def("ptr_time", [](const TemporalGraphBlock& tgb) { return tgb.ptr_time; })
         .def("search_time", [](const TemporalGraphBlock& tgb) { return tgb.search_time; })

@@ -36,10 +36,10 @@ from dgl.utils.shared_mem import create_shared_mem_array, get_shared_mem_array
 from sklearn.metrics import average_precision_score, roc_auc_score
 from tqdm import tqdm
 
-from modules import *
+from gnn.base import *
 from sampler import *
 from utils import *
-from utils import mfgs_to_cuda
+from utils import blocks_to_cuda
 
 
 def set_seed(seed):
@@ -112,7 +112,7 @@ if memory_param.type != "none":
     if args.local_rank == 0:
         node_memory = create_shared_mem_array(
             "node_memory",
-            torch.Size([num_nodes, memory_param.dim_out]),
+            torch.Size([num_nodes, memory_param.d_hid]),
             dtype=torch.float32,
         )
         node_memory_ts = create_shared_mem_array(
@@ -123,15 +123,15 @@ if memory_param.type != "none":
             torch.Size(
                 [
                     num_nodes,
-                    memory_param.mailbox_size,
-                    2 * memory_param.dim_out + dim_feats[4],
+                    memory_param.boxsize,
+                    2 * memory_param.d_hid + dim_feats[4],
                 ]
             ),
             dtype=torch.float32,
         )
         mail_ts = create_shared_mem_array(
             "mail_ts",
-            torch.Size([num_nodes, memory_param.mailbox_size]),
+            torch.Size([num_nodes, memory_param.boxsize]),
             dtype=torch.float32,
         )
         next_mail_pos = create_shared_mem_array(
@@ -151,7 +151,7 @@ if memory_param.type != "none":
         torch.distributed.barrier()
         node_memory = get_shared_mem_array(
             "node_memory",
-            torch.Size([num_nodes, memory_param.dim_out]),
+            torch.Size([num_nodes, memory_param.d_hid]),
             dtype=torch.float32,
         )
         node_memory_ts = get_shared_mem_array(
@@ -162,15 +162,15 @@ if memory_param.type != "none":
             torch.Size(
                 [
                     num_nodes,
-                    memory_param.mailbox_size,
-                    2 * memory_param.dim_out + dim_feats[4],
+                    memory_param.boxsize,
+                    2 * memory_param.d_hid + dim_feats[4],
                 ]
             ),
             dtype=torch.float32,
         )
         mail_ts = get_shared_mem_array(
             "mail_ts",
-            torch.Size([num_nodes, memory_param.mailbox_size]),
+            torch.Size([num_nodes, memory_param.boxsize]),
             dtype=torch.float32,
         )
         next_mail_pos = get_shared_mem_array(
@@ -193,7 +193,7 @@ if memory_param.type != "none":
 
 if args.local_rank < args.num_gpus:
     # GPU worker process
-    model = GeneralModel(
+    model = BaseModel(
         dim_feats[1], dim_feats[4], sample_param, memory_param, gnn_param, train_param
     ).cuda()
     model = torch.nn.parallel.DistributedDataParallel(
@@ -223,22 +223,24 @@ if args.local_rank < args.num_gpus:
                 torch.load(path_saver, map_location=torch.device("cuda:0"))
             )
             continue
-        my_mfgs = [None]
-        multi_mfgs = [None] * (args.num_gpus + 1)
-        torch.distributed.scatter_object_list(my_mfgs, multi_mfgs, src=args.num_gpus)
-        mfgs = mfgs_to_cuda(my_mfgs[0])
-        _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_mfgs(
-            mfgs, node_feats, edge_feats
+        my_blocks = [None]
+        multi_blocks = [None] * (args.num_gpus + 1)
+        torch.distributed.scatter_object_list(
+            my_blocks, multi_blocks, src=args.num_gpus
+        )
+        blocks = blocks_to_cuda(my_blocks[0])
+        _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_blocks(
+            blocks, node_feats, edge_feats
         )
         if my_model_state[0] == 0:
             model.train()
             optimizer.zero_grad()
             if mailbox is not None:
                 deduplicated_mem, deduplicated_mem_input = mailbox.prepmm(
-                    mfgs[0], node_uniq
+                    blocks[0], node_uniq
                 )
             pred_pos, pred_neg = model(
-                mfgs,
+                blocks,
                 node_feats_on_gpu,
                 edge_feats_on_gpu,
                 deduplicated_mem,
@@ -300,10 +302,10 @@ if args.local_rank < args.num_gpus:
             with torch.no_grad():
                 if mailbox is not None:
                     deduplicated_mem, deduplicated_mem_input = mailbox.prepmm(
-                        mfgs[0], node_uniq
+                        blocks[0], node_uniq
                     )
                 pred_pos, pred_neg = model(
-                    mfgs,
+                    blocks,
                     node_feats_on_gpu,
                     edge_feats_on_gpu,
                     deduplicated_mem,
@@ -367,9 +369,9 @@ if args.local_rank < args.num_gpus:
             with torch.no_grad():
                 if mailbox is not None:
                     deduplicated_mem, deduplicated_mem_input = mailbox.prepmm(
-                        mfgs[0], node_uniq
+                        blocks[0], node_uniq
                     )
-                emb = model.module.get_emb(mfgs).detach().cpu()
+                emb = model.module.get_emb(blocks).detach().cpu()
                 torch.distributed.gather_object(emb, None, dst=args.num_gpus)
 else:
     # hosting process
@@ -409,7 +411,7 @@ else:
             return
         while df.time[processed_edge_id] < time:
             # print('curr:',processed_edge_id,df.time[processed_edge_id],'target:',time)
-            multi_mfgs = list()
+            multi_blocks = list()
             multi_root = list()
             multi_ts = list()
             multi_eid = list()
@@ -440,10 +442,10 @@ else:
                         sampler.sample(root_nodes, ts)
                     ret = sampler.get_ret()
                 if gnn_param.arch != "identity":
-                    mfgs = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
+                    blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
                 else:
-                    mfgs = node_to_dgl_blocks(root_nodes, ts, cuda=False)
-                multi_mfgs.append(mfgs)
+                    blocks = node_to_dgl_blocks(root_nodes, ts, cuda=False)
+                multi_blocks.append(blocks)
                 multi_root.append(root_nodes)
                 multi_ts.append(ts)
                 multi_eid.append(rows["Unnamed: 0"].values)
@@ -461,10 +463,10 @@ else:
             torch.distributed.scatter_object_list(
                 my_model_state, model_state, src=args.num_gpus
             )
-            multi_mfgs.append(None)
-            my_mfgs = [None]
+            multi_blocks.append(None)
+            my_blocks = [None]
             torch.distributed.scatter_object_list(
-                my_mfgs, multi_mfgs, src=args.num_gpus
+                my_blocks, multi_blocks, src=args.num_gpus
             )
             if mailbox is not None:
                 multi_root.append(None)
@@ -496,7 +498,7 @@ else:
                 break
 
     embs = list()
-    multi_mfgs = list()
+    multi_blocks = list()
     for _, rows in tqdm(ldf.groupby(ldf.index // args.batch_size)):
         root_nodes = rows.node.values.astype(np.int32)
         ts = rows.time.values.astype(np.float32)
@@ -507,26 +509,26 @@ else:
             sampler.sample(root_nodes, ts)
             ret = sampler.get_ret()
         if gnn_param.arch != "identity":
-            mfgs = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
+            blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
         else:
-            mfgs = node_to_dgl_blocks(root_nodes, ts, cuda=False)
-        multi_mfgs.append(mfgs)
-        if len(multi_mfgs) == args.num_gpus:
+            blocks = node_to_dgl_blocks(root_nodes, ts, cuda=False)
+        multi_blocks.append(blocks)
+        if len(multi_blocks) == args.num_gpus:
             forward_model_to(ts[-1])
             model_state = [5] * (args.num_gpus + 1)
             my_model_state = [None]
             torch.distributed.scatter_object_list(
                 my_model_state, model_state, src=args.num_gpus
             )
-            multi_mfgs.append(None)
-            my_mfgs = [None]
+            multi_blocks.append(None)
+            my_blocks = [None]
             torch.distributed.scatter_object_list(
-                my_mfgs, multi_mfgs, src=args.num_gpus
+                my_blocks, multi_blocks, src=args.num_gpus
             )
             multi_embs = [None] * (args.num_gpus + 1)
             torch.distributed.gather_object(None, multi_embs, dst=args.num_gpus)
             embs += multi_embs[:-1]
-            multi_mfgs = list()
+            multi_blocks = list()
 
     emb_file_name = (
         hashlib.md5(

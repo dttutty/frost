@@ -3,35 +3,10 @@
 from typing import Callable, Dict, List
 
 import torch
-from step_1 import (
-    _concat_src_dst_memory,
-    _prepare_mail_and_node_ids,
-    combine_within_gpu,
-    generate_mail_vectorized,
-    scatter_by_remainder,
-    send_to_neighbor,
-    send_to_self,
-    update_mailbox,
-)
-from step_2 import (
-    aggregate_owner_latest,
-    aggregate_owner_mean,
-    build_owner_mailbox,
-    route_to_owner,
-)
-from step_3 import (
-    build_plan_on_rank0,
-    exchange_features_with_all_to_all,
-    scatter_plan,
-    split_data_to_tensors,
-    split_data_to_tensors_send_to_neigh,
-    split_data_to_tensors_send_to_self,
-)
 from torch_scatter import scatter_max
 
-from memorys import MemoryMailbox
-from schemas.datatypes import DataTsNid
-from worker.h2d import TransferData
+from schemas.datatypes import MemTsNid
+from worker.h2d import Meta
 
 
 Hook = Callable[..., None]
@@ -72,7 +47,7 @@ class MMFN:
         env,
         mem_strategy,
         mail_strategy,
-        mailbox_size,
+        boxsize,
         world_size,
         neg_samples,
         merge_src,
@@ -88,7 +63,7 @@ class MMFN:
         self.env = env
         self.mem_strategy = mem_strategy
         self.mail_strategy = mail_strategy
-        self.mailbox_size = mailbox_size
+        self.boxsize = boxsize
         self.env = env
         self.world_size = world_size
         self.neg_samples = neg_samples
@@ -98,14 +73,14 @@ class MMFN:
     @torch.no_grad()
     def process(
         self,
-        td: TransferData,
-        mfgs,
+        td: Meta,
+        blocks,
     ):
         # 需要更新mem的节点:发生interaction的root节点
         # 不需要更新mem的节点,其他节点
         dst = td.next_all_nodes  # 如果是latest,必须已经计算好scatter计划
-        mu_efeats = self._efeat[td.eid] if self._efeat is not None else None
-        mid = td.mid
+        mu_efeats = self._efeat[td.pos_edge_id] if self._efeat is not None else None
+        mid = td.macro_bid
         # block = td.block
         last_updated_nid = self.mu.last_updated_nid.clone()
         last_updated_memory = self.mu.last_updated_memory.clone()
@@ -121,30 +96,30 @@ class MMFN:
 
         # 1) 先写 mailbox（mail + memory）
         #    注意：根据你的 MemoryMailbox 依赖关系，若需要先写 memory 再写 mail，可对调顺序
-        n_src = td.root.shape[0] // (self.neg_samples + 2)
+        n_src = td.roots.shape[0] // (self.neg_samples + 2)
         pos_root_nid = last_updated_nid.long()[: n_src * 2]
         pos_root_new_mem = last_updated_memory[: n_src * 2]
         pos_root_new_mem_ts = last_updated_ts[: n_src * 2]
 
-        mem_td_nid = DataTsNid(
-            nid=pos_root_nid,
+        mem_td_nid = MemTsNid(
+            id=pos_root_nid,
             ts=pos_root_new_mem_ts,
             data=pos_root_new_mem,  # 如果是latest, 需要改成所有节点的mem(pos_root用新mem,)
         )
 
         if self.deliver_to == "self":
             td.mail_next_batch_root_nodes = td.next_batch_root_nodes
-        if mailbox_size == 1:
+        if boxsize == 1:
             assert self.deliver_to == "self", (
-                "mailbox_size<=world_size only support deliver_to=self, otherwise slots is not enough"
+                "boxsize<=world_size only support deliver_to=self, otherwise slots is not enough"
             )
             if not merge_src:
                 hook_mgr.register("b_inrank", combine_mail_within_gpu, mail_strategy)
                 # each interaction has its own memory, so each interaction has its own mail
             hook_mgr.register("b_crrank", fill_mailbox_acorss_gpu, mail_strategy)
-        elif mailbox_size > world_size:  # this gonna keep as much mail as possible
+        elif boxsize > world_size:  # this gonna keep as much mail as possible
             assert not merge_src, (
-                "you are wasting mailbox slots, please make sure mailbox_size <= world_size when merge_src==True"
+                "you are wasting mailbox slots, please make sure boxsize <= world_size when merge_src==True"
             )
             if self.deliver_to == "self":
                 hook_mgr.register(
@@ -218,7 +193,7 @@ class MMFN:
         memhandler = self.write_node_memory(self.dedup, mem_td_nid, n_src)
 
         boxhandler = self.write_mail_to_mailbox(
-            mem_td_nid, mu_efeats, td.block, neg_samples
+            mem_td_nid, mu_efeats, td.mdb, neg_samples
         )  # this include update mailbox, mailbox_ts, and next_mail_pos
 
         # # 2) 若按邻居投递，需要配合 gate 推进 next_mail_pos
@@ -249,7 +224,7 @@ class MMFN:
             nid = torch.where(mm.mail_pos_update_pending_flag == 1)[0]
             mm.next_mail_pos[nid] = (
                 mm.next_mail_pos[nid] + 1
-            ) % mm.memory_param.mailbox_size
+            ) % mm.memory_param.boxsize
             mm.mail_pos_update_pending_flag.fill_(0)
 
     @torch.no_grad()
@@ -300,13 +275,13 @@ class MMFN:
     @torch.no_grad()
     def write_mail_to_mailbox(
         self,
-        mem_td_nid: DataTsNid,
+        mem_td_nid: MemTsNid,
         edge_feats,
         mail_delivery_block,
         neg_samples,
     ):
         pos_root_nid, pos_root_new_mem, pos_root_new_mem_ts = (
-            mem_td_nid.nid,
+            mem_td_nid.id,
             mem_td_nid.mem,
             mem_td_nid.ts,
         )
@@ -342,14 +317,14 @@ class MMFN:
 
         mm.mails[idx, mm.next_mail_pos[idx]] = mail
         mm.mail_ts[idx, mm.next_mail_pos[idx]] = mail_ts
-        if mm.memory_param.mailbox_size > 1:
+        if mm.memory_param.boxsize > 1:
             if mm.mail_pos_update_pending_flag is not None:
                 mm.mail_pos_update_pending_flag[idx] = 1
             else:
                 pos_root_nid = idx
                 mm.next_mail_pos[pos_root_nid] = (
                     mm.next_mail_pos[pos_root_nid] + 1
-                ) % mm.memory_param.mailbox_size
+                ) % mm.memory_param.boxsize
 
         generate_mail_vectorized(
             pos_root_nid, new_mem, new_mem_ts, pe, pe_ts, pe_feat, bs

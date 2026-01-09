@@ -3,7 +3,7 @@ from typing import Any, List
 import torch
 import torch.distributed as dist
 
-from common.state import WorkerState
+from schemas.datatypes import Env, Meta
 
 
 class Distributor:
@@ -15,16 +15,17 @@ class Distributor:
     2. Worker 进程是 0 到 world_size - 2。
     """
 
-    def __init__(self):
+    def __init__(self, env: Env, group: dist.ProcessGroup):
         # 1. 在构造时才获取分布式状态，而不是在全局
-        self.world_size: int = dist.get_world_size()
-        self.local_rank: int = dist.get_rank()
+        self.world_size: int = env.world_size
+        self.local_rank: int = env.local_rank
 
         # 2. 将所有全局变量变为实例属性
-        self.HOST_RANK: int = self.world_size - 1
-        self.ngpus: int = self.world_size - 1
+        self.host_rank: int = env.host_rank
+        self.ngpus: int = env.n_gpu
+        self.group: dist.ProcessGroup = group
 
-        assert self.local_rank == self.HOST_RANK
+        assert self.local_rank == self.host_rank
         # 3. 状态缓冲区也由类实例管理
         self.state_buf: torch.Tensor = torch.empty(1, dtype=torch.int32, device="cpu")
 
@@ -53,9 +54,7 @@ class Distributor:
 
     #     dist.broadcast(self.state_buf, src=self.HOST_RANK)
 
-    def scatter_send(
-        self, work_state: WorkerState, batch_payloads: List[Any] | None = None
-    ):
+    def scatter_send(self, metas: List[Meta]):
         """
         Host (self) 向所有 Workers scatter 数据。
 
@@ -65,33 +64,31 @@ class Distributor:
                           payloads[1] 发给 Rank 1
                           ...
         """
-        if batch_payloads is None:
-            batch_payloads = [None] * self.ngpus
-        assert self.local_rank == self.HOST_RANK, "只有 Host 进程可以 scatter"
-        assert len(batch_payloads) == self.ngpus, (
-            f"需要为 {self.ngpus} 个 GPU worker 准备 payload, 但你给了 {len(batch_payloads)} 个"
+        # if metas is None:
+        #     metas = [None] * self.ngpus
+        assert self.local_rank == self.host_rank, "只有 Host 进程可以 scatter"
+        assert len(metas) == self.ngpus, (
+            f"需要为 {self.ngpus} 个 GPU worker 准备 payload, 但你给了 {len(metas)} 个"
         )
 
-        mids = [bp.mid for bp in batch_payloads]
-        print(
-            f"Host (Rank {self.HOST_RANK}): Scattering {mids} to {self.ngpus} workers..."
-        )
+        # mini_bid = [bp.mini_bid for bp in metas]
+        # print(
+        #     f"Host (Rank {self.host_rank}): Scattering {mini_bid} to {self.ngpus} workers..."
+        # )
 
-        batch_payloads = [
-            {"work_state": work_state, "data": batch_payloads[i]}
-            for i in range(self.ngpus)
-        ]
-        # 构造长度 world_size 的列表
-        scatter_list = list(batch_payloads) + [None]  # Host 自己的槽位放 None
-
-        print(
-            f"Host (Rank {self.HOST_RANK}): Scatter list prepared: {batch_payloads} + [None]"
-        )
+        # batch_payloads_dict = [
+        #     {"work_state": work_state, "data": metas[i]} for i in range(self.ngpus)
+        # ]
+        # # 构造长度 world_size 的列表
+        # scatter_list = list(batch_payloads_dict) + [None]  # Host 自己的槽位放 None
+        scatter_list = metas + [None]
+        # print(f"Host (Rank {self.host_rank}): Scatter list prepared: {metas} + [None]")
         # Host 自己也必须参与 collective
         dist.scatter_object_list(
             [None],  # Host 自己的接收缓冲区（没用）
             scatter_list,
-            src=self.HOST_RANK,
+            src=self.host_rank,
+            group=self.group,
         )
 
     def gather_receive(self) -> List[Any]:
@@ -104,7 +101,7 @@ class Distributor:
             list[1] 是 Rank 1 的结果
             ...
         """
-        assert self.local_rank == self.HOST_RANK, "只有 Host 进程可以 gather"
+        assert self.local_rank == self.host_rank, "只有 Host 进程可以 gather"
 
         gathered_list = [None] * self.world_size
 
@@ -112,7 +109,7 @@ class Distributor:
         dist.gather_object(
             float(0),
             gathered_list,
-            dst=self.HOST_RANK,  # Host 发送的占位数据
+            dst=self.host_rank,  # Host 发送的占位数据
         )
 
         # 丢掉 Host 自己的槽位（最后一个），只返回 workers 的结果

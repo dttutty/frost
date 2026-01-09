@@ -9,14 +9,13 @@ sampling:
     duration: 25
     num_thread: 64
 memory: 
-  - type: 'none'
-    dim_out: 0
+  - d_hid: 0
 gnn:
-  - arch: 'transformer_attention'
+  - arch: 'attn'
     layer: 2
-    att_head: 2
-    dim_time: 0
-    dim_out: 100
+    att_h: 2
+    d_time: 0
+    d_hid: 100
     combine: 'rnn'
 train:
   - epoch: 10

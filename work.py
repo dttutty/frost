@@ -16,8 +16,8 @@ except Exception:
 
 
 # ---------------- Simulated ops ----------------
-def mfgs_to_cuda(batch):
-    print(f"  (Feeder)  Step 1: mfgs_to_cuda for batch {batch['id']}...")
+def blocks_to_cuda(batch):
+    print(f"  (Feeder)  Step 1: blocks_to_cuda for batch {batch['id']}...")
     time.sleep(0.2)
     batch["nfeat_src"] = f"nfeat_for_{batch['id']}"
     batch["efeat_src"] = f"efeat_for_{batch['id']}"
@@ -167,7 +167,7 @@ class AsyncStallCoordinator:
 
 
 # ---------------- Thread classes ----------------
-class MFGFeederThread(threading.Thread):
+class blockFeederThread(threading.Thread):
     def __init__(self, source_q, nfeat_q, efeat_q, mail_q):
         super().__init__(name="Feeder_Thread")
         self.source_q, self.nfeat_q, self.efeat_q, self.mail_q = (
@@ -185,7 +185,7 @@ class MFGFeederThread(threading.Thread):
                 self.efeat_q.put(None)
                 self.mail_q.put(None)
                 break
-            processed_batch = mfgs_to_cuda(raw_batch)
+            processed_batch = blocks_to_cuda(raw_batch)
             batch_id = processed_batch["id"]
             self.nfeat_q.put({"id": batch_id, "data": processed_batch["nfeat_src"]})
             self.efeat_q.put({"id": batch_id, "data": processed_batch["efeat_src"]})
@@ -311,7 +311,7 @@ def main():
     coordinator.start()
 
     # Threads
-    feeder = MFGFeederThread(raw_data_queue, nfeat_q, efeat_q, mail_q)
+    feeder = blockFeederThread(raw_data_queue, nfeat_q, efeat_q, mail_q)
     nfeat_worker = GPUCopyWorkerThread("nfeat", nfeat_q, partial_results_queue)
     efeat_worker = GPUCopyWorkerThread("efeat", efeat_q, partial_results_queue)
     mail_worker = GPUCopyWorkerThread(

@@ -9,14 +9,13 @@ sampling:
     duration: 0
     num_thread: 64
 memory: 
-  - type: 'none'
-    dim_out: 0
+  - d_hid: 0
 gnn:
-  - arch: 'transformer_attention'
+  - arch: 'attn'
     layer: 2
-    att_head: 2
-    dim_time: 100
-    dim_out: 100
+    att_h: 2
+    d_time: 100
+    d_hid: 100
 train:
   - epoch: 3
     batch_size: 4000 # local batch_size
