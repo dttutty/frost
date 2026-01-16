@@ -13,3 +13,6 @@ models/
 traces/
 temp/
 logs/
+result.json
+*.gz
+*.zip
