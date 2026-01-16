@@ -11,13 +11,21 @@ import torch.distributed as dist
 from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from gnn.base import BaseModel
+from gnn import APAN, JODIE, TGAT, TGN, DyGFormer, DySAT_TGL
+from gnn.components import EdgePredictor, TimeEncode
+from gnn.memory_updater import (
+    MemoryUpdater,
+    TransformerMemoryUpdater,
+)
+from gnn.with_memory.base import MemoryBaseGNN
+from gnn.without_memory.base import GNN
 from schemas.datatypes import (
     BoxTsNid,
     Config,
     CudaPlanSet,
     Delta,
     Env,
+    ForwardCtx,
     MailTsNid,
     MemTsNid,
     Meta,
@@ -79,88 +87,192 @@ class Worker:
     def __init__(
         self,
         cfg: Config,
-        shared: Shared,
+        shared: Shared | None,
         save_to: str,
         nfeat: None | torch.Tensor,
         efeat: None | torch.Tensor,
         env: Env,
-        nccl_p2p,
-        nccl_ddp,
-        nccl_pg,
+        nccl,
         gloo,
+        shared_total_epoch,
     ):
         self.cfg = cfg
         self.save_to = save_to
         self.env = env
 
         self.shared = shared
-        self.total_epoch = int(self.shared.total_epoch[0].item())
+        self.total_epoch = int(shared_total_epoch[0].item())
         self.meta_q = queue.Queue(maxsize=1)
-        self.xpart_q: Queue[Tuple[Meta, X, TensorPlanSet]] = queue.Queue(maxsize=1)
-        self.delta_q: Queue[Delta | None] = queue.Queue(maxsize=1)
-
-        self.nccl_p2p = nccl_p2p
-        self.nccl_ddp = nccl_ddp
-        self.mem_p2p_q: Queue[P2PTask] = queue.Queue()
-        self.box_p2p_q: Queue[P2PTask] = queue.Queue()
         self.stop_ev = threading.Event()
         self.nfeat = nfeat
         self.efeat = efeat
-        self.nccl_pg = nccl_pg
+        self.nccl = nccl
         self.gloo = gloo
         self.curr_epoch = -1
         self.logger = _setup_logger(self.env.local_rank)
-        self.h2d_sem = threading.Semaphore(0)
+
+        if self.cfg.m is not None:
+            self.delta_q: Queue[Delta | None] = queue.Queue(maxsize=1)
+            self.mem_p2p_q: Queue[P2PTask] = queue.Queue()
+            self.box_p2p_q: Queue[P2PTask] = queue.Queue()
+            self.xpart_q: Queue[Tuple[Meta, X, TensorPlanSet]] = queue.Queue(maxsize=1)
+            self.sync_q: Queue[SyncTask] = queue.Queue(maxsize=1)
+            self.xfull_q = queue.Queue(maxsize=1)
+
+            assert shared is not None, "Shared memory must be provided if memory exists"
+            destination_q_for_h2d = self.xpart_q
+            self.h2d_sem = threading.Semaphore(0)
+            self.data_syncer = DataSyncer(
+                cfg=cfg,
+                env=self.env,
+                shared=shared,
+                h2d_sem=self.h2d_sem,
+                sync_q=self.sync_q,
+                stop_ev=self.stop_ev,
+                mem_p2p_q=self.mem_p2p_q,
+                box_p2p_q=self.box_p2p_q,
+            )
+            self.assembler = Assembler(
+                xpart_q=self.xpart_q,
+                delta_q=self.delta_q,
+                xfull_q=self.xfull_q,
+                stop_ev=self.stop_ev,
+            )
+        else:
+            self.xfull_q: Queue[Tuple[Meta, X, TensorPlanSet]] = queue.Queue(maxsize=1)
+            destination_q_for_h2d = self.xfull_q
+            self.h2d_sem = None
+            self.data_syncer = None
+
         self.h2d = H2D(
             nfeat=nfeat,
             efeat=efeat,
             shared=shared,
+            gnn_arch=cfg.g.arch,
             merge_src=self.cfg.t.merge_src,
             meta_q=self.meta_q,
-            xpart_q=self.xpart_q,
+            destination_q=destination_q_for_h2d,
             stop_ev=self.stop_ev,
             h2d_sem=self.h2d_sem,
         )
 
-        self.xfull_q = queue.Queue(maxsize=1)
-        self.sync_q: Queue[SyncTask] = queue.Queue(maxsize=1)
+        self.has_memory = False
+        if cfg.m is not None:
+            self.has_memory = True
+        match cfg.t.model:
+            case "TGN":
+                assert cfg.m is not None, "TGN requires memory config"
+                d_mail = 2 * cfg.m.d_mem + cfg.t.edim
+                memory_updater = MemoryUpdater(
+                    rnn=torch.nn.GRUCell(d_mail + cfg.m.d_time, cfg.m.d_mem),
+                    time_encoder=TimeEncode(cfg.m.d_time),
+                )
+                gnn = TGN(
+                    dim_node=cfg.t.ndim,
+                    dim_edge=cfg.t.edim,
+                    dim_memory=cfg.m.d_mem,
+                    dim_time=cfg.m.d_time,
+                    dim_out=cfg.g.d_out,
+                )
+                edge_predictor = EdgePredictor(cfg.g.d_out, neg_samples=1)
+                model = MemoryBaseGNN(
+                    gnn=gnn,
+                    memory_updater=memory_updater,
+                    sync_q=self.sync_q,
+                    predictor=edge_predictor,
+                )
+            case "APAN":
+                assert cfg.m is not None, "APAN requires memory config"
 
-        self.data_syncer = DataSyncer(
-            cfg=cfg,
-            env=self.env,
-            shared=shared,
-            h2d_sem=self.h2d_sem,
-            sync_q=self.sync_q,
-            stop_ev=self.stop_ev,
-            mem_p2p_q=self.mem_p2p_q,
-            box_p2p_q=self.box_p2p_q,
-        )
-        model = BaseModel(cfg, self.sync_q).cuda()
-
+                d_mail = 2 * cfg.m.d_mem + cfg.t.edim
+                memory_updater = TransformerMemoryUpdater(
+                    d_mail=d_mail,
+                    d_mem=cfg.t.ndim,
+                    d_time=cfg.m.d_time,
+                    boxsize=cfg.m.boxsize,
+                    heads=cfg.m.att_h,
+                    dropout=cfg.t.dropout,
+                    att_dropout=cfg.t.dropout,
+                )
+                gnn = APAN(
+                    dim_memory=cfg.m.d_mem,
+                    neg_samples=1,
+                )
+                edge_predictor = EdgePredictor(cfg.m.d_mem, neg_samples=1)
+                model = MemoryBaseGNN(
+                    gnn=gnn,
+                    memory_updater=memory_updater,
+                    sync_q=self.sync_q,
+                    predictor=edge_predictor,
+                )
+            case "JODIE":
+                assert cfg.m is not None, "JODIE requires memory config"
+                d_mail = 2 * cfg.m.d_mem + cfg.t.edim
+                memory_updater = MemoryUpdater(
+                    rnn=torch.nn.RNNCell(d_mail + cfg.m.d_time, cfg.m.d_mem),
+                    time_encoder=TimeEncode(cfg.m.d_time),
+                )
+                gnn = JODIE(
+                    dim_node=cfg.t.ndim,
+                    dim_memory=cfg.m.d_mem,
+                    dim_time=cfg.m.d_time,
+                )
+                edge_predictor = EdgePredictor(cfg.m.d_mem, neg_samples=1)
+                model = MemoryBaseGNN(
+                    gnn=gnn,
+                    memory_updater=memory_updater,
+                    sync_q=self.sync_q,
+                    predictor=edge_predictor,
+                )
+            case "TGAT":
+                gnn = TGAT(
+                    dim_node=cfg.t.ndim,
+                    dim_edge=cfg.t.edim,
+                    dim_time=cfg.g.d_time,
+                    dim_hid=cfg.g.d_out,
+                    num_layers=cfg.s.layer,
+                    heads=cfg.g.att_h,
+                    dropout=cfg.t.dropout,
+                )
+                model = GNN(
+                    gnn=gnn,
+                    predictor=EdgePredictor(cfg.g.d_out, neg_samples=1),
+                )
+            case "DySAT":
+                model = DySAT_TGL(
+                    dim_node=cfg.t.ndim,
+                    dim_edge=cfg.t.edim,
+                    dim_time=cfg.g.d_time,
+                    dim_hid=cfg.g.d_out,
+                    num_layers=cfg.s.layer,
+                    heads=cfg.g.att_h,
+                    dropout=cfg.t.dropout,
+                    history_len=cfg.s.history,
+                )
+                model = GNN(
+                    gnn=model,
+                    predictor=EdgePredictor(cfg.g.d_out, neg_samples=1),
+                )
+            case "DyGFormer":
+                model = DyGFormer(
+                    dim_node=cfg.t.ndim,
+                    dim_edge=cfg.t.edim,
+                )
+            case _:
+                raise ValueError(f"Unknown model type: {cfg.t.model}")
+        model = model.cuda()
         find_unused_parameters = False
         if cfg.s and cfg.s.history > 1:
             find_unused_parameters = True
 
         find_unused_parameters = True
-        self.model: Union[DDP, BaseModel] = DDP(
+        self.model: Union[DDP, TGN] = DDP(
             model,
-            process_group=self.nccl_ddp,
+            process_group=self.nccl,
             find_unused_parameters=find_unused_parameters,
         )
         self.criterion = torch.nn.BCEWithLogitsLoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=cfg.t.lr)
-        self.assembler = Assembler(
-            xpart_q=self.xpart_q,
-            delta_q=self.delta_q,
-            xfull_q=self.xfull_q,
-            stop_ev=self.stop_ev,
-        )
-
-        # self.receiver_thread = threading.Thread(
-        #     target=self._receiver_loop,
-        #     name="MetaReceiverThread",
-        #     daemon=True,  # 设置为守护线程，主程序退出时它会自动结束
-        # )
 
         self.receiver = Receiver(
             env=self.env,
@@ -212,7 +324,7 @@ class Worker:
             padded_local = local_tensor
         return padded_local
 
-    def train(self, meta: Meta, x: X, plan_set: CudaPlanSet):
+    def train(self, meta: Meta, x: X, plan_set: CudaPlanSet | None):
         if meta.mark == "first":
             self.reset_ap_auc_count()
         n_pos_edges = meta.pos_edge.shape[0]
@@ -228,8 +340,18 @@ class Worker:
         self.logger.debug(
             f"Rank {self.env.local_rank} training microbatch {meta.macro_bid}"
         )
+        n_root_src_n_pos_dst = meta.pos_edge.shape[0] * 2
+        forward_ctx = ForwardCtx(
+            blockss=meta.blockss,
+            x=x,
+            macro_bid=meta.macro_bid,
+            plan_set=plan_set,
+            mail_delivery_tensor=meta.mdt,
+            is_last=False,
+            n_root_src_n_pos_dst=n_root_src_n_pos_dst,
+        )
+        logits_pos, logits_neg = self.model(forward_ctx)
 
-        logits_pos, logits_neg = self.model(meta, x, plan_set, is_last=False)
         self.logger.debug(
             f"Rank {self.env.local_rank} finished forward for microbatch {meta.macro_bid}"
         )
@@ -237,62 +359,21 @@ class Worker:
         logits = torch.cat([logits_pos, logits_neg])
 
         loss = self.criterion(logits.squeeze(-1), labels)
+        if self.has_memory:
+            self.handle_p2p_q()
 
-        dist.barrier(group=self.nccl_pg)
-        self.handle_p2p_q()
+        dist.barrier(group=self.nccl)
         loss.backward()
         self.optimizer.step()
+
         # self.receive_next_meta_and_put_in_queue()
         reduced_loss = loss.detach().clone()
-        dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=self.nccl_pg)
+        dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=self.nccl)
 
         if self.env.local_rank == 1:
             self.logger.info(
                 f"[Microbatch {meta.macro_bid}, loss {reduced_loss.item()}"
             )
-
-    # def receive_next_meta_and_put_in_queue(self):
-    #     next_meta_buf = [None]
-    #     dist.scatter_object_list(
-    #         next_meta_buf, None, src=self.env.host_rank, group=self.gloo
-    #     )
-    #     next_meta: Meta = next_meta_buf[0]
-    #     assert next_meta.plan_set is not None, (
-    #         "plan_set should not be None before putting in queue"
-    #     )
-    #     self.meta_q.put(copy.deepcopy(next_meta), block=True)
-
-    # def _receiver_loop(self):
-    #     """这是在该线程中一直跑的循环"""
-    #     while True:
-    #         try:
-    #             next_meta_buf = [None]
-
-    #             # 这一步是阻塞的，直到 host 发来数据
-    #             dist.scatter_object_list(
-    #                 next_meta_buf, None, src=self.env.host_rank, group=self.gloo
-    #             )
-
-    #             next_meta = next_meta_buf[0]
-
-    #             # 【重要】需要一个退出机制
-    #             # 约定：如果 host 发来 None 或者特殊的结束信号，就退出循环
-    #             if next_meta is None:
-    #                 print(
-    #                     f"Rank {self.env.local_rank}: Received stop signal. Exiting receiver thread."
-    #                 )
-    #                 break
-
-    #             assert next_meta.plan_set is not None, (
-    #                 "plan_set should not be None before putting in queue"
-    #             )
-
-    #             # 放入队列供主线程消费
-    #             self.meta_q.put(copy.deepcopy(next_meta), block=True)
-
-    #         except Exception as e:
-    #             print(f"Rank {self.env.local_rank}: Error in receiver thread: {e}")
-    #             break
 
     def _exec_p2p(self, p2p_task):
         nid, data, ts, type = p2p_task.nid, p2p_task.data, p2p_task.ts, p2p_task.type
@@ -306,14 +387,12 @@ class Worker:
         recv_ts, send_ts = ts.recv, ts.send
 
         dist.all_to_all_single(
-            recv_nid, send_nid, out_splits, in_splits, group=self.nccl_p2p
+            recv_nid, send_nid, out_splits, in_splits, group=self.nccl
         )
         dist.all_to_all_single(
-            recv_data, send_x, out_splits, in_splits, group=self.nccl_p2p
+            recv_data, send_x, out_splits, in_splits, group=self.nccl
         )
-        dist.all_to_all_single(
-            recv_ts, send_ts, out_splits, in_splits, group=self.nccl_p2p
-        )
+        dist.all_to_all_single(recv_ts, send_ts, out_splits, in_splits, group=self.nccl)
 
         if type == "mem":
             return MemTsNid(id=recv_nid, data=recv_data, ts=recv_ts)
@@ -352,7 +431,7 @@ class Worker:
         print(f"DataSyncer: rank {self.env.local_rank} put delta into delta_q")
 
     @torch.no_grad()
-    def eval(self, meta: Meta, x: X, plan_set: CudaPlanSet):
+    def eval(self, meta: Meta, x: X, plan_set: CudaPlanSet | None):
         ap = 0.0
         auc = 0.0
         n_pos_edges = meta.pos_edge.shape[0]
@@ -365,11 +444,18 @@ class Worker:
         )
         self.model.eval()
         is_last_macrobatch_of_epoch = meta.mark == "last" and meta.split == "test"
-        logits_pos, logits_neg = self.model(
-            meta, x, plan_set, is_last=is_last_macrobatch_of_epoch
+        forward_ctx = ForwardCtx(
+            blockss=meta.blockss,
+            x=x,
+            macro_bid=meta.macro_bid,
+            plan_set=plan_set,
+            mail_delivery_tensor=meta.mdt,
+            is_last=is_last_macrobatch_of_epoch,
+            n_root_src_n_pos_dst=n_pos_edges * 2,
         )
-
-        self.handle_p2p_q()
+        logits_pos, logits_neg = self.model(forward_ctx)
+        if self.has_memory:
+            self.handle_p2p_q()
         logits = torch.cat([logits_pos, logits_neg], dim=0)
         y_pred = logits.sigmoid()
         # if not (meta.split == "test" and meta.mark == "last"):
@@ -389,7 +475,7 @@ class Worker:
             work = dist.all_reduce(
                 reduced_loss,
                 op=dist.ReduceOp.SUM,
-                group=self.nccl_pg,
+                group=self.nccl,
             )
             if self.env.local_rank == 0:
                 # only rank 0 prints eval loss
@@ -425,7 +511,7 @@ class Worker:
             all_sizes = [torch.zeros_like(local_size) for _ in range(self.env.n_gpu)]
             self.logger.debug(f"Rank {self.env.local_rank} before gather all_sizes")
 
-            work = dist.all_gather(all_sizes, local_size, group=self.nccl_pg)
+            dist.all_gather(all_sizes, local_size, group=self.nccl)
 
             # Convert size tensors to integers list
             size_list = [size.item() for size in all_sizes]
@@ -436,10 +522,10 @@ class Worker:
             preds_list = [torch.zeros_like(pad_preds) for _ in range(self.env.n_gpu)]
             labels_list = [torch.zeros_like(pad_labels) for _ in range(self.env.n_gpu)]
             self.logger.debug(f"Rank {self.env.local_rank} before gather preds_list")
-            work = dist.all_gather(preds_list, pad_preds, group=self.nccl_pg)
+            dist.all_gather(preds_list, pad_preds, group=self.nccl)
             self.logger.debug(f"Rank {self.env.local_rank} before gather labels_list")
 
-            work = dist.all_gather(labels_list, pad_labels, group=self.nccl_pg)
+            dist.all_gather(labels_list, pad_labels, group=self.nccl)
             self.logger.debug(
                 f"Rank {self.env.local_rank} after gather all preds and labels"
             )
@@ -463,14 +549,13 @@ class Worker:
     def run(self):
         self.logger.info("Worker: Starting H2D thread...")
         self.receiver.start()
-        self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
-        self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
-
         self.h2d.start()  # 启动 H2D 预取线程
-
-        self.assembler.start()  # 启动 Assembler 组装线程
-        self.data_syncer.start()
-        self.delta_q.put(None)
+        if self.has_memory:
+            self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
+            self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
+            self.assembler.start()  # 启动 Assembler 组装线程
+            self.data_syncer.start()
+            self.delta_q.put(None)
 
         _initialize = False
 
@@ -481,11 +566,16 @@ class Worker:
                 # self.receive_next_meta_and_put_in_queue()
                 _initialize = True
                 # print meta split and mark
+            if self.has_memory:
+                meta, plan_set, sorted_x, assemble_stream = self.xfull_q.get()
+                print("Worker: got x_full", meta.macro_bid)
+                torch.cuda.current_stream().wait_stream(assemble_stream)
+                print("Worker: waited for x_full", meta.macro_bid)
+            else:
+                meta, sorted_x, plan_set, ready_event = self.xfull_q.get()
+                torch.cuda.current_stream().wait_event(ready_event)
 
-            meta, plan_set, sorted_x, assemble_stream = self.xfull_q.get()
-            print("Worker: got x_full", meta.macro_bid)
-            torch.cuda.current_stream().wait_stream(assemble_stream)
-            print("Worker: waited for x_full", meta.macro_bid)
+                print("Worker: got x_full", meta.macro_bid)
             self.logger.info(
                 f"Worker: rank {self.env.local_rank} processing microbatch {meta.macro_bid}, {meta.split} {meta.mark}"
             )
@@ -508,25 +598,21 @@ class Worker:
 
             if __debug__:
                 print("Worker: checking sparse tables", meta.macro_bid)
-                if sorted_x.nfeat:
-                    check_sparse_table("nfeat", sorted_x.nfeat.id, sorted_x.nfeat.data)
                 if sorted_x.mem:
                     check_sparse_table("mem", sorted_x.mem.id, sorted_x.mem.data)
                 if sorted_x.box:
                     check_sparse_table("box", sorted_x.box.id, sorted_x.box.data)
-                if sorted_x.efeat:
-                    check_sparse_table("efeat", sorted_x.efeat.id, sorted_x.efeat.data)
-
-            plan_set_cuda = plan_set.cuda()
+            if plan_set is not None:
+                plan_set = plan_set.cuda()
             print("plan_set moved to cuda")
             # torch.cuda.synchronize()
 
             if meta.split == "train":  # if training
-                self.train(meta, sorted_x, plan_set_cuda)
+                self.train(meta, sorted_x, plan_set)
             elif meta.split in ["val", "test"]:  # if evaluating
                 if meta.mark == "first":
                     self.reset_ap_auc_count()
-                self.eval(meta, sorted_x, plan_set_cuda)
+                self.eval(meta, sorted_x, plan_set)
             # pint split and mark
             self.logger.debug(
                 f"Worker: rank {self.env.local_rank} finished processing microbatch {meta.macro_bid}, {meta.split} {meta.mark}"
@@ -538,7 +624,8 @@ class Worker:
                 self.logger.info(
                     f"Worker: Finished epoch {self.curr_epoch} test phase."
                 )
-                self.shared.reset()
+                if self.shared:
+                    self.shared.reset()
                 # print current_epoch
                 self.logger.info(f"Worker: Current epoch {self.curr_epoch} completed.")
                 _initialize = False

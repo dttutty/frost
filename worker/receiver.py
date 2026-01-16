@@ -40,10 +40,6 @@ class Receiver(threading.Thread):
                         )
                         break
 
-                    assert next_meta.plan_set is not None, (
-                        "plan_set should not be None before putting in queue"
-                    )
-
                     # 放入队列供主线程消费
                     self.meta_q.put(copy.deepcopy(next_meta), block=True)
             except Exception:

@@ -36,7 +36,7 @@ from dgl.utils.shared_mem import create_shared_mem_array, get_shared_mem_array
 from sklearn.metrics import average_precision_score, roc_auc_score
 from tqdm import tqdm
 
-from gnn.base import *
+from gnn.TGN import *
 from sampler import *
 from utils import *
 from utils import blocks_to_cuda
@@ -193,7 +193,7 @@ if memory_param.type != "none":
 
 if args.local_rank < args.num_gpus:
     # GPU worker process
-    model = BaseModel(
+    model = TGN(
         dim_feats[1], dim_feats[4], sample_param, memory_param, gnn_param, train_param
     ).cuda()
     model = torch.nn.parallel.DistributedDataParallel(

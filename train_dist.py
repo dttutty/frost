@@ -108,9 +108,7 @@ def main():
     all_ranks = list(range(0, env.world_size))
     print(f"Rank {env.local_rank}: Creating worker NCCL groups...")
     gloo = dist.new_group(ranks=all_ranks, backend="gloo")
-    nccl_p2p = dist.new_group(ranks=worker_ranks, backend="nccl")
-    nccl_ddp = dist.new_group(ranks=worker_ranks, backend="nccl")
-    nccl_pg = dist.new_group(ranks=worker_ranks, backend="nccl")
+    nccl = dist.new_group(ranks=worker_ranks, backend="nccl")
     if args.seed is not None:
         set_seed(args.seed)
 
@@ -163,7 +161,7 @@ def main():
     cfg.g.d_in = cfg.m.d_mem if cfg.m is not None else ndim
     if cfg.g.d_out is None and cfg.m is not None:
         cfg.g.d_out = cfg.m.d_mem
-    if cfg.s is not None:
+    if cfg.s.is_sample_support_node:
         assert cfg.s.layer == len(cfg.s.neighbor)
 
     n_epoch = cfg.t.epoch
@@ -171,45 +169,46 @@ def main():
     shared = None
     if cfg.m is not None:
         mail_shape = [n_nodes, cfg.m.boxsize, 2 * cfg.m.d_mem + edim]
-        F32 = torch.float32
-        I64 = torch.int64
-        # shared.box_next_pos should be int
-        if env.local_rank == 0:
-            mem = csm("mem", [n_nodes, cfg.m.d_mem], F32)
-            mem_ts = csm("mem_ts", [n_nodes], F32)
-            box = csm(
-                "mail",
-                mail_shape,
-                F32,
-            )
-            box_ts = csm("mail_ts", [n_nodes, cfg.m.boxsize], F32)
-            box_next_pos = csm("mail_next_pos", [n_nodes], torch.int32)
-            total_epoch = csm("total_epoch", [1], torch.int32)
-        dist.barrier()
-        if env.local_rank != 0:
-            mem = gsm("mem", [n_nodes, cfg.m.d_mem], F32)
-            mem_ts = gsm("mem_ts", [n_nodes], F32)
-            box = gsm(
-                "mail",
-                mail_shape,
-                F32,
-            )
-            box_ts = gsm("mail_ts", [n_nodes, cfg.m.boxsize], F32)
-            box_next_pos = gsm("mail_next_pos", [n_nodes], torch.int32)
-            total_epoch = gsm("total_epoch", [1], torch.int32)
-
+    F32 = torch.float32
+    # shared.box_next_pos should be int
+    if env.local_rank == 0:
+        shared_total_epoch = csm("total_epoch", [1], torch.int32)
+    if env.local_rank == 0 and cfg.m is not None:
+        mem = csm("mem", [n_nodes, cfg.m.d_mem], F32)
+        mem_ts = csm("mem_ts", [n_nodes], F32)
+        box = csm(
+            "mail",
+            mail_shape,
+            F32,
+        )
+        box_ts = csm("mail_ts", [n_nodes, cfg.m.boxsize], F32)
+        box_next_pos = csm("mail_next_pos", [n_nodes], torch.int32)
+    dist.barrier()
+    if env.local_rank != 0:
+        shared_total_epoch = gsm("total_epoch", [1], torch.int32)
+    if env.local_rank != 0 and cfg.m is not None:
+        mem = gsm("mem", [n_nodes, cfg.m.d_mem], F32)
+        mem_ts = gsm("mem_ts", [n_nodes], F32)
+        box = gsm(
+            "mail",
+            mail_shape,
+            F32,
+        )
+        box_ts = gsm("mail_ts", [n_nodes, cfg.m.boxsize], F32)
+        box_next_pos = gsm("mail_next_pos", [n_nodes], torch.int32)
+    shared = None
+    if cfg.m is not None:
         shared = Shared(
             mem=mem,
             mem_ts=mem_ts,
             box=box,
             box_ts=box_ts,
             box_next_pos=box_next_pos,
-            total_epoch=total_epoch,
         )
 
     if shared is not None:
         if env.local_rank == 0:
-            shared.total_epoch[0] = n_epoch
+            shared_total_epoch[0] = n_epoch
     dist.barrier()
 
     if env.is_host:
@@ -217,15 +216,7 @@ def main():
 
         print("Host: Initializing host process...")
 
-        host = Host(
-            cfg,
-            g,
-            df,
-            env,
-            shared,
-            start,
-            gloo,
-        )
+        host = Host(cfg, g, df, env, shared, start, gloo, shared_total_epoch)
         host.run()
     else:
         from run_worker import Worker
@@ -233,16 +224,7 @@ def main():
         print("Worker: Initializing worker process...")
 
         worker = Worker(
-            cfg,
-            shared,
-            save_to,
-            nfeat,
-            efeat,
-            env,
-            nccl_p2p,
-            nccl_ddp,
-            nccl_pg,
-            gloo,
+            cfg, shared, save_to, nfeat, efeat, env, nccl, gloo, shared_total_epoch
         )
         worker.run()
 

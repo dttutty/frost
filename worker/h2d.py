@@ -7,15 +7,13 @@ import torch.distributed as dist
 
 from schemas.datatypes import (
     BoxTsNid,
-    EdgeFeat,
     MemTsNid,
     Meta,
-    NodeFeat,
     Shared,
     TensorPlanSet,
     X,
 )
-from utils import _deduplicate_first_layer_src, blocks_to_cuda
+from utils import _deduplicate_first_layer_src
 
 
 class H2D(threading.Thread):
@@ -24,19 +22,21 @@ class H2D(threading.Thread):
         nfeat: torch.Tensor | None,
         efeat: torch.Tensor | None,
         shared: Shared | None,
+        gnn_arch: str,
         merge_src: bool,
         meta_q: queue.Queue,
-        xpart_q: queue.Queue,
+        destination_q: queue.Queue,
         stop_ev: threading.Event,
-        h2d_sem: threading.Semaphore,
+        h2d_sem: threading.Semaphore | None,
     ):
         super().__init__(daemon=True, name="h2d")
         self.nfeat = nfeat
         self.efeat = efeat
         self.shared = shared
         self.merge_src = merge_src
+        self.gnn_arch = gnn_arch
         self.meta_q = meta_q
-        self.xpart_q = xpart_q
+        self.destination_q = destination_q
         self.stop_ev = stop_ev
         self.h2d_sem = h2d_sem
         self.stream = torch.cuda.Stream()
@@ -45,32 +45,34 @@ class H2D(threading.Thread):
         try:
             with torch.cuda.stream(self.stream), torch.no_grad():
                 while not self.stop_ev.is_set():
-                    self.h2d_sem.acquire()
-                    self.h2d_sem.acquire()
+                    if self.h2d_sem is not None:
+                        self.h2d_sem.acquire()
+                        self.h2d_sem.acquire()
                     print("H2D: acquired semaphore, starting H2D operation")
                     meta: Meta = self.meta_q.get(block=True)
+
                     x = X()
                     plan_set = meta.plan_set
-                    assert plan_set is not None, "plan_set should not be None after H2D"
 
                     if self.efeat is not None:
                         x.pos_efeat = self.efeat[meta.pos_edge_id].cuda()
+                        if self.gnn_arch != "identity":
+                            for blocks in meta.blockss:
+                                for block in blocks:
+                                    eid = block.edata["ID"]
+                                    block.edata["efeat"] = self.efeat[eid]
+
+                    if self.nfeat is not None:
+                        nfeat = self.nfeat[meta.unique_nodes]
+                        id_list = meta.unique_nodes
+                        for block in meta.blockss[0]:
+                            nid = block.srcdata["ID"]
+                            node_idx = torch.searchsorted(id_list, nid)
+                            block.srcdata["nfeat"] = nfeat[node_idx]
 
                     # move feat to gpu
                     if plan_set is not None:
                         assert type(plan_set) is TensorPlanSet
-                        if plan_set.nfeat_prefetch is not None:
-                            assert self.nfeat is not None
-                            nid = plan_set.nfeat_prefetch
-                            x.nfeat = NodeFeat(
-                                id=nid, data=self.nfeat[plan_set.nfeat_prefetch]
-                            ).cuda()
-                        if plan_set.efeat_prefetch is not None:
-                            assert self.efeat is not None
-                            x.efeat = EdgeFeat(
-                                id=plan_set.efeat_prefetch,
-                                data=self.efeat[plan_set.efeat_prefetch],
-                            ).cuda()
                         if self.shared is not None:
                             assert plan_set.box is not None
                             assert plan_set.mem is not None
@@ -94,16 +96,18 @@ class H2D(threading.Thread):
                                 meta.blockss[0]
                             )
 
-                        meta.blockss = blocks_to_cuda(meta.blockss)
+                    if meta.mdt:
+                        meta.mdt = meta.mdt.cuda()
+                    meta.blockss = [
+                        [block.to("cuda:0") for block in blocks]
+                        for blocks in meta.blockss
+                    ]
 
-                        if meta.mdt:
-                            meta.mdt = meta.mdt.cuda()
-
-                    assert plan_set is not None, "plan_set should not be None after H2D"
+                    print("meta.blockss[0][0].device:", meta.blockss[0][0].device)
 
                     ready_event = torch.cuda.Event()
                     ready_event.record(torch.cuda.current_stream())
-                    self.xpart_q.put((meta, x, plan_set, ready_event), block=True)
+                    self.destination_q.put((meta, x, plan_set, ready_event), block=True)
 
         except Exception:
             print(f"!!! Assembler Thread Crashed on Rank {dist.get_rank()} !!!")

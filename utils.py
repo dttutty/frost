@@ -7,7 +7,6 @@ import pandas as pd
 import torch
 import yaml
 from dgl.heterograph import DGLBlock
-from sampler_core import ParallelSampler
 
 # In utils.py
 from schemas.datatypes import GNNCFG, Config, MemoryCFG, SampleCFG, TrainCFG
@@ -155,53 +154,86 @@ def parse_config(f) -> Config:
     return cfg
 
 
-def sampler_wrapper(no_neg, root_nodes, sampler: ParallelSampler | None, ts):
-    if no_neg:
-        pos_root_end = root_nodes.shape[0] * 2 // 3
-        sampler.sample(root_nodes[:pos_root_end], ts[:pos_root_end])
-    else:
-        sampler.sample(root_nodes, ts)
-    ret = sampler.get_ret()
-    sample_time = ret[0].sample_time()
-    return ret, sample_time
-
-
-def to_dgl_blocks(
-    ret, history, reverse=False, save_on_pgu=False
-) -> List[List[DGLBlock]]:
-    # eg. if sample_param.history = 3, sample_param.layer = 2, ret = [Ly1His1, Ly1His2, Ly1His3, Ly2His1, Ly2His2, Ly2His3]
-    # then grouped_blocks = [[Ly1His1, Ly1His2], [Ly1His3, Ly2His1, [Ly2His2, Ly2His3]]
-    blocks = list()
-    # 6 tgbs -> blocks length 6 [1,2,3,4,5,6]
-    # if history = 2, grouped_blocks = [[1,2],[3,4],[5,6]]
+def to_dgl_blocks(ret, history, save_on_gpu=False) -> List[List[DGLBlock]]:
+    """
+    用于正常的 GNN 前向计算，支持多层聚合和多快照历史。
+    """
+    blocks = []
     for tgb in ret:
-        tgb_nodes = torch.from_numpy(tgb.nodes())
-        tgb_dts = torch.from_numpy(tgb.dts())
+        # 提取数据并转为 Tensor
+        all_nodes = torch.from_numpy(tgb.nodes())
         tgb_ts = torch.from_numpy(tgb.ts())
         tgb_eid = torch.from_numpy(tgb.eid())
-        if not reverse:
-            edges = (tgb.col(), tgb.row())
-            num_src, num_dst = tgb.dim_in(), tgb.dim_out()
-            dt_slice_start = num_dst
-            id_ts_target = "srcdata"
-        else:
-            edges = (tgb.row(), tgb.col())
-            num_src, num_dst = tgb.dim_out(), tgb.dim_in()
-            dt_slice_start = num_src
-            id_ts_target = "dstdata"
-        block = dgl.create_block(edges, num_src_nodes=num_src, num_dst_nodes=num_dst)
-        getattr(block, id_ts_target)["ID"] = tgb_nodes
-        getattr(block, id_ts_target)["ts"] = tgb_ts
+        tgb_dts = torch.from_numpy(tgb.dts())
 
-        # Assign edge data
-        block.edata["dt"] = tgb_dts[dt_slice_start:]
+        # 正向逻辑：col -> row (邻居指向中心)
+        edges = (tgb.col(), tgb.row())
+
+        # 创建 DGL Block
+        block = dgl.create_block(
+            edges, num_src_nodes=tgb.dim_in(), num_dst_nodes=tgb.dim_out()
+        )
+
+        # num_dst_nodes =tgb.dim_out()少
+        # num_src_nodes = tgb.dim_in()多
+
+        num_roots = tgb.dim_out()
+
+        block.srcdata["ID"] = all_nodes
+        block.dstdata["ID"] = all_nodes[:num_roots]
+
+        block.srcdata["ts"] = tgb_ts
+        block.dstdata["ts"] = tgb_ts[:num_roots]  # 只有目标节点需要 ts
+
+        block.edata["dt"] = tgb_dts[num_roots:]  # 只有边需要 dt
         block.edata["ID"] = tgb_eid
 
-        blocks.append(block.to("cuda:0") if save_on_pgu else block)
-    # [[Ly1His1, Ly1His2], [Ly1His3, Ly2His1, [Ly2His2, Ly2His3]]
+        blocks.append(block.to("cuda:0") if save_on_gpu else block)
+
+    # 按照历史步长分组
     grouped_blocks = list(map(list, zip(*[iter(blocks)] * history)))
+    # 反转层级顺序以匹配从外向里的聚合顺序
     grouped_blocks.reverse()
     return grouped_blocks
+
+
+def to_apan_mailbox_block(ret, save_on_gpu=False) -> DGLBlock:
+    """
+    专门用于 APAN 的异步邮件传播。
+    只取 ret 中的第一个 TGB (1 layer, 1 history)。
+    """
+    # this is not standard DGL block
+    # 按照 train_dist.py 的逻辑，reverse 时只使用第一个元素
+    tgb = ret[0]
+
+    all_nodes = torch.from_numpy(tgb.nodes())
+    tgb_ts = torch.from_numpy(tgb.ts())
+    tgb_eid = torch.from_numpy(tgb.eid())
+    tgb_dts = torch.from_numpy(tgb.dts())
+
+    # 传播逻辑：row -> col (中心指向邻居)
+    edges = (tgb.row(), tgb.col())
+
+    block = dgl.create_block(
+        edges, num_src_nodes=tgb.dim_out(), num_dst_nodes=tgb.dim_in()
+    )
+
+    # num_src_nodes = tgb.dim_out()少
+    # num_dst_nodes = tgb.dim_in()多
+
+    num_roots = tgb.dim_out()
+    # 在传播过程中，目标节点（邻居）需要获取 ID 和时间戳
+    block.srcdata["ID"] = all_nodes[:num_roots]
+    block.dstdata["ID"] = all_nodes
+
+    block.srcdata["ts"] = tgb_ts[:num_roots]
+    block.dstdata["ts"] = tgb_ts  # 只有目标节点需要 ts
+
+    # edge data
+    block.edata["dt"] = tgb_dts[num_roots:]
+    block.edata["ID"] = tgb_eid
+
+    return block.to("cuda:0") if save_on_gpu else block
 
 
 def node_to_dgl_blocks(root_nodes, ts, cuda: bool) -> List[List[DGLBlock]]:
@@ -209,8 +241,8 @@ def node_to_dgl_blocks(root_nodes, ts, cuda: bool) -> List[List[DGLBlock]]:
     block = dgl.create_block(
         ([], []), num_src_nodes=root_nodes.shape[0], num_dst_nodes=root_nodes.shape[0]
     )
-    block.srcdata["ID"] = torch.from_numpy(root_nodes)
-    block.srcdata["ts"] = torch.from_numpy(ts)
+    block.srcdata["ID"] = root_nodes
+    block.srcdata["ts"] = ts
     if cuda:
         blocks.insert(0, [block.to("cuda:0")])
     else:
@@ -218,12 +250,11 @@ def node_to_dgl_blocks(root_nodes, ts, cuda: bool) -> List[List[DGLBlock]]:
     return blocks
 
 
-def blocks_to_cuda(blocks):
-    new_blocks = []
-    for block in blocks:
-        new_block = [block.to("cuda:0") for block in block]
-        new_blocks.append(new_block)
-    return new_blocks
+def blocks_to_cuda(blockss: List[List[DGLBlock]]) -> List[List[DGLBlock]]:
+    for blocks in blockss:
+        for block in blocks:
+            block = block.to("cuda:0")
+    return blockss
 
 
 def _deduplicate_first_layer_src(blockss_0):

@@ -22,8 +22,9 @@ gnn:
     d_time: 100
     d_hid: 100
 train:
-  - epoch: 2
+  - epoch: 5
     batch_size: 4000 # local batch_size
     lr: 0.0001
     dropout: 0.2
     reorder: 8
+    model: "TGN"

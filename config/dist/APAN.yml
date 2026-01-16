@@ -7,16 +7,17 @@ sampling:
     history: 1
     duration: 0
     num_thread: 64
-    no_neg: True
+    neg_samples: 1
+    sample_neighbors_for_neg_root_nodes : False
 memory: 
   - d_time: 100
     deliver_to: 'neighbors'
     mail_combine: 'last'
-    memory_update: 'transformer'
-    attention_head: 2
+    cell: 'transformer'
+    att_h: 2
     boxsize: 10
     combine_node_feature: False
-    d_hid: 100
+    d_mem: 100
 gnn:
   - arch: 'identity'
 train:
@@ -24,5 +25,5 @@ train:
     batch_size: 4000 # local batch_size
     lr: 0.0001
     dropout: 0.1
-    att_dropout: 0.1
     reorder: 8
+    model: "APAN"

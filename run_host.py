@@ -11,10 +11,17 @@ from sampler_core import ParallelSampler
 from tqdm import tqdm
 
 from host.comm import Distributor
-from planner import Planner
+from planner import ApanPlanner, Planner
+from planner.planner import (
+    compute_whats_need_by_gpu,
+)
 from sampler import NegLinkSampler, create_sampler
 from schemas.datatypes import Config, Env, Meta
-from utils import node_to_dgl_blocks, sampler_wrapper, to_dgl_blocks
+from utils import (
+    node_to_dgl_blocks,
+    to_apan_mailbox_block,
+    to_dgl_blocks,
+)
 
 
 class Host:
@@ -26,7 +33,8 @@ class Host:
         env: Env,
         shared,
         start,
-        gloo=None,
+        gloo,
+        shared_total_epoch,
     ):
         """
         initialize the host with configuration, graph data, edge dataframe, and environment settings
@@ -36,8 +44,8 @@ class Host:
         self.has_nfeat = cfg.t.ndim > 0
         self.has_efeat = cfg.t.edim > 0
         self.has_memory_and_mailbox = cfg.m is not None
-        assert self.cfg.s is not None  # 采样器配置不能为空
         self.env = env
+        self.shared_total_epoch = shared_total_epoch
         self.t_cfg = copy.deepcopy(cfg.t)  # tcfg 会在 run_epoch 中被修改，所以拷贝一份
 
         # 1. 初始化通信器
@@ -55,21 +63,24 @@ class Host:
         self.va_df = df[train_edge_end:val_edge_end]
         self.te_df = df[val_edge_end:]
         gpu_topo = [0, 1]
+        self.planner = None
         if self.cfg.m is not None:
-            self.planner = Planner(
-                gpu_topo,
-                has_nfeat=self.has_nfeat,
-                has_efeat=self.has_efeat,
-                has_memory_and_mailbox=self.has_memory_and_mailbox,
-                mail_strategy=self.cfg.m.mail_combine,
-                deliver_to=self.cfg.m.deliver_to,
-            )
-        else:
-            self.planner = Planner(gpu_topo)
+            # need planner for memory/mailbox reusing
+            if self.cfg.m.deliver_to == "neighbors":
+                self.planner = ApanPlanner(
+                    gpu_topo,
+                    mail_strategy=self.cfg.m.mail_combine,
+                )
+            else:
+                self.planner = Planner(
+                    gpu_topo,
+                    mail_strategy=self.cfg.m.mail_combine,
+                )
 
         # 3. 初始化采样器
         self.pos_sampler = None
-        if self.cfg.s is not None:
+        if self.cfg.s.is_sample_support_node:
+            print("Initializing positive sampler...", self.cfg.s.neighbor)
             self.pos_sampler = ParallelSampler(
                 graph["indptr"],
                 graph["indices"],
@@ -84,14 +95,14 @@ class Host:
                 self.cfg.s.history,
                 float(self.cfg.s.duration),
             )
-            if self.cfg.s.neg_samples > 0:
-                self.neg_sampler = NegLinkSampler(graph)
+
+        self.neg_sampler = NegLinkSampler(graph)
         self.e_ns = create_sampler(graph)
         self.curr_minibatch_id = 0
         self.curr_epoch = 0
         self.meta_q: List[Meta] = list()  # 待分发的批次列表
         self.deliver_to = self.cfg.m.deliver_to if self.cfg.m else None
-        self.total_epoch = int(shared.total_epoch[0].item())
+        self.total_epoch = int(shared_total_epoch[0].item())
 
     def run(self):
         """
@@ -181,11 +192,12 @@ class Host:
             # scatter when batches are enough for plan
             # enough for plan: size == n_gpu * 2
             if len(self.meta_q) == self.env.n_gpu * 2:
-                self.meta_q = self.planner.plan_next(
-                    self.meta_q,
-                    is_last_macrobatch=False,
-                    deliver_to=self.deliver_to,
-                )
+                if self.planner is not None:
+                    self.meta_q = self.planner.plan_next(
+                        self.meta_q,
+                        is_last_macrobatch=False,
+                    )
+
                 meta_2_scatter = self.meta_q[: self.env.n_gpu]
                 # only send n_gpus batches
                 mini_ids = [td.mini_bid for td in meta_2_scatter]
@@ -196,19 +208,16 @@ class Host:
                 )
                 assert len(meta_2_scatter) == self.env.n_gpu
                 meta_2_scatter = copy.deepcopy(meta_2_scatter)
-                for meta in meta_2_scatter:
-                    assert meta.plan_set is not None, (
-                        "plan_set should not be None before scatter"
-                    )
+
                 self.comm.scatter_send(meta_2_scatter)
                 self.meta_q = self.meta_q[self.env.n_gpu :]  # only keep next batches
 
         if split == "test":
-            self.meta_q = self.planner.plan_next(
-                self.meta_q,
-                is_last_macrobatch=True,
-                deliver_to=self.deliver_to,
-            )
+            if self.planner is not None:
+                self.meta_q = self.planner.plan_next(
+                    self.meta_q,
+                    is_last_macrobatch=True,
+                )
             for meta in self.meta_q:
                 assert meta.plan_set is not None, (
                     "plan_set should not be None before scatter"
@@ -230,7 +239,8 @@ class Host:
     def reset_end_of_epoch_states(self):
         if self.pos_sampler is not None:
             self.pos_sampler.reset()
-        self.planner.reset()
+        if self.planner is not None:
+            self.planner.reset()
         self.meta_q = []
         self.curr_minibatch_id = 0
         self.curr_epoch += 1
@@ -258,15 +268,23 @@ class Host:
         roots = torch.cat([src_nid, dst_nid, neg_dst_nid])
         ts = torch.cat([pos_edge_ts, pos_edge_ts, pos_edge_ts])
 
-        ret, _ = sampler_wrapper(
-            self.cfg.s.neg_samples == 0, roots.numpy(), self.pos_sampler, ts.numpy()
-        )
-
+        ts_np = ts.numpy()
+        if self.cfg.s.is_sample_support_node:
+            if self.cfg.s.sample_neighbors_for_neg_root_nodes == 0:
+                pos_root_np = torch.cat([src_nid, dst_nid]).numpy()
+                pos_ts_np = torch.cat([pos_edge_ts, pos_edge_ts]).numpy()
+                self.pos_sampler.sample(pos_root_np, pos_ts_np)
+            else:
+                roots_np = roots.numpy()
+                self.pos_sampler.sample(roots_np, ts_np)
+            ret = self.pos_sampler.get_ret()
+        unique_nodes = None
         if self.cfg.g.arch != "identity":
-            blockss = to_dgl_blocks(ret, self.cfg.s.history, save_on_pgu=False)
-        else:
+            blockss = to_dgl_blocks(ret, self.cfg.s.history, save_on_gpu=False)
+        elif self.cfg.g.arch == "identity":
             blockss = node_to_dgl_blocks(roots, ts, cuda=False)  # for APAN and JODIE
 
+        unique_nodes = compute_whats_need_by_gpu(blockss[0])
         meta = Meta(
             blockss=blockss,
             mini_bid=self.curr_minibatch_id,
@@ -280,6 +298,7 @@ class Host:
             curr_mini_bid_of_this_split=curr_mini_bid_of_this_split,
             curr_macro_bid_of_this_split=curr_macro_bid_of_this_split,
             last_epoch=False,
+            unique_nodes=unique_nodes,
         )
 
         if self.curr_epoch + 1 == self.total_epoch:
@@ -288,9 +307,7 @@ class Host:
             assert self.cfg.s is not None
             assert self.cfg.s.history == 1
             # 只把 history[1] 的反向 block 交给 mailbox, APAN 和 JODIE 专用, only support history=1
-            meta.mdb = to_dgl_blocks(
-                ret, self.cfg.s.history, reverse=True, save_on_pgu=False
-            )[0][0]
+            meta.mdb = to_apan_mailbox_block(ret, save_on_gpu=False)
 
         self.meta_q.append(meta)
 
@@ -312,6 +329,5 @@ class Host:
         print("Host: All processes reached the final barrier.")
         end = time.time()
 
-        if not dist.is_initialized() or dist.get_rank() == 0:
-            print(f"Elapsed time: {end - self.start_timetart:.2f} seconds")
+        print(f"Elapsed time: {end - self.start_time:.2f} seconds")
         dist.destroy_process_group()

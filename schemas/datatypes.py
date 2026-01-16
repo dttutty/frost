@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import List, Literal, Optional, Set, Union
 
 import torch
@@ -9,6 +9,17 @@ import torch.distributed as dist
 from dgl.heterograph import DGLBlock
 from numpy.typing import NDArray
 from torch import Tensor
+
+
+@dataclass(slots=True)
+class ForwardCtx:
+    blockss: List[List[DGLBlock]]
+    x: X
+    macro_bid: int
+    plan_set: CudaPlanSet
+    mail_delivery_tensor: Tensor | None
+    is_last: bool
+    n_root_src_n_pos_dst: int
 
 
 @dataclass(slots=True, kw_only=True)
@@ -26,6 +37,7 @@ class GNNCFG:
 
 @dataclass(slots=True, kw_only=True)
 class TrainCFG:
+    model: Literal["APAN", "JODIE", "TGN"] = "TGN"
     epoch: int = 10
     batch_size: int = 600
     reorder: Optional[int] = 8
@@ -42,7 +54,9 @@ class SampleCFG:
     layer: int = 1
     history: int = 1
     neg_samples: int = 1
-    neighbor: List[int] = field(default_factory=lambda: [10, 10])
+    is_sample_support_node: bool = True
+    sample_neighbors_for_neg_root_nodes: bool = True
+    neighbor: Optional[List[int]] = None
     prop_time: bool = False
     duration: int = 0
     num_thread: int = 32  # valid if history > 1
@@ -434,19 +448,15 @@ class EdgeFeat:
 
 @dataclass(slots=True)
 class X:
-    nfeat: NodeFeat | None = None
-    efeat: EdgeFeat | None = None
+    nid: Tensor | None = None
     pos_efeat: Optional[Tensor] = None
     mem: MemTsNid | None = None
     box: BoxTsNid | None = None
     is_sorted: bool = False
-    nid: Optional[Tensor] = None
 
     def sort_by_nid(self) -> "X":
-        if self.nfeat is not None:
-            sorted_indices = torch.argsort(self.nfeat.id)
-            self.nfeat.id = self.nfeat.id[sorted_indices]
-            self.nfeat.data = self.nfeat.data[sorted_indices]
+        if self.is_sorted:
+            return self
 
         if self.mem is not None:
             sorted_indices = torch.argsort(self.mem.id)
@@ -462,15 +472,9 @@ class X:
             if self.box.next_pos is not None:
                 self.box.next_pos = self.box.next_pos[sorted_indices]
 
-        if self.efeat is not None:
-            sorted_indices = torch.argsort(self.efeat.id)
-            self.efeat.id = self.efeat.id[sorted_indices]
-            self.efeat.data = self.efeat.data[sorted_indices]
-
         # check if nids are consistent
         nid_for_compare = None
-        if self.nfeat is not None:
-            nid_for_compare = self.nfeat.id
+
         if self.mem is not None:
             if nid_for_compare is not None:
                 assert torch.equal(nid_for_compare, self.mem.id), (
@@ -486,10 +490,8 @@ class X:
             else:
                 nid_for_compare = self.box.id
 
-        assert nid_for_compare is not None, (
-            "At least one of nfeat, mem, box_or_mail must be provided"
-        )
-        self.nid = nid_for_compare
+        if nid_for_compare is not None:
+            self.nid = nid_for_compare
         self.is_sorted = True
         return self
 
@@ -533,23 +535,14 @@ class GatherElement:
 class PlanSet:
     mem: Plan
     box: Plan
-    nfeat_prefetch: Optional[Set[int]] = None
-    efeat_prefetch: Optional[Set[int]] = None
 
     def tensorfy(self):
         mem = self.mem.tensorfy()
         box = self.box.tensorfy()
-        if self.nfeat_prefetch is not None:
-            assert isinstance(self.nfeat_prefetch, Set)
-            nfeat_prefetch = set_to_tensor(self.nfeat_prefetch)
-        if self.efeat_prefetch is not None:
-            assert isinstance(self.efeat_prefetch, Set)
-            efeat_prefetch = set_to_tensor(self.efeat_prefetch)
+
         return TensorPlanSet(
             mem=mem,
             box=box,
-            nfeat_prefetch=nfeat_prefetch,
-            efeat_prefetch=efeat_prefetch,
         )
 
 
@@ -557,8 +550,6 @@ class PlanSet:
 class TensorPlanSet:
     mem: TensorPlan
     box: TensorPlan
-    nfeat_prefetch: Optional[Tensor] = None
-    efeat_prefetch: Optional[Tensor] = None
 
     def cuda(self):
         if self.mem is not None:
@@ -567,17 +558,9 @@ class TensorPlanSet:
         if self.box is not None:
             assert isinstance(self.box, TensorPlan)
             box = self.box.cuda()
-        if self.nfeat_prefetch is not None:
-            assert isinstance(self.nfeat_prefetch, Tensor)
-            nfeat_prefetch = self.nfeat_prefetch.cuda()
-        if self.efeat_prefetch is not None:
-            assert isinstance(self.efeat_prefetch, Tensor)
-            efeat_prefetch = self.efeat_prefetch.cuda()
         return CudaPlanSet(
             mem=mem,
             box=box,
-            nfeat_prefetch=nfeat_prefetch,
-            efeat_prefetch=efeat_prefetch,
         )
 
     def sort(self):
@@ -587,12 +570,6 @@ class TensorPlanSet:
         if self.box is not None:
             assert isinstance(self.box, TensorPlan)
             self.box = self.box.sort()
-        if self.nfeat_prefetch is not None:
-            assert isinstance(self.nfeat_prefetch, Tensor)
-            self.nfeat_prefetch = torch.sort(self.nfeat_prefetch).values
-        if self.efeat_prefetch is not None:
-            assert isinstance(self.efeat_prefetch, Tensor)
-            self.efeat_prefetch = torch.sort(self.efeat_prefetch).values
         return self
 
 
@@ -600,8 +577,6 @@ class TensorPlanSet:
 class CudaPlanSet:
     mem: CudaPlan
     box: CudaPlan
-    nfeat_prefetch: Optional[torch.Tensor] = None
-    efeat_prefetch: Optional[torch.Tensor] = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -693,15 +668,17 @@ class Meta:
     total_macro_batch: Optional[int] = 500
     total_epochs: int = 10
     last_epoch: bool = False  # whether this meta is sent for cleanup
+    unique_nodes: Optional[torch.Tensor] = None
+    unique_edges: Optional[torch.Tensor] = None
 
 
 @dataclass(slots=True, kw_only=True)
 class SyncTask:
-    meta: Meta
+    macro_bid: int
     plan_set: CudaPlanSet
     root_new_mem: MemTsNid
     x: X
-    mail_delivery_tensor: torch.Tensor
+    mail_delivery_tensor: torch.Tensor | None
     is_last: bool
     ready_event: torch.cuda.Event
 
@@ -715,7 +692,6 @@ class Shared:
     box: Tensor
     box_ts: Tensor
     box_next_pos: Tensor | None = None
-    total_epoch: Tensor  # we put total_epoch in shared so that the worker can notify host for early stopping
 
     def reset(self) -> None:
         """将所有共享内存张量清零"""

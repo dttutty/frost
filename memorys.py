@@ -4,56 +4,43 @@ import torch
 import torch.nn.functional as F
 from dgl.heterograph import DGLBlock
 
-from layers import TimeEncode
+from gnn.components import TimeEncode
 from schemas.datatypes import MemoryCFG
 
 
 class BasicMemoryUpdater(torch.nn.Module):
     def __init__(
         self,
-        m_cfg: MemoryCFG,
+        d_mem,
+        d_time,
         ndim,
         edim,
         mem_updater_class,
     ):
         super().__init__()
-        self.d_mem = m_cfg.d_mem
-        self.d_time = m_cfg.d_time
+        self.d_mem = d_mem
+        self.d_time = d_time
         self.ndim = ndim
         self.edim = edim
         assert self.d_time >= 0, "must have time encoding if memory is used"
 
         self.time_enc = TimeEncode(self.d_time)
-        # if combine_node_feature:
-        d_mail_w_time = self.d_mem * 2 + edim + self.d_time
-        self.updater = mem_updater_class(d_mail_w_time, self.d_mem)
-        if self.ndim > 0 and self.d_mem != self.ndim:
-            self.nfeat_map = torch.nn.Linear(self.ndim, self.d_mem)
+        self.d_mail = 2 * self.d_mem + self.edim
+        self.d_input = self.d_mail + self.d_time
+        self.updater = mem_updater_class(self.d_input, self.d_mem)
 
     def forward(
         self,
-        blockss: List[List[DGLBlock]],
+        block: DGLBlock,
     ):
-        # 有记忆的节点,只允许有1个layer和一个history
-        assert len(blockss) == 1, (
-            "Node memory updater only supports one history window and one layer"
-        )
-        blocks_0 = blockss[0][0]
-        ts = blocks_0.srcdata["ts"]
-        mem = blocks_0.srcdata["mem"]
-        mem_ts = blocks_0.srcdata["mem_ts"]
-        box: torch.Tensor = blocks_0.srcdata["box"]
-        mail = box.squeeze(1)
-
-        nid = blocks_0.srcdata["ID"]
-        assert isinstance(ts, torch.Tensor)
-        assert isinstance(mail, torch.Tensor)
-        assert isinstance(mem, torch.Tensor)
-        assert isinstance(mem_ts, torch.Tensor)
-        assert isinstance(nid, torch.Tensor)
-        time_rep = self.time_enc(ts - mem_ts)
-        mail_with_time = torch.cat([mail, time_rep], dim=1)
-        upd_mem = self.updater(mail_with_time, mem)
+        ts: torch.Tensor = block.srcdata["ts"]
+        mem: torch.Tensor = block.srcdata["mem"]
+        mem_ts: torch.Tensor = block.srcdata["mem_ts"]
+        mail: torch.Tensor = block.srcdata["mail"]
+        nid: torch.Tensor = block.srcdata["ID"]
+        time_emb = self.time_enc(ts - mem_ts)
+        input = torch.cat([mail, time_emb], dim=1)
+        upd_mem = self.updater(input, mem)
 
         return ts, upd_mem, nid
 

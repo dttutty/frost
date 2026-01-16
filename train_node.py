@@ -36,7 +36,7 @@ import torch
 from sklearn.metrics import average_precision_score, f1_score
 from tqdm import tqdm
 
-from gnn.base import *
+from gnn.TGN import *
 from sampler import *
 from utils import *
 
@@ -63,7 +63,7 @@ def generate_temporal_embeddings(ldf, emb_file_name):
     _, node_feat_dim, _, _, edge_feat_dim, _ = get_node_edge_dimensions(
         node_np, edge_np
     )
-    model = BaseModel(
+    model = TGN(
         node_feat_dim,
         edge_feat_dim,
         sample_param,

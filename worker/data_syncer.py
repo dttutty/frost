@@ -388,7 +388,7 @@ class DataSyncer(threading.Thread):
                 task: SyncTask = self.sync_q.get(block=True)
                 self.work_handles = []
                 (
-                    meta,
+                    macro_bid,
                     plan_set,
                     root_new_mem,
                     x,
@@ -396,7 +396,7 @@ class DataSyncer(threading.Thread):
                     is_last,
                     ready_event,
                 ) = (
-                    task.meta,
+                    task.macro_bid,
                     task.plan_set,
                     task.root_new_mem,
                     task.x,
@@ -408,7 +408,7 @@ class DataSyncer(threading.Thread):
                 torch.cuda.current_stream().wait_event(ready_event)
                 print(
                     "DataSyncer: ready_event received, processing delta",
-                    meta.macro_bid,
+                    macro_bid,
                 )
 
                 root_new_mem_orig = root_new_mem.clone()  # 这里的ts是交互发生的时间
@@ -430,7 +430,7 @@ class DataSyncer(threading.Thread):
                     BoxTask(
                         root_new_mem_orig,
                         x.pos_efeat,
-                        meta.macro_bid,
+                        macro_bid,
                         x.box,
                         plan_set.box,
                         is_last,

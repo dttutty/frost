@@ -60,7 +60,7 @@ import numpy as np
 import torch
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-from gnn.base import BaseModel
+from gnn.TGN import TGN
 from profiler import profiler
 from sampler import (
     AvoidInfoLeakNegLinkSampler,
@@ -171,7 +171,7 @@ shared_cfg = {
 from memorys import MemoryMailbox
 
 
-model = BaseModel(
+model = TGN(
     gnn_dim_node,
     gnn_dim_edge,
     sample_param,

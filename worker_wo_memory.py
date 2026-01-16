@@ -5,7 +5,7 @@ import torch.distributed as dist
 from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from gnn.base import BaseModel
+from gnn.TGN import TGN
 from utils import blocks_to_cuda, prepare_blocks
 from worker.h2d import H2D, Meta
 
@@ -96,7 +96,7 @@ def train_from_prefetch(
     is_dedup,
     cpu_to_gpu_thread: H2D,
     memory_mailbox: MemoryMailbox,
-    model: DDP | BaseModel,
+    model: DDP | TGN,
     optimizer,
     creterion,
     edge_feats,
@@ -149,7 +149,7 @@ def train_from_prefetch(
 def run_evaluation_step(
     dedup,
     prev_cup_to_gpu_thread: H2D,
-    model: DDP | BaseModel,
+    model: DDP | TGN,
     optimizer,
     creterion,
     edge_feats,
@@ -293,7 +293,7 @@ def run_worker(
 ):
     # stream position 1
     stream = torch.cuda.Stream()
-    model = BaseModel(
+    model = TGN(
         node_feat_dim,
         edge_feat_dim,
         sample_param,
