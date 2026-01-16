@@ -226,10 +226,7 @@ class Host:
             mark_info = [td.mark for td in meta_2_scatter]
             print(f"Host: Scattering batch {mini_ids} ({split_info}, {mark_info})...")
             meta_2_scatter = copy.deepcopy(meta_2_scatter)
-            for meta in meta_2_scatter:
-                assert meta.plan_set is not None, (
-                    "plan_set should not be None before scatter"
-                )
+
             self.comm.scatter_send(meta_2_scatter)
             self.reset_end_of_epoch_states()
 

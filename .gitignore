@@ -16,3 +16,9 @@ logs/
 result.json
 *.gz
 *.zip
+wandb/
+temp/
+logs/
+.trash/
+.ruff_cache/
+_tgmem_out/
