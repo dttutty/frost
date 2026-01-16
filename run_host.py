@@ -218,10 +218,7 @@ class Host:
                     self.meta_q,
                     is_last_macrobatch=True,
                 )
-            for meta in self.meta_q:
-                assert meta.plan_set is not None, (
-                    "plan_set should not be None before scatter"
-                )
+
             meta_2_scatter = self.meta_q  # only send n_gpus batches
 
             mini_ids = [td.mini_bid for td in meta_2_scatter]
