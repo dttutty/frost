@@ -101,7 +101,7 @@ class Worker:
         self.env = env
 
         self.shared = shared
-        self.total_epoch = int(shared_total_epoch[0].item())
+        self.total_epoch = cfg.t.epoch
         self.meta_q = queue.Queue(maxsize=1)
         self.stop_ev = threading.Event()
         self.nfeat = nfeat
@@ -155,6 +155,8 @@ class Worker:
             stop_ev=self.stop_ev,
             h2d_sem=self.h2d_sem,
         )
+
+        self.result_q = queue.Queue()
 
         self.has_memory = False
         if cfg.m is not None:
@@ -368,13 +370,15 @@ class Worker:
 
         # self.receive_next_meta_and_put_in_queue()
         reduced_loss = loss.detach().clone()
-        dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=self.nccl)
+        self.result_q.put(reduced_loss)
+        # dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=self.nccl)
 
-        if self.env.local_rank == 1:
-            self.logger.info(
-                f"[Microbatch {meta.macro_bid}, loss {reduced_loss.item()}"
-            )
+        # if self.env.local_rank == 1:
+        #     self.logger.info(
+        #         f"[Microbatch {meta.macro_bid}, loss {reduced_loss.item()}"
+        #     )
 
+    @torch.no_grad()
     def _exec_p2p(self, p2p_task):
         nid, data, ts, type = p2p_task.nid, p2p_task.data, p2p_task.ts, p2p_task.type
         recv_nid, send_nid, out_splits, in_splits = (
@@ -471,33 +475,34 @@ class Worker:
             loss = self.criterion(logits.squeeze(-1), labels)
             reduced_loss = loss.detach().clone()
             # print meta.split
-
-            work = dist.all_reduce(
-                reduced_loss,
-                op=dist.ReduceOp.SUM,
-                group=self.nccl,
-            )
-            if self.env.local_rank == 0:
-                # only rank 0 prints eval loss
-                self.logger.info(
-                    f"[Microbatch {meta.macro_bid}, loss {reduced_loss.item()}"
-                )
+            self.result_q.put(reduced_loss)
+            # dist.all_reduce(
+            #     reduced_loss,
+            #     op=dist.ReduceOp.SUM,
+            #     group=self.nccl,
+            # )
+            # if self.env.local_rank == 0:
+            #     # only rank 0 prints eval loss
+            #     self.logger.info(
+            #         f"[Microbatch {meta.macro_bid}, loss {reduced_loss.item()}"
+            #     )
         else:
             # torch.cuda.synchronize()
             assert meta.split == "test"
-            self.logger.info(
-                f"Rank {self.env.local_rank} finished forward for microbatch {meta.macro_bid}"
-            )
+            # self.logger.info(
+            #     f"Rank {self.env.local_rank} finished forward for microbatch {meta.macro_bid}"
+            # )
 
-            if self.env.local_rank == 0:
-                # only rank 0 prints eval loss
-                self.logger.info(f"[Microbatch {meta.macro_bid}, test done]")
-        self.my_rank_preds.append(y_pred)
-        self.my_rank_labels.append(labels)
+            # if self.env.local_rank == 0:
+            #     # only rank 0 prints eval loss
+            #     self.logger.info(f"[Microbatch {meta.macro_bid}, test done]")
+        self.result_q.put({loss: reduced_loss, y_pred: y_pred, labels: labels})
+        # self.my_rank_preds.append(y_pred)
+        # self.my_rank_labels.append(labels)
         # print self.my_rank_preds and self.my_rank_labels sizes
-        self.logger.debug(
-            f"Rank {self.env.local_rank} preds size: {len(self.my_rank_preds)}, labels size: {len(self.my_rank_labels)}"
-        )
+        # self.logger.debug(
+        #     f"Rank {self.env.local_rank} preds size: {len(self.my_rank_preds)}, labels size: {len(self.my_rank_labels)}"
+        # )
 
         if meta.mark == "last":
             my_rank_preds = torch.cat(self.my_rank_preds)
@@ -581,6 +586,7 @@ class Worker:
             )
 
             def check_sparse_table(name, ids, data):
+                pass
                 if ids is None or data is None:
                     return
                 assert ids.numel() == data.size(0), (
@@ -596,12 +602,12 @@ class Worker:
                 has_dup = torch.any(ids[1:] == ids[:-1])
                 assert not has_dup, f"{name}: duplicated ids found"
 
-            if __debug__:
-                print("Worker: checking sparse tables", meta.macro_bid)
-                if sorted_x.mem:
-                    check_sparse_table("mem", sorted_x.mem.id, sorted_x.mem.data)
-                if sorted_x.box:
-                    check_sparse_table("box", sorted_x.box.id, sorted_x.box.data)
+            # if __debug__:
+            #     print("Worker: checking sparse tables", meta.macro_bid)
+            #     if sorted_x.mem:
+            #         check_sparse_table("mem", sorted_x.mem.id, sorted_x.mem.data)
+            #     if sorted_x.box:
+            #         check_sparse_table("box", sorted_x.box.id, sorted_x.box.data)
             if plan_set is not None:
                 plan_set = plan_set.cuda()
             print("plan_set moved to cuda")
@@ -635,7 +641,7 @@ class Worker:
             if meta.split == "test" and meta.mark == "last":
                 self.logger.info(f"total_epoch {self.total_epoch}")
                 self.logger.info(
-                    f"Worker: rank {self.env.local_rank} completed microbatch {meta.macro_bid}. Current epoch: {self.curr_epoch}."
+                    f"Worker: rank {self.env.local_rank} completed microbatch {meta.macro_bid}. Current epoch: {self.curr_epoch}/{self.total_epoch}."
                 )
             if (
                 self.total_epoch == self.curr_epoch + 1

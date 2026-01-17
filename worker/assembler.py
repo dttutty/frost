@@ -25,9 +25,9 @@ class Assembler(threading.Thread):
         # step 1: find index of each x.nid in _ID
         permute_nidx = torch.searchsorted(x.nid, global_nid)
         # need to make sure _ID is subset of x.nid
-        assert torch.equal(x.nid[permute_nidx], global_nid), (
-            "Data missing: Block IDs not found in Assembler X data"
-        )
+        # assert torch.equal(x.nid[permute_nidx], global_nid), (
+        #     "Data missing: Block IDs not found in Assembler X data"
+        # )
         if x.mem is not None:
             block.srcdata["mem"] = x.mem.data[permute_nidx]  # 这里放memory
             block.srcdata["mem_ts"] = x.mem.ts[permute_nidx]

@@ -45,7 +45,7 @@ class Host:
         self.has_efeat = cfg.t.edim > 0
         self.has_memory_and_mailbox = cfg.m is not None
         self.env = env
-        self.shared_total_epoch = shared_total_epoch
+        self.shared_total_epoch = cfg.t.epoch
         self.t_cfg = copy.deepcopy(cfg.t)  # tcfg 会在 run_epoch 中被修改，所以拷贝一份
 
         # 1. 初始化通信器

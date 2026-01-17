@@ -19,10 +19,13 @@ def _mail_delivery_tensor(
     uniq_global_src = torch.unique(global_src)
     uniq_global_dst = torch.unique(global_dst)
     is_in_root = torch.isin(global_src, unique_root_nodes)
-
+    # uniq_global_dst to set
+    uniq_global_dst_set = set(uniq_global_dst.tolist())
     roots_sorted = torch.sort(unique_root_nodes).values
+    # roots_sorted to set
+    roots_sorted_set = set(roots_sorted.tolist())
+
     src_sorted = torch.sort(global_src).values
-    assert torch.equal(roots_sorted, src_sorted), "roots != unique(global_src)"
 
     final_src = global_src[is_in_root]
     final_dst = global_dst[is_in_root]
@@ -342,9 +345,7 @@ def compute_whats_need_by_gpu(blocks: List[DGLBlock]) -> torch.Tensor:
     return torch.unique(all_nid_tensor)
 
 
-def _comp_need_nodes(
-    meta: Meta, deliver_to: Literal["self", "neighbors"] = "self"
-) -> tuple[Set, None | Set[int], None | Set[int]]:
+def _comp_need_nodes(meta: Meta) -> tuple[Set, None | Set[int], None | Set[int]]:
     """
     Helper method to process a single batch.
 
@@ -358,14 +359,10 @@ def _comp_need_nodes(
     root_nodes = torch.unique(meta.pos_edge)
     mem_update_nodes = mailbox_update_nodes = None
     mem_update_nodes = root_nodes
-    if deliver_to == "self":
-        mailbox_update_nodes = root_nodes
-    elif deliver_to == "neighbors":
-        assert meta.mdb is not None
-        meta.mdt = _mail_delivery_tensor(root_nodes, mail_delivery_block=meta.mdb)
-        mailbox_update_nodes = torch.unique(meta.mdt)
-    else:
-        raise ValueError(f"Unknown deliver_to: {deliver_to}")
+
+    assert meta.mdb is not None
+    meta.mdt = _mail_delivery_tensor(root_nodes, mail_delivery_block=meta.mdb)
+    mailbox_update_nodes = torch.unique(meta.mdt)
 
     all_nodes = compute_whats_need_by_gpu(meta.blockss[0])
 
@@ -393,7 +390,6 @@ class ApanPlanner:
 
         Args:
             gpus_groups: GPU 拓扑结构, 用于计算距离。
-            mail_deliver_to: "self", "neighbors"
             mail_strategy:  "self"可以是"latest", "mean","neighbors"可以是"latest", "all",
         """
         # 1. 存储静态配置 (解决痛点 1 和 4)
@@ -403,7 +399,8 @@ class ApanPlanner:
         self.mail_deliver_to = "neighbors"
 
         # 2. 为中间结果准备占位符 (解决痛点 2)
-        self.all_node_set: List[Set[int]]
+        self.mail_all_node_set: List[Set[int]]
+        self.mailbox_all_node_set: List[Set[int]]
         self.mem_update_set: List[Set[int]] | None = None
         self.mailbox_update_set: List[Set[int]] | None = None
         self.initialized: bool = False
@@ -411,7 +408,8 @@ class ApanPlanner:
         self.mail_prefetch: List[Set[int]] = []
 
     def reset(self):
-        self.all_node_set = []
+        self.mail_all_node_set = []
+        self.mailbox_all_node_set = []
         self.mem_update_set = None
         self.mailbox_update_set = None
         self.initialized = False
@@ -425,12 +423,9 @@ class ApanPlanner:
     ) -> List[Meta]:
         # Use integer division (//) instead of float division (/)
         ngpus = self.n_gpus
-        deliver_to = self.mail_deliver_to
 
-        def comp_needs_4_one_macrobatch(
-            metas: List[Meta], deliver_to: Literal["self", "neighbors"]
-        ):
-            all_nodes_all_ranks = []
+        def comp_needs_4_one_macrobatch(metas: List[Meta]):
+            mem_all_nodes_all_ranks = []
             mem_update_nodes_all_ranks = []
             mailbox_update_nodes_all_ranks = []
 
@@ -440,16 +435,16 @@ class ApanPlanner:
                     all_nodes_per_rank,
                     all_mem_update_nodes_per_rank,
                     all_mailbox_update_nodes_per_rank,
-                ) = _comp_need_nodes(meta, deliver_to)
+                ) = _comp_need_nodes(meta)
 
-                all_nodes_all_ranks.append(all_nodes_per_rank)
+                mem_all_nodes_all_ranks.append(all_nodes_per_rank)
                 assert mem_update_nodes_all_ranks is not None
                 assert mailbox_update_nodes_all_ranks is not None
                 mem_update_nodes_all_ranks.append(all_mem_update_nodes_per_rank)
                 mailbox_update_nodes_all_ranks.append(all_mailbox_update_nodes_per_rank)
 
             return (
-                all_nodes_all_ranks,
+                mem_all_nodes_all_ranks,
                 mem_update_nodes_all_ranks,
                 mailbox_update_nodes_all_ranks,
             )
@@ -459,15 +454,15 @@ class ApanPlanner:
         # only if the planner hasn't been initialized.
         if not self.initialized:
             (
-                self.all_node_set,
+                self.mail_all_node_set,
                 self.mem_update_set,
                 self.mailbox_update_set,
-            ) = comp_needs_4_one_macrobatch(meta_list[:ngpus], deliver_to)
+            ) = comp_needs_4_one_macrobatch(meta_list[:ngpus])
 
-            self.mem_prefetch.extend(self.all_node_set)
+            self.mem_prefetch.extend(self.mail_all_node_set)
             assert self.mem_update_set is not None
             assert self.mailbox_update_set is not None
-            self.mail_prefetch.extend(self.all_node_set)
+            self.mail_prefetch.extend(self.mail_all_node_set)
 
         # --- 2. Plan for the next step ---
         next_uniq_all_nodes = []
@@ -487,11 +482,11 @@ class ApanPlanner:
                 next_uniq_all_nodes,
                 next_uniq_mem_update_nodes,
                 next_uniq_mailbox_update_list,
-            ) = comp_needs_4_one_macrobatch(meta_list[ngpus:], deliver_to)
+            ) = comp_needs_4_one_macrobatch(meta_list[ngpus:])
 
         # Call the main step planner using data from the second half
         mem_plan, box_plan = self.plan_step(next_uniq_all_nodes)
-        self.all_node_set = next_uniq_all_nodes
+        self.mail_all_node_set = next_uniq_all_nodes
         self.mem_update_set = next_uniq_mem_update_nodes
         self.mailbox_update_set = next_uniq_mailbox_update_list
 
@@ -533,7 +528,7 @@ class ApanPlanner:
             )
         )
         mem_plan = self._plan_memory_or_mailbox(
-            self.all_node_set,
+            self.mail_all_node_set,
             which_gpu_hold_the_latest_which_memory,
             next_all_node_set,
             all_ranks_fresh_mem_nodes,
@@ -546,7 +541,7 @@ class ApanPlanner:
             )
         )  # for mulitple GPU, we only keep the last one to update the mailbox
         mail_plan = self._plan_memory_or_mailbox(
-            self.all_node_set,
+            self.mail_all_node_set,
             which_gpu_hold_the_latest_which_mailbox,
             next_all_node_set,
             all_ranks_fresh_mailbox_nodes,

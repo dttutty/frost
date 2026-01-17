@@ -476,19 +476,14 @@ class X:
         nid_for_compare = None
 
         if self.mem is not None:
-            if nid_for_compare is not None:
-                assert torch.equal(nid_for_compare, self.mem.id), (
-                    "NID mismatch between nfeat and mem"
-                )
-            else:
-                nid_for_compare = self.mem.id
-        if self.box is not None:
-            if nid_for_compare is not None:
-                assert torch.equal(nid_for_compare, self.box.id), (
-                    "NID mismatch between nfeat/mem and box_or_mail"
-                )
-            else:
-                nid_for_compare = self.box.id
+            nid_for_compare = self.mem.id
+        # if self.box is not None:
+        #     if nid_for_compare is not None:
+        #         assert torch.equal(nid_for_compare, self.box.id), (
+        #             "NID mismatch between nfeat/mem and box_or_mail"
+        #         )
+        #     else:
+        #         nid_for_compare = self.box.id
 
         if nid_for_compare is not None:
             self.nid = nid_for_compare

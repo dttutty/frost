@@ -2,7 +2,7 @@ sampling:
   - layer: 2
     neighbor: 
       - 10
-      - 10
+      - 25
     strategy: 'uniform'
     prop_time: True
     history: 3

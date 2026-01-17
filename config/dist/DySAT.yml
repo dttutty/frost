@@ -1,12 +1,12 @@
 sampling:
   - layer: 2
     neighbor: 
-      - 10
-      - 10
+      - 25
+      - 25
     strategy: 'uniform'
     prop_time: True
     history: 3
-    duration: 25
+    duration: 10000
     num_thread: 64
 gnn:
   - arch: 'attn'
@@ -16,7 +16,7 @@ gnn:
     d_out: 100
     combine: 'rnn'
 train:
-  - epoch: 10
+  - epoch: 3
     batch_size: 4000 # local batch_size
     lr: 0.0001
     dropout: 0.1
