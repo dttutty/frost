@@ -1,12 +1,25 @@
 import os
 import threading
 import traceback  # 记得导入
+from queue import Queue
+from typing import List, TypeAlias
 
 import torch.distributed as dist
 
+from schemas.datatypes import Meta
+
+
+MetaBundle: TypeAlias = List[Meta]
+
 
 class MetaBatcher(threading.Thread):
-    def __init__(self, n_gpus, in_q, out_q, stop_ev):
+    def __init__(
+        self,
+        n_gpus: int,
+        in_q: Queue[Meta | None],
+        out_q: Queue[MetaBundle | None],
+        stop_ev: threading.Event,
+    ):
         super().__init__(daemon=True)
         self.n_gpus = n_gpus
         self.in_q = in_q

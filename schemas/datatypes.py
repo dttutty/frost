@@ -11,7 +11,16 @@ from dgl.heterograph import DGLBlock
 from numpy.typing import NDArray
 from torch import Tensor
 
-from .plan import CudaPlan, CudaPlanSet, PlanSet, TensorPlanSet
+from .plan import BatchNodeStateIO, PlanSet, TensorPlanSet
+
+
+@dataclass(slots=True, kw_only=True)
+class SampleReturn:
+    all_nodes: set | None = None
+    root_nodes: set | None = None
+    ngh2root_mfg: DGLBlockMeta | None
+    root2ngh_mfg: DGLBlockMeta | None
+    batch_node_state_io: BatchNodeStateIO | None
 
 
 @dataclass(slots=True)
@@ -19,7 +28,7 @@ class ForwardCtx:
     blockss: List[List[DGLBlock]]
     x: X
     macro_bid: int
-    plan_set: CudaPlanSet
+    plan_set: TensorPlanSet
     mail_delivery_tensor: Tensor | None
     is_last: bool
     n_root_src_n_pos_dst: int
@@ -580,7 +589,13 @@ class Meta:
     feat: Optional[X] = None
     mdt: Optional[Tensor] = None
     mdb_raw_data: DGLBlockMeta | None = None
-    plan_set: Optional[PlanSet | TensorPlanSet | CudaPlanSet] = None
+    batch_node_state_io: Optional[BatchNodeStateIO] = None
+
+
+@dataclass(slots=True, kw_only=True)
+class ScatterData:
+    metas: List[Meta]
+    planset: Optional[PlanSet | TensorPlanSet] = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -628,14 +643,14 @@ class MetaReady2Send:
     feat: Optional[X] = None
     mdt: Optional[Tensor] = None
     mdb_raw_data: DGLBlockMeta | None = None
-    plan_set: Optional[PlanSet | TensorPlanSet | CudaPlanSet] = None
+    plan_set: Optional[PlanSet | TensorPlanSet] = None
     epoch_split_iter_info: EpochSplitIterInfo
 
 
 @dataclass(slots=True, kw_only=True)
 class SyncTask:
     macro_bid: int
-    plan_set: CudaPlanSet
+    plan_set: TensorPlanSet
     root_new_mem: MemTsNid
     x: X
     mail_delivery_tensor: torch.Tensor | None

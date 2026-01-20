@@ -19,29 +19,6 @@ from schemas.datatypes import (
 )
 
 
-def _mail_delivery_tensor(
-    unique_root_nodes: torch.Tensor, mail_delivery_block: DGLBlock
-) -> torch.Tensor:
-    src_local_id, dst_local_id = mail_delivery_block.edges(
-        order="eid"
-    )  # find out all edges
-    global_src = mail_delivery_block.srcdata["ID"][src_local_id]
-    global_dst = mail_delivery_block.dstdata["ID"][dst_local_id]
-
-    uniq_global_src = torch.unique(global_src)
-    uniq_global_dst = torch.unique(global_dst)
-    is_in_root = torch.isin(global_src, unique_root_nodes)
-
-    roots_sorted = torch.sort(unique_root_nodes).values
-    src_sorted = torch.sort(global_src).values
-    assert torch.equal(roots_sorted, src_sorted), "roots != unique(global_src)"
-
-    final_src = global_src[is_in_root]
-    final_dst = global_dst[is_in_root]
-    tensor = torch.stack([final_src, final_dst], dim=0)
-    return tensor
-
-
 def dgl_blocks_to_tensor_dicts(blocks):
     """Converts a list of DGL blocks to a list of serializable tensor dictionaries."""
     tensor_dicts = []
@@ -267,16 +244,13 @@ def collate_and_build_graph(
     return grouped_blocks
 
 
-def to_apan_mailbox_block(
-    mfg_meta_list: List[DGLBlockMeta], save_on_gpu=False
-) -> DGLBlock:
+def to_apan_mailbox_block(mfg_meta: DGLBlockMeta) -> DGLBlock:
     """
     专门用于 APAN 的异步邮件传播。
     只取 ret 中的第一个 TGB (1 layer, 1 history)。
     """
     # this is not standard DGL block
     # 按照 train_dist.py 的逻辑，reverse 时只使用第一个元素
-    mfg_meta: DGLBlockMeta = mfg_meta_list[0]
     # 传播逻辑：row -> col (中心指向邻居)
     block = dgl.create_block(
         (mfg_meta.row, mfg_meta.col),
@@ -300,7 +274,57 @@ def to_apan_mailbox_block(
     block.edata["dt"] = mfg_meta.dts[num_roots:]
     block.edata["ID"] = mfg_meta.eid
 
-    return block.to("cuda:0") if save_on_gpu else block
+    return block
+
+
+def _mail_delivery_tensor(
+    mail_delivery_block: DGLBlock,
+    unique_root_nodes: torch.Tensor,
+) -> torch.Tensor:
+    src_local_id, dst_local_id = mail_delivery_block.edges(
+        order="eid"
+    )  # find out all edges
+    global_src = mail_delivery_block.srcdata["ID"][src_local_id]
+    global_dst = mail_delivery_block.dstdata["ID"][dst_local_id]
+
+    uniq_global_src = torch.unique(global_src)
+    uniq_global_dst = torch.unique(global_dst)
+    is_in_root = torch.isin(global_src, unique_root_nodes)
+
+    roots_sorted = torch.sort(unique_root_nodes).values
+    src_sorted = torch.sort(global_src).values
+    assert torch.equal(roots_sorted, src_sorted), "roots != unique(global_src)"
+
+    final_src = global_src[is_in_root]
+    final_dst = global_dst[is_in_root]
+    tensor = torch.stack([final_src, final_dst], dim=0)
+    return tensor
+
+
+def get_global_edges_directly(mfg_meta):
+    """
+    直接从 mfg_meta 获取全局 ID 的边 (Src -> Dst)
+    无需构建 DGLBlock
+    """
+    # 1. 获取全局 ID 查找表 (Tensor)
+    # 假设 mfg_meta.nodes 已经是 tensor，如果是 numpy 需要转一下
+    all_nodes = mfg_meta.nodes
+    if not isinstance(all_nodes, torch.Tensor):
+        all_nodes = torch.from_numpy(all_nodes)
+
+    # 2. 直接利用 row 和 col 进行索引映射
+    # APAN Mailbox 逻辑是：Row (Roots) -> Col (Neighbors)
+    # row 和 col 里的数值就是 all_nodes 的下标
+
+    # 既然 row 里的值对应 roots (在 all_nodes 的前 dim_out 部分)
+    # col 里的值对应 all_nodes 的任意位置
+
+    global_src = all_nodes[mfg_meta.row]  # 这一步代替了 src_local_id -> global
+    global_dst = all_nodes[mfg_meta.col]  # 这一步代替了 dst_local_id -> global
+
+    # 3. 堆叠成结果
+    # shape: [2, num_edges]
+    return torch.stack([global_src, global_dst], dim=0)
 
 
 def node_to_dgl_blocks(root_nodes, ts) -> List[List[DGLBlock]]:

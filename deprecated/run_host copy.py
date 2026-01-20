@@ -13,7 +13,7 @@ from sampler_core import ParallelSampler
 from tqdm import tqdm
 
 from host.comm import Distributor
-from host.sliding_planner import (
+from host.planner.dynamic_planner import (
     compute_whats_need_by_gpu,
 )
 from sampler import NegLinkSampler, create_sampler

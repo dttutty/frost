@@ -1,7 +1,7 @@
 import math
 import threading
 import time
-from multiprocessing import Queue
+from queue import Queue  # 这是给多线程用的
 from typing import List, Literal
 
 import numpy as np
@@ -11,14 +11,24 @@ import torch.distributed as dist
 from sampler_core import ParallelSampler
 from tqdm import tqdm
 
-from host import Distributor, MetaBatcher, Planner, ScatterSender
+from host import Distributor, MetaBatcher, Planner, Scatter
+from host.meta_batcher import MetaBundle
+from host.planner.planner import PlanBundle
 from sampler import NegLinkSampler
 from schemas import Config, Env, Meta, SampleCFG
-from schemas.datatypes import EpochSplitIterInfo, ExtFullGraph
+from schemas.alias import MetaBundleWithoutPlan, MetaBundleWithPlan
+from schemas.datatypes import DGLBlockMeta, EpochSplitIterInfo, ExtFullGraph
 from utils import analyze_blocks, extract_raw_data
 
 
 class Host:
+    meta_bundle_q: Queue[MetaBundle | None]
+    meta_in_q: Queue[Meta | None]
+    mem_plan_out_q: Queue[PlanBundle | None] | None
+    mail_plan_out_q: Queue[PlanBundle | None] | None
+    nfeat_plan_out_q: Queue[PlanBundle | None] | None
+    send_q: Queue[MetaBundleWithPlan | MetaBundleWithoutPlan | None]
+
     def __init__(
         self,
         cfg: Config,
@@ -48,11 +58,14 @@ class Host:
         self.sample_support_for_neg_dst = cfg.s.sample_support_for_neg_dst
         self.model_name = cfg.t.model_name
 
-        self.meta_in_q: Queue[List[Meta]] = Queue()
-        self.planner = None
-        self.send_q: Queue[List[Meta]] = Queue()
+        self.meta_in_q = Queue()
+        self.meta_bundle_q = Queue()
+        self.send_q = Queue()
+
+        self.mem_plan_out_q = Queue() if self.has_mem else None
+        self.mail_plan_out_q = Queue() if self.has_mem else None
+        self.nfeat_plan_out_q = Queue() if self.has_nfeat else None
         if self.has_nfeat or self.has_mem:
-            self.meta_bundle_q: Queue[List[Meta]] = Queue()
             self.meta_batcher = MetaBatcher(
                 n_gpus=env.n_gpu,
                 in_q=self.meta_in_q,
@@ -60,47 +73,43 @@ class Host:
                 stop_ev=self.stop_ev,
             )
 
-            mem_plan_out_q = Queue() if self.has_mem else None
-            mail_plan_out_q = Queue() if self.has_mem else None
-            nfeat_plan_out_q = Queue() if self.has_nfeat else None
             self.planner = Planner(
                 gpu_topo=gpu_topo,
                 in_q=self.meta_bundle_q,
-                send_q=self.send_q,
-                mem_plan_out_q=mem_plan_out_q,
-                mail_plan_out_q=mail_plan_out_q,
-                nfeat_plan_out_q=nfeat_plan_out_q,
+                out_q=self.send_q,
+                mem_plan_out_q=self.mem_plan_out_q,
+                mail_plan_out_q=self.mail_plan_out_q,
+                nfeat_plan_out_q=self.nfeat_plan_out_q,
                 stop_ev=self.stop_ev,
             )
 
             self.sem = threading.Semaphore()
-            self.scatter = ScatterSender(
+            self.scatter = Scatter(
                 sem=self.sem,
                 n_gpus=env.n_gpu,
                 comm=self.comm,
                 send_q=self.send_q,
-                mem_plan_out_q=mem_plan_out_q,
-                mail_plan_out_q=mail_plan_out_q,
-                nfeat_plan_out_q=nfeat_plan_out_q,
+                mem_plan_out_q=self.mem_plan_out_q,
+                mail_plan_out_q=self.mail_plan_out_q,
+                nfeat_plan_out_q=self.nfeat_plan_out_q,
                 stop_ev=self.stop_ev,
             )
-
         else:
-            self.meta_bundle_q: Queue[List[Meta]] = Queue()
             self.meta_batcher = MetaBatcher(
                 n_gpus=env.n_gpu,
                 in_q=self.meta_in_q,
                 out_q=self.send_q,
                 stop_ev=self.stop_ev,
             )
-            self.scatter = ScatterSender(
+            self.planner = None
+            self.scatter = Scatter(
                 sem=self.sem,
                 n_gpus=env.n_gpu,
                 comm=self.comm,
                 send_q=self.send_q,
-                mem_plan_out_q=None,
-                mail_plan_out_q=None,
-                nfeat_plan_out_q=None,
+                mem_plan_out_q=self.mem_plan_out_q,
+                mail_plan_out_q=self.mail_plan_out_q,
+                nfeat_plan_out_q=self.nfeat_plan_out_q,
                 stop_ev=self.stop_ev,
             )
 
@@ -161,20 +170,22 @@ class Host:
         # wandb.finish()
 
     @staticmethod
-    def _plan_gpu_batches(num_samples, target_batch_size, ngpus=1):
+    def _plan_gpu_batches(
+        num_samples, target_batch_size: int, n_gpu: int
+    ) -> tuple[int, int]:
         """
         this is to ensure iterations number is divisible by number of gpus
         """
         target_batch_size = int(target_batch_size)  # <--- add
         # This is to ensure the total number of training iterations is an integer multiple of the number of GPUs
-        # eg: num_samples = 13345, target_batch_size = 1000, ngpus = 4
+        # eg: num_samples = 13345, target_batch_size = 1000, n_gpu = 4
         approx_iterations = (
             num_samples // target_batch_size
         )  # approximate number of iterations, 13
         nbatch_per_gpu = max(
-            approx_iterations // ngpus, 1
+            approx_iterations // n_gpu, 1
         )  # The approximate number of batches that each GPU needs to process, 3
-        iteration_total = nbatch_per_gpu * ngpus  # total batches, 12
+        iteration_total = nbatch_per_gpu * n_gpu  # total batches, 12
         adjusted_batch_size = math.ceil(num_samples / iteration_total)  # 1113
         return iteration_total, adjusted_batch_size
 
@@ -184,7 +195,7 @@ class Host:
         df = df.reset_index(drop=True)
 
         iteration_total, adjusted_train_batch_size = self._plan_gpu_batches(
-            len(df), self.batch_size, ngpus=self.n_gpu
+            len(df), self.batch_size, n_gpu=self.n_gpu
         )
         batches_assignment = df.index // adjusted_train_batch_size
         # this will be improved for future random group training
@@ -226,19 +237,34 @@ class Host:
         self.curr_mini_of_epoch = 0
         self.curr_epoch += 1
 
-    def _add_to_td_list(self, edges: pd.DataFrame, epoch_split_iter_info):
+    def _sample(
+        self, ngh_sampler, roots: torch.Tensor, ts: torch.Tensor, sample_history: int
+    ) -> tuple[List[DGLBlockMeta], set, set]:
+        ts_np = ts.numpy()
+        roots_np = roots.numpy()
+        ngh_sampler.sample(roots_np, ts_np)
+        ret = ngh_sampler.get_ret()
+        gnn_mfgs_raw = extract_raw_data(ret)
+        all_nodes, root_nodes = analyze_blocks(gnn_mfgs_raw, sample_history)
+        root_nodes_for_verify = set(roots.numpy().tolist())
+        assert root_nodes == root_nodes_for_verify, (
+            "Sampled root nodes do not match the expected root nodes."
+        )
+        return gnn_mfgs_raw, all_nodes, root_nodes
+
+    def _add_to_td_list(
+        self, edges: pd.DataFrame, epoch_split_iter_info: EpochSplitIterInfo
+    ):
         src = torch.as_tensor(edges.src.values, dtype=torch.long)
         dst = torch.as_tensor(edges.dst.values, dtype=torch.long)
         edge_ts = torch.as_tensor(edges.time.values, dtype=torch.long)
 
+        # sample neg destination nodes
         neg_dst = self.neg_sampler.sample(src, dst)
 
-        pos_edge = torch.stack([src, dst], dim=1)
-        pos_edge_id = torch.as_tensor(edges.index.values, dtype=torch.long)
-
+        # combine all together
         roots = torch.cat([src, dst, neg_dst])
         ts = torch.cat([edge_ts, edge_ts, edge_ts])
-        ts_np = ts.numpy()
 
         # handle different model types
         batch_node_state_io = None
@@ -255,43 +281,27 @@ class Host:
             )
         else:
             assert self.model_name in ["DyGFormer", "GAT", "TGN", "DySAT"]
-            roots_np = roots.numpy()
-            self.ngh_sampler.sample(roots_np, ts_np)
-            ret = self.ngh_sampler.get_ret()
-            gnn_mfgs_raw = extract_raw_data(ret)
-            all_nodes, root_nodes = analyze_blocks(gnn_mfgs_raw, self.sample_history)
-            root_nodes_for_verify = set(roots.numpy().tolist())
-            assert root_nodes == root_nodes_for_verify, (
-                "Sampled root nodes do not match the expected root nodes."
+            gnn_mfgs_raw, all_nodes, root_nodes = self._sample(
+                self.ngh_sampler, roots, ts, self.sample_history
             )
 
         meta = Meta(
             gnn_mfgs_raw=gnn_mfgs_raw,
             all_nodes=all_nodes,
             root_nodes=root_nodes,
-            pos_edge=pos_edge,
+            pos_edge=torch.stack([src, dst], dim=1),
             pos_edge_ts=edge_ts,
-            pos_edge_id=pos_edge_id,
+            pos_edge_id=torch.as_tensor(edges.index.values, dtype=torch.long),
             epoch_split_iter_info=epoch_split_iter_info,
             mdb_raw_data=root2ngh_mfg,
+            batch_node_state_io=batch_node_state_io,
         )
 
-        self.meta_in_q.put((meta, batch_node_state_io))
+        self.meta_in_q.put(meta)
 
     def _cleanup(self):
         print("Host: Broadcasting CLEANUP command...")
 
-        # 【新增】: 构造一个由 None 组成的列表，发送给所有 Worker
-        # 这会解除 Worker 端 Receiver 线程在 scatter_object_list 上的阻塞
-        stop_signal = [None for _ in range(self.n_gpu + 1)]
-
-        # 注意：这里需要使用底层的 scatter_object_list，或者确保你的 comm.scatter_send 能处理 None
-        # 假设 self.gloo 是你的通信组
-        dist.scatter_object_list(
-            [None], stop_signal, src=dist.get_rank(), group=self.gloo
-        )
-
-        print("Host: Stop signal sent. Entering final barrier...")
         dist.barrier()  # 建议指定 group=self.gloo 或者 nccl_pg，通常 gloo 用于控制流
         print("Host: All processes reached the final barrier.")
         end = time.time()

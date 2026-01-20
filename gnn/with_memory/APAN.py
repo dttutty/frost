@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from dgl.heterograph import DGLBlock
 
-from schemas.datatypes import DGLBlockMeta
+from schemas.datatypes import DGLBlockMeta, SampleReturn
 from schemas.plan import BatchNodeStateIO
 from utils import extract_raw_data
 
@@ -62,14 +62,26 @@ class APAN(nn.Module):
         )
 
     @staticmethod
-    def sample(ngh_sampler, src, dst, neg_dst, ts):
+    def sample(
+        ngh_sampler,
+        src: torch.Tensor,
+        dst: torch.Tensor,
+        neg_dst: torch.Tensor,
+        ts: torch.Tensor,
+    ):
         pos_root_np = torch.cat([src, dst]).numpy()
         pos_ts_np = torch.cat([ts, ts]).numpy()
         ngh_sampler.sample(pos_root_np, pos_ts_np)
         ret = ngh_sampler.get_ret()
         root2ngh_mfg = extract_raw_data(ret)[0]
         batch_node_state_io = APAN.analyze_need(root2ngh_mfg, neg_dst)
-        return root2ngh_mfg, batch_node_state_io
+        return SampleReturn(
+            all_nodes=None,
+            root_nodes=None,
+            ngh2root_mfg=None,
+            root2ngh_mfg=root2ngh_mfg,
+            batch_node_state_io=batch_node_state_io,
+        )
 
     def forward(
         self,

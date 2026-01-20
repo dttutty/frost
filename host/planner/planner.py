@@ -2,13 +2,17 @@ import os
 import threading
 import traceback
 from queue import Queue
-from typing import List, Set, Tuple, Union
+from typing import List, Set, TypeAlias, Union
 
 import numpy as np
 
-from host.sliding_planner import sliding_planner
-from schemas import Meta
-from schemas.plan import BatchNodeStateIO
+from host.planner.dynamic_planner import DynamicPlanner
+from schemas.plan import BatchNodeStateIO, Plan
+
+from ..meta_batcher import MetaBundle
+
+
+PlanBundle: TypeAlias = List[Plan]
 
 
 def find_all_gpu_distances_list(gpus_groups: list) -> np.ndarray:
@@ -112,14 +116,17 @@ class Planner(threading.Thread):
     这个是对那种mailbox_update=mem_update的planner
     """
 
+    gpus_distance: np.ndarray
+    n_gpus: int
+
     def __init__(
         self,
         gpu_topo: list,
-        in_q: Queue[List[Meta]],
-        send_q: Queue[Tuple[List[Meta]]],
-        mem_plan_out_q: Queue | None,
-        mail_plan_out_q: Queue | None,
-        nfeat_plan_out_q: Queue | None,
+        in_q: Queue[MetaBundle | None],
+        out_q: Queue[MetaBundle | None],
+        mem_plan_out_q: Queue[PlanBundle | None],
+        mail_plan_out_q: Queue[PlanBundle | None],
+        nfeat_plan_out_q: Queue[PlanBundle | None],
         stop_ev: threading.Event,
     ):
         """
@@ -129,19 +136,19 @@ class Planner(threading.Thread):
             gpus_groups: GPU 拓扑结构, 用于计算距离。
         """
         # 1. 存储静态配置 (解决痛点 1 和 4)
-        gpus_distance: np.ndarray = find_all_gpu_distances_list(gpu_topo)
-        self.n_gpus: int = len(gpus_distance)
+        self.gpus_distance = find_all_gpu_distances_list(gpu_topo)
+        self.n_gpus = len(self.gpus_distance)
 
         # 2. 为中间结果准备占位符 (解决痛点 2)
         self.meta_bundle_q = in_q
-        self.send_q = send_q
+        self.out_q = out_q
 
         # mem_plan
         self.mem_plan_in_q = None
         if mem_plan_out_q:
             self.mem_plan_in_q = Queue()
-            self.mem_planner = sliding_planner(
-                gpus_distance=gpus_distance,
+            self.mem_planner = DynamicPlanner(
+                gpus_distance=self.gpus_distance,
                 in_q=self.mem_plan_in_q,
                 out_q=mem_plan_out_q,
                 stop_ev=stop_ev,
@@ -151,8 +158,8 @@ class Planner(threading.Thread):
         self.mail_plan_in_q = None
         if mail_plan_out_q:
             self.mail_plan_in_q = Queue()
-            self.mail_planner = sliding_planner(
-                gpus_distance=gpus_distance,
+            self.mail_planner = DynamicPlanner(
+                gpus_distance=self.gpus_distance,
                 in_q=self.mail_plan_in_q,
                 out_q=mail_plan_out_q,
                 stop_ev=stop_ev,
@@ -162,7 +169,7 @@ class Planner(threading.Thread):
         self.nfeat_plan_in_q = None
         if nfeat_plan_out_q:
             self.nfeat_plan_in_q = Queue()
-            self.nfeat_planner = sliding_planner(
+            self.nfeat_planner = DynamicPlanner(
                 gpus_distance=gpus_distance,
                 in_q=self.nfeat_plan_in_q,
                 out_q=nfeat_plan_out_q,
@@ -201,7 +208,7 @@ class Planner(threading.Thread):
                 self.nfeat_plan_in_q.put(next_needs)
             for meta in metas:
                 del meta.batch_node_state_io  # 释放内存
-            self.send_q.put(metas)
+            self.out_q.put(metas)
         elif metas is None:
             if self.mem_plan_in_q is not None:
                 self.mem_plan_in_q.put(None)
@@ -209,4 +216,4 @@ class Planner(threading.Thread):
                 self.mail_plan_in_q.put(None)
             if self.nfeat_plan_in_q is not None:
                 self.nfeat_plan_in_q.put(None)
-            self.send_q.put(None)
+            self.out_q.put(None)

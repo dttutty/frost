@@ -29,84 +29,40 @@ class BatchNodeStateIOAPAN:
 
 @dataclass(slots=True, kw_only=True)
 class PlanSet:
-    mem: Plan
+    mem: Plan | None
     box: Plan | None
+    nfeat: Plan | None
 
-    def tensorfy(self):
-        mem = self.mem.tensorfy()
-
+    def tensorfy(self) -> "TensorPlanSet":
         return TensorPlanSet(
-            mem=mem,
+            mem=self.mem.tensorfy() if self.mem is not None else None,
+            box=self.box.tensorfy() if self.box is not None else None,
+            nfeat=self.nfeat.tensorfy() if self.nfeat is not None else None,
         )
-
-
-@dataclass(slots=True, kw_only=True)
-class CudaPlanSet:
-    mem: CudaPlan
 
 
 @dataclass(slots=True, kw_only=True)
 class TensorPlanSet:
-    mem: TensorPlan
+    mem: TensorPlan | None = None
+    box: TensorPlan | None = None
+    nfeat: TensorPlan | None = None
 
-    def cuda(self):
-        if self.mem is not None:
-            assert isinstance(self.mem, TensorPlan)
-            mem = self.mem.cuda()
-        return CudaPlanSet(
-            mem=mem,
+    def to(self, device: torch.device) -> "TensorPlanSet":
+        return self.__class__(
+            mem=self.mem.to(device) if self.mem is not None else None,
+            box=self.box.to(device) if self.box is not None else None,
+            nfeat=self.nfeat.to(device) if self.nfeat is not None else None,
         )
 
-    def sort(self):
-        if self.mem is not None:
-            assert isinstance(self.mem, TensorPlan)
-            self.mem = self.mem.sort()
-        return self
+    def cuda(self) -> "TensorPlanSet":
+        return self.to(torch.device("cuda"))
 
-
-@dataclass(slots=True, kw_only=True)
-class ApanPlanSet:
-    mem: Plan
-    box: Plan
-
-    def tensorfy(self):
-        mem = self.mem.tensorfy()
-        box = self.box.tensorfy
-
-        return ApanTensorPlanSet(mem=mem, box=box)
-
-
-@dataclass(slots=True, kw_only=True)
-class ApanTensorPlanSet:
-    mem: TensorPlan
-    box: TensorPlan
-
-    def cuda(self):
-        if self.mem is not None:
-            assert isinstance(self.mem, TensorPlan)
-            mem = self.mem.cuda()
-        if self.box is not None:
-            assert isinstance(self.box, TensorPlan)
-            box = self.box.cuda()
-        return ApanCudaPlanSet(
-            mem=mem,
-            box=box,
+    def sort(self) -> "TensorPlanSet":
+        return self.__class__(
+            mem=self.mem.sort() if self.mem is not None else None,
+            box=self.box.sort() if self.box is not None else None,
+            nfeat=self.nfeat.sort() if self.nfeat is not None else None,
         )
-
-    def sort(self):
-        if self.mem is not None:
-            assert isinstance(self.mem, TensorPlan)
-            self.mem = self.mem.sort()
-        if self.box is not None:
-            assert isinstance(self.box, TensorPlan)
-            self.box = self.box.sort()
-        return self
-
-
-@dataclass(slots=True, kw_only=True)
-class ApanCudaPlanSet:
-    mem: CudaPlan
-    box: CudaPlan
 
 
 @dataclass(slots=True, kw_only=True)
@@ -143,27 +99,33 @@ class TensorPlan:
     send_cts: NDArray
     writeback: Optional[torch.Tensor] = None
 
-    def cuda(self):
-        return CudaPlan(
-            p2p=[s.cuda() for s in self.p2p],
-            prefetch=self.prefetch.cuda(),
+    def to(self, device: torch.device) -> "TensorPlan":
+        return self.__class__(
+            p2p=[s.to(device) for s in self.p2p],
+            prefetch=self.prefetch.to(device),
             rec_cts=self.rec_cts,
             send_cts=self.send_cts,
-            writeback=(self.writeback.cuda() if self.writeback is not None else None),
+            writeback=(
+                self.writeback.to(device) if self.writeback is not None else None
+            ),
         )
 
-    def sort(self):
-        self.prefetch, _ = torch.sort(self.prefetch)
-        self.p2p = [torch.sort(s).values for s in self.p2p]
+    def cuda(self) -> "TensorPlan":
+        return self.to(torch.device("cuda"))
+
+    def sort(self) -> "TensorPlan":
+        new_prefetch, _ = torch.sort(self.prefetch)
+        new_p2p = [torch.sort(s).values for s in self.p2p]
         if self.writeback is not None:
-            self.writeback, _ = torch.sort(self.writeback)
-        return self
+            new_writeback, _ = torch.sort(self.writeback)
+        return self.__class__(
+            p2p=new_p2p,
+            prefetch=new_prefetch,
+            rec_cts=self.rec_cts,  # 不需要排序，直接引用
+            send_cts=self.send_cts,  # 不需要排序，直接引用
+            writeback=new_writeback,
+        )
 
-
-@dataclass(slots=True, kw_only=True)
-class CudaPlan:
-    p2p: List[torch.Tensor]
-    prefetch: torch.Tensor
-    rec_cts: NDArray
-    send_cts: NDArray
-    writeback: Optional[torch.Tensor] = None
+    @property
+    def device(self):
+        return self.prefetch.device

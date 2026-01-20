@@ -70,8 +70,8 @@ class JODIE(nn.Module):
         return BatchNodeStateIO(
             mem_needed=all_nodes,
             mem_updated=all_nodes,
-            mailbox_needed=all_nodes,
-            mailbox_updated=all_nodes,
+            mailbox_needed=None,
+            mailbox_updated=None,
             nfeat_needed=all_nodes,
         )
 

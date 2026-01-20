@@ -6,7 +6,9 @@ from typing import List, Set, Tuple
 
 import numpy as np
 
-from schemas import Meta, Plan
+from schemas import Plan
+
+from ..meta_batcher import MetaBundle
 
 
 def handle_remaining(
@@ -153,16 +155,19 @@ def dedup_updates(
     return new_updates, all_update
 
 
-class sliding_planner(threading.Thread):
+class DynamicPlanner(threading.Thread):
     """
     这个是对那种mailbox_update=mem_update的planner
     """
 
+    gpus_distance: np.ndarray
+    n_gpus: int
+
     def __init__(
         self,
-        gpus_distance: list,
-        in_q: Queue[List[Meta]],
-        out_q: Queue[Tuple[List[Meta], List[Plan]]],
+        gpus_distance: np.ndarray,
+        in_q: Queue[MetaBundle | None],
+        out_q: Queue[Tuple[MetaBundle, List[Plan]] | None],
         stop_ev: threading.Event,
     ):
         """
@@ -172,8 +177,8 @@ class sliding_planner(threading.Thread):
             gpus_distance: GPU 距离矩阵，用于计算距离。
         """
         # 1. 存储静态配置 (解决痛点 1 和 4)
-        self.gpus_distance: list = gpus_distance
-        self.n_gpus: int = len(self.gpus_distance)
+        self.gpus_distance = gpus_distance
+        self.n_gpus = len(self.gpus_distance)
 
         self.in_q = in_q
         self.out_q = out_q
