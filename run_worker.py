@@ -19,7 +19,7 @@ from gnn.memory_updater import (
 )
 from gnn.with_memory.base import MemoryBaseGNN
 from gnn.without_memory.base import GNN
-from schemas.datatypes import (
+from schemas import (
     BoxTsNid,
     Config,
     CudaPlanSet,
@@ -38,7 +38,7 @@ from schemas.datatypes import (
 from worker.assembler import Assembler
 from worker.data_syncer import DataSyncer
 from worker.h2d import H2D
-from worker.receiver import Receiver
+from worker.receiver import HostWorkerSyncer as Receiver
 
 
 # def tensorfy(self, plan_set: ThreePlan):
@@ -94,7 +94,6 @@ class Worker:
         env: Env,
         nccl,
         gloo,
-        shared_total_epoch,
     ):
         self.cfg = cfg
         self.save_to = save_to
@@ -110,6 +109,8 @@ class Worker:
         self.gloo = gloo
         self.curr_epoch = -1
         self.logger = _setup_logger(self.env.local_rank)
+        self.prefetch_factor = 1
+        self.cmd_q = queue.Queue()
 
         if self.cfg.m is not None:
             self.delta_q: Queue[Delta | None] = queue.Queue(maxsize=1)
@@ -157,10 +158,43 @@ class Worker:
         )
 
         self.result_q = queue.Queue()
+        self.cmd_q = queue.Queue()
 
         self.has_memory = False
         if cfg.m is not None:
             self.has_memory = True
+
+        self.receiver = Receiver(
+            env=self.env,
+            gloo=self.gloo,
+            meta_q=self.meta_q,
+            stop_ev=self.stop_ev,
+            cmd_q=self.cmd_q,
+        )
+
+        self.best_ap_epoch = {
+            "val_ap": 0.0,
+            "val_auc": 0.0,
+            "epoch": -1,
+            "test_ap": 0.0,
+            "test_auc": 0.0,
+        }
+        self.best_auc_epoch = {
+            "val_ap": 0.0,
+            "val_auc": 0.0,
+            "epoch": -1,
+            "test_ap": 0.0,
+            "test_auc": 0.0,
+        }
+
+        self.state = {
+            "total_epoch": math.inf,
+            "done_epoch": 0,
+            "total_macro_batch": math.inf,
+            "done_macro_batch": 0,
+        }
+
+    def init_models(self, cfg):
         match cfg.t.model:
             case "TGN":
                 assert cfg.m is not None, "TGN requires memory config"
@@ -276,39 +310,17 @@ class Worker:
         self.criterion = torch.nn.BCEWithLogitsLoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=cfg.t.lr)
 
-        self.receiver = Receiver(
-            env=self.env,
-            gloo=self.gloo,
-            meta_q=self.meta_q,
-            stop_ev=self.stop_ev,
-        )
-
-        self.best_ap_epoch = {
-            "val_ap": 0.0,
-            "val_auc": 0.0,
-            "epoch": -1,
-            "test_ap": 0.0,
-            "test_auc": 0.0,
-        }
-        self.best_auc_epoch = {
-            "val_ap": 0.0,
-            "val_auc": 0.0,
-            "epoch": -1,
-            "test_ap": 0.0,
-            "test_auc": 0.0,
-        }
-
-        self.state = {
-            "total_epoch": math.inf,
-            "done_epoch": 0,
-            "total_macro_batch": math.inf,
-            "done_macro_batch": 0,
-        }
-
     def reset_ap_auc_count(self):
         self.count_sum = 0
         self.my_rank_preds = []
         self.my_rank_labels = []
+
+        # [新增] 初始化 Loss 累积器 (必须在 GPU 上，避免 copy)
+        self.epoch_loss_sum = torch.tensor(0.0, device="cuda")
+        self.epoch_batch_count = torch.tensor(0.0, device="cuda")
+
+        self.val_loss_sum = torch.tensor(0.0, device="cuda")
+        self.val_batch_count = torch.tensor(0.0, device="cuda")
 
     def pad_tensor(
         self, local_tensor: torch.Tensor, max_size: int, fill=-1
@@ -344,7 +356,7 @@ class Worker:
         )
         n_root_src_n_pos_dst = meta.pos_edge.shape[0] * 2
         forward_ctx = ForwardCtx(
-            blockss=meta.blockss,
+            blockss=meta.            gnn_mfgs_raw=gnn_mfgs_raw,,
             x=x,
             macro_bid=meta.macro_bid,
             plan_set=plan_set,
@@ -369,16 +381,25 @@ class Worker:
         self.optimizer.step()
 
         # self.receive_next_meta_and_put_in_queue()
-        reduced_loss = loss.detach().clone()
-        self.result_q.put(reduced_loss)
+        self.epoch_loss_sum += loss.detach()
+        self.epoch_batch_count += 1.0
+        # reduced_loss = loss.detach().clone()
         # dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=self.nccl)
 
-        # if self.env.local_rank == 1:
-        #     self.logger.info(
-        #         f"[Microbatch {meta.macro_bid}, loss {reduced_loss.item()}"
-        #     )
+        if meta.mark == "last":
+            # 此时进行 all_reduce，将所有卡的 Loss 总和加起来
+            dist.all_reduce(self.epoch_loss_sum, op=dist.ReduceOp.SUM, group=self.nccl)
+            dist.all_reduce(
+                self.epoch_batch_count, op=dist.ReduceOp.SUM, group=self.nccl
+            )
 
-    @torch.no_grad()
+            if self.env.local_rank == 1:  # 或者 rank 0
+                # 只有在这里才调用 .item()，此时 Epoch 已经结束，不影响训练流水线
+                avg_loss = (self.epoch_loss_sum / self.epoch_batch_count).item()
+                self.logger.info(f"[Epoch End] Training Average Loss: {avg_loss:.6f}")
+
+        # if self.env.l
+
     def _exec_p2p(self, p2p_task):
         nid, data, ts, type = p2p_task.nid, p2p_task.data, p2p_task.ts, p2p_task.type
         recv_nid, send_nid, out_splits, in_splits = (
@@ -438,6 +459,10 @@ class Worker:
     def eval(self, meta: Meta, x: X, plan_set: CudaPlanSet | None):
         ap = 0.0
         auc = 0.0
+
+        if meta.mark == "first":
+            self.reset_ap_auc_count()
+
         n_pos_edges = meta.pos_edge.shape[0]
         labels = torch.cat(
             [
@@ -449,7 +474,7 @@ class Worker:
         self.model.eval()
         is_last_macrobatch_of_epoch = meta.mark == "last" and meta.split == "test"
         forward_ctx = ForwardCtx(
-            blockss=meta.blockss,
+            blockss=meta.            gnn_mfgs_raw=gnn_mfgs_raw,,
             x=x,
             macro_bid=meta.macro_bid,
             plan_set=plan_set,
@@ -473,9 +498,13 @@ class Worker:
         )
         if meta.split == "val":
             loss = self.criterion(logits.squeeze(-1), labels)
-            reduced_loss = loss.detach().clone()
+
+            self.val_loss_sum += loss.detach()
+            self.val_batch_count += 1.0
+
+            # reduced_loss = loss.detach().clone()
             # print meta.split
-            self.result_q.put(reduced_loss)
+
             # dist.all_reduce(
             #     reduced_loss,
             #     op=dist.ReduceOp.SUM,
@@ -489,22 +518,34 @@ class Worker:
         else:
             # torch.cuda.synchronize()
             assert meta.split == "test"
-            # self.logger.info(
-            #     f"Rank {self.env.local_rank} finished forward for microbatch {meta.macro_bid}"
-            # )
+            self.logger.info(
+                f"Rank {self.env.local_rank} finished forward for microbatch {meta.macro_bid}"
+            )
 
-            # if self.env.local_rank == 0:
-            #     # only rank 0 prints eval loss
-            #     self.logger.info(f"[Microbatch {meta.macro_bid}, test done]")
-        self.result_q.put({loss: reduced_loss, y_pred: y_pred, labels: labels})
-        # self.my_rank_preds.append(y_pred)
-        # self.my_rank_labels.append(labels)
+            if self.env.local_rank == 0:
+                # only rank 0 prints eval loss
+                self.logger.info(f"[Microbatch {meta.macro_bid}, test done]")
+        self.my_rank_preds.append(y_pred)
+        self.my_rank_labels.append(labels)
         # print self.my_rank_preds and self.my_rank_labels sizes
-        # self.logger.debug(
-        #     f"Rank {self.env.local_rank} preds size: {len(self.my_rank_preds)}, labels size: {len(self.my_rank_labels)}"
-        # )
+        self.logger.debug(
+            f"Rank {self.env.local_rank} preds size: {len(self.my_rank_preds)}, labels size: {len(self.my_rank_labels)}"
+        )
 
         if meta.mark == "last":
+            # A. 统一结算 Loss (新增)
+            if meta.split == "val":
+                dist.all_reduce(
+                    self.val_loss_sum, op=dist.ReduceOp.SUM, group=self.nccl
+                )
+                dist.all_reduce(
+                    self.val_batch_count, op=dist.ReduceOp.SUM, group=self.nccl
+                )
+
+                if self.env.local_rank == 0:  # 只有 Rank 0 打印
+                    avg_val_loss = (self.val_loss_sum / self.val_batch_count).item()
+                    self.logger.info(f"[Val End] Average Loss: {avg_val_loss:.6f}")
+
             my_rank_preds = torch.cat(self.my_rank_preds)
             my_rank_labels = torch.cat(self.my_rank_labels)
 
@@ -534,7 +575,7 @@ class Worker:
             self.logger.debug(
                 f"Rank {self.env.local_rank} after gather all preds and labels"
             )
-            if self.env.local_rank == 1:
+            if self.env.local_rank == 0:
                 all_rank_preds = []
                 all_rank_labels = []
                 for i in range(self.env.n_gpu):
@@ -552,6 +593,17 @@ class Worker:
         return ap, auc
 
     def run(self):
+        while True:
+            # 处理命令（非阻塞/短超时）
+            try:
+                cmd, payload = self.cmd_q.get_nowait()
+            except queue.Empty:
+                cmd = None
+
+            if cmd == "SAVE_MODEL":
+                self.save_model(os.path)  # 这里在主线程执行
+
+    def run_pipeline(self):
         self.logger.info("Worker: Starting H2D thread...")
         self.receiver.start()
         self.h2d.start()  # 启动 H2D 预取线程
@@ -668,10 +720,42 @@ class Worker:
                 break
 
     # 供外部保存/加载
-    def save(self, path):
-        if self.env.local_rank == 0:
-            torch.save(self.model.state_dict(), path)
+    def save_model(self, path):
+        if dist.is_available() and dist.is_initialized():
+            rank = dist.get_rank()
+        else:
+            rank = 0
 
-    def load(self, path):
-        state = torch.load(path, map_location=torch.device("cuda:0"))
-        self.model.load_state_dict(state)
+        if rank == 0:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            # 关键：保存“裸模型”的权重（非DDP也能加载）
+            model = self.model.module if isinstance(self.model, DDP) else self.model
+            torch.save(model.state_dict(), path)
+
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+
+    def load_model(self, path):
+        # 让所有rank都在文件写完后再开始读（更稳）
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+
+        state = torch.load(path, map_location="cpu")
+
+        # 如果当前是DDP，先拿到裸模型来load（因为你保存的是裸模型state_dict）
+        model = self.model.module if isinstance(self.model, DDP) else self.model
+        model.load_state_dict(state, strict=True)
+
+        # 如果每rank只可见1张GPU，这里用0没问题；否则用local_rank
+        torch.cuda.set_device(0)
+        model = model.to("cuda:0")
+
+        # wrap 成 DDP
+        self.model = DDP(model, device_ids=[0])
+
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+
+    def load_memory(self, memory_state):
+        if self.has_memory:
+            self.model.module.load_memory_state(memory_state)

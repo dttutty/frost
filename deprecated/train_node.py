@@ -33,11 +33,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from gnn.TGN import *
+from sampler import *
 from sklearn.metrics import average_precision_score, f1_score
 from tqdm import tqdm
 
-from gnn.TGN import *
-from sampler import *
 from utils import *
 
 
@@ -148,7 +148,7 @@ def generate_temporal_embeddings(ldf, emb_file_name):
             if sampler is not None:
                 ret, _ = sampler_wrapper(sample_param.no_neg, root_nodes, sampler, ts)
             if gnn_param.arch != "identity":
-                blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=True)
+                blocks = extract_raw_data(ret, sample_param.history, save_on_pgu=True)
             else:
                 blocks = node_to_dgl_blocks(root_nodes, ts, cuda=True)
 
@@ -172,7 +172,7 @@ def generate_temporal_embeddings(ldf, emb_file_name):
                     mem_edge_feats = edge_np[eid] if edge_np is not None else None
                     block = None
                     if memory_param.deliver_to == "neighbors":
-                        block = to_dgl_blocks(
+                        block = extract_raw_data(
                             ret, sample_param.history, reverse=True, save_on_pgu=True
                         )[0][0]
                     mailbox.write_mail_to_mailbox(
@@ -199,7 +199,7 @@ def generate_temporal_embeddings(ldf, emb_file_name):
             sampler.sample(root_nodes, ts)
             ret = sampler.get_ret()
         if gnn_param.arch != "identity":
-            blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=True)
+            blocks = extract_raw_data(ret, sample_param.history, save_on_pgu=True)
         else:  # why aggragate?
             blocks = node_to_dgl_blocks(root_nodes, ts, cuda=True)
         blocks, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = (

@@ -115,7 +115,7 @@ def main():
     # host load graph and features, then broadcast to workers
     my_data = None
     if env.is_host:  # only host hold the graph and dataframe(edges)
-        g, df, n_nodes, n_edges = load_graph(args.dataset)
+        graph, df, n_nodes, n_edges = load_graph(args.dataset)
         edge_np, edim, edtype = load_feat(
             args.dataset,
             "edge",
@@ -161,7 +161,7 @@ def main():
     cfg.g.d_in = cfg.m.d_mem if cfg.m is not None else ndim
     if cfg.g.d_out is None and cfg.m is not None:
         cfg.g.d_out = cfg.m.d_mem
-    if cfg.s.is_sample_support_node:
+    if cfg.s.sample_support_node:
         assert cfg.s.layer == len(cfg.s.neighbor)
 
     n_epoch = cfg.t.epoch
@@ -171,8 +171,7 @@ def main():
         mail_shape = [n_nodes, cfg.m.boxsize, 2 * cfg.m.d_mem + edim]
     F32 = torch.float32
     # shared.box_next_pos should be int
-    if env.local_rank == 0:
-        shared_total_epoch = csm("total_epoch", [1], torch.int32)
+
     if env.local_rank == 0 and cfg.m is not None:
         mem = csm("mem", [n_nodes, cfg.m.d_mem], F32)
         mem_ts = csm("mem_ts", [n_nodes], F32)
@@ -184,8 +183,7 @@ def main():
         box_ts = csm("mail_ts", [n_nodes, cfg.m.boxsize], F32)
         box_next_pos = csm("mail_next_pos", [n_nodes], torch.int32)
     dist.barrier()
-    if env.local_rank != 0:
-        shared_total_epoch = gsm("total_epoch", [1], torch.int32)
+
     if env.local_rank != 0 and cfg.m is not None:
         mem = gsm("mem", [n_nodes, cfg.m.d_mem], F32)
         mem_ts = gsm("mem_ts", [n_nodes], F32)
@@ -206,9 +204,6 @@ def main():
             box_next_pos=box_next_pos,
         )
 
-    if shared is not None:
-        if env.local_rank == 0:
-            shared_total_epoch[0] = n_epoch
     dist.barrier()
 
     if env.is_host:
@@ -216,16 +211,14 @@ def main():
 
         print("Host: Initializing host process...")
 
-        host = Host(cfg, g, df, env, shared, start, gloo, shared_total_epoch)
+        host = Host(cfg, graph, df, env, start, gloo)
         host.run()
     else:
         from run_worker import Worker
 
         print("Worker: Initializing worker process...")
 
-        worker = Worker(
-            cfg, shared, save_to, nfeat, efeat, env, nccl, gloo, shared_total_epoch
-        )
+        worker = Worker(cfg, shared, save_to, nfeat, efeat, env, nccl, gloo)
         worker.run()
 
 

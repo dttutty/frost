@@ -8,15 +8,15 @@ import torch.distributed as dist
 from schemas.datatypes import Env
 
 
-class Receiver(threading.Thread):
-    def __init__(self, env: Env, gloo, meta_q, stop_ev):
+class HostWorkerSyncer(threading.Thread):
+    def __init__(self, env: Env, gloo, meta_q, stop_ev, cmd_q):
         super().__init__(daemon=True, name="receiver")
         self.env: Env = env
         self.gloo = gloo
-        self.receiver_thread = None
         self.meta_q = meta_q
         self.stream = torch.cuda.Stream()
         self.stop_ev = stop_ev
+        self.cmd_q = cmd_q  # 新增一个属性用于存放命令队列
 
     def run(self):
         while not self.stop_ev.is_set():
@@ -39,9 +39,11 @@ class Receiver(threading.Thread):
                             f"Rank {self.env.local_rank}: Received stop signal. Exiting receiver thread."
                         )
                         break
-
-                    # 放入队列供主线程消费
-                    self.meta_q.put(copy.deepcopy(next_meta), block=True)
+                    elif isinstance(next_meta, str):
+                        self.cmd_q.put(next_meta)
+                        continue
+                    else:
+                        self.meta_q.put(copy.deepcopy(next_meta), block=True)
             except Exception:
                 # 【修改】这里原来写的是 Assembler Thread Crashed，改为 Receiver
                 print(f"!!! Receiver Thread Crashed on Rank {dist.get_rank()} !!!")

@@ -2,14 +2,44 @@ import os
 from typing import List
 
 import dgl
-import numpy as np
 import pandas as pd
 import torch
 import yaml
 from dgl.heterograph import DGLBlock
 
 # In utils.py
-from schemas.datatypes import GNNCFG, Config, MemoryCFG, SampleCFG, TrainCFG
+from schemas.datatypes import (
+    GNNCFG,
+    Config,
+    DGLBlockMeta,
+    ExtFullGraph,
+    MemoryCFG,
+    SampleCFG,
+    TrainCFG,
+)
+
+
+def _mail_delivery_tensor(
+    unique_root_nodes: torch.Tensor, mail_delivery_block: DGLBlock
+) -> torch.Tensor:
+    src_local_id, dst_local_id = mail_delivery_block.edges(
+        order="eid"
+    )  # find out all edges
+    global_src = mail_delivery_block.srcdata["ID"][src_local_id]
+    global_dst = mail_delivery_block.dstdata["ID"][dst_local_id]
+
+    uniq_global_src = torch.unique(global_src)
+    uniq_global_dst = torch.unique(global_dst)
+    is_in_root = torch.isin(global_src, unique_root_nodes)
+
+    roots_sorted = torch.sort(unique_root_nodes).values
+    src_sorted = torch.sort(global_src).values
+    assert torch.equal(roots_sorted, src_sorted), "roots != unique(global_src)"
+
+    final_src = global_src[is_in_root]
+    final_dst = global_dst[is_in_root]
+    tensor = torch.stack([final_src, final_dst], dim=0)
+    return tensor
 
 
 def dgl_blocks_to_tensor_dicts(blocks):
@@ -117,8 +147,8 @@ def load_feat(
     return feat, d_feat, dtype
 
 
-def load_graph(d) -> tuple[dict, pd.DataFrame, int, int]:
-    g = np.load("DATA/{}/ext_full.npz".format(d))
+def load_graph(d) -> tuple[ExtFullGraph, pd.DataFrame, int, int]:
+    g: ExtFullGraph = ExtFullGraph.load(f"DATA/{d}/ext_full.npz")
     df = pd.read_csv("DATA/{}/edges.csv".format(d))
     src = df["src"].to_numpy()
     dst = df["dst"].to_numpy()
@@ -154,99 +184,132 @@ def parse_config(f) -> Config:
     return cfg
 
 
-def to_dgl_blocks(ret, history, save_on_gpu=False) -> List[List[DGLBlock]]:
-    """
-    用于正常的 GNN 前向计算，支持多层聚合和多快照历史。
-    """
-    blocks = []
+def extract_raw_data(ret: List) -> List[DGLBlockMeta]:
+    # 用简单的字典或者 NamedTuple 存储纯数据
+    mfg_meta_list = []
     for tgb in ret:
-        # 提取数据并转为 Tensor
-        all_nodes = torch.from_numpy(tgb.nodes())
-        tgb_ts = torch.from_numpy(tgb.ts())
-        tgb_eid = torch.from_numpy(tgb.eid())
-        tgb_dts = torch.from_numpy(tgb.dts())
+        # 1. 提取 Numpy 数据并转为 CPU Tensor
+        # 此时不要去 GPU，也不要创建 DGLBlock
+        mfg_meta: DGLBlockMeta = DGLBlockMeta(
+            nodes=torch.from_numpy(tgb.nodes()),
+            ts=torch.from_numpy(tgb.ts()),
+            eid=torch.from_numpy(tgb.eid()),
+            dts=torch.from_numpy(tgb.dts()),
+            col=torch.from_numpy(tgb.col()),
+            row=torch.from_numpy(tgb.row()),
+            dim_in=tgb.dim_in(),
+            dim_out=tgb.dim_out(),
+        )
+        mfg_meta_list.append(mfg_meta)
+    return mfg_meta_list
 
-        # 正向逻辑：col -> row (邻居指向中心)
-        edges = (tgb.col(), tgb.row())
 
-        # 创建 DGL Block
+def analyze_blocks(
+    mfg_meta_list: List[DGLBlockMeta], n_history: int
+) -> Tuple[set, set]:
+    """
+    Analyzes the provided list of DGLBlockMeta to determine the maximum
+    number of source and destination nodes across the last n_history blocks.
+
+    Args:
+        mfg_meta_list (List[DGLBlockMeta]): List of DGLBlockMeta objects.
+
+    Returns:
+        Tuple[set, set]: A tuple containing the set of all   source nodes
+                         and the set of all root nodes.
+    """
+    all_nodes = set()
+    root_nodes = set()
+    for index, mfg_meta in enumerate(mfg_meta_list):
+        nodes = mfg_meta.nodes.numpy()
+        num_roots = mfg_meta.dim_out
+        all_nodes.update(nodes.tolist())
+        if index < n_history:
+            root_nodes.update(nodes[:num_roots].tolist())
+
+    return all_nodes, root_nodes
+
+
+def collate_and_build_graph(
+    mfg_meta_list: List[DGLBlockMeta], history: int
+) -> List[List[DGLBlock]]:
+    blocks = []
+
+    for mfg_meta in mfg_meta_list:
+        # 1. 在 Worker 进程组装 DGLBlock
+        # 此时数据已经在 Worker 的内存空间了
         block = dgl.create_block(
-            edges, num_src_nodes=tgb.dim_in(), num_dst_nodes=tgb.dim_out()
+            (mfg_meta.col, mfg_meta.row),
+            num_src_nodes=mfg_meta.dim_in,
+            num_dst_nodes=mfg_meta.dim_out,
         )
 
-        # num_dst_nodes =tgb.dim_out()少
+        # num_dst_nodes = tgb.dim_out()少
         # num_src_nodes = tgb.dim_in()多
 
-        num_roots = tgb.dim_out()
-
+        # 2. 绑定特征
+        num_roots = mfg_meta.dim_out
+        all_nodes = mfg_meta.nodes
         block.srcdata["ID"] = all_nodes
         block.dstdata["ID"] = all_nodes[:num_roots]
+        block.srcdata["ts"] = mfg_meta.ts
+        block.dstdata["ts"] = mfg_meta.ts[:num_roots]
+        block.edata["dt"] = mfg_meta.dts[num_roots:]
+        block.edata["ID"] = mfg_meta.eid
+        # 3. 统一上 GPU (由 Worker 决定何时上 GPU)
+        # block = block.to("cuda:0")
+        blocks.append(block)
 
-        block.srcdata["ts"] = tgb_ts
-        block.dstdata["ts"] = tgb_ts[:num_roots]  # 只有目标节点需要 ts
-
-        block.edata["dt"] = tgb_dts[num_roots:]  # 只有边需要 dt
-        block.edata["ID"] = tgb_eid
-
-        blocks.append(block.to("cuda:0") if save_on_gpu else block)
-
-    # 按照历史步长分组
+    # 4. 处理历史分组逻辑
     grouped_blocks = list(map(list, zip(*[iter(blocks)] * history)))
-    # 反转层级顺序以匹配从外向里的聚合顺序
     grouped_blocks.reverse()
+
     return grouped_blocks
 
 
-def to_apan_mailbox_block(ret, save_on_gpu=False) -> DGLBlock:
+def to_apan_mailbox_block(
+    mfg_meta_list: List[DGLBlockMeta], save_on_gpu=False
+) -> DGLBlock:
     """
     专门用于 APAN 的异步邮件传播。
     只取 ret 中的第一个 TGB (1 layer, 1 history)。
     """
     # this is not standard DGL block
     # 按照 train_dist.py 的逻辑，reverse 时只使用第一个元素
-    tgb = ret[0]
-
-    all_nodes = torch.from_numpy(tgb.nodes())
-    tgb_ts = torch.from_numpy(tgb.ts())
-    tgb_eid = torch.from_numpy(tgb.eid())
-    tgb_dts = torch.from_numpy(tgb.dts())
-
+    mfg_meta: DGLBlockMeta = mfg_meta_list[0]
     # 传播逻辑：row -> col (中心指向邻居)
-    edges = (tgb.row(), tgb.col())
-
     block = dgl.create_block(
-        edges, num_src_nodes=tgb.dim_out(), num_dst_nodes=tgb.dim_in()
+        (mfg_meta.row, mfg_meta.col),
+        num_src_nodes=mfg_meta.dim_out,
+        num_dst_nodes=mfg_meta.dim_in,
     )
+    all_nodes = mfg_meta.nodes
+    num_roots = mfg_meta.dim_out
 
     # num_src_nodes = tgb.dim_out()少
     # num_dst_nodes = tgb.dim_in()多
 
-    num_roots = tgb.dim_out()
     # 在传播过程中，目标节点（邻居）需要获取 ID 和时间戳
     block.srcdata["ID"] = all_nodes[:num_roots]
     block.dstdata["ID"] = all_nodes
 
-    block.srcdata["ts"] = tgb_ts[:num_roots]
-    block.dstdata["ts"] = tgb_ts  # 只有目标节点需要 ts
+    block.srcdata["ts"] = mfg_meta.ts[:num_roots]
+    block.dstdata["ts"] = mfg_meta.ts  # 只有目标节点需要 ts
 
     # edge data
-    block.edata["dt"] = tgb_dts[num_roots:]
-    block.edata["ID"] = tgb_eid
+    block.edata["dt"] = mfg_meta.dts[num_roots:]
+    block.edata["ID"] = mfg_meta.eid
 
     return block.to("cuda:0") if save_on_gpu else block
 
 
-def node_to_dgl_blocks(root_nodes, ts, cuda: bool) -> List[List[DGLBlock]]:
+def node_to_dgl_blocks(root_nodes, ts) -> List[List[DGLBlock]]:
     blocks = list()
     block = dgl.create_block(
         ([], []), num_src_nodes=root_nodes.shape[0], num_dst_nodes=root_nodes.shape[0]
     )
     block.srcdata["ID"] = root_nodes
     block.srcdata["ts"] = ts
-    if cuda:
-        blocks.insert(0, [block.to("cuda:0")])
-    else:
-        blocks.insert(0, [block])
     return blocks
 
 

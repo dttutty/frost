@@ -3,6 +3,8 @@ import math
 import torch
 import torch.nn as nn
 
+from schemas.plan import BatchNodeStateIO
+
 from ..components import TimeEncode
 
 
@@ -61,6 +63,24 @@ class JODIE(nn.Module):
         self.jodie_time_proj = JODIETimeEmbedding(dim_out=dim_memory)
 
         # --- 3. Edge Predictor ---
+
+    @staticmethod
+    def analyze_need(root_nodes):
+        all_nodes = root_nodes
+        return BatchNodeStateIO(
+            mem_needed=all_nodes,
+            mem_updated=all_nodes,
+            mailbox_needed=all_nodes,
+            mailbox_updated=all_nodes,
+            nfeat_needed=all_nodes,
+        )
+
+    @staticmethod
+    def sample(ngh_sampler, src, dst, neg_dst, ts):
+        roots = torch.cat([src, dst, neg_dst])
+        all_nodes = root_nodes = set(roots.numpy().tolist())
+        batch_node_state_io = JODIE.analyze_need(root_nodes)
+        return all_nodes, root_nodes, batch_node_state_io
 
     def forward(
         self,

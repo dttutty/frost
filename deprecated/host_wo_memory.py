@@ -6,13 +6,13 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from host.host_sampler import sample_and_scatter_batch
+from memorys import MemoryMailbox
+from sampler import NegLinkSampler
 from sampler_core import ParallelSampler
 from tqdm import tqdm
 
-from memorys import MemoryMailbox
-from sampler import NegLinkSampler
 from schemas.datatypes import Env
-from utils import node_to_dgl_blocks, to_dgl_blocks
+from utils import extract_raw_data, node_to_dgl_blocks
 
 
 local_rank = dist.get_rank()
@@ -108,7 +108,7 @@ def sample_and_dispatch_batch(
     )
 
     if gnn_param.arch != "identity":
-        grouped_blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
+        grouped_blocks = extract_raw_data(ret, sample_param.history, save_on_pgu=False)
     else:
         grouped_blocks = node_to_dgl_blocks(root_nodes, ts, cuda=False)
 
@@ -122,7 +122,7 @@ def sample_and_dispatch_batch(
     special_block_tensors = None
     if memory_mailbox is not None and memory_param.deliver_to == "neighbors":
         # 创建这个特殊的、反转的 block
-        special_block = to_dgl_blocks(
+        special_block = extract_raw_data(
             ret, sample_param.history, reverse=True, save_on_pgu=False
         )[0][0]
         # 使用同样的工具函数将其转换为张量字典
@@ -194,7 +194,7 @@ def sample_and_scatter_batch(
     if gnn_param.arch != "identity":
         # eg. if sample_param.history = 3, sample_param.layer = 2, ret = [block1,block2, block3,block4, block5,block6]
         # then grouped_blocks = [[block1,block2],[block3,block4],[block5,block6]]
-        grouped_blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
+        grouped_blocks = extract_raw_data(ret, sample_param.history, save_on_pgu=False)
     else:
         # eg. grouped_blocks = [[block]]
         grouped_blocks = node_to_dgl_blocks(root_nodes, ts, cuda=False)
@@ -208,7 +208,7 @@ def sample_and_scatter_batch(
     )
     if memory_mailbox is not None and memory_param.deliver_to == "neighbors":
         # only deliver to neighbors in history[1]
-        data_to_send.mdb = to_dgl_blocks(
+        data_to_send.mdb = extract_raw_data(
             ret, sample_param.history, reverse=True, save_on_pgu=False
         )[0][0]
     batch_to_send.append(data_to_send)

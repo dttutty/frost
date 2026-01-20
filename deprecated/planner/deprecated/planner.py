@@ -320,64 +320,6 @@ def find_all_gpu_distances_list(gpus_groups: list) -> np.ndarray:
     return distance_matrix
 
 
-def _comp_need_edges(blockss: List[List[DGLBlock]]) -> torch.Tensor:
-    all_eid_list = []
-    for blocks in blockss:
-        for block in blocks:
-            all_eid_list.append(block.edata["ID"])
-    if len(all_eid_list) == 0:
-        return torch.empty(0, dtype=torch.long)
-    all_eid_tensor = torch.cat(all_eid_list)
-    unique_all_eid_tensor = torch.unique(all_eid_tensor)
-    return unique_all_eid_tensor
-
-
-def compute_whats_need_by_gpu(blocks: List[DGLBlock]) -> torch.Tensor:
-    if not blocks:
-        return torch.empty(0, dtype=torch.long)
-    all_nid_list = []
-    for block in blocks:
-        all_nid_list.append(block.srcdata["ID"])
-    all_nid_tensor = torch.cat(all_nid_list)
-    return torch.unique(all_nid_tensor)
-
-
-def _comp_need_nodes(
-    td: Meta, deliver_to: Literal["self", "neighbors"] = "self"
-) -> tuple[Set, None | Set[int], None | Set[int]]:
-    """
-    Helper method to process a single batch.
-
-    It calculates dependencies (needed features, memory updates, mail updates)
-    and stores intermediate results (like pos_edges) back into the batch object.
-
-    Returns:
-        tuple: (whats_need, whose_mem_gonna_updated, whats_mail_gonna_updated)
-    """
-
-    root_nodes = torch.unique(td.pos_edge)
-    mem_update_nodes = mailbox_update_nodes = None
-    mem_update_nodes = root_nodes
-    if deliver_to == "self":
-        mailbox_update_nodes = root_nodes
-    elif deliver_to == "neighbors":
-        assert td.mdb is not None
-        td.mdt = _mail_delivery_tensor(root_nodes, mail_delivery_block=td.mdb)
-        mailbox_update_nodes = torch.unique(td.mdt[1, :])  #  td.mdt[1, :] are dst nodes
-    else:
-        raise ValueError(f"Unknown deliver_to: {deliver_to}")
-
-    all_nodes = compute_whats_need_by_gpu(td.blockss[0])
-
-    return (
-        set(all_nodes.tolist()),
-        set(mem_update_nodes.tolist()) if mem_update_nodes is not None else None,
-        set(mailbox_update_nodes.tolist())
-        if mailbox_update_nodes is not None
-        else None,
-    )
-
-
 class Planner:
     """
     编排多GPU训练中的内存、特征和Mailbox的数据传输计划。
@@ -386,7 +328,11 @@ class Planner:
     def __init__(
         self,
         gpus_groups: list,
+        has_nfeat: bool = True,
+        has_efeat: bool = True,
+        has_memory_and_mailbox: bool = True,
         mail_strategy: Optional[Literal["mean", "last"]] = "last",
+        deliver_to: Optional[Literal["self", "neighbors"]] = "self",
     ):
         """
         初始化规划器。
@@ -400,39 +346,98 @@ class Planner:
         self.gpus_distance: np.ndarray = find_all_gpu_distances_list(gpus_groups)
         self.n_gpus: int = len(self.gpus_distance)
         self.mail_strategy = mail_strategy
-        self.mail_deliver_to = "self"
+        self.mail_deliver_to = deliver_to
 
         # 2. 为中间结果准备占位符 (解决痛点 2)
         self.all_node_set: List[Set[int]]
         self.mem_update_set: List[Set[int]] | None = None
         self.mailbox_update_set: List[Set[int]] | None = None
+        self.all_edge_set: List[Set[int]] | None = None
         self.initialized: bool = False
+        self.has_memory_and_mailbox = has_memory_and_mailbox
+        self.has_nfeat = has_nfeat
+        self.has_efeat = has_efeat
         self.mem_prefetch: List[Set[int]] = []
         self.mail_prefetch: List[Set[int]] = []
+        self.nfeat_prefetch: List[Set[int]] = []
+        self.efeat_prefetch: List[Set[int]] = []
+
+    def _comp_need_nodes(
+        self, td: Meta, deliver_to: Literal["self", "neighbors"] = "self"
+    ) -> tuple[Set, None | Set[int], None | Set[int]]:
+        """
+        Helper method to process a single batch.
+
+        It calculates dependencies (needed features, memory updates, mail updates)
+        and stores intermediate results (like pos_edges) back into the batch object.
+
+        Returns:
+            tuple: (whats_need, whose_mem_gonna_updated, whats_mail_gonna_updated)
+        """
+
+        root_nodes = torch.unique(td.pos_edge)
+        mem_update_nodes = mailbox_update_nodes = None
+        if self.has_memory_and_mailbox:
+            mem_update_nodes = root_nodes
+            if deliver_to == "self":
+                mailbox_update_nodes = root_nodes
+            elif deliver_to == "neighbors":
+                assert td.mdb_raw_data is not None
+                td.mdt = _mail_delivery_tensor(
+                    root_nodes, mail_delivery_block=td.mdb_raw_data
+                )
+                mailbox_update_nodes = torch.unique(
+                    td.mdt[1, :]
+                )  #  td.mdt[1, :] are dst nodes
+            else:
+                raise ValueError(f"Unknown deliver_to: {deliver_to}")
+
+        def compute_whats_need_by_gpu(blocks: List[DGLBlock]) -> torch.Tensor:
+            if not blocks:
+                return torch.empty(0, dtype=torch.long)
+            all_nid_list = []
+            for block in blocks:
+                all_nid_list.append(block.srcdata["ID"])
+            all_nid_tensor = torch.cat(all_nid_list)
+            return torch.unique(all_nid_tensor)
+
+        all_nodes = compute_whats_need_by_gpu(td.            gnn_mfg=gnn_mfgs_raw,[0])
+
+        return (
+            set(all_nodes.tolist()),
+            set(mem_update_nodes.tolist()) if mem_update_nodes is not None else None,
+            set(mailbox_update_nodes.tolist())
+            if mailbox_update_nodes is not None
+            else None,
+        )
 
     def reset(self):
         self.all_node_set = []
         self.mem_update_set = None
         self.mailbox_update_set = None
+        self.all_edge_set = None
         self.initialized = False
         self.mem_prefetch = []
         self.mail_prefetch = []
+        self.nfeat_prefetch = []
+        self.efeat_prefetch = []
 
     def plan_next(
         self,
         meta_list: List[Meta],
         is_last_macrobatch: bool,
+        deliver_to: Literal["self", "neighbors"],
     ) -> List[Meta]:
         # Use integer division (//) instead of float division (/)
         ngpus = self.n_gpus
-        deliver_to = self.mail_deliver_to
 
         def comp_needs_4_one_macrobatch(
             metas: List[Meta], deliver_to: Literal["self", "neighbors"]
         ):
             all_nodes_all_ranks = []
-            mem_update_nodes_all_ranks = []
-            mailbox_update_nodes_all_ranks = []
+            mem_update_nodes_all_ranks = [] if self.has_memory_and_mailbox else None
+            mailbox_update_nodes_all_ranks = [] if self.has_memory_and_mailbox else None
+            all_edges_all_ranks = [] if self.has_efeat else None
 
             for meta in metas:
                 # Use the helper function
@@ -440,18 +445,27 @@ class Planner:
                     all_nodes_per_rank,
                     all_mem_update_nodes_per_rank,
                     all_mailbox_update_nodes_per_rank,
-                ) = _comp_need_nodes(meta, deliver_to)
+                ) = self._comp_need_nodes(meta, deliver_to)
 
                 all_nodes_all_ranks.append(all_nodes_per_rank)
-                assert mem_update_nodes_all_ranks is not None
-                assert mailbox_update_nodes_all_ranks is not None
-                mem_update_nodes_all_ranks.append(all_mem_update_nodes_per_rank)
-                mailbox_update_nodes_all_ranks.append(all_mailbox_update_nodes_per_rank)
+                if self.has_memory_and_mailbox:
+                    assert mem_update_nodes_all_ranks is not None
+                    assert mailbox_update_nodes_all_ranks is not None
+                    mem_update_nodes_all_ranks.append(all_mem_update_nodes_per_rank)
+                    mailbox_update_nodes_all_ranks.append(
+                        all_mailbox_update_nodes_per_rank
+                    )
 
+            if self.has_efeat:
+                assert all_edges_all_ranks is not None
+                for meta in metas:
+                    u_all_edge = self._comp_need_edges(meta.            gnn_mfg=gnn_mfgs_raw,)
+                    all_edges_all_ranks.append(u_all_edge)
             return (
                 all_nodes_all_ranks,
                 mem_update_nodes_all_ranks,
                 mailbox_update_nodes_all_ranks,
+                all_edges_all_ranks,
             )
 
         # --- 1. Handle Planner Initialization (if needed) ---
@@ -462,46 +476,63 @@ class Planner:
                 self.all_node_set,
                 self.mem_update_set,
                 self.mailbox_update_set,
+                self.all_edge_set,
             ) = comp_needs_4_one_macrobatch(meta_list[:ngpus], deliver_to)
 
             self.mem_prefetch.extend(self.all_node_set)
-            assert self.mem_update_set is not None
-            assert self.mailbox_update_set is not None
-            self.mail_prefetch.extend(self.all_node_set)
+            if self.has_memory_and_mailbox:
+                assert self.mem_update_set is not None
+                assert self.mailbox_update_set is not None
+                self.mail_prefetch.extend(self.all_node_set)
+                self.nfeat_prefetch.extend(self.all_node_set)
+            if self.has_efeat:
+                assert self.all_edge_set is not None
+                self.efeat_prefetch.extend(self.all_edge_set)
 
         # --- 2. Plan for the next step ---
         next_uniq_all_nodes = []
         next_uniq_mem_update_nodes = []
         next_uniq_mailbox_update_list = []
+        next_uniq_all_edges = []
 
         if is_last_macrobatch:
             # last macrobatch is only half size of normal macrobatch
             assert len(meta_list) == self.n_gpus
             for batch in meta_list:
                 next_uniq_all_nodes.append(set())
-                next_uniq_mem_update_nodes.append(set())
-                next_uniq_mailbox_update_list.append(set())
-
+                if self.has_memory_and_mailbox:
+                    next_uniq_mem_update_nodes.append(set())
+                    next_uniq_mailbox_update_list.append(set())
+                if self.has_efeat:
+                    next_uniq_all_edges.append(set())
         else:
             (
                 next_uniq_all_nodes,
                 next_uniq_mem_update_nodes,
                 next_uniq_mailbox_update_list,
+                next_uniq_all_edges,
             ) = comp_needs_4_one_macrobatch(meta_list[ngpus:], deliver_to)
 
         # Call the main step planner using data from the second half
-        mem_plan, box_plan = self.plan_step(next_uniq_all_nodes)
+        mem_plan, box_plan, nfeat_plan, efeat_plan = self.plan_step(
+            next_uniq_all_nodes, next_uniq_all_edges
+        )
         self.all_node_set = next_uniq_all_nodes
-        self.mem_update_set = next_uniq_mem_update_nodes
-        self.mailbox_update_set = next_uniq_mailbox_update_list
+        if self.has_memory_and_mailbox:
+            self.mem_update_set = next_uniq_mem_update_nodes
+            self.mailbox_update_set = next_uniq_mailbox_update_list
+        if self.has_efeat:
+            self.all_edge_set = next_uniq_all_edges
 
         # --- 3. Assign plans ---
         # Assign the generated plan to the *first half* of the batches
         # (which will be executed in the next stage/iteration).
         for b_id, batch in enumerate(meta_list[:ngpus]):
             batch.plan_set = PlanSet(
-                box=box_plan[b_id],
-                mem=mem_plan[b_id],
+                box=box_plan[b_id] if self.has_memory_and_mailbox else None,
+                mem=mem_plan[b_id] if self.has_memory_and_mailbox else None,
+                nfeat_prefetch=nfeat_plan[b_id] if self.has_nfeat else None,
+                efeat_prefetch=efeat_plan[b_id] if self.has_efeat else None,
             )
 
             batch.plan_set = batch.plan_set.tensorfy()
@@ -513,47 +544,70 @@ class Planner:
 
         return meta_list
 
+    def _comp_need_edges(self, blockss: List[List[DGLBlock]]) -> Set:
+        all_eid_list = []
+        for blocks in blockss:
+            for block in blocks:
+                all_eid_list.append(block.edata["ID"])
+        if len(all_eid_list) == 0:
+            return set()
+        all_eid_tensor = torch.cat(all_eid_list)
+        unique_all_eid_tensor = torch.unique(all_eid_tensor)
+        return set(unique_all_eid_tensor.tolist())
+
     def plan_step(
         self,
         next_all_node_set: List[Set[int]],
+        next_all_edge_set: Optional[List[Set[int]]] = None,
     ) -> Tuple[
         Union[List[Plan], None],
         Union[List[Plan], None],
+        Union[List[Set[int]], None],
+        Union[List[Set[int]], None],
     ]:
         """
         为当前训练步骤规划所有数据流动。
         """
-        mail_plan = mem_plan = None
-        assert self.mem_update_set is not None
-        assert self.mailbox_update_set is not None
-        which_gpu_hold_the_latest_which_memory, all_ranks_fresh_mem_nodes = (
-            dedup_this_root_nodess(
-                self.mem_update_set,
-                reverse=True,
+        mail_plan = mem_plan = efeat_plan = None
+        if self.has_memory_and_mailbox:
+            assert self.mem_update_set is not None
+            assert self.mailbox_update_set is not None
+            which_gpu_hold_the_latest_which_memory, all_ranks_fresh_mem_nodes = (
+                dedup_this_root_nodess(
+                    self.mem_update_set,
+                    reverse=True,
+                )
             )
-        )
-        mem_plan = self._plan_memory_or_mailbox(
-            self.all_node_set,
-            which_gpu_hold_the_latest_which_memory,
-            next_all_node_set,
-            all_ranks_fresh_mem_nodes,
-            "memory",
-        )
-        which_gpu_hold_the_latest_which_mailbox, all_ranks_fresh_mailbox_nodes = (
-            dedup_this_root_nodess(
-                self.mailbox_update_set,
-                reverse=True,
+            mem_plan = self._plan_memory_or_mailbox(
+                self.all_node_set,
+                which_gpu_hold_the_latest_which_memory,
+                next_all_node_set,
+                all_ranks_fresh_mem_nodes,
+                "memory",
             )
-        )  # for mulitple GPU, we only keep the last one to update the mailbox
-        mail_plan = self._plan_memory_or_mailbox(
-            self.all_node_set,
-            which_gpu_hold_the_latest_which_mailbox,
-            next_all_node_set,
-            all_ranks_fresh_mailbox_nodes,
-            mem_or_mail="mail",
-        )
+            which_gpu_hold_the_latest_which_mailbox, all_ranks_fresh_mailbox_nodes = (
+                dedup_this_root_nodess(
+                    self.mailbox_update_set,
+                    reverse=True,
+                )
+            )  # for mulitple GPU, we only keep the last one to update the mailbox
+            mail_plan = self._plan_memory_or_mailbox(
+                self.all_node_set,
+                which_gpu_hold_the_latest_which_mailbox,
+                next_all_node_set,
+                all_ranks_fresh_mailbox_nodes,
+                mem_or_mail="mail",
+            )
 
-        return mem_plan, mail_plan
+        # nfeat_plan = self._plan_nfeat(next_all_node_set) if self.has_nfeat else None
+
+        nfeat_plan = self.all_node_set if self.has_nfeat else None
+        if self.has_efeat:
+            assert next_all_edge_set is not None
+            # efeat_plan = self._plan_efeat(next_all_edge_set) if self.has_efeat else None
+            efeat_plan = self.all_edge_set if self.has_efeat else None
+
+        return mem_plan, mail_plan, nfeat_plan, efeat_plan
 
     def _plan_memory_or_mailbox(
         self,
@@ -632,3 +686,53 @@ class Planner:
             )
             plans.append(plan)
         return plans
+
+    # def _plan_nfeat(self, next_all_s: List[Set[int]]) -> List[Plan]:
+    #     """规划节点特征（Node Features）的传输。"""
+    #     assert self.all_node_set is not None
+
+    #     # 特征没有“新鲜”概念，只有“陈旧” P2P 和 CPU 预取
+    #     prefetch, stale_p2p, p2p_counts = stale_data_planer(
+    #         self.all_node_set,  # 持有者：所有 this_batch 需要的节点
+    #         next_all_s,  # 需求者：所有 next_batch 需要的节点
+    #         self.gpus_distance,
+    #         all_fresh=None,  # 关键：没有 fresh 节点
+    #     )
+    #     self.nfeat_prefetch.extend(prefetch)
+    #     plans = []
+    #     for gpu_id in range(self.n_gpus):
+    #         # self.plan_set_s[gpu_id].feat_plan = Plan(
+    #         plans.append(
+    #             Plan(
+    #                 p2p=stale_p2p[gpu_id],
+    #                 prefetch=self.nfeat_prefetch.pop(0),
+    #                 rec_cts=p2p_counts[:, gpu_id],
+    #                 send_cts=p2p_counts[gpu_id, :],
+    #             )
+    #         )
+    #     return plans
+
+    # def _plan_efeat(self, next_all_edge_set: List[Set[int]]) -> List[Plan]:
+    #     """规划边特征（Edge Features）的传输。"""
+    #     assert self.all_edge_set is not None
+    #     # 边特征没有“新鲜”概念，只有“陈旧” P2P 和 CPU 预取
+    #     prefetch, stale_p2p, p2p_counts = stale_data_planer(
+    #         self.all_edge_set,  # 持有者：所有 this_batch 需要的节点
+    #         next_all_edge_set,  # 需求者：所有 next_batch 需要的节点
+    #         self.gpus_distance,
+    #         all_fresh=None,  # 关键：没有 fresh 节点
+    #     )
+
+    #     self.efeat_prefetch.extend(prefetch)
+    #     plans = []
+    #     for gpu_id in range(self.n_gpus):
+    #         # self.plan_set_s[gpu_id].feat_plan = Plan(
+    #         plans.append(
+    #             Plan(
+    #                 p2p=stale_p2p[gpu_id],
+    #                 prefetch=self.efeat_prefetch.pop(0),
+    #                 rec_cts=p2p_counts[:, gpu_id],
+    #                 send_cts=p2p_counts[gpu_id, :],
+    #             )
+    #         )
+    #     return plans

@@ -33,11 +33,11 @@ import random
 import numpy as np
 import torch
 from dgl.utils.shared_mem import create_shared_mem_array, get_shared_mem_array
+from gnn.TGN import *
+from sampler import *
 from sklearn.metrics import average_precision_score, roc_auc_score
 from tqdm import tqdm
 
-from gnn.TGN import *
-from sampler import *
 from utils import *
 from utils import blocks_to_cuda
 
@@ -442,7 +442,9 @@ else:
                         sampler.sample(root_nodes, ts)
                     ret = sampler.get_ret()
                 if gnn_param.arch != "identity":
-                    blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
+                    blocks = extract_raw_data(
+                        ret, sample_param.history, save_on_pgu=False
+                    )
                 else:
                     blocks = node_to_dgl_blocks(root_nodes, ts, cuda=False)
                 multi_blocks.append(blocks)
@@ -451,7 +453,7 @@ else:
                 multi_eid.append(rows["Unnamed: 0"].values)
                 if mailbox is not None and memory_param.deliver_to == "neighbors":
                     multi_block.append(
-                        to_dgl_blocks(
+                        extract_raw_data(
                             ret, sample_param.history, reverse=True, save_on_pgu=False
                         )[0][0]
                     )
@@ -509,7 +511,7 @@ else:
             sampler.sample(root_nodes, ts)
             ret = sampler.get_ret()
         if gnn_param.arch != "identity":
-            blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
+            blocks = extract_raw_data(ret, sample_param.history, save_on_pgu=False)
         else:
             blocks = node_to_dgl_blocks(root_nodes, ts, cuda=False)
         multi_blocks.append(blocks)

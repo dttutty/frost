@@ -2,16 +2,16 @@
 
 
 import torch
+from memorys import (
+    BasicMemoryUpdater,
+    GluTransformerMemoryUpdater,
+    TransformerMemoryUpdater,
+)
 
 from gnn.components import (
     EdgePredictor,
     IdentityNormLayer,
     TransfomerAttentionLayer,
-)
-from memorys import (
-    BasicMemoryUpdater,
-    GluTransformerMemoryUpdater,
-    TransformerMemoryUpdater,
 )
 from schemas.datatypes import Config, MemTsNid, Meta, PlanSet, X
 from worker.data_syncer import DataSyncer
@@ -102,7 +102,7 @@ class BaseModel(torch.nn.Module):
         neg_samples=1,
         is_last=False,
     ):
-        blockss = meta.blockss
+        blockss = meta.gnn_mfgs_raw = (gnn_mfgs_raw,)
         # sort feat by nid
         # memory partg
         root_new_mem = None

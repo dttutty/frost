@@ -3,10 +3,10 @@ import os
 import queue
 import threading
 
-from tqdm import tqdm
-
 from etc import batch_producer
 from profiler import profiler
+from tqdm import tqdm
+
 from utils import blocks_to_cuda
 
 
@@ -58,8 +58,6 @@ import time
 
 import numpy as np
 import torch
-from sklearn.metrics import average_precision_score, roc_auc_score
-
 from gnn.TGN import TGN
 from sampler import (
     AvoidInfoLeakNegLinkSampler,
@@ -68,13 +66,15 @@ from sampler import (
     ParallelSampler,
     create_sampler,
 )
+from sklearn.metrics import average_precision_score, roc_auc_score
+
 from utils import (
+    extract_raw_data,
     load_feat,
     load_graph,
     node_to_dgl_blocks,
     parse_config,
     prepare_blocks,
-    to_dgl_blocks,
 )
 
 
@@ -255,7 +255,7 @@ def eval(mode="val"):
                     sampler.sample(root_nodes, ts)
                 ret = sampler.get_ret()
             if gnn_param.arch != "identity":
-                blocks_same_device_as_feat = to_dgl_blocks(
+                blocks_same_device_as_feat = extract_raw_data(
                     ret, sample_param.history, save_on_pgu=train_param.all_on_gpu
                 )
             else:
@@ -311,7 +311,7 @@ def eval(mode="val"):
                 mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
                 block = None
                 if memory_param.deliver_to == "neighbors":
-                    block = to_dgl_blocks(
+                    block = extract_raw_data(
                         ret,
                         sample_param.history,
                         reverse=True,
@@ -436,7 +436,7 @@ for e in range(5):
                 total_sampling_time += ret[0].sample_time()
             t_prep_s = time.time()
             if gnn_param.arch != "identity":
-                blocks_same_device_as_feat = to_dgl_blocks(
+                blocks_same_device_as_feat = extract_raw_data(
                     ret, sample_param.history, save_on_pgu=train_param.all_on_gpu
                 )
             else:
@@ -478,7 +478,9 @@ for e in range(5):
                 mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
                 block = None
                 if memory_param.deliver_to == "neighbors":
-                    block = to_dgl_blocks(ret, sample_param.history, reverse=True)[0][0]
+                    block = extract_raw_data(ret, sample_param.history, reverse=True)[
+                        0
+                    ][0]
                 mailbox.write_mail_to_mailbox(
                     model.memory_updater.last_updated_nid,
                     model.memory_updater.last_updated_memory,

@@ -5,7 +5,7 @@ import traceback
 import torch
 import torch.distributed as dist
 
-from schemas.datatypes import (
+from schemas import (
     BoxTsNid,
     MemTsNid,
     Meta,
@@ -24,7 +24,7 @@ class H2D(threading.Thread):
         shared: Shared | None,
         gnn_arch: str,
         merge_src: bool,
-        meta_q: queue.Queue,
+        meta_q: queue.Queue[Meta],
         destination_q: queue.Queue,
         stop_ev: threading.Event,
         h2d_sem: threading.Semaphore | None,
@@ -57,7 +57,7 @@ class H2D(threading.Thread):
                     if self.efeat is not None:
                         x.pos_efeat = self.efeat[meta.pos_edge_id].cuda()
                         if self.gnn_arch != "identity":
-                            for blocks in meta.blockss:
+                            for blocks in meta.            gnn_mfgs_raw=gnn_mfgs_raw,:
                                 for block in blocks:
                                     eid = block.edata["ID"]
                                     block.edata["efeat"] = self.efeat[eid]
@@ -65,7 +65,7 @@ class H2D(threading.Thread):
                     if self.nfeat is not None:
                         nfeat = self.nfeat[meta.unique_nodes]
                         id_list = meta.unique_nodes
-                        for block in meta.blockss[0]:
+                        for block in meta.            gnn_mfgs_raw=gnn_mfgs_raw,[0]:
                             nid = block.srcdata["ID"]
                             node_idx = torch.searchsorted(id_list, nid)
                             block.srcdata["nfeat"] = nfeat[node_idx]
@@ -92,18 +92,18 @@ class H2D(threading.Thread):
                         # move plan to gpu
                         # even there is no next batch, we still need plan_set for writeback
                         if self.merge_src:
-                            meta.blockss[0] = _deduplicate_first_layer_src(
-                                meta.blockss[0]
+                            meta.            gnn_mfgs_raw=gnn_mfgs_raw,[0] = _deduplicate_first_layer_src(
+                                meta.            gnn_mfg=gnn_mfgs_raw,[0]
                             )
 
                     if meta.mdt:
                         meta.mdt = meta.mdt.cuda()
-                    meta.blockss = [
+                    meta.            gnn_mfgs_raw=gnn_mfgs_raw, = [
                         [block.to("cuda:0") for block in blocks]
-                        for blocks in meta.blockss
+                        for blocks in meta.            gnn_mfgs_raw=gnn_mfgs_raw,
                     ]
 
-                    print("meta.blockss[0][0].device:", meta.blockss[0][0].device)
+                    print("meta.blockss[0][0].device:", meta.            gnn_mfg=gnn_mfgs_raw,[0][0].device)
 
                     ready_event = torch.cuda.Event()
                     ready_event.record(torch.cuda.current_stream())

@@ -1,4 +1,5 @@
 import os
+import queue
 import threading
 import traceback  # 记得导入
 
@@ -10,13 +11,30 @@ from schemas.datatypes import Delta, X
 
 
 class Assembler(threading.Thread):
-    def __init__(self, xpart_q, delta_q, xfull_q, stop_ev):
+    def __init__(
+        self,
+        xpart_q: queue.Queue[X],
+        delta_q: queue.Queue[Delta],
+        xfull_q: queue.Queue[X],
+        stop_ev: threading.Event,
+    ):
         super().__init__(daemon=True)
         self.xpart_q = xpart_q
         self.delta_q = delta_q
         self.xfull_q = xfull_q
         self.stop_ev = stop_ev
         self.stream = torch.cuda.Stream()
+
+    def mailbox_assemble(self, new_mails, old_mailbox):
+        if old_mailbox is None:
+            return new_mails
+        else:
+            # 合并新旧 mailbox，假设按时间戳排序
+            combined_data = torch.cat((old_mailbox.data, new_mails.data), dim=0)
+            combined_ts = torch.cat((old_mailbox.ts, new_mails.ts), dim=0)
+            combined_id = torch.cat((old_mailbox.id, new_mails.id), dim=0)
+            # 这里可以添加排序逻辑，确保按时间戳排序
+            return X.Box(data=combined_data, ts=combined_ts, id=combined_id)
 
     def fill_block(self, block: DGLBlock, x: X):
         # print(f"fill_blocks block.srcdata['pos']: {block.srcdata['pos']}")

@@ -2,10 +2,10 @@ import threading
 
 import torch
 import torch.distributed as dist
+from gnn.TGN import TGN
 from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from gnn.TGN import TGN
 from utils import blocks_to_cuda, prepare_blocks
 from worker.h2d import H2D, Meta
 
@@ -178,7 +178,7 @@ def run_evaluation_step(
             prev_cup_to_gpu_thread.cleanup()
         prev_cup_to_gpu_thread = None
     prev_th_hold_notmoved_data: Meta = scatter_receive()
-    blocks_on_cpu = prev_th_hold_notmoved_data.blockss
+    blocks_on_cpu = prev_th_hold_notmoved_data.gnn_mfgs_raw = (gnn_mfgs_raw,)
     if not blocks_on_cpu or len(blocks_on_cpu) == 0:
         print(
             f"Rank {local_rank}: Received empty batch during evaluation, skipping step."

@@ -1,11 +1,13 @@
 # worker/trainer.py
 
-from typing import List
+from typing import List, Tuple
 
 import torch
 from dgl.heterograph import DGLBlock
 
 from gnn.components import TemporalGraphAttentionLayer
+from schemas.datatypes import DGLBlockMeta
+from schemas.plan import BatchNodeStateIO
 
 
 class TGN(torch.nn.Module):
@@ -39,6 +41,42 @@ class TGN(torch.nn.Module):
             dim_out=dim_out,
             num_head=att_h,
             dropout=dropout,
+        )
+
+    @staticmethod
+    def analyze_block(mfg_meta: DGLBlockMeta) -> Tuple[set, set]:
+        """
+        Analyzes the provided list of DGLBlockMeta to determine the maximum
+        number of source and destination nodes across the last n_history blocks.
+
+        Args:
+            mfg_meta_list (List[DGLBlockMeta]): List of DGLBlockMeta objects.
+
+        Returns:
+            Tuple[set, set]: A tuple containing the set of all   source nodes
+                            and the set of all root nodes.
+        """
+        all_nodes = set()
+        root_nodes = set()
+        nodes = mfg_meta.nodes.numpy()
+        num_roots = mfg_meta.dim_out
+        all_nodes.update(nodes.tolist())
+        root_nodes.update(nodes[:num_roots].tolist())
+
+        return all_nodes, root_nodes
+
+    @staticmethod
+    def analyze_dynam(blockss: List[DGLBlockMeta], src, pos_dst, neg_dst):
+        assert len(blockss) == 1, "TGN only supports 1 layer currently"
+
+        all_nodes, root_nodes = TGN.analyze_block(blockss[0])
+        mem_mailbox_will_update_nodes = src + pos_dst
+        return BatchNodeStateIO(
+            mem_needed=all_nodes,
+            mem_updated=mem_mailbox_will_update_nodes,
+            mailbox_needed=all_nodes,
+            mailbox_updated=mem_mailbox_will_update_nodes,
+            nfeat_needed=all_nodes,
         )
 
     def forward(

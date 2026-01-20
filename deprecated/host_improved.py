@@ -4,18 +4,18 @@ import time
 import numpy as np
 import torch
 import torch.distributed as dist
+from sampler import NegLinkSampler
 
 # Assume these are your existing imports
 from sampler_core import ParallelSampler
 from tqdm import tqdm
 
-from sampler import NegLinkSampler
 from utils import (
     dgl_blocks_to_tensor_dicts,  # Helper from previous answer
+    extract_raw_data,
     node_to_dgl_blocks,
     sampler_wrapper,
     tensor_dicts_to_dgl_blocks,  # Helper from previous answer
-    to_dgl_blocks,
 )
 
 
@@ -169,7 +169,7 @@ def create_task_package(
     ret, _ = sampler_wrapper(sample_param.no_neg, root_nodes, sampler, ts, None)
 
     if gnn_param.arch != "identity":
-        grouped_blocks = to_dgl_blocks(ret, sample_param.history, save_on_pgu=False)
+        grouped_blocks = extract_raw_data(ret, sample_param.history, save_on_pgu=False)
     else:
         grouped_blocks = node_to_dgl_blocks(root_nodes, ts, cuda=False)
 
@@ -179,7 +179,7 @@ def create_task_package(
 
     special_block_tensors = None
     if memory_param.deliver_to == "neighbors":  # Simplified check
-        special_block = to_dgl_blocks(
+        special_block = extract_raw_data(
             ret, sample_param.history, reverse=True, save_on_pgu=False
         )[0][0]
         special_block_tensors = dgl_blocks_to_tensor_dicts([special_block])[0]

@@ -193,7 +193,7 @@ class MMFN:
         memhandler = self.write_node_memory(self.dedup, mem_td_nid, n_src)
 
         boxhandler = self.write_mail_to_mailbox(
-            mem_td_nid, mu_efeats, td.mdb, neg_samples
+            mem_td_nid, mu_efeats, td.mdb_raw_data, neg_samples
         )  # this include update mailbox, mailbox_ts, and next_mail_pos
 
         # # 2) 若按邻居投递，需要配合 gate 推进 next_mail_pos

@@ -1,6 +1,6 @@
 from torch.distributed import TCPStore  # type: ignore
 
-from worker.kv import KV
+from worker.deprecated.kv import KV
 
 
 class ClusterStore:

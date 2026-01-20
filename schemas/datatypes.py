@@ -4,11 +4,14 @@ import os
 from dataclasses import asdict, dataclass
 from typing import List, Literal, Optional, Set, Union
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from dgl.heterograph import DGLBlock
 from numpy.typing import NDArray
 from torch import Tensor
+
+from .plan import CudaPlan, CudaPlanSet, PlanSet, TensorPlanSet
 
 
 @dataclass(slots=True)
@@ -20,6 +23,37 @@ class ForwardCtx:
     mail_delivery_tensor: Tensor | None
     is_last: bool
     n_root_src_n_pos_dst: int
+
+
+IntArr = NDArray[np.int64]
+FloatArr = NDArray[np.floating]
+
+
+@dataclass(frozen=True, slots=True)
+class ExtFullGraph:
+    indptr: IntArr
+    indices: IntArr
+    eid: IntArr
+    ts: NDArray[np.float32]  # 你后面会 astype(float32)，那这里就直接约束成 float32
+
+    @property
+    def num_nodes(self) -> int:
+        # indptr 长度 = num_nodes + 1
+        return int(self.indptr.shape[0] - 1)
+
+    @property
+    def num_edges(self) -> int:
+        return int(self.indices.shape[0])
+
+    @staticmethod
+    def load(path: str) -> "ExtFullGraph":
+        npz = np.load(path)
+        return ExtFullGraph(
+            indptr=npz["indptr"].astype(np.int64, copy=False),
+            indices=npz["indices"].astype(np.int64, copy=False),
+            eid=npz["eid"].astype(np.int64, copy=False),
+            ts=npz["ts"].astype(np.float32, copy=False),
+        )
 
 
 @dataclass(slots=True, kw_only=True)
@@ -37,7 +71,7 @@ class GNNCFG:
 
 @dataclass(slots=True, kw_only=True)
 class TrainCFG:
-    model: Literal["APAN", "JODIE", "TGN"] = "TGN"
+    model_name: Literal["APAN", "JODIE", "TGN"] = "TGN"
     epoch: int = 10
     batch_size: int = 600
     reorder: Optional[int] = 8
@@ -54,8 +88,8 @@ class SampleCFG:
     layer: int = 1
     history: int = 1
     neg_samples: int = 1
-    is_sample_support_node: bool = True
-    sample_neighbors_for_neg_root_nodes: bool = True
+    sample_support_node: bool = True
+    sample_support_for_neg_dst: bool = True
     neighbor: Optional[List[int]] = None
     prop_time: bool = False
     duration: int = 0
@@ -527,114 +561,6 @@ class GatherElement:
 
 
 @dataclass(slots=True, kw_only=True)
-class PlanSet:
-    mem: Plan
-    box: Plan
-
-    def tensorfy(self):
-        mem = self.mem.tensorfy()
-        box = self.box.tensorfy()
-
-        return TensorPlanSet(
-            mem=mem,
-            box=box,
-        )
-
-
-@dataclass(slots=True, kw_only=True)
-class TensorPlanSet:
-    mem: TensorPlan
-    box: TensorPlan
-
-    def cuda(self):
-        if self.mem is not None:
-            assert isinstance(self.mem, TensorPlan)
-            mem = self.mem.cuda()
-        if self.box is not None:
-            assert isinstance(self.box, TensorPlan)
-            box = self.box.cuda()
-        return CudaPlanSet(
-            mem=mem,
-            box=box,
-        )
-
-    def sort(self):
-        if self.mem is not None:
-            assert isinstance(self.mem, TensorPlan)
-            self.mem = self.mem.sort()
-        if self.box is not None:
-            assert isinstance(self.box, TensorPlan)
-            self.box = self.box.sort()
-        return self
-
-
-@dataclass(slots=True, kw_only=True)
-class CudaPlanSet:
-    mem: CudaPlan
-    box: CudaPlan
-
-
-@dataclass(slots=True, kw_only=True)
-class Plan:
-    p2p: List[Set[int]]
-    prefetch: Set[int]
-    rec_cts: NDArray
-    send_cts: NDArray
-    writeback: Optional[Set[int]] = None
-
-    def tensorfy(self) -> "TensorPlan":
-        return TensorPlan(
-            p2p=[torch.tensor(list(s)).long() for s in self.p2p],
-            prefetch=torch.tensor(list(self.prefetch)).long(),
-            rec_cts=self.rec_cts,
-            send_cts=self.send_cts,
-            writeback=(
-                torch.tensor(list(self.writeback)).long()
-                if self.writeback is not None
-                else None
-            ),
-        )
-
-
-def set_to_tensor(s: Set[int]) -> torch.Tensor:
-    return torch.tensor(list(s)).long()
-
-
-@dataclass(slots=True, kw_only=True)
-class TensorPlan:
-    p2p: List[torch.Tensor]
-    prefetch: torch.Tensor
-    rec_cts: NDArray
-    send_cts: NDArray
-    writeback: Optional[torch.Tensor] = None
-
-    def cuda(self):
-        return CudaPlan(
-            p2p=[s.cuda() for s in self.p2p],
-            prefetch=self.prefetch.cuda(),
-            rec_cts=self.rec_cts,
-            send_cts=self.send_cts,
-            writeback=(self.writeback.cuda() if self.writeback is not None else None),
-        )
-
-    def sort(self):
-        self.prefetch, _ = torch.sort(self.prefetch)
-        self.p2p = [torch.sort(s).values for s in self.p2p]
-        if self.writeback is not None:
-            self.writeback, _ = torch.sort(self.writeback)
-        return self
-
-
-@dataclass(slots=True, kw_only=True)
-class CudaPlan:
-    p2p: List[torch.Tensor]
-    prefetch: torch.Tensor
-    rec_cts: NDArray
-    send_cts: NDArray
-    writeback: Optional[torch.Tensor] = None
-
-
-@dataclass(slots=True, kw_only=True)
 class MetaList:
     queue: List[Meta]
 
@@ -644,27 +570,66 @@ class MetaList:
 
 @dataclass(slots=True, kw_only=True)
 class Meta:
-    blockss: List[List[DGLBlock]]
-    mini_bid: int
-    macro_bid: int
-    curr_mini_bid_of_this_split: int
-    curr_macro_bid_of_this_split: int
+    gnn_mfgs_raw: List[DGLBlockMeta] | None
+    all_nodes: Set[int] | None | torch.Tensor
+    root_nodes: Set[int] | None | torch.Tensor
     pos_edge: Tensor  # 没有去重的2root nodes
     pos_edge_ts: Tensor  # 没有3倍处理
     pos_edge_id: Tensor  # 没有3倍处理,这个信息不需要传输到gpu
+    epoch_split_iter_info: Optional[EpochSplitIterInfo] = None
+    feat: Optional[X] = None
+    mdt: Optional[Tensor] = None
+    mdb_raw_data: DGLBlockMeta | None = None
+    plan_set: Optional[PlanSet | TensorPlanSet | CudaPlanSet] = None
+
+
+@dataclass(slots=True, kw_only=True)
+class EpochSplitIterInfo:
+    cur_epoch: int
+    n_epoch: int
+
+    cur_macro_of_split: int
+    n_macro_of_split: int
+
+    cur_macro_of_epoch: int
+    n_macro_of_epoch: None = None
+
     split: Literal["train", "val", "test"]
+
+    @property
+    def position_in_split(self) -> str | None:
+        if self.cur_macro_of_split + 1 == self.n_macro_of_split:
+            return "last"
+        elif self.cur_macro_of_split == 0:
+            return "first"
+        else:
+            return None
+
+    @property
+    def position_in_epoch(self) -> str | None:
+        if self.cur_epoch + 1 == self.n_epoch:
+            return "last"
+        elif self.cur_epoch == 0:
+            return "first"
+        else:
+            return None
+
+
+@dataclass(slots=True, kw_only=True)
+class MetaReady2Send:
+    gnn_mfgs_raw: List[DGLBlockMeta] | None
+    all_nodes: torch.Tensor
+    root_nodes: torch.Tensor
+    pos_edge: Tensor  # 没有去重的2root nodes
+    pos_edge_ts: Tensor  # 没有3倍处理
+    pos_edge_id: Tensor  # 没有3倍处理,这个信息不需要传输到gpu
     # pred_cts: List[int]
     # total_mbatchs_for_this_rank: Optional[int] = None
     feat: Optional[X] = None
     mdt: Optional[Tensor] = None
-    mdb: Optional[DGLBlock] = None
+    mdb_raw_data: DGLBlockMeta | None = None
     plan_set: Optional[PlanSet | TensorPlanSet | CudaPlanSet] = None
-    mark: Optional[Literal["first", "last"]] = None
-    total_macro_batch: Optional[int] = 500
-    total_epochs: int = 10
-    last_epoch: bool = False  # whether this meta is sent for cleanup
-    unique_nodes: Optional[torch.Tensor] = None
-    unique_edges: Optional[torch.Tensor] = None
+    epoch_split_iter_info: EpochSplitIterInfo
 
 
 @dataclass(slots=True, kw_only=True)
@@ -697,6 +662,18 @@ class Shared:
 
 
 Role = Literal["worker", "host"]
+
+
+@dataclass(frozen=True, kw_only=True)
+class DGLBlockMeta:
+    nodes: torch.Tensor
+    ts: torch.Tensor
+    eid: torch.Tensor
+    dts: torch.Tensor
+    col: torch.Tensor
+    row: torch.Tensor
+    dim_in: int
+    dim_out: int
 
 
 @dataclass(frozen=True, kw_only=True)
