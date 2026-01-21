@@ -7,11 +7,11 @@ import torch
 import torch.distributed as dist
 from host.host_sampler import sample_and_scatter_batch
 from memorys import MemoryMailbox
-from sampler import NegLinkSampler
 from sampler_core import ParallelSampler
 from tqdm import tqdm
 
-from schemas.datatypes import Env
+from sampler import NegLinkSampler
+from schemas.datatypes.env import Env
 from utils import extract_raw_data, node_to_dgl_blocks
 
 
@@ -26,8 +26,8 @@ def eval(
     eval_df,
     memory_mailbox: MemoryMailbox,
     sampler: ParallelSampler | None,
-    neg_link_sampler,
-    gnn_param,
+    neg_link_sampler: NegLinkSampler,
+    gnn_param:,
     memory_param,
     cfg_batch_size,
     sample_param,

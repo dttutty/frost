@@ -15,7 +15,8 @@ from dgl.utils.shared_mem import (
     get_shared_mem_array as gsm,
 )
 
-from schemas.datatypes import Env, Shared
+from schemas.datatypes.env import Env
+from schemas.datatypes.misc import Shared
 from utils import (
     load_feat,
     load_graph,

@@ -15,9 +15,16 @@ from host import Distributor, MetaBatcher, Planner, Scatter
 from host.meta_batcher import MetaBundle
 from host.planner.planner import PlanBundle
 from sampler import NegLinkSampler
-from schemas import Config, Env, Meta, SampleCFG
 from schemas.alias import MetaBundleWithoutPlan, MetaBundleWithPlan
-from schemas.datatypes import DGLBlockMeta, EpochSplitIterInfo, ExtFullGraph
+from schemas.datatypes.cfg import Config, SampleCFG
+from schemas.datatypes.env import Env
+from schemas.datatypes.misc import (
+    DGLBlockMeta,
+    EpochSplitIterInfo,
+    ExtFullGraph,
+    Meta,
+    Roots,
+)
 from utils import analyze_blocks, extract_raw_data
 
 
@@ -285,16 +292,19 @@ class Host:
                 self.ngh_sampler, roots, ts, self.sample_history
             )
 
+        root_info = Roots(
+            nid=roots,
+            ts=ts,
+        )
+
         meta = Meta(
+            roots=root_info,
             gnn_mfgs_raw=gnn_mfgs_raw,
-            all_nodes=all_nodes,
-            root_nodes=root_nodes,
-            pos_edge=torch.stack([src, dst], dim=1),
-            pos_edge_ts=edge_ts,
             pos_edge_id=torch.as_tensor(edges.index.values, dtype=torch.long),
             epoch_split_iter_info=epoch_split_iter_info,
             mdb_raw_data=root2ngh_mfg,
             batch_node_state_io=batch_node_state_io,
+            n_src=src.shape[0],
         )
 
         self.meta_in_q.put(meta)

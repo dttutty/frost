@@ -304,8 +304,8 @@ class Host:
 
         unique_nodes = compute_whats_need_by_gpu(blockss[0])
         meta = Meta(
-            all_nodes=all_nodes,
-            root_nodes=root_nodes,
+            uniq_all=all_nodes,
+            uniq_root=root_nodes,
                         gnn_mfgs_raw=gnn_mfgs_raw,=blockss,
             mini_bid=self.curr_minibatch_id,
             macro_bid=self.curr_minibatch_id // self.env.n_gpu,

@@ -71,20 +71,18 @@ def run_training_step(
     )
     curr_cpu_to_gpu_thread.start()
     if prev_cpu_to_gpu_thread is not None:
-        prev_cpu_to_gpu_thread, tot_loss, prev_mailbox_mem_updater = (
-            train_from_prefetch(
-                dedup,
-                prev_cpu_to_gpu_thread,
-                mailbox,
-                model,
-                optimizer,
-                creterion,
-                edge_feats,
-                tot_loss,
-                curr_cpu_to_gpu_thread,
-                memory_param,
-                nccl_group,
-            )
+        prev_cpu_to_gpu_thread, tot_loss, prev_mailbox_mem_updater = train_from_fetch(
+            dedup,
+            prev_cpu_to_gpu_thread,
+            mailbox,
+            model,
+            optimizer,
+            creterion,
+            edge_feats,
+            tot_loss,
+            curr_cpu_to_gpu_thread,
+            memory_param,
+            nccl_group,
         )
     else:
         prev_cpu_to_gpu_thread = curr_cpu_to_gpu_thread
@@ -92,7 +90,7 @@ def run_training_step(
     return prev_cpu_to_gpu_thread, tot_loss, prev_mailbox_mem_updater
 
 
-def train_from_prefetch(
+def train_from_fetch(
     is_dedup,
     cpu_to_gpu_thread: H2D,
     memory_mailbox: MemoryMailbox,
@@ -162,7 +160,7 @@ def run_evaluation_step(
     nccl_group,
 ):
     if isinstance(prev_cup_to_gpu_thread, H2D):
-        prev_cup_to_gpu_thread, _ = train_from_prefetch(
+        prev_cup_to_gpu_thread, _ = train_from_fetch(
             dedup,
             prev_cup_to_gpu_thread,
             model,

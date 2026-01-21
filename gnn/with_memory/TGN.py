@@ -6,8 +6,8 @@ import torch
 from dgl.heterograph import DGLBlock
 
 from gnn.components import TemporalGraphAttentionLayer
-from schemas.datatypes import DGLBlockMeta
-from schemas.plan import BatchNodeStateIO
+from schemas.datatypes.misc import DGLBlockMeta
+from schemas.datatypes.plan import BatchNodeStateIO
 
 
 class TGN(torch.nn.Module):

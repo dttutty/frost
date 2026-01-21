@@ -2,13 +2,11 @@ import os
 import threading
 import traceback
 from queue import Queue
-from typing import List, Set, Tuple
+from typing import List, Set
 
 import numpy as np
 
-from schemas import Plan
-
-from ..meta_batcher import MetaBundle
+from schemas.datatypes.plan import StPlan
 
 
 class StaticPlanner(threading.Thread):
@@ -16,14 +14,14 @@ class StaticPlanner(threading.Thread):
     这个是对那种mailbox_update=mem_update的planner
     """
 
-    gpus_distance: np.ndarray
     n_gpus: int
+    pending_needs: List[Set[int] | None] | None
 
     def __init__(
         self,
         gpus_distance: np.ndarray,
-        in_q: Queue[MetaBundle | None],
-        out_q: Queue[Tuple[MetaBundle, List[Plan]] | None],
+        in_q: Queue[List[Set[int] | None] | None],
+        out_q: Queue[StPlan | None] | None,
         stop_ev: threading.Event,
     ):
         """
@@ -39,7 +37,7 @@ class StaticPlanner(threading.Thread):
         self.in_q = in_q
         self.out_q = out_q
         self.stop_ev = stop_ev
-        self.pending_infos = None
+        self.pending_needs = None
 
     def run(self):
         try:
@@ -52,81 +50,46 @@ class StaticPlanner(threading.Thread):
             os._exit(1)
 
     def logic(self):
-        new_infos = self.in_q.get(block=True)
-        if new_infos is not None:
-            if self.pending_infos is None:
-                current_needs, _ = new_infos
-                self.pending_infos = new_infos
-                self.prefetch = current_needs
+        needs = self.in_q.get(block=True)
+        if needs is not None:
+            if self.pending_needs is None:
+                self.pending_needs = needs
+                self.fetchs = needs
             else:
-                current_needs = self.pending_infos
-                next_needs, _ = new_infos
-                plan = self._plan(current_needs, next_needs)
+                avails = self.pending_needs
+                plan = self._plan(avails, needs)
 
                 self.out_q.put(plan)
-                self.pending_infos = new_infos
+                self.pending_needs = needs
 
-        elif new_infos is None:
-            assert self.pending_infos is not None
-            current_needs = self.pending_infos
+        elif needs is None:
+            assert self.pending_needs is not None
+            avails = self.pending_needs
             # 没有下一个 batch 了，next_needs 为空
             next_needs = [set() for _ in range(self.n_gpus)]
 
-            plan = self._plan(current_needs, next_needs)
+            plan = self._plan(avails, next_needs)
             self.out_q.put(plan)
-            self.pending_infos = None
+            self.pending_needs = None
 
     def _plan(
         self,
         avails: List[Set[int]],
         needs: List[Set[int]],
-    ) -> List[Plan]:
+    ) -> List[StPlan]:
         """规划内存（Memory）的P2P、CPU预取和CPU写回。"""
 
-        update_avails, all_update_avails = dedup_updates(
-            update_avails,
-            reverse=True,
-        )
-
         n_gpus = self.n_gpus
-
-        # === 解决痛点 2：中间结果存入 self ===
-        leftovers, fresh_p2p, fresh_p2p_cts = handle_update(needs, update_avails)
-
-        # 1. 预处理：确定每个 GPU 实际持有的 "Stale" 数据
-        # 如果提供了 fresh 集合，必须从持有列表中排除它们（因为 fresh 优先用于 fresh plan）
-        avails = [avail - all_update_avails for avail in avails]
-        needs = [need - all_update_avails for need in needs]
-
-        needs, stale_p2p, stale_p2p_cts = handle_remaining(
-            needs,  # <-- 从 self 读取
-            avails,
-            self.gpus_distance,
-        )  # 这种没有新mem的节点,直接发送旧的mem就可以(由distance最近的发)
-
+        next_fetchs = [set() for _ in range(n_gpus)]
         plans = []
-        p2p = [[set() for _ in range(n_gpus)] for _ in range(n_gpus)]
 
-        prefetch = self.prefetch
-        self.prefetch = needs
-
-        for src in range(n_gpus):
-            for dst in range(n_gpus):
-                intersection = fresh_p2p[src][dst] & stale_p2p[src][dst]
-                assert len(intersection) == 0, (
-                    "Fresh and Stale P2P sets should be disjoint."
-                )
-                p2p[src][dst] = fresh_p2p[src][dst] | stale_p2p[src][dst]
-
-            rec_cts = fresh_p2p_cts[:, src] + stale_p2p_cts[:, src]
-            send_cts = fresh_p2p_cts[src, :] + stale_p2p_cts[src, :]
-
-            plan = Plan(
-                p2p=p2p[src],
-                prefetch=prefetch[src],
-                writeback=leftovers[src],
-                rec_cts=rec_cts,  # 两个长度相等,可以逐位相加
-                send_cts=send_cts,  # 两个长度相等,可以逐位相加
+        for n in range(n_gpus):
+            to_cache = avails[n] & needs[n]
+            plan = StPlan(
+                to_cache=to_cache,
+                fetch=self.fetchs[n],
             )
+            next_fetchs[n] = needs[n] - avails[n]
             plans.append(plan)
+        self.fetchs = next_fetchs
         return plans

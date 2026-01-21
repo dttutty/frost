@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from dgl.heterograph import DGLBlock
 
 from gnn.components import TimeEncode
+from schemas.datatypes.misc import Roots
 
 
 class MemoryUpdater(torch.nn.Module):
@@ -86,7 +87,7 @@ class TransformerMemoryUpdater(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.att_dropout = nn.Dropout(att_dropout)
 
-    def forward(self, block: DGLBlock):
+    def forward(self, root_info: Roots):
         """
         block: DGL MFG (Message Flow Graph)
         Requires block.srcdata to have:
@@ -95,12 +96,12 @@ class TransformerMemoryUpdater(nn.Module):
             - 'ts': Current time [N]
             - 'box_ts': Mailbox timestamps [N, mailbox_size]
         """
-        mem: torch.Tensor = block.srcdata["mem"]
-        ts: torch.Tensor = block.srcdata["ts"]
-        box: torch.Tensor = block.srcdata["box"]
-        box_ts: torch.Tensor = block.srcdata["box_ts"]
+        ts = root_info.ts  # [N]
+        mem = root_info.mem  # [N, dim_mem]
+        box = root_info.box  # [N, L, dim_mail]
+        box_ts = root_info.box_ts  # [N, L]
 
-        batch_size = block.num_src_nodes()
+        batch_size = mem.size(0)
 
         # 1. Compute Query (from current Memory)
         # [N, H, D_head] D_head = dim_mem / heads
@@ -140,6 +141,5 @@ class TransformerMemoryUpdater(nn.Module):
         rst = F.relu(rst)
 
         # Update block for downstream
-        block.srcdata["updated_mem"] = rst
 
         return rst

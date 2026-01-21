@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from dgl.heterograph import DGLBlock
 
 from gnn.components import TimeEncode
-from schemas.datatypes import MemoryCFG
+from schemas.datatypes.cfg import MemoryCFG
 
 
 class BasicMemoryUpdater(torch.nn.Module):

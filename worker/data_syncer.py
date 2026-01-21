@@ -6,17 +6,15 @@ import torch
 from numpy.typing import NDArray
 from torch_scatter import scatter_sum
 
-from schemas.datatypes import (
+from schemas.datatypes.cfg import Config
+from schemas.datatypes.data_to_sync import BoxTsNid, MailTsNid, MemTsNid
+from schemas.datatypes.env import Env
+from schemas.datatypes.misc import Shared
+from schemas.datatypes.task import (
     BoxTask,
-    BoxTsNid,
-    Config,
-    Env,
     GatherElement,
-    MailTsNid,
     MemTask,
-    MemTsNid,
     P2PTask,
-    Shared,
     SyncTask,
 )
 
@@ -382,61 +380,65 @@ class DataSyncer(threading.Thread):
                 self.h2d_sem.release()
 
     @torch.no_grad()
+    def logic(self):
+        task: SyncTask = self.sync_q.get(block=True)
+        self.work_handles = []
+        (
+            macro_bid,
+            plan_set,
+            root_new_mem,
+            x,
+            mail_delivery_tensor,
+            is_last,
+            ready_event,
+        ) = (
+            task.macro_bid,
+            task.plan_set,
+            task.root_new_mem,
+            task.x,
+            task.mail_delivery_tensor,
+            task.is_last,
+            task.ready_event,
+        )
+
+        torch.cuda.current_stream().wait_event(ready_event)
+        print(
+            "DataSyncer: ready_event received, processing delta",
+            macro_bid,
+        )
+
+        root_new_mem_orig = root_new_mem.clone()  # 这里的ts是交互发生的时间
+
+        assert x.mem is not None
+        assert x.box is not None
+        # handle mem sync
+        old_mem_ts_nid = x.mem
+        self.mem_task_q.put(
+            MemTask(
+                root_new_mem,
+                old_mem_ts_nid,
+                plan_set.mem,
+                is_last,
+            )
+        )
+        assert x.pos_efeat is not None
+        self.box_task_q.put(
+            BoxTask(
+                root_new_mem_orig,
+                x.pos_efeat,
+                macro_bid,
+                x.box,
+                plan_set.box,
+                is_last,
+                mail_delivery_tensor,
+            )
+        )
+
+    @torch.no_grad()
     def run(self):
         with torch.cuda.stream(self.stream):
             while True:
-                task: SyncTask = self.sync_q.get(block=True)
-                self.work_handles = []
-                (
-                    macro_bid,
-                    plan_set,
-                    root_new_mem,
-                    x,
-                    mail_delivery_tensor,
-                    is_last,
-                    ready_event,
-                ) = (
-                    task.macro_bid,
-                    task.plan_set,
-                    task.root_new_mem,
-                    task.x,
-                    task.mail_delivery_tensor,
-                    task.is_last,
-                    task.ready_event,
-                )
-
-                torch.cuda.current_stream().wait_event(ready_event)
-                print(
-                    "DataSyncer: ready_event received, processing delta",
-                    macro_bid,
-                )
-
-                root_new_mem_orig = root_new_mem.clone()  # 这里的ts是交互发生的时间
-
-                assert x.mem is not None
-                assert x.box is not None
-                # handle mem sync
-                old_mem_ts_nid = x.mem
-                self.mem_task_q.put(
-                    MemTask(
-                        root_new_mem,
-                        old_mem_ts_nid,
-                        plan_set.mem,
-                        is_last,
-                    )
-                )
-                assert x.pos_efeat is not None
-                self.box_task_q.put(
-                    BoxTask(
-                        root_new_mem_orig,
-                        x.pos_efeat,
-                        macro_bid,
-                        x.box,
-                        plan_set.box,
-                        is_last,
-                        mail_delivery_tensor,
-                    )
-                )
+                self.logic()
 
     def p2p(
         self,

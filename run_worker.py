@@ -35,7 +35,7 @@ from schemas import (
     TensorPlanSet,
     X,
 )
-from worker.assembler import Assembler
+from worker.dy_assembler import DyAssembler
 from worker.data_syncer import DataSyncer
 from worker.h2d import H2D
 from worker.receiver import HostWorkerSyncer as Receiver
@@ -109,7 +109,7 @@ class Worker:
         self.gloo = gloo
         self.curr_epoch = -1
         self.logger = _setup_logger(self.env.local_rank)
-        self.prefetch_factor = 1
+        self.fetch_factor = 1
         self.cmd_q = queue.Queue()
 
         if self.cfg.m is not None:
@@ -133,7 +133,7 @@ class Worker:
                 mem_p2p_q=self.mem_p2p_q,
                 box_p2p_q=self.box_p2p_q,
             )
-            self.assembler = Assembler(
+            self.assembler = DyAssembler(
                 xpart_q=self.xpart_q,
                 delta_q=self.delta_q,
                 xfull_q=self.xfull_q,

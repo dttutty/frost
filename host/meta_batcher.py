@@ -2,14 +2,11 @@ import os
 import threading
 import traceback  # 记得导入
 from queue import Queue
-from typing import List, TypeAlias
 
 import torch.distributed as dist
 
-from schemas.datatypes import Meta
-
-
-MetaBundle: TypeAlias = List[Meta]
+from schemas.alias import MetaBundle
+from schemas.datatypes.misc import Meta
 
 
 class MetaBatcher(threading.Thread):
@@ -26,17 +23,20 @@ class MetaBatcher(threading.Thread):
         self.out_q = out_q
         self.stop_ev = stop_ev
 
+    def logic(self):
+        meta_list = []
+        while len(meta_list) < self.n_gpus:
+            meta = self.in_q.get(block=True)
+            if meta is None:
+                self.out_q.put(None)
+            else:
+                meta_list.append(meta)
+        self.out_q.put(meta_list)
+
     def run(self):
         try:
             while not self.stop_ev.is_set():
-                meta_list = []
-                while len(meta_list) < self.n_gpus:
-                    meta = self.in_q.get(block=True)
-                    if meta is None:
-                        self.out_q.put(None)
-                    else:
-                        meta_list.append(meta)
-                self.out_q.put(meta_list)
+                self.logic()
 
         except Exception:
             print(f"!!! Assembler Thread Crashed on Rank {dist.get_rank()} !!!")

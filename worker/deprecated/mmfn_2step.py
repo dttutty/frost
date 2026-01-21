@@ -5,7 +5,7 @@ from typing import Callable, Dict, List
 import torch
 from torch_scatter import scatter_max
 
-from schemas.datatypes import MemTsNid
+from schemas.datatypes.misc import MemTsNid
 from worker.h2d import Meta
 
 

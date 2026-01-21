@@ -57314,7 +57314,7 @@
     {
       "ph": "X",
       "cat": "python_function",
-      "name": "worker.py(92): train_from_prefetch",
+      "name": "worker.py(92): train_from_fetch",
       "pid": 87155,
       "tid": 87155,
       "ts": 1756492826831444,

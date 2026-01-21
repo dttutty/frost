@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 from dgl.heterograph import DGLBlock
 
-from schemas.datatypes import DGLBlockMeta, SampleReturn
-from schemas.plan import BatchNodeStateIO
+from schemas.datatypes.misc import DGLBlockMeta, SampleReturn
+from schemas.datatypes.plan import BatchNodeStateIO
 from utils import extract_raw_data
 
 

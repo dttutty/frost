@@ -3,7 +3,9 @@ from queue import Queue
 import torch
 import torch.nn as nn
 
-from schemas.datatypes import ForwardCtx, MemTsNid, SyncTask
+from schemas.datatypes.data_to_sync import MemTsNid
+from schemas.datatypes.misc import ForwardCtx
+from schemas.datatypes.task import SyncTask
 
 
 class MemoryBaseGNN(nn.Module):
@@ -21,23 +23,32 @@ class MemoryBaseGNN(nn.Module):
         self.predictor = predictor
 
     def forward(self, ctx: ForwardCtx):
-        self._maybe_sync_memory(ctx=ctx)
+        self._sync_memory(ctx=ctx)
         h = self.gnn(ctx.blockss)
         return self.predictor(h)
 
     @torch.no_grad()
-    def _maybe_sync_memory(self, *, ctx: ForwardCtx):
+    def _sync_memory(self, *, ctx: ForwardCtx):
         block = ctx.blockss[0][0]
-        updated_mem = self.memory_updater(block=block)
+        if block is not None:
+            updated_mem = self.memory_updater(block)
+            ts = block.srcdata["ts"]
+            nid = block.srcdata["ID"]
 
-        ts = block.srcdata["ts"]
-        nid = block.srcdata["ID"]
+            root_new_mem = MemTsNid(
+                ts=ts[: ctx.n_root_src_n_pos_dst],
+                data=updated_mem[: ctx.n_root_src_n_pos_dst],
+                id=nid[: ctx.n_root_src_n_pos_dst],
+            )
 
-        root_new_mem = MemTsNid(
-            ts=ts[: ctx.n_root_src_n_pos_dst],
-            data=updated_mem[: ctx.n_root_src_n_pos_dst],
-            id=nid[: ctx.n_root_src_n_pos_dst],
-        )
+        else:
+            assert ctx.root_info is not None
+            updated_mem = self.memory_updater(root_info=ctx.root_info)
+            root_new_mem = MemTsNid(
+                ts=ctx.root_info.ts[: ctx.n_root_src_n_pos_dst],
+                data=updated_mem[: ctx.n_root_src_n_pos_dst],
+                id=ctx.root_info.nid[: ctx.n_root_src_n_pos_dst],
+            )
 
         ready_event = torch.cuda.Event()
         ready_event.record(torch.cuda.current_stream())

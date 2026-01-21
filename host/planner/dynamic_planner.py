@@ -6,7 +6,7 @@ from typing import List, Set, Tuple
 
 import numpy as np
 
-from schemas import Plan
+from schemas import DyPlan
 
 from ..meta_batcher import MetaBundle
 
@@ -167,7 +167,7 @@ class DynamicPlanner(threading.Thread):
         self,
         gpus_distance: np.ndarray,
         in_q: Queue[MetaBundle | None],
-        out_q: Queue[Tuple[MetaBundle, List[Plan]] | None],
+        out_q: Queue[Tuple[MetaBundle, List[DyPlan]] | None],
         stop_ev: threading.Event,
     ):
         """
@@ -201,7 +201,7 @@ class DynamicPlanner(threading.Thread):
             if self.pending_infos is None:
                 current_needs, _ = new_infos
                 self.pending_infos = new_infos
-                self.prefetch = current_needs
+                self.fetch = current_needs
             else:
                 current_needs, current_updates = self.pending_infos
                 next_needs, _ = new_infos
@@ -225,7 +225,7 @@ class DynamicPlanner(threading.Thread):
         avails: List[Set[int]],
         update_avails: List[Set[int]],
         needs: List[Set[int]],
-    ) -> List[Plan]:
+    ) -> List[DyPlan]:
         """规划内存（Memory）的P2P、CPU预取和CPU写回。"""
 
         update_avails, all_update_avails = dedup_updates(
@@ -252,8 +252,8 @@ class DynamicPlanner(threading.Thread):
         plans = []
         p2p = [[set() for _ in range(n_gpus)] for _ in range(n_gpus)]
 
-        prefetch = self.prefetch
-        self.prefetch = needs
+        fetch = self.fetch
+        self.fetch = needs
 
         for src in range(n_gpus):
             for dst in range(n_gpus):
@@ -266,9 +266,9 @@ class DynamicPlanner(threading.Thread):
             rec_cts = fresh_p2p_cts[:, src] + stale_p2p_cts[:, src]
             send_cts = fresh_p2p_cts[src, :] + stale_p2p_cts[src, :]
 
-            plan = Plan(
+            plan = DyPlan(
                 p2p=p2p[src],
-                prefetch=prefetch[src],
+                fetch=fetch[src],
                 writeback=leftovers[src],
                 rec_cts=rec_cts,  # 两个长度相等,可以逐位相加
                 send_cts=send_cts,  # 两个长度相等,可以逐位相加

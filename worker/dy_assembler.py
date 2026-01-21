@@ -7,10 +7,15 @@ import torch
 import torch.distributed as dist
 from dgl.heterograph import DGLBlock
 
-from schemas.datatypes import Delta, X
+from schemas.datatypes.data_to_sync import Delta
+from schemas.datatypes.misc import RootX, X
 
 
-class Assembler(threading.Thread):
+class DyAssembler(threading.Thread):
+    """
+    动态数据组装器线程，将分块数据和增量数据合并，并填充到 DGL Block 中。
+    """
+
     def __init__(
         self,
         xpart_q: queue.Queue[X],
@@ -53,24 +58,42 @@ class Assembler(threading.Thread):
             block.srcdata["box"] = x.box.data[permute_nidx]
             block.srcdata["box_ts"] = x.box.ts[permute_nidx]
 
+    def fill_root_x(self, root_info, x: X) -> RootX:
+        assert x.is_sorted  # make sure x.nid is sorted
+        global_nid: torch.Tensor = root_info.nid
+        permute_nidx = torch.searchsorted(x.nid, global_nid)
+        root_x = RootX()
+        if x.mem is not None:
+            root_x.mem = x.mem.data[permute_nidx]
+            root_x.mem_ts = x.mem.ts[permute_nidx]
+        if x.box is not None:
+            root_x.box = x.box.data[permute_nidx]
+            root_x.box_ts = x.box.ts[permute_nidx]
+
+        return root_x
+
+    def logic(self):
+        meta, x_part, plan_set, ready_event = self.xpart_q.get(block=True)
+
+        delta = self.delta_q.get(block=True)
+
+        torch.cuda.current_stream().wait_event(ready_event)
+
+        x_full = self._assemble_dy_data(x_part, delta)  # 你的 _assemble_dy_data
+        sorted_x = x_full.sort_by_nid()  # 你的 sort
+        if meta.gnn_mfgs is not None:
+            for block in meta.gnn_mfgs[0]:
+                self.fill_block(block, sorted_x)
+        else:
+            meta.root_x = self.fill_root_x(meta.root_info, sorted_x)
+        # 3) 把结果交给主线程（主线程取时再 wait_stream）
+        self.xfull_q.put((meta, plan_set, sorted_x, self.stream), block=True)
+
     def run(self):
         try:  # 【新增】包裹整个 run 逻辑
             with torch.cuda.stream(self.stream), torch.no_grad():
                 while not self.stop_ev.is_set():
-                    meta, x_part, plan_set, ready_event = self.xpart_q.get(block=True)
-
-                    delta = self.delta_q.get(block=True)
-
-                    torch.cuda.current_stream().wait_event(ready_event)
-
-                    x_full = self._assemble_data(x_part, delta)  # 你的 _assemble_data
-                    sorted_x = x_full.sort_by_nid()  # 你的 sort
-                    for block in meta.blockss[0]:
-                        self.fill_block(block, sorted_x)
-                    # 3) 把结果交给主线程（主线程取时再 wait_stream）
-                    self.xfull_q.put(
-                        (meta, plan_set, sorted_x, self.stream), block=True
-                    )
+                    self.logic()
         except Exception:
             print(f"!!! Assembler Thread Crashed on Rank {dist.get_rank()} !!!")
             traceback.print_exc()
@@ -78,7 +101,7 @@ class Assembler(threading.Thread):
             os._exit(1)
 
     @staticmethod
-    def _assemble_data(x: X, delta: Delta | None) -> X:
+    def _assemble_dy_data(x: X, delta: Delta | None) -> X:
         if delta is None:
             return x
 

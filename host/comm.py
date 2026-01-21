@@ -3,7 +3,8 @@ from typing import Any, List
 import torch
 import torch.distributed as dist
 
-from schemas.datatypes import Env, Meta
+from schemas.datatypes.env import Env
+from schemas.datatypes.misc import Meta
 
 
 class Distributor:

@@ -7,15 +7,18 @@ import torch
 import yaml
 from dgl.heterograph import DGLBlock
 
-# In utils.py
-from schemas.datatypes import (
+from schemas.datatypes.cfg import (
     GNNCFG,
     Config,
-    DGLBlockMeta,
-    ExtFullGraph,
     MemoryCFG,
     SampleCFG,
     TrainCFG,
+)
+
+# In utils.py
+from schemas.datatypes.misc import (
+    DGLBlockMeta,
+    ExtFullGraph,
 )
 
 

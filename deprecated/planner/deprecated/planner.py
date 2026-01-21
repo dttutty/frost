@@ -4,7 +4,8 @@ import numpy as np
 import torch
 from dgl.heterograph import DGLBlock
 
-from schemas.datatypes import Meta, Plan, PlanSet
+from schemas.datatypes.misc import Meta
+from schemas.datatypes.plan import DyPlan, PlanSet
 
 
 def _mail_delivery_tensor(
@@ -94,9 +95,9 @@ def stale_data_planer(
                 p2p_counts[s, r] = len(to_transfer)  # 记录 s 发给 r 的数量
 
     # 4. 此时 remaining_needs_by_gpu 里剩下的就是 P2P 搞不定的，只能去 CPU 拿
-    prefetch = remaining_needs_by_gpu
+    fetch = remaining_needs_by_gpu
 
-    return prefetch, p2p_plan, p2p_counts
+    return fetch, p2p_plan, p2p_counts
 
 
 def fresh_data_planner(
@@ -357,10 +358,10 @@ class Planner:
         self.has_memory_and_mailbox = has_memory_and_mailbox
         self.has_nfeat = has_nfeat
         self.has_efeat = has_efeat
-        self.mem_prefetch: List[Set[int]] = []
-        self.mail_prefetch: List[Set[int]] = []
-        self.nfeat_prefetch: List[Set[int]] = []
-        self.efeat_prefetch: List[Set[int]] = []
+        self.mem_fetch: List[Set[int]] = []
+        self.mail_fetch: List[Set[int]] = []
+        self.nfeat_fetch: List[Set[int]] = []
+        self.efeat_fetch: List[Set[int]] = []
 
     def _comp_need_nodes(
         self, td: Meta, deliver_to: Literal["self", "neighbors"] = "self"
@@ -417,10 +418,10 @@ class Planner:
         self.mailbox_update_set = None
         self.all_edge_set = None
         self.initialized = False
-        self.mem_prefetch = []
-        self.mail_prefetch = []
-        self.nfeat_prefetch = []
-        self.efeat_prefetch = []
+        self.mem_fetch = []
+        self.mail_fetch = []
+        self.nfeat_fetch = []
+        self.efeat_fetch = []
 
     def plan_next(
         self,
@@ -479,15 +480,15 @@ class Planner:
                 self.all_edge_set,
             ) = comp_needs_4_one_macrobatch(meta_list[:ngpus], deliver_to)
 
-            self.mem_prefetch.extend(self.all_node_set)
+            self.mem_fetch.extend(self.all_node_set)
             if self.has_memory_and_mailbox:
                 assert self.mem_update_set is not None
                 assert self.mailbox_update_set is not None
-                self.mail_prefetch.extend(self.all_node_set)
-                self.nfeat_prefetch.extend(self.all_node_set)
+                self.mail_fetch.extend(self.all_node_set)
+                self.nfeat_fetch.extend(self.all_node_set)
             if self.has_efeat:
                 assert self.all_edge_set is not None
-                self.efeat_prefetch.extend(self.all_edge_set)
+                self.efeat_fetch.extend(self.all_edge_set)
 
         # --- 2. Plan for the next step ---
         next_uniq_all_nodes = []
@@ -531,8 +532,8 @@ class Planner:
             batch.plan_set = PlanSet(
                 box=box_plan[b_id] if self.has_memory_and_mailbox else None,
                 mem=mem_plan[b_id] if self.has_memory_and_mailbox else None,
-                nfeat_prefetch=nfeat_plan[b_id] if self.has_nfeat else None,
-                efeat_prefetch=efeat_plan[b_id] if self.has_efeat else None,
+                nfeat_fetch=nfeat_plan[b_id] if self.has_nfeat else None,
+                efeat_fetch=efeat_plan[b_id] if self.has_efeat else None,
             )
 
             batch.plan_set = batch.plan_set.tensorfy()
@@ -626,16 +627,16 @@ class Planner:
             next_all_nodes, update_nodes, all_ranks_fresh_nodes
         )
 
-        prefetch, stale_p2p, p2p_counts = stale_data_planer(
+        fetch, stale_p2p, p2p_counts = stale_data_planer(
             all_nodes,
             stale_needs,  # <-- 从 self 读取
             self.gpus_distance,
             all_ranks_fresh_nodes,  # <-- 从 self 读取
         )  # 这种没有新mem的节点,直接发送旧的mem就可以(由distance最近的发)
         if mem_or_mail == "memory":
-            self.mem_prefetch.extend(prefetch)
+            self.mem_fetch.extend(fetch)
         else:
-            self.mail_prefetch.extend(prefetch)
+            self.mail_fetch.extend(fetch)
         plans = []
         for src_gpu in range(self.n_gpus):
             p2p = [set() for _ in range(self.n_gpus)]
@@ -646,9 +647,9 @@ class Planner:
                 )
                 p2p[dst_gpu] = fresh_p2p[src_gpu][dst_gpu] | stale_p2p[src_gpu][dst_gpu]
             if mem_or_mail == "memory":
-                this_batch_prefetch = self.mem_prefetch.pop(0)
+                this_batch_fetch = self.mem_fetch.pop(0)
             elif mem_or_mail == "mail":
-                this_batch_prefetch = self.mail_prefetch.pop(0)
+                this_batch_fetch = self.mail_fetch.pop(0)
             else:
                 raise ValueError(f"Unknown mem_or_mail: {mem_or_mail}")
             current_rec_cts = fresh_p2p_counts[:, src_gpu] + p2p_counts[:, src_gpu]
@@ -679,7 +680,7 @@ class Planner:
                     )
             plan = Plan(
                 p2p=p2p,
-                prefetch=this_batch_prefetch,
+                fetch=this_batch_fetch,
                 writeback=leftovers[src_gpu],
                 rec_cts=current_rec_cts,  # 两个长度相等,可以逐位相加
                 send_cts=current_send_cts,  # 两个长度相等,可以逐位相加
@@ -692,20 +693,20 @@ class Planner:
     #     assert self.all_node_set is not None
 
     #     # 特征没有“新鲜”概念，只有“陈旧” P2P 和 CPU 预取
-    #     prefetch, stale_p2p, p2p_counts = stale_data_planer(
+    #     fetch, stale_p2p, p2p_counts = stale_data_planer(
     #         self.all_node_set,  # 持有者：所有 this_batch 需要的节点
     #         next_all_s,  # 需求者：所有 next_batch 需要的节点
     #         self.gpus_distance,
     #         all_fresh=None,  # 关键：没有 fresh 节点
     #     )
-    #     self.nfeat_prefetch.extend(prefetch)
+    #     self.nfeat_fetch.extend(fetch)
     #     plans = []
     #     for gpu_id in range(self.n_gpus):
     #         # self.plan_set_s[gpu_id].feat_plan = Plan(
     #         plans.append(
     #             Plan(
     #                 p2p=stale_p2p[gpu_id],
-    #                 prefetch=self.nfeat_prefetch.pop(0),
+    #                 fetch=self.nfeat_fetch.pop(0),
     #                 rec_cts=p2p_counts[:, gpu_id],
     #                 send_cts=p2p_counts[gpu_id, :],
     #             )
@@ -716,21 +717,21 @@ class Planner:
     #     """规划边特征（Edge Features）的传输。"""
     #     assert self.all_edge_set is not None
     #     # 边特征没有“新鲜”概念，只有“陈旧” P2P 和 CPU 预取
-    #     prefetch, stale_p2p, p2p_counts = stale_data_planer(
+    #     fetch, stale_p2p, p2p_counts = stale_data_planer(
     #         self.all_edge_set,  # 持有者：所有 this_batch 需要的节点
     #         next_all_edge_set,  # 需求者：所有 next_batch 需要的节点
     #         self.gpus_distance,
     #         all_fresh=None,  # 关键：没有 fresh 节点
     #     )
 
-    #     self.efeat_prefetch.extend(prefetch)
+    #     self.efeat_fetch.extend(fetch)
     #     plans = []
     #     for gpu_id in range(self.n_gpus):
     #         # self.plan_set_s[gpu_id].feat_plan = Plan(
     #         plans.append(
     #             Plan(
     #                 p2p=stale_p2p[gpu_id],
-    #                 prefetch=self.efeat_prefetch.pop(0),
+    #                 fetch=self.efeat_fetch.pop(0),
     #                 rec_cts=p2p_counts[:, gpu_id],
     #                 send_cts=p2p_counts[gpu_id, :],
     #             )

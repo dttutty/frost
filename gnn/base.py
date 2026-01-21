@@ -13,7 +13,10 @@ from gnn.components import (
     IdentityNormLayer,
     TransfomerAttentionLayer,
 )
-from schemas.datatypes import Config, MemTsNid, Meta, PlanSet, X
+from schemas.datatypes.cfg import Config
+from schemas.datatypes.data_to_sync import MemTsNid
+from schemas.datatypes.misc import Meta, X
+from schemas.datatypes.plan import PlanSet
 from worker.data_syncer import DataSyncer
 
 

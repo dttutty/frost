@@ -2,17 +2,13 @@ import os
 import threading
 import traceback
 from queue import Queue
-from typing import List, Set, TypeAlias, Union
+from typing import List, Set, Union
 
 import numpy as np
 
 from host.planner.dynamic_planner import DynamicPlanner
-from schemas.plan import BatchNodeStateIO, Plan
-
-from ..meta_batcher import MetaBundle
-
-
-PlanBundle: TypeAlias = List[Plan]
+from schemas.alias import MetaBundle, PlanBundle
+from schemas.datatypes.plan import BatchNodeStateIO
 
 
 def find_all_gpu_distances_list(gpus_groups: list) -> np.ndarray:

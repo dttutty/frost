@@ -6,7 +6,10 @@ import torch.nn.functional as F
 from dgl.heterograph import DGLBlock
 
 from gnn.components import EdgePredictor, TimeEncode
-from schemas.datatypes import CudaPlanSet, MemTsNid, SyncTask, X
+from schemas.datatypes.data_to_sync import MemTsNid
+from schemas.datatypes.misc import X
+from schemas.datatypes.plan import TensorPlanSet
+from schemas.datatypes.task import SyncTask
 
 
 class APANMemoryTransformer(nn.Module):
@@ -181,7 +184,7 @@ class APAN(nn.Module):
         n_root_src_n_pos_dst: int,
         mdt: torch.Tensor,
         x: X,
-        plan_set: CudaPlanSet,
+        plan_set: TensorPlanSet,
         neg_samples=1,
         is_last: bool = False,
     ):

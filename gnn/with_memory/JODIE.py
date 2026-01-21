@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn as nn
 
-from schemas.plan import BatchNodeStateIO
+from schemas.datatypes.plan import BatchNodeStateIO
 
 from ..components import TimeEncode
 

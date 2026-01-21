@@ -1,6 +1,6 @@
 import torch.nn as nn
 
-from schemas.datatypes import ForwardCtx
+from schemas.datatypes.misc import ForwardCtx
 
 
 class GNN(nn.Module):
