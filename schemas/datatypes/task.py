@@ -8,7 +8,7 @@ from numpy.typing import NDArray
 from torch import Tensor
 
 from .data_to_sync import BoxTsNid, MemTsNid
-from .misc import X
+from .misc import DyX
 from .plan import TensorDyPlan, TensorPlanSet
 
 
@@ -52,7 +52,7 @@ class SyncTask:
     macro_bid: int
     plan_set: TensorPlanSet
     root_new_mem: MemTsNid
-    x: X
+    x: DyX
     mail_delivery_tensor: torch.Tensor | None
     is_last: bool
     ready_event: torch.cuda.Event

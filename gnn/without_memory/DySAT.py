@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 from dgl.heterograph import DGLBlock
 
+from gnn.sample_mixin import SampleMixin
+
 from ..components import EdgePredictor
 
 
@@ -147,7 +149,7 @@ class TemporalAttentionLayer(nn.Module):
         return self.w_out(last_out)
 
 
-class DySAT(nn.Module):
+class DySAT(nn.Module, SampleMixin):
     """
     DySAT: Structural GAT + Temporal Self-Attention.
     """

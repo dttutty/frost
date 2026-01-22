@@ -18,7 +18,7 @@ from host.planner.dynamic_planner import (
 )
 from sampler import NegLinkSampler, create_sampler
 from schemas import Config, Env, Meta
-from utils import analyze_blocks, extract_raw_data
+from utils import analyze_need, extract_raw_data
 
 
 class Host:
@@ -283,7 +283,7 @@ class Host:
         unique_nodes = None
         if self.cfg.g.arch != "identity":
             blockss = extract_raw_data(ret)
-            all_nodes, root_nodes = analyze_blocks(blockss, self.cfg.s.history)
+            all_nodes, root_nodes = analyze_need(blockss, self.cfg.s.history)
             root_nodes_for_verify = set(roots.numpy().tolist())
             assert root_nodes == root_nodes_for_verify, (
                 "Sampled root nodes do not match the expected root nodes."

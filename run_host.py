@@ -2,7 +2,7 @@ import math
 import threading
 import time
 from queue import Queue  # 这是给多线程用的
-from typing import List, Literal
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -19,13 +19,11 @@ from schemas.alias import MetaBundleWithoutPlan, MetaBundleWithPlan
 from schemas.datatypes.cfg import Config, SampleCFG
 from schemas.datatypes.env import Env
 from schemas.datatypes.misc import (
-    DGLBlockMeta,
     EpochSplitIterInfo,
     ExtFullGraph,
     Meta,
-    Roots,
+    SampleReturn,
 )
-from utils import analyze_blocks, extract_raw_data
 
 
 class Host:
@@ -44,6 +42,7 @@ class Host:
         env: Env,
         start_time: float,
         gloo,
+        gnn,
     ):
         """
         initialize the host with configuration, graph data, edge dataframe, and environment settings
@@ -54,6 +53,7 @@ class Host:
         self.has_mem = cfg.m is not None
         self.n_gpu = env.n_gpu
         self.batch_size = cfg.t.batch_size  # tcfg 会在 run_epoch 中被修改，所以拷贝一份
+        self.gnn = gnn
 
         # 1. 初始化通信器
 
@@ -186,12 +186,10 @@ class Host:
         target_batch_size = int(target_batch_size)  # <--- add
         # This is to ensure the total number of training iterations is an integer multiple of the number of GPUs
         # eg: num_samples = 13345, target_batch_size = 1000, n_gpu = 4
-        approx_iterations = (
-            num_samples // target_batch_size
-        )  # approximate number of iterations, 13
-        nbatch_per_gpu = max(
-            approx_iterations // n_gpu, 1
-        )  # The approximate number of batches that each GPU needs to process, 3
+        approx_iterations = num_samples // target_batch_size
+        # approximate number of iterations, 13
+        nbatch_per_gpu = max(approx_iterations // n_gpu, 1)
+        # The approximate number of batches that each GPU needs to process, 3
         iteration_total = nbatch_per_gpu * n_gpu  # total batches, 12
         adjusted_batch_size = math.ceil(num_samples / iteration_total)  # 1113
         return iteration_total, adjusted_batch_size
@@ -244,66 +242,33 @@ class Host:
         self.curr_mini_of_epoch = 0
         self.curr_epoch += 1
 
-    def _sample(
-        self, ngh_sampler, roots: torch.Tensor, ts: torch.Tensor, sample_history: int
-    ) -> tuple[List[DGLBlockMeta], set, set]:
-        ts_np = ts.numpy()
-        roots_np = roots.numpy()
-        ngh_sampler.sample(roots_np, ts_np)
-        ret = ngh_sampler.get_ret()
-        gnn_mfgs_raw = extract_raw_data(ret)
-        all_nodes, root_nodes = analyze_blocks(gnn_mfgs_raw, sample_history)
-        root_nodes_for_verify = set(roots.numpy().tolist())
-        assert root_nodes == root_nodes_for_verify, (
-            "Sampled root nodes do not match the expected root nodes."
-        )
-        return gnn_mfgs_raw, all_nodes, root_nodes
-
     def _add_to_td_list(
         self, edges: pd.DataFrame, epoch_split_iter_info: EpochSplitIterInfo
     ):
         src = torch.as_tensor(edges.src.values, dtype=torch.long)
         dst = torch.as_tensor(edges.dst.values, dtype=torch.long)
-        edge_ts = torch.as_tensor(edges.time.values, dtype=torch.long)
+        ts = torch.as_tensor(edges.time.values, dtype=torch.long)
 
         # sample neg destination nodes
         neg_dst = self.neg_sampler.sample(src, dst)
 
-        # combine all together
-        roots = torch.cat([src, dst, neg_dst])
-        ts = torch.cat([edge_ts, edge_ts, edge_ts])
-
         # handle different model types
-        batch_node_state_io = None
-        gnn_mfgs_raw = None
-        root2ngh_mfg = None
-        if self.model_name == "JODIE":
-            # for APAN and JODIE
-            all_nodes = root_nodes = set(roots.numpy().tolist())
-        elif self.model_name == "APAN":
-            from gnn.with_memory.APAN import APAN
-
-            root2ngh_mfg, batch_node_state_io = APAN.sample(
-                self.ngh_sampler, src, dst, neg_dst, edge_ts
-            )
+        if self.sample_history > 1:
+            sample_ret = self.gnn.sample(self.ngh_sampler, src, dst, neg_dst, ts)
         else:
-            assert self.model_name in ["DyGFormer", "GAT", "TGN", "DySAT"]
-            gnn_mfgs_raw, all_nodes, root_nodes = self._sample(
-                self.ngh_sampler, roots, ts, self.sample_history
+            sample_ret = self.gnn.sample(
+                self.ngh_sampler, src, dst, neg_dst, ts, self.sample_history
             )
 
-        root_info = Roots(
-            nid=roots,
-            ts=ts,
-        )
-
+        assert isinstance(sample_ret, SampleReturn), type(sample_ret)
         meta = Meta(
-            roots=root_info,
-            gnn_mfgs_raw=gnn_mfgs_raw,
+            root_nid=torch.cat([src, dst, neg_dst], dim=0),
+            root_ts=ts.repeat(3),
+            gnn_mfgs_raw=sample_ret.ngh2root_mfgs_raw,
             pos_edge_id=torch.as_tensor(edges.index.values, dtype=torch.long),
             epoch_split_iter_info=epoch_split_iter_info,
-            mdb_raw_data=root2ngh_mfg,
-            batch_node_state_io=batch_node_state_io,
+            mdb_raw_data=sample_ret.root2ngh_mfg_raw,
+            batch_node_state_io=sample_ret.batch_node_state_io,
             n_src=src.shape[0],
         )
 

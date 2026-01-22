@@ -2,9 +2,10 @@ import torch
 import torch.nn as nn
 
 from gnn.components import EdgePredictor, TemporalGraphAttentionLayer
+from gnn.sample_mixin import SampleMixin
 
 
-class DySAT_TGL(nn.Module):
+class DySAT_TGL(nn.Module, SampleMixin):
     """
     GCRN: Graph Convolutional Recurrent Network.
     Structure: [GAT -> GAT] (per snapshot) -> RNN (aggregate history)

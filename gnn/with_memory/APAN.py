@@ -47,9 +47,9 @@ class APAN(nn.Module):
         root_nodes.update(nodes[:num_roots].tolist())
         return all_nodes, root_nodes
 
-    @staticmethod
+    @classmethod
     def analyze_need(mdb, neg_dst):
-        mailbox_will_update_nodes, src_n_posdst = APAN.analyze_block(mdb)
+        mailbox_will_update_nodes, src_n_posdst = cls.analyze_block(mdb)
         neg_nodes = set(neg_dst.numpy().tolist())
         all_nodes = mailbox_will_update_nodes + neg_nodes
         root_nodes = src_n_posdst + neg_nodes
@@ -70,18 +70,17 @@ class APAN(nn.Module):
         ts: torch.Tensor,
     ):
         pos_root_np = torch.cat([src, dst]).numpy()
-        pos_ts_np = torch.cat([ts, ts]).numpy()
+        pos_ts_np = ts.repeat(2).numpy()
         ngh_sampler.sample(pos_root_np, pos_ts_np)
         ret = ngh_sampler.get_ret()
         root2ngh_mfg = extract_raw_data(ret)[0]
         batch_node_state_io = APAN.analyze_need(root2ngh_mfg, neg_dst)
-        return SampleReturn(
-            all_nodes=None,
-            root_nodes=None,
-            ngh2root_mfg=None,
-            root2ngh_mfg=root2ngh_mfg,
+        sample_ret = SampleReturn(
+            ngh2root_mfgs_raw=None,
+            root2ngh_mfg_raw=root2ngh_mfg,
             batch_node_state_io=batch_node_state_io,
         )
+        return sample_ret
 
     def forward(
         self,

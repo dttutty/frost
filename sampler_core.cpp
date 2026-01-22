@@ -27,7 +27,7 @@ public:
 
     // per-node (src-side list): length = dim_in
     std::vector<TimeStampType> ts;   // timestamp for each block-node
-    std::vector<TimeStampType> dts;  // delta time for each block-node (root nodes -> 0)
+    std::vector<TimeStampType> dts;  // DyX time for each block-node (root nodes -> 0)
     std::vector<NodeIDType> nodes;   // global node id for each block-node
 
     NodeIDType dim_in = 0;   // #src nodes in block

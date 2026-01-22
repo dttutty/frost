@@ -15,13 +15,12 @@ from dgl.utils.shared_mem import (
     get_shared_mem_array as gsm,
 )
 
+from gnn import APAN, JODIE, TGAT, TGN, DyGFormer, DySAT_TGL
+from gnn.components import EdgePredictor, TimeEncode
+from gnn.memory_updater import MemoryUpdater, TransformerMemoryUpdater
 from schemas.datatypes.env import Env
-from schemas.datatypes.misc import Shared
-from utils import (
-    load_feat,
-    load_graph,
-    parse_config,
-)
+from schemas.datatypes.misc import ModelComponents, Shared
+from utils import load_feat, load_graph, parse_config
 
 
 start = time.time()
@@ -102,7 +101,7 @@ def main():
     os.environ["MKL_NUM_THREADS"] = str(args.omp_num_threads)
 
     # initialize distributed environment
-    dist.init_process_group(backend="gloo", timeout=datetime.timedelta(seconds=3600))
+    dist.init_process_group(backend="gloo", timeout=datetime.timeDyX(seconds=3600))
     env = Env.initial()
     print(f"env: {env}")
     worker_ranks = list(range(0, env.world_size - 1))
@@ -206,21 +205,121 @@ def main():
         )
 
     dist.barrier()
+    model_components = _init_gnn(cfg.t, cfg.m, cfg.g, cfg.s)
 
     if env.is_host:
         from run_host import Host
 
         print("Host: Initializing host process...")
 
-        host = Host(cfg, graph, df, env, start, gloo)
+        host = Host(cfg, graph, df, env, start, gloo, model_components.gnn)
         host.run()
     else:
         from run_worker import Worker
 
         print("Worker: Initializing worker process...")
 
-        worker = Worker(cfg, shared, save_to, nfeat, efeat, env, nccl, gloo)
+        worker = Worker(
+            cfg, shared, save_to, nfeat, efeat, env, nccl, gloo, model_components
+        )
         worker.run()
+
+
+def _init_gnn(t_cfg, m_cfg=None, g_cfg=None, s_cfg=None) -> ModelComponents:
+    memory_updater = None
+    gnn = None
+    header = None
+    has_memory = False
+    d_mail = 0
+    if m_cfg is not None:
+        has_memory = True
+        d_mail = 2 * m_cfg.d_mem + t_cfg.edim
+    match t_cfg.model_name.lower():
+        case "tgn":
+            assert m_cfg is not None, "TGN requires memory config"
+            memory_updater = MemoryUpdater(
+                rnn=torch.nn.GRUCell(d_mail + m_cfg.d_time, m_cfg.d_mem),
+                time_encoder=TimeEncode(m_cfg.d_time),
+            )
+            gnn = TGN(
+                dim_node=t_cfg.ndim,
+                dim_edge=t_cfg.edim,
+                dim_memory=m_cfg.d_mem,
+                dim_time=m_cfg.d_time,
+                dim_out=g_cfg.d_out,
+            )
+            header = EdgePredictor(g_cfg.d_out, neg_samples=1)
+
+        case "apan":
+            assert m_cfg is not None, "APAN requires memory config"
+
+            memory_updater = TransformerMemoryUpdater(
+                d_mail=d_mail,
+                d_mem=t_cfg.ndim,
+                d_time=m_cfg.d_time,
+                boxsize=m_cfg.boxsize,
+                heads=m_cfg.att_h,
+                dropout=t_cfg.dropout,
+                att_dropout=t_cfg.dropout,
+            )
+            gnn = APAN(
+                dim_memory=m_cfg.d_mem,
+                neg_samples=1,
+            )
+            header = EdgePredictor(m_cfg.d_mem, neg_samples=1)
+
+        case "jodie":
+            assert m_cfg is not None, "JODIE requires memory config"
+            memory_updater = MemoryUpdater(
+                rnn=torch.nn.RNNCell(d_mail + m_cfg.d_time, m_cfg.d_mem),
+                time_encoder=TimeEncode(m_cfg.d_time),
+            )
+            gnn = JODIE(
+                dim_node=t_cfg.ndim,
+                dim_memory=m_cfg.d_mem,
+                dim_time=m_cfg.d_time,
+            )
+            header = EdgePredictor(m_cfg.d_mem, neg_samples=1)
+
+        case "tgat":
+            gnn = TGAT(
+                dim_node=t_cfg.ndim,
+                dim_edge=t_cfg.edim,
+                dim_time=g_cfg.d_time,
+                dim_hid=g_cfg.d_out,
+                num_layers=s_cfg.layer,
+                heads=g_cfg.att_h,
+                dropout=t_cfg.dropout,
+            )
+            header = EdgePredictor(g_cfg.d_out, neg_samples=1)
+
+        case "dysat":
+            gnn = DySAT_TGL(
+                dim_node=t_cfg.ndim,
+                dim_edge=t_cfg.edim,
+                dim_time=g_cfg.d_time,
+                dim_hid=g_cfg.d_out,
+                num_layers=cfg.s.layer,
+                heads=g_cfg.att_h,
+                dropout=t_cfg.dropout,
+                history_len=s_cfg.history,
+            )
+            header = EdgePredictor(g_cfg.d_out, neg_samples=1)
+
+        case "dygformer":
+            gnn = DyGFormer(
+                dim_node=t_cfg.ndim,
+                dim_edge=t_cfg.edim,
+            )
+
+        case _:
+            raise ValueError(f"Unknown model: {t_cfg.model_name}")
+
+    return ModelComponents(
+        memory_updater=memory_updater,
+        gnn=gnn,
+        header=header,
+    )
 
 
 if __name__ == "__main__":

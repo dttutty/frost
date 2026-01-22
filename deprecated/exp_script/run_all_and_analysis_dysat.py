@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
+import csv
 import os
+import re
+import shutil
+import subprocess
 import sys
 import time
 import uuid
-import csv
-import re
-import subprocess
+from datetime import datetime
 from pathlib import Path
 from statistics import mean, stdev
-from datetime import datetime
-import shutil
+
 
 # ===== Fixed configuration =====
 WORKDIR = Path.cwd()
@@ -217,17 +218,17 @@ def parse_log(text: str):
         if m_best:
             best_epoch = int(m_best.group(1))
 
-    # 4) delta to next epoch timestamp
-    delta_next = {}
+    # 4) DyX to next epoch timestamp
+    DyX_next = {}
     for i in range(len(epoch_ts) - 1):
         ep_i, ts_i = epoch_ts[i]
         ep_j, ts_j = epoch_ts[i + 1]
-        delta_next[ep_i] = (ts_j - ts_i).total_seconds()
-    # Fill last epoch delta using "Best model ..." timestamp
+        DyX_next[ep_i] = (ts_j - ts_i).total_seconds()
+    # Fill last epoch DyX using "Best model ..." timestamp
     if epoch_ts:
         last_ep, last_ts = epoch_ts[-1]
         if best_ts and best_ts >= last_ts:
-            delta_next[last_ep] = (best_ts - last_ts).total_seconds()
+            DyX_next[last_ep] = (best_ts - last_ts).total_seconds()
 
     # 5) test metrics
     test_ap = test_auc = None
@@ -239,21 +240,21 @@ def parse_log(text: str):
         except ValueError:
             pass
 
-    return epoch_ts, train_time, sample_time, delta_next, best_epoch, test_ap, test_auc
+    return epoch_ts, train_time, sample_time, DyX_next, best_epoch, test_ap, test_auc
 
 
-def summarize(epoch_ts, train_time, sample_time, delta_next):
+def summarize(epoch_ts, train_time, sample_time, DyX_next):
     if not epoch_ts:
         return None
     first_ep = min(ep for ep, _ in epoch_ts)
 
     train_vals = [v for ep, v in sorted(train_time.items()) if ep != first_ep]
     sample_vals = [v for ep, v in sorted(sample_time.items()) if ep != first_ep]
-    delta_vals = [v for ep, v in sorted(delta_next.items()) if ep != first_ep]
+    DyX_vals = [v for ep, v in sorted(DyX_next.items()) if ep != first_ep]
 
     tm_mean, tm_std = safe_mean_std(train_vals)
     sm_mean, sm_std = safe_mean_std(sample_vals)
-    dt_mean, dt_std = safe_mean_std(delta_vals)
+    dt_mean, dt_std = safe_mean_std(DyX_vals)
 
     return {
         "exclude_first_epoch": first_ep,
@@ -261,11 +262,11 @@ def summarize(epoch_ts, train_time, sample_time, delta_next):
         "train_time_std": tm_std,
         "sample_time_mean": sm_mean,
         "sample_time_std": sm_std,
-        "delta_next_mean": dt_mean,
-        "delta_next_std": dt_std,
+        "DyX_next_mean": dt_mean,
+        "DyX_next_std": dt_std,
         "n_train": len(train_vals),
         "n_sample": len(sample_vals),
-        "n_delta": len(delta_vals),
+        "n_DyX": len(DyX_vals),
     }
 
 
@@ -295,7 +296,7 @@ def append_summary_to_log(
                 f"Sample time mean/std   (s): {fmt(summary['sample_time_mean'])} / {fmt(summary['sample_time_std'])}\n"
             )
             lf.write(
-                f"Delta-to-next mean/std (s): {fmt(summary['delta_next_mean'])} / {fmt(summary['delta_next_std'])}\n"
+                f"DyX-to-next mean/std (s): {fmt(summary['DyX_next_mean'])} / {fmt(summary['DyX_next_std'])}\n"
             )
             lf.write(
                 f"Best model epoch: {best_epoch if best_epoch is not None else 'NA'}\n"
@@ -387,7 +388,7 @@ def run_one(
         f"Dataset    : {dataset}\n"
         f"Base Config: {base_cfg}\n"
         f"Temp Config: {temp_cfg}\n"
-        f"CUDA       : {os.environ.get('CUDA_VISIBLE_DEVICES','')}\n"
+        f"CUDA       : {os.environ.get('CUDA_VISIBLE_DEVICES', '')}\n"
     )
     if phase == "feat":
         header += f"rand_edge_features: {edge_dim}\nrand_node_features: {node_dim}\n"
@@ -444,10 +445,10 @@ def run_one(
     elapsed = time.perf_counter() - start
 
     text = logfile.read_text(encoding="utf-8", errors="replace")
-    epoch_ts, train_time_map, sample_time_map, delta_next_map, best_ep, ap, auc = (
+    epoch_ts, train_time_map, sample_time_map, DyX_next_map, best_ep, ap, auc = (
         parse_log(text)
     )
-    summary = summarize(epoch_ts, train_time_map, sample_time_map, delta_next_map)
+    summary = summarize(epoch_ts, train_time_map, sample_time_map, DyX_next_map)
     status = classify_returncode(rc, text)
 
     footer = (
@@ -471,8 +472,8 @@ def run_one(
 
     # # Parse and summarize
     # text = logfile.read_text(encoding="utf-8", errors="replace")
-    # epoch_ts, train_time_map, sample_time_map, delta_next_map, best_ep, ap, auc = parse_log(text)
-    # summary = summarize(epoch_ts, train_time_map, sample_time_map, delta_next_map)
+    # epoch_ts, train_time_map, sample_time_map, DyX_next_map, best_ep, ap, auc = parse_log(text)
+    # summary = summarize(epoch_ts, train_time_map, sample_time_map, DyX_next_map)
 
     # Append to log
     meta_lines = []
@@ -514,9 +515,9 @@ def run_one(
             "sample_mean_s",
             "sample_std_s",
             "n_sample",
-            "delta_next_mean_s",
-            "delta_next_std_s",
-            "n_delta",
+            "DyX_next_mean_s",
+            "DyX_next_std_s",
+            "n_DyX",
             "logfile",
         ]
         row = [
@@ -551,16 +552,16 @@ def run_one(
             ),
             (summary["n_sample"] if summary else 0),
             (
-                f"{summary['delta_next_mean']:.6f}"
-                if summary and summary["delta_next_mean"] is not None
+                f"{summary['DyX_next_mean']:.6f}"
+                if summary and summary["DyX_next_mean"] is not None
                 else ""
             ),
             (
-                f"{summary['delta_next_std']:.6f}"
-                if summary and summary["delta_next_std"] is not None
+                f"{summary['DyX_next_std']:.6f}"
+                if summary and summary["DyX_next_std"] is not None
                 else ""
             ),
-            (summary["n_delta"] if summary else 0),
+            (summary["n_DyX"] if summary else 0),
             str(logfile),
         ]
         append_row_to_csv(csv_path, header, row)
@@ -583,9 +584,9 @@ def run_one(
             "sample_mean_s",
             "sample_std_s",
             "n_sample",
-            "delta_next_mean_s",
-            "delta_next_std_s",
-            "n_delta",
+            "DyX_next_mean_s",
+            "DyX_next_std_s",
+            "n_DyX",
             "logfile",
         ]
         row = [
@@ -620,16 +621,16 @@ def run_one(
             ),
             (summary["n_sample"] if summary else 0),
             (
-                f"{summary['delta_next_mean']:.6f}"
-                if summary and summary["delta_next_mean"] is not None
+                f"{summary['DyX_next_mean']:.6f}"
+                if summary and summary["DyX_next_mean"] is not None
                 else ""
             ),
             (
-                f"{summary['delta_next_std']:.6f}"
-                if summary and summary["delta_next_std"] is not None
+                f"{summary['DyX_next_std']:.6f}"
+                if summary and summary["DyX_next_std"] is not None
                 else ""
             ),
-            (summary["n_delta"] if summary else 0),
+            (summary["n_DyX"] if summary else 0),
             str(logfile),
         ]
         append_row_to_csv(csv_path, header, row)
@@ -650,9 +651,9 @@ def run_one(
             "sample_mean_s",
             "sample_std_s",
             "n_sample",
-            "delta_next_mean_s",
-            "delta_next_std_s",
-            "n_delta",
+            "DyX_next_mean_s",
+            "DyX_next_std_s",
+            "n_DyX",
             "logfile",
         ]
         row = [
@@ -686,16 +687,16 @@ def run_one(
             ),
             (summary["n_sample"] if summary else 0),
             (
-                f"{summary['delta_next_mean']:.6f}"
-                if summary and summary["delta_next_mean"] is not None
+                f"{summary['DyX_next_mean']:.6f}"
+                if summary and summary["DyX_next_mean"] is not None
                 else ""
             ),
             (
-                f"{summary['delta_next_std']:.6f}"
-                if summary and summary["delta_next_std"] is not None
+                f"{summary['DyX_next_std']:.6f}"
+                if summary and summary["DyX_next_std"] is not None
                 else ""
             ),
-            (summary["n_delta"] if summary else 0),
+            (summary["n_DyX"] if summary else 0),
             str(logfile),
         ]
         append_row_to_csv(csv_path, header, row)
@@ -716,9 +717,9 @@ def run_one(
             "sample_mean_s",
             "sample_std_s",
             "n_sample",
-            "delta_next_mean_s",
-            "delta_next_std_s",
-            "n_delta",
+            "DyX_next_mean_s",
+            "DyX_next_std_s",
+            "n_DyX",
             "logfile",
         ]
         row = [
@@ -752,16 +753,16 @@ def run_one(
             ),
             (summary["n_sample"] if summary else 0),
             (
-                f"{summary['delta_next_mean']:.6f}"
-                if summary and summary["delta_next_mean"] is not None
+                f"{summary['DyX_next_mean']:.6f}"
+                if summary and summary["DyX_next_mean"] is not None
                 else ""
             ),
             (
-                f"{summary['delta_next_std']:.6f}"
-                if summary and summary["delta_next_std"] is not None
+                f"{summary['DyX_next_std']:.6f}"
+                if summary and summary["DyX_next_std"] is not None
                 else ""
             ),
-            (summary["n_delta"] if summary else 0),
+            (summary["n_DyX"] if summary else 0),
             str(logfile),
         ]
         append_row_to_csv(csv_path, header, row)
@@ -782,9 +783,9 @@ def run_one(
             "sample_mean_s",
             "sample_std_s",
             "n_sample",
-            "delta_next_mean_s",
-            "delta_next_std_s",
-            "n_delta",
+            "DyX_next_mean_s",
+            "DyX_next_std_s",
+            "n_DyX",
             "logfile",
         ]
         row = [
@@ -818,16 +819,16 @@ def run_one(
             ),
             (summary["n_sample"] if summary else 0),
             (
-                f"{summary['delta_next_mean']:.6f}"
-                if summary and summary["delta_next_mean"] is not None
+                f"{summary['DyX_next_mean']:.6f}"
+                if summary and summary["DyX_next_mean"] is not None
                 else ""
             ),
             (
-                f"{summary['delta_next_std']:.6f}"
-                if summary and summary["delta_next_std"] is not None
+                f"{summary['DyX_next_std']:.6f}"
+                if summary and summary["DyX_next_std"] is not None
                 else ""
             ),
-            (summary["n_delta"] if summary else 0),
+            (summary["n_DyX"] if summary else 0),
             str(logfile),
         ]
         append_row_to_csv(csv_path, header, row)
@@ -848,9 +849,9 @@ def run_one(
             "sample_mean_s",
             "sample_std_s",
             "n_sample",
-            "delta_next_mean_s",
-            "delta_next_std_s",
-            "n_delta",
+            "DyX_next_mean_s",
+            "DyX_next_std_s",
+            "n_DyX",
             "logfile",
         ]
         row = [
@@ -884,16 +885,16 @@ def run_one(
             ),
             (summary["n_sample"] if summary else 0),
             (
-                f"{summary['delta_next_mean']:.6f}"
-                if summary and summary["delta_next_mean"] is not None
+                f"{summary['DyX_next_mean']:.6f}"
+                if summary and summary["DyX_next_mean"] is not None
                 else ""
             ),
             (
-                f"{summary['delta_next_std']:.6f}"
-                if summary and summary["delta_next_std"] is not None
+                f"{summary['DyX_next_std']:.6f}"
+                if summary and summary["DyX_next_std"] is not None
                 else ""
             ),
-            (summary["n_delta"] if summary else 0),
+            (summary["n_DyX"] if summary else 0),
             str(logfile),
         ]
         append_row_to_csv(csv_path, header, row)
@@ -972,14 +973,14 @@ def main():
                     if rc != 0:
                         failures.append(
                             (
-                                f"samp_combo/{ds}/{cfg_path.name}/sl{layer}/nb{'-'.join(map(str,neigh))}",
+                                f"samp_combo/{ds}/{cfg_path.name}/sl{layer}/nb{'-'.join(map(str, neigh))}",
                                 rc,
                             )
                         )
                 except Exception as e:
                     failures.append(
                         (
-                            f"samp_combo/{ds}/{cfg_path.name}/sl{layer}/nb{'-'.join(map(str,neigh))}",
+                            f"samp_combo/{ds}/{cfg_path.name}/sl{layer}/nb{'-'.join(map(str, neigh))}",
                             f"exception:{e}",
                         )
                     )

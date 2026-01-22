@@ -102,7 +102,7 @@ class MMFN:
         pos_root_new_mem_ts = last_updated_ts[: n_src * 2]
 
         mem_td_nid = MemTsNid(
-            id=pos_root_nid,
+            nid=pos_root_nid,
             ts=pos_root_new_mem_ts,
             data=pos_root_new_mem,  # 如果是latest, 需要改成所有节点的mem(pos_root用新mem,)
         )
@@ -281,7 +281,7 @@ class MMFN:
         neg_samples,
     ):
         pos_root_nid, pos_root_new_mem, pos_root_new_mem_ts = (
-            mem_td_nid.id,
+            mem_td_nid.nid,
             mem_td_nid.mem,
             mem_td_nid.ts,
         )

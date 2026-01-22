@@ -6,7 +6,7 @@ from typing import List, Set, Tuple
 
 import numpy as np
 
-from schemas import DyPlan
+from schemas.datatypes.plan import DyPlan
 
 from ..meta_batcher import MetaBundle
 

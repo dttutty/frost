@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 
+from gnn.sample_mixin import SampleMixin
+
 from ..components import TimeEncode
 
 
@@ -65,7 +67,7 @@ class DyGFormerAttention(nn.Module):
         return src
 
 
-class DyGFormer(nn.Module):
+class DyGFormer(nn.Module, SampleMixin):
     def __init__(
         self,
         dim_node,
@@ -194,7 +196,7 @@ class DyGFormer(nn.Module):
                 "nid": dense_nids[start:end],
                 "feat_n": dense_nfeat[start:end],
                 "feat_e": dense_efeat[start:end],
-                "dts": dense_dts[start:end],  # Delta Time (已经算好的)
+                "dts": dense_dts[start:end],  # DyX Time (已经算好的)
             }
 
         src_seq = make_dict(0, batch_size)
@@ -232,7 +234,7 @@ class DyGFormer(nn.Module):
             p_co = self.proj_co_occ(self.get_patches(co_occ))
 
             # Time Encoding
-            # block.dts 已经是 (Root_TS - Neighbor_TS)，正是我们要的 Delta
+            # block.dts 已经是 (Root_TS - Neighbor_TS)，正是我们要的 DyX
             # 需要处理 Padding (nid=0 的位置 dts 应该无效，mask掉或者由 time_enc 处理)
             time_emb = self.time_enc(seq["dts"]).squeeze(2)  # [B, L, Dt]
             # Mask out padding time (optional but recommended)

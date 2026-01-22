@@ -10,8 +10,6 @@ from .datatypes.plan import DyPlan, PlanSet
 
 
 MetaBundleWithPlan: TypeAlias = Tuple[List[Meta], List[PlanSet]]
-
-
 MetaBundleWithoutPlan: TypeAlias = Tuple[List[Meta], None]
 MetaBundle: TypeAlias = List[Meta]
 

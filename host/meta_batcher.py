@@ -39,7 +39,7 @@ class MetaBatcher(threading.Thread):
                 self.logic()
 
         except Exception:
-            print(f"!!! Assembler Thread Crashed on Rank {dist.get_rank()} !!!")
+            print(f"!!! MetaBatcher Thread Crashed on Rank {dist.get_rank()} !!!")
             traceback.print_exc()
             self.stop_ev.set()
             os._exit(1)

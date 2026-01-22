@@ -258,7 +258,7 @@ class TemporalGraphAttentionLayer(nn.Module):
         b: DGL Block (MFG)
         b.srcdata['h']: Node features for both src and dst nodes.
         b.edata['f']: Edge features.
-        b.edata['dt']: Time delta (ts_interaction - ts_neighbor_last_update).
+        b.edata['dt']: Time DyX (ts_interaction - ts_neighbor_last_update).
         """
         if b.num_edges() == 0:
             return torch.zeros((b.num_dst_nodes(), self.dim_out), device=b.device)

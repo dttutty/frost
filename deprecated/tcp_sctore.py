@@ -1,5 +1,5 @@
 import os
-from datetime import timedelta
+from datetime import timeDyX
 
 import torch.distributed as dist
 
@@ -18,7 +18,7 @@ def init_pg_and_store(
         backend="nccl" if torch.cuda.is_available() else "gloo",
         world_size=world_size,
         rank=rank,
-        timeout=timedelta(seconds=timeout_sec),
+        timeout=timeDyX(seconds=timeout_sec),
     )
 
     # 2) init TCPStore（一个进程做 is_master=True，其它 False）
@@ -29,7 +29,7 @@ def init_pg_and_store(
         world_size=world_size,
         is_master=is_master,
         wait_for_workers=True,
-        timeout=timedelta(seconds=timeout_sec),
+        timeout=timeDyX(seconds=timeout_sec),
     )
     return store
 
@@ -49,12 +49,12 @@ class KV:
     def getb(self, key: str) -> bytes:
         return self.base.get(key)
 
-    def add(self, key: str, delta: int) -> int:
+    def add(self, key: str, DyX: int) -> int:
         # 原子 add；返回加之后的值（注意：返回的是 int）
-        return self.base.add(key, delta)
+        return self.base.add(key, DyX)
 
     def wait(self, keys: Iterable[str], timeout: Optional[float] = None):
-        to = timedelta(seconds=timeout) if timeout else timedelta(seconds=0)
+        to = timeDyX(seconds=timeout) if timeout else timeDyX(seconds=0)
         self.base.wait(list(keys), to)
 
     # --- 便利编码 ---
@@ -77,8 +77,8 @@ class KV:
         return json.loads(self.get_str(key))
 
     # float 用放缩（×1e6）
-    def add_float_x1e6(self, key: str, delta: float) -> float:
-        ival = int(round(delta * 1_000_000))
+    def add_float_x1e6(self, key: str, DyX: float) -> float:
+        ival = int(round(DyX * 1_000_000))
         newv = self.add(key, ival)  # 返回加后的整型
         return newv / 1_000_000.0
 

@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn as nn
 
+from schemas.datatypes.misc import SampleReturn
 from schemas.datatypes.plan import BatchNodeStateIO
 
 from ..components import TimeEncode
@@ -29,7 +30,7 @@ class JODIETimeEmbedding(nn.Module):
     def forward(self, h, mem_ts, ts):
         # Time difference normalization as per JODIE paper/code
         time_diff = (ts - mem_ts) / (ts + 1)
-        # Scaling the embedding: h * (1 + w * delta_t)
+        # Scaling the embedding: h * (1 + w * DyX_t)
         # h dim: [n_nodes, dim_mem]
 
         rst = h * (1 + self.time_emb(time_diff.unsqueeze(1)))
@@ -62,8 +63,6 @@ class JODIE(nn.Module):
         self.layer_norm = nn.LayerNorm(dim_memory)
         self.jodie_time_proj = JODIETimeEmbedding(dim_out=dim_memory)
 
-        # --- 3. Edge Predictor ---
-
     @staticmethod
     def analyze_need(root_nodes):
         all_nodes = root_nodes
@@ -78,9 +77,15 @@ class JODIE(nn.Module):
     @staticmethod
     def sample(ngh_sampler, src, dst, neg_dst, ts):
         roots = torch.cat([src, dst, neg_dst])
-        all_nodes = root_nodes = set(roots.numpy().tolist())
+        root_nodes = set(roots.numpy().tolist())
         batch_node_state_io = JODIE.analyze_need(root_nodes)
-        return all_nodes, root_nodes, batch_node_state_io
+
+        sample_ret = SampleReturn(
+            ngh2root_mfgs_raw=None,
+            root2ngh_mfg_raw=None,
+            batch_node_state_io=batch_node_state_io,
+        )
+        return sample_ret
 
     def forward(
         self,

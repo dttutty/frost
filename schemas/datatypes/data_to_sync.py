@@ -14,30 +14,48 @@ def is_sorted(t: torch.Tensor):
 
 @dataclass(slots=True, kw_only=True)
 class MemTsNid:
-    id: Tensor
+    nid: Tensor
     data: Tensor
     ts: Tensor
-    ct: Tensor | None = None
+    is_sorted: bool = False
 
     def clone(self) -> "MemTsNid":
-        return MemTsNid(id=self.id.clone(), data=self.data.clone(), ts=self.ts.clone())
+        return MemTsNid(
+            nid=self.nid.clone(), data=self.data.clone(), ts=self.ts.clone()
+        )
 
     def cuda(self) -> "MemTsNid":
-        return MemTsNid(id=self.id.cuda(), data=self.data.cuda(), ts=self.ts.cuda())
+        return MemTsNid(nid=self.nid.cuda(), data=self.data.cuda(), ts=self.ts.cuda())
+
+    def merge_with_another_mem(self, other: "MemTsNid") -> "MemTsNid":
+        return MemTsNid(
+            nid=torch.cat((self.nid, other.nid), dim=0),
+            data=torch.cat((self.data, other.data), dim=0),
+            ts=torch.cat((self.ts, other.ts), dim=0),
+        )
+
+    def sort_by_nid(self) -> "MemTsNid":
+        sorted_indices = torch.argsort(self.nid)
+        self.nid = self.nid[sorted_indices]
+        self.data = self.data[sorted_indices]
+        self.ts = self.ts[sorted_indices]
+        self.is_sorted = True
+        return self
 
 
 @dataclass(slots=True, kw_only=True)
 class BoxTsNid:
-    id: Tensor
+    nid: Tensor
     data: Tensor
     ts: torch.Tensor
     next_pos: Optional[Tensor] = None
     # if next_pos is None, then this BoxTsNid is actually a MailTsNid
     ct: Optional[Tensor] = None  # 如果mean的话(每次只能累计一个mail)
+    is_sorted: bool = False
 
     def cuda(self) -> "BoxTsNid":
         return BoxTsNid(
-            id=self.id.cuda(),
+            nid=self.nid.cuda(),
             data=self.data.cuda(),
             ts=self.ts.cuda(),
             next_pos=self.next_pos.cuda() if self.next_pos is not None else None,
@@ -47,9 +65,9 @@ class BoxTsNid:
     def merge_1_mail(self, new_mails: MailTsNid) -> "BoxTsNid":
         assert self.next_pos is not None, "next_pos must be provided for merge_1_mail"
         if __debug__:
-            assert is_sorted(self.id)
-            assert new_mails.id.numel() == torch.unique(new_mails.id).numel()
-        idx = torch.searchsorted(self.id, new_mails.id)
+            assert is_sorted(self.nid)
+            assert new_mails.nid.numel() == torch.unique(new_mails.nid).numel()
+        idx = torch.searchsorted(self.nid, new_mails.nid)
         pos = self.next_pos[idx]
         self.data[idx, pos] = new_mails.data
         self.ts[idx, pos] = new_mails.ts
@@ -69,16 +87,34 @@ class BoxTsNid:
     def to_mail(self):
         assert self.next_pos is None, "next_pos must be None for mail"
         return MailTsNid(
-            id=self.id,
+            nid=self.nid,
             data=self.data.squeeze(1),
             ts=self.ts.squeeze(1),
             ct=self.ct,
         )
 
+    def merge_with_another_box(self, other: "BoxTsNid") -> "BoxTsNid":
+        return BoxTsNid(
+            nid=torch.cat((self.nid, other.nid), dim=0),
+            data=torch.cat((self.data, other.data), dim=0),
+            ts=torch.cat((self.ts, other.ts), dim=0),
+            next_pos=None,
+        )
+
+    def sort_by_nid(self) -> "BoxTsNid":
+        sorted_indices = torch.argsort(self.nid)
+        self.nid = self.nid[sorted_indices]
+        self.data = self.data[sorted_indices]
+        self.ts = self.ts[sorted_indices]
+        if self.next_pos is not None:
+            self.next_pos = self.next_pos[sorted_indices]
+        self.is_sorted = True
+        return self
+
 
 @dataclass(slots=True, kw_only=True)
 class MailTsNid:
-    id: Tensor
+    nid: Tensor
     data: Tensor
 
     ts: Tensor
@@ -86,7 +122,7 @@ class MailTsNid:
 
     def cuda(self) -> "MailTsNid":
         return MailTsNid(
-            id=self.id.cuda(),
+            nid=self.nid.cuda(),
             data=self.data.cuda(),
             ts=self.ts.cuda(),
             ct=self.ct.cuda() if self.ct is not None else None,
@@ -94,7 +130,7 @@ class MailTsNid:
 
     def to_box(self):
         return BoxTsNid(
-            id=self.id,
+            nid=self.nid,
             data=self.data.unsqueeze(1),
             ts=self.ts.unsqueeze(1),
             ct=self.ct,
@@ -133,11 +169,11 @@ class MailTsNid:
         # ======================
         # 特殊情况：空输入
         # ======================
-        if self.id.numel() == 0 or mail_delivery_tensor.numel() == 0:
+        if self.nid.numel() == 0 or mail_delivery_tensor.numel() == 0:
             if include_self:
                 return self
 
-            empty_nid = torch.empty(0, dtype=self.id.dtype, device=self.id.device)
+            empty_nid = torch.empty(0, dtype=self.nid.dtype, device=self.nid.device)
             empty_mail = torch.empty(
                 0,
                 self.data.size(1),
@@ -149,7 +185,7 @@ class MailTsNid:
             if self.ct is not None:
                 empty_ct = torch.empty(0, dtype=self.ct.dtype, device=self.ct.device)
 
-            return MailTsNid(id=empty_nid, data=empty_mail, ts=empty_ts, ct=empty_ct)
+            return MailTsNid(nid=empty_nid, data=empty_mail, ts=empty_ts, ct=empty_ct)
 
         # ======================
         # 主逻辑：按 edge 循环
@@ -165,7 +201,7 @@ class MailTsNid:
         # 一条条 edge 处理
         for src, dst in zip(src_nodes, dst_nodes):
             # mask: 所有发给 src 的旧邮件
-            mask = self.id == src
+            mask = self.nid == src
             assert mask.any()
 
             # 取出这些邮件
@@ -191,7 +227,7 @@ class MailTsNid:
             if include_self:
                 return self
 
-            empty_nid = torch.empty(0, dtype=self.id.dtype, device=self.id.device)
+            empty_nid = torch.empty(0, dtype=self.nid.dtype, device=self.nid.device)
             empty_mail = torch.empty(
                 0,
                 self.data.size(1),
@@ -203,7 +239,7 @@ class MailTsNid:
             if self.ct is not None:
                 empty_ct = torch.empty(0, dtype=self.ct.dtype, device=self.ct.device)
 
-            return MailTsNid(id=empty_nid, data=empty_mail, ts=empty_ts, ct=empty_ct)
+            return MailTsNid(nid=empty_nid, data=empty_mail, ts=empty_ts, ct=empty_ct)
 
         # ======================
         # 把所有 edge 收集的结果拼在一起
@@ -222,7 +258,7 @@ class MailTsNid:
             return MailTsNid(new_nids, new_mail_data, new_ts, new_ct)
 
         return MailTsNid(
-            id=torch.cat([self.id, new_nids], dim=0),
+            nid=torch.cat([self.nid, new_nids], dim=0),
             data=torch.cat([self.data, new_mail_data], dim=0),
             ts=torch.cat([self.ts, new_ts], dim=0),
             ct=None if self.ct is None else torch.cat([self.ct, new_ct], dim=0),
@@ -242,7 +278,7 @@ class MailTsNid:
             - False: 只返回新投递出来的邮件
             - True:  返回 [原有邮件 + 新邮件]
         """
-        nid = self.id
+        nid = self.nid
         mail = self.data
         ts = self.ts
         ct = self.ct
@@ -298,7 +334,7 @@ class MailTsNid:
                 if ct is not None:
                     empty_ct = ct.new_empty((0,))
                 return MailTsNid(
-                    id=empty_nid,
+                    nid=empty_nid,
                     data=empty_mail,
                     ts=empty_ts,
                     ct=empty_ct,
@@ -318,17 +354,11 @@ class MailTsNid:
         # 是否保留原邮件
         # ======================
         if not include_self:
-            return MailTsNid(id=new_nids, data=new_mail_data, ts=new_ts, ct=new_ct)
+            return MailTsNid(nid=new_nids, data=new_mail_data, ts=new_ts, ct=new_ct)
 
         return MailTsNid(
-            id=torch.cat([nid, new_nids], dim=0),
+            nid=torch.cat([nid, new_nids], dim=0),
             data=torch.cat([mail, new_mail_data], dim=0),
             ts=torch.cat([ts, new_ts], dim=0),
             ct=None if ct is None else torch.cat([ct, new_ct], dim=0),
         )
-
-
-@dataclass(slots=True, kw_only=True)
-class Delta:
-    box: BoxTsNid
-    mem: MemTsNid

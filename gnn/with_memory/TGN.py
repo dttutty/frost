@@ -6,11 +6,12 @@ import torch
 from dgl.heterograph import DGLBlock
 
 from gnn.components import TemporalGraphAttentionLayer
+from gnn.sample_mixin import SampleMixin
 from schemas.datatypes.misc import DGLBlockMeta
 from schemas.datatypes.plan import BatchNodeStateIO
 
 
-class TGN(torch.nn.Module):
+class TGN(torch.nn.Module, SampleMixin):
     def __init__(
         self,
         dim_node: int,

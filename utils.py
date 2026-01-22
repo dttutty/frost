@@ -164,52 +164,6 @@ def parse_config(f) -> Config:
     return cfg
 
 
-def extract_raw_data(ret: List) -> List[DGLBlockMeta]:
-    # 用简单的字典或者 NamedTuple 存储纯数据
-    mfg_meta_list = []
-    for tgb in ret:
-        # 1. 提取 Numpy 数据并转为 CPU Tensor
-        # 此时不要去 GPU，也不要创建 DGLBlock
-        mfg_meta: DGLBlockMeta = DGLBlockMeta(
-            nodes=torch.from_numpy(tgb.nodes()),
-            ts=torch.from_numpy(tgb.ts()),
-            eid=torch.from_numpy(tgb.eid()),
-            dts=torch.from_numpy(tgb.dts()),
-            col=torch.from_numpy(tgb.col()),
-            row=torch.from_numpy(tgb.row()),
-            dim_in=tgb.dim_in(),
-            dim_out=tgb.dim_out(),
-        )
-        mfg_meta_list.append(mfg_meta)
-    return mfg_meta_list
-
-
-def analyze_blocks(
-    mfg_meta_list: List[DGLBlockMeta], n_history: int
-) -> Tuple[set, set]:
-    """
-    Analyzes the provided list of DGLBlockMeta to determine the maximum
-    number of source and destination nodes across the last n_history blocks.
-
-    Args:
-        mfg_meta_list (List[DGLBlockMeta]): List of DGLBlockMeta objects.
-
-    Returns:
-        Tuple[set, set]: A tuple containing the set of all   source nodes
-                         and the set of all root nodes.
-    """
-    all_nodes = set()
-    root_nodes = set()
-    for index, mfg_meta in enumerate(mfg_meta_list):
-        nodes = mfg_meta.nodes.numpy()
-        num_roots = mfg_meta.dim_out
-        all_nodes.update(nodes.tolist())
-        if index < n_history:
-            root_nodes.update(nodes[:num_roots].tolist())
-
-    return all_nodes, root_nodes
-
-
 def collate_and_build_graph(
     mfg_meta_list: List[DGLBlockMeta], history: int
 ) -> List[List[DGLBlock]]:

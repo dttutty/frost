@@ -11,10 +11,10 @@ from schemas.datatypes.data_to_sync import (
     MemTsNid,
 )
 from schemas.datatypes.misc import (
+    DyX,
     Meta,
-    RootX,
+    RootDyX,
     Shared,
-    X,
 )
 from schemas.datatypes.plan import TensorPlanSet
 from utils import _deduplicate_first_layer_src, collate_and_build_graph
@@ -54,60 +54,80 @@ class H2D(threading.Thread):
 
         self.stream = torch.cuda.Stream()
 
+    def handle_mfg_st_feat(self, meta: Meta):
+        assert meta.gnn_mfgs_raw is not None
+        meta.gnn_mfgs = collate_and_build_graph(meta.gnn_mfgs_raw, self.history)
+
+        # we don't reuse efeat always
+        if self.efeat is not None:
+            meta.pos_efeat = self.efeat[meta.pos_edge_id].cuda()
+            if self.gnn_arch != "identity":
+                for blocks in meta.gnn_mfgs[0]:
+                    for block in blocks:
+                        eid = block.edata["ID"]
+                        block.edata["efeat"] = self.efeat[eid]
+
+        # this version not reuse nfeat
+        if self.nfeat is not None:
+            for block in meta.gnn_mfgs[0]:
+                # inner node appear in outer gnn, so we only do this for outer gnn
+                nid = block.srcdata["ID"]
+                block.srcdata["nfeat"] = self.nfeat[nid]
+        return meta
+
+    def prep_part_dy_x(self, plan_set: TensorPlanSet):
+        # this is compatible with no mfg and mfg case
+        # pre move part data to gpu, avoid h2d in assembler
+        assert self.shared is not None
+        assert plan_set.mem is not None
+        mem_fetch_nids = plan_set.mem.fetch
+        mem = MemTsNid(
+            nid=mem_fetch_nids,
+            data=self.shared.mem[mem_fetch_nids],
+            ts=self.shared.mem_ts[mem_fetch_nids],
+        ).cuda()
+        if plan_set.box is not None:
+            mail_fetch_nids = plan_set.box.fetch
+        else:
+            mail_fetch_nids = mem_fetch_nids
+        box = BoxTsNid(
+            nid=mail_fetch_nids,
+            data=self.shared.box[mail_fetch_nids],
+            ts=self.shared.box_ts[mail_fetch_nids],
+        ).cuda()
+
+        x = DyX(mem=mem, box=box)
+
+        return x
+
+    def handle_nomfg_st_feat(self, meta: Meta):
+        pass
+
     def logic(self):
         if self.h2d_sem is not None:
             self.h2d_sem.acquire()
             self.h2d_sem.acquire()
         print("H2D: acquired semaphore, starting H2D operation")
-        x = X()
+
         meta: Meta = self.meta_q.get(block=True)
         plan_set = meta.plan_set
 
         # make mfg from raw data
         if meta.gnn_mfgs_raw is not None:
-            meta.gnn_mfgs = collate_and_build_graph(meta.gnn_mfgs_raw, self.history)
-
-            # we don't reuse efeat always
-            if self.efeat is not None:
-                x.pos_efeat = self.efeat[meta.pos_edge_id].cuda()
-                if self.gnn_arch != "identity":
-                    for blocks in meta.gnn_mfgs[0]:
-                        for block in blocks:
-                            eid = block.edata["ID"]
-                            block.edata["efeat"] = self.efeat[eid]
-
-            # this version not reuse nfeat
-            if self.nfeat is not None:
-                for block in meta.gnn_mfgs[0]:
-                    # inner node appear in outer gnn, so we only do this for outer gnn
-                    nid = block.srcdata["ID"]
-                    block.srcdata["nfeat"] = self.nfeat[nid]
+            self.handle_mfg_st_feat(meta)
 
         # move feat to gpu
         if plan_set is not None:
             assert type(plan_set) is TensorPlanSet
             if self.shared is not None:
-                assert plan_set.box is not None
-                assert plan_set.mem is not None
+                meta.x.dy_x = self.prep_part_dy_x(plan_set)
 
-                mem_fetch_nids = plan_set.mem.fetch
-                x.mem = MemTsNid(
-                    id=mem_fetch_nids,
-                    data=self.shared.mem[mem_fetch_nids],
-                    ts=self.shared.mem_ts[mem_fetch_nids],
-                ).cuda()
-                mail_fetch_nids = plan_set.box.fetch
-                x.box = BoxTsNid(
-                    id=mail_fetch_nids,
-                    data=self.shared.box[mail_fetch_nids],
-                    ts=self.shared.box_ts[mail_fetch_nids],
-                ).cuda()
             # move plan to gpu
             # even there is no next batch, we still need plan_set for writeback
             if self.merge_src:
                 meta.gnn_mfgs[0] = _deduplicate_first_layer_src(meta.gnn_mfgs[0])
         else:
-            meta.roots.x = RootX()
+            meta.roots.x = RootDyX()
             if self.nfeat is not None:
                 nid = meta.roots.nid
                 meta.roots.x.nfeat = self.nfeat[nid].cuda()
@@ -116,11 +136,6 @@ class H2D(threading.Thread):
             for blocks in meta.gnn_mfgs:
                 for block in blocks:
                     block = block.to("cuda:0")
-
-        print(
-            "meta.gnn_mfgs[0][0].device:",
-            meta.gnn_mfgs[0][0].device,
-        )
 
         ready_event = torch.cuda.Event()
         ready_event.record(torch.cuda.current_stream())

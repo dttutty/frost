@@ -37,35 +37,35 @@ Notes:
 """
 
 from __future__ import annotations
+
 import argparse
-import os
-import time
-import random
-import pickle
-import pathlib
-from dataclasses import dataclass
-from collections import defaultdict
-from typing import Any, Dict, List, Tuple
-
 import multiprocessing as mp
+import os
+import pathlib
+import pickle
+import socket
+import time
+from collections import defaultdict
+from contextlib import closing
+from dataclasses import dataclass
 from multiprocessing.synchronize import Event as MEvent
-
+from typing import Any, Dict, List, Tuple
 
 import torch
 import torch.distributed as dist
 from torch import nn
-import socket
-from contextlib import closing
+
 
 def find_free_port():
     """
     Finds and returns an available TCP port on the system.
     """
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-        s.bind(('', 0))
+        s.bind(("", 0))
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         return s.getsockname()[1]
-    
+
+
 # -----------------------------
 # Config defaults
 # -----------------------------
@@ -78,12 +78,14 @@ RING_SIZE_DEFAULT = 2
 # Data classes
 # -----------------------------
 
+
 @dataclass
 class MicroSpec:
     bid: int
     mid: int  # 0..world_size-1 (also equals device index in this toy setup)
     node_ids: List[int]
     aux: Dict[str, Any]
+
 
 @dataclass
 class MicroOnGPU:
@@ -93,12 +95,14 @@ class MicroOnGPU:
     features_dev: torch.Tensor  # (MICRO_SIZE, FEAT_DIM)
     node_ids: List[int]
 
+
 @dataclass
 class GradSignal:
     bid: int
     mid: int
     device: int
-    new_memory_delta: Dict[int, Any]
+    new_memory_DyX: Dict[int, Any]
+
 
 @dataclass
 class RootNodesWithTs:
@@ -106,10 +110,12 @@ class RootNodesWithTs:
     dst: list[int]
     time: list[float]
 
+
 @dataclass
 class BatchSpec:
     bid: int
     micros: List[MicroSpec]
+
 
 # Sentinel for queues
 SENTINEL = None
@@ -118,6 +124,7 @@ SENTINEL = None
 # Logging helpers
 # -----------------------------
 
+
 def ts() -> str:
     return time.strftime("%H:%M:%S")
 
@@ -125,9 +132,11 @@ def ts() -> str:
 def log(who: str, msg: str) -> None:
     print(f"[{ts()}] [{who}] {msg}", flush=True)
 
+
 # -----------------------------
 # Staleness controller
 # -----------------------------
+
 
 def can_start_bid(bid: int, committed_bid: int, S: int) -> bool:
     s = S.value
@@ -138,30 +147,33 @@ def can_start_bid(bid: int, committed_bid: int, S: int) -> bool:
     return bid <= c + s + 1
 
 
-def wait_until_can_start(who: str, bid: int, committed_bid: int, S: int, cond: mp.synchronize.Condition):
+def wait_until_can_start(
+    who: str, bid: int, committed_bid: int, S: int, cond: mp.synchronize.Condition
+):
     with cond:
         while not can_start_bid(bid, committed_bid, S):
             cond.wait(timeout=0.1)
         # Optional: one-shot log when gate opens
         # log(who, f"gate open for bid={bid} (committed={committed_bid.value}, S={S.value})")
 
+
 # -----------------------------
 # Dummy domain helpers
 # -----------------------------
 
 
-def sample_nodes_for_micro(bid: int, mid: int, src_meta, dst_meta, ts_meta, train_edge_end, val_edge_end) -> List[int]:
+def sample_nodes_for_micro(
+    bid: int, mid: int, src_meta, dst_meta, ts_meta, train_edge_end, val_edge_end
+) -> List[int]:
     # Deterministic-ish sample for visibility
     src_shm_name, src_shape, src_dtype = src_meta
-    src_shm = shared_memory.SharedMemory(name=src_shm_name) 
+    src_shm = shared_memory.SharedMemory(name=src_shm_name)
     src_values = np.ndarray(src_shape, dtype=src_dtype, buffer=src_shm.buf)
-
 
     # Process 'dst' data
     dst_shm_name, dst_shape, dst_dtype = dst_meta
     dst_shm = shared_memory.SharedMemory(name=dst_shm_name)
     dst_values = np.ndarray(dst_shape, dtype=dst_dtype, buffer=dst_shm.buf)
-
 
     # Process 'time' data
     ts_shm_name, ts_shape, ts_dtype = ts_meta
@@ -180,13 +192,13 @@ def sample_nodes_for_micro(bid: int, mid: int, src_meta, dst_meta, ts_meta, trai
 
     # subset_df = train_df.iloc[selected_df_start:selected_df_end]
 
-    
-    
     src_values = src_values[selected_df_start:selected_df_end]
     dst_values = dst_values[selected_df_start:selected_df_end]
     time_values = time_values[selected_df_start:selected_df_end]
 
-    root_nodes_with_ts = RootNodesWithTs(src=src_values, dst=dst_values, time=time_values)
+    root_nodes_with_ts = RootNodesWithTs(
+        src=src_values, dst=dst_values, time=time_values
+    )
     return root_nodes_with_ts
 
 
@@ -196,22 +208,37 @@ def load_features_pinned(micro: MicroSpec, use_cuda: bool) -> "torch.Tensor":
     return x
 
 
-def detach_to_cpu(delta: Dict[int, Any]) -> Dict[int, Any]:
+def detach_to_cpu(DyX: Dict[int, Any]) -> Dict[int, Any]:
     # Ensure CPU-serializable content
     out = {}
-    for k, v in delta.items():
+    for k, v in DyX.items():
         if torch is not None and isinstance(v, torch.Tensor):
             out[k] = v.detach().cpu().numpy()
         else:
             out[k] = v
     return out
 
+
 # -----------------------------
 # Processes
 # -----------------------------
 
-def sampler_proc(q01: mp.Queue, src_meta, dst_meta, ts_meta, train_edge_end, val_edge_end, cond: mp.synchronize.Condition, committed_bid: int, S: int,
-                 stop_ev: MEvent, batches: int, t_sample: float, world_size: int):
+
+def sampler_proc(
+    q01: mp.Queue,
+    src_meta,
+    dst_meta,
+    ts_meta,
+    train_edge_end,
+    val_edge_end,
+    cond: mp.synchronize.Condition,
+    committed_bid: int,
+    S: int,
+    stop_ev: MEvent,
+    batches: int,
+    t_sample: float,
+    world_size: int,
+):
     who = "P0"
     for bid in range(batches):
         # If you want strict freshest-memory-aware sampling, uncomment this line:
@@ -219,8 +246,12 @@ def sampler_proc(q01: mp.Queue, src_meta, dst_meta, ts_meta, train_edge_end, val
         t0 = time.time()
         micros: List[MicroSpec] = []
         for mid in range(world_size):
-            root_nodes_with_ts = sample_nodes_for_micro(bid, mid, src_meta, dst_meta, ts_meta, train_edge_end, val_edge_end)
-            micros.append(MicroSpec(bid=bid, mid=mid, node_ids=root_nodes_with_ts, aux={}))
+            root_nodes_with_ts = sample_nodes_for_micro(
+                bid, mid, src_meta, dst_meta, ts_meta, train_edge_end, val_edge_end
+            )
+            micros.append(
+                MicroSpec(bid=bid, mid=mid, node_ids=root_nodes_with_ts, aux={})
+            )
         q01.put(BatchSpec(bid=bid, micros=micros))
         log(who, f"emitted BatchSpec bid={bid}")
     # signal end
@@ -244,8 +275,14 @@ def cp1_proc(q01: mp.Queue, q12_devs: List[mp.Queue], stop_ev: MEvent, world_siz
         log(who, f"dispatched bid={item.bid} → per-GPU feeders")
 
 
-def h2d_feeder_proc(dev: int, q12_dev: mp.Queue, ring_dev: mp.Queue,
-                    stop_ev: MEvent, t_h2d: float, use_cuda: bool):
+def h2d_feeder_proc(
+    dev: int,
+    q12_dev: mp.Queue,
+    ring_dev: mp.Queue,
+    stop_ev: MEvent,
+    t_h2d: float,
+    use_cuda: bool,
+):
     who = f"H2D:d{dev}"
     if use_cuda:
         torch.cuda.set_device(dev)
@@ -270,8 +307,15 @@ def h2d_feeder_proc(dev: int, q12_dev: mp.Queue, ring_dev: mp.Queue,
             h2d_stream.synchronize()
         else:
             feats_dev = feats_pin  # CPU fallback
-        ring_dev.put(MicroOnGPU(bid=micro.bid, mid=micro.mid, device=dev,
-                                features_dev=feats_dev, node_ids=micro.node_ids))
+        ring_dev.put(
+            MicroOnGPU(
+                bid=micro.bid,
+                mid=micro.mid,
+                device=dev,
+                features_dev=feats_dev,
+                node_ids=micro.node_ids,
+            )
+        )
         # Keep ring_dev bounded (Queue capacity limits ring size)
         # No explicit log each micro to avoid spam
 
@@ -287,43 +331,63 @@ class TinyModel(nn.Module):
         return self.net(x).squeeze(-1)
 
 
-def compute_loss_and_memory(out: "torch.Tensor", node_ids: List[int]) -> Tuple["torch.Tensor", Dict[int, Any]]:
+def compute_loss_and_memory(
+    out: "torch.Tensor", node_ids: List[int]
+) -> Tuple["torch.Tensor", Dict[int, Any]]:
     # Dummy supervised loss: drive outputs to 0
     target = torch.zeros_like(out)
     loss = torch.nn.functional.mse_loss(out, target)
-    # Memory delta: map a small subset of node_ids to a tiny vector (mean/std of this micro)
-    # NOTE: in real TGNN you would return learned temporal memory deltas.
+    # Memory DyX: map a small subset of node_ids to a tiny vector (mean/std of this micro)
+    # NOTE: in real TGNN you would return learned temporal memory DyXs.
     k = min(32, len(node_ids))
     sel_ids = node_ids[:k]
     mean = out.detach().mean()
     std = out.detach().std()
-    delta = {nid: torch.stack([mean, std]) for nid in sel_ids}
-    return loss, delta
+    DyX = {nid: torch.stack([mean, std]) for nid in sel_ids}
+    return loss, DyX
 
 
-def dist_init(backend: str, rank: int, world_size: int, master_addr: str, master_port: int):
+def dist_init(
+    backend: str, rank: int, world_size: int, master_addr: str, master_port: int
+):
     os.environ.setdefault("MASTER_ADDR", master_addr)
     os.environ.setdefault("MASTER_PORT", str(master_port))
     dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
 
 
-def trainer_proc(dev: int, ring_dev: mp.Queue, q23: mp.Queue,
-                 cond: mp.synchronize.Condition, committed_bid: int, S: int,
-                 stop_ev: MEvent, master_addr: str, master_port: int,
-                 world_size: int, amp: bool):
+def trainer_proc(
+    dev: int,
+    ring_dev: mp.Queue,
+    q23: mp.Queue,
+    cond: mp.synchronize.Condition,
+    committed_bid: int,
+    S: int,
+    stop_ev: MEvent,
+    master_addr: str,
+    master_port: int,
+    world_size: int,
+    amp: bool,
+):
     who = f"CP2:d{dev}"
     use_cuda = torch.cuda.is_available()
     backend = "nccl" if use_cuda else "gloo"
     torch.cuda.set_device(dev) if use_cuda else None
 
     # rank == dev by construction here
-    dist_init(backend=backend, rank=dev, world_size=world_size,
-              master_addr=master_addr, master_port=master_port)
+    dist_init(
+        backend=backend,
+        rank=dev,
+        world_size=world_size,
+        master_addr=master_addr,
+        master_port=master_port,
+    )
 
     model = TinyModel(FEAT_DIM)
     if use_cuda:
         model = model.to(dev)
-    ddp_model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[dev] if use_cuda else None)
+    ddp_model = torch.nn.parallel.DistributedDataParallel(
+        model, device_ids=[dev] if use_cuda else None
+    )
     opt = torch.optim.Adam(ddp_model.parameters(), lr=1e-3)
     scaler = torch.cuda.amp.GradScaler(enabled=amp and use_cuda)
 
@@ -342,15 +406,18 @@ def trainer_proc(dev: int, ring_dev: mp.Queue, q23: mp.Queue,
             current_bid = micro.bid
             accum = 0
             opt.zero_grad(set_to_none=True)
-            log(who, f"START bid={current_bid} (committed={committed_bid.value}, S={S.value})")
+            log(
+                who,
+                f"START bid={current_bid} (committed={committed_bid.value}, S={S.value})",
+            )
 
         # Forward/backward with optional no_sync() to accumulate across micros
-        use_no_sync = (accum < world_size - 1)
+        use_no_sync = accum < world_size - 1
         cm = ddp_model.no_sync() if use_no_sync else nullcontext()
         with cm:
             with torch.cuda.amp.autocast(enabled=amp and use_cuda):
                 out = ddp_model(micro.features_dev)
-                loss, delta = compute_loss_and_memory(out, micro.node_ids)
+                loss, DyX = compute_loss_and_memory(out, micro.node_ids)
             scaler.scale(loss).backward()
         accum += 1
 
@@ -361,9 +428,15 @@ def trainer_proc(dev: int, ring_dev: mp.Queue, q23: mp.Queue,
             accum = 0
             log(who, f"STEP bid={current_bid}")
 
-        # Emit memory delta per micro
-        q23.put(GradSignal(bid=micro.bid, mid=micro.mid, device=dev,
-                           new_memory_delta=detach_to_cpu(delta)))
+        # Emit memory DyX per micro
+        q23.put(
+            GradSignal(
+                bid=micro.bid,
+                mid=micro.mid,
+                device=dev,
+                new_memory_DyX=detach_to_cpu(DyX),
+            )
+        )
 
     # Send one sentinel to CP3 when this rank is done
     q23.put(SENTINEL)
@@ -372,24 +445,33 @@ def trainer_proc(dev: int, ring_dev: mp.Queue, q23: mp.Queue,
 
 
 from contextlib import contextmanager
+
+
 @contextmanager
 def nullcontext():
     yield
 
 
-def merge_memory_deltas(delta_dict: Dict[int, Dict[int, Any]]) -> Dict[int, Any]:
-    # delta_dict: mid -> {nid -> vec}
+def merge_memory_DyXs(DyX_dict: Dict[int, Dict[int, Any]]) -> Dict[int, Any]:
+    # DyX_dict: mid -> {nid -> vec}
     merged: Dict[int, Any] = {}
     # simple last-writer-wins merge by mid order
-    for mid in sorted(delta_dict.keys()):
-        merged.update(delta_dict[mid])
+    for mid in sorted(DyX_dict.keys()):
+        merged.update(DyX_dict[mid])
     return merged
 
 
-def cp3_proc(q23: mp.Queue, cond: mp.synchronize.Condition, committed_bid: int, stop_ev: MEvent,
-             world_size: int, t_io: float, out_dir: str):
+def cp3_proc(
+    q23: mp.Queue,
+    cond: mp.synchronize.Condition,
+    committed_bid: int,
+    stop_ev: MEvent,
+    world_size: int,
+    t_io: float,
+    out_dir: str,
+):
     who = "CP3"
-    inbox: Dict[int, Dict[int, Any]] = defaultdict(dict)  # bid -> mid -> delta
+    inbox: Dict[int, Dict[int, Any]] = defaultdict(dict)  # bid -> mid -> DyX
     done_signals = 0
     outp = pathlib.Path(out_dir)
     outp.mkdir(parents=True, exist_ok=True)
@@ -404,10 +486,10 @@ def cp3_proc(q23: mp.Queue, cond: mp.synchronize.Condition, committed_bid: int, 
             else:
                 continue
         sig: GradSignal = item
-        inbox[sig.bid][sig.mid] = sig.new_memory_delta
+        inbox[sig.bid][sig.mid] = sig.new_memory_DyX
         # when full set of micros for this bid arrived
         if len(inbox[sig.bid]) == world_size:
-            merged = merge_memory_deltas(inbox[sig.bid])
+            merged = merge_memory_DyXs(inbox[sig.bid])
             # emulate IO latency
             if t_io > 0:
                 time.sleep(t_io)
@@ -427,16 +509,25 @@ def cp3_proc(q23: mp.Queue, cond: mp.synchronize.Condition, committed_bid: int, 
         log(who, f"leftover inbox keys={list(inbox.keys())}")
     log(who, "done")
 
+
 # -----------------------------
 # Main wiring
 # -----------------------------
 from multiprocessing import shared_memory
+
 import numpy as np
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--world-size", type=int, default=WORLD_SIZE_DEFAULT)
     parser.add_argument("--batches", type=int, default=6)
-    parser.add_argument("--staleness", type=int, default=0, help="-1=unlimited, 0=strict, k>=0 allows k leading uncommitted")
+    parser.add_argument(
+        "--staleness",
+        type=int,
+        default=0,
+        help="-1=unlimited, 0=strict, k>=0 allows k leading uncommitted",
+    )
     parser.add_argument("--ring-size", type=int, default=RING_SIZE_DEFAULT)
     parser.add_argument("--t-sample", type=float, default=1.0)
     parser.add_argument("--t-h2d", type=float, default=0.5)
@@ -454,42 +545,44 @@ def main():
     ws = args.world_size
     assert ws >= 1
     from utils import load_graph
-    g, df = load_graph('REDDIT')
-    src_numpy_array = df['src'].values
-    dst_numpy_array = df['dst'].values
-    ts_numpy_array = df['time'].values
 
-    train_edge_end = df[df['ext_roll'].gt(0)].index[0]
-    val_edge_end = df[df['ext_roll'].gt(1)].index[0]
+    g, df = load_graph("REDDIT")
+    src_numpy_array = df["src"].values
+    dst_numpy_array = df["dst"].values
+    ts_numpy_array = df["time"].values
 
-    num_nodes = g['indptr'].shape[0] - 1
-    
+    train_edge_end = df[df["ext_roll"].gt(0)].index[0]
+    val_edge_end = df[df["ext_roll"].gt(1)].index[0]
 
+    num_nodes = g["indptr"].shape[0] - 1
 
-    
     src_shm = shared_memory.SharedMemory(create=True, size=src_numpy_array.nbytes)
     dst_shm = shared_memory.SharedMemory(create=True, size=dst_numpy_array.nbytes)
     ts_shm = shared_memory.SharedMemory(create=True, size=ts_numpy_array.nbytes)
-    shared_array_main_src = np.ndarray(src_numpy_array.shape, dtype=src_numpy_array.dtype, buffer=src_shm.buf)
-    shared_array_main_dst = np.ndarray(dst_numpy_array.shape, dtype=dst_numpy_array.dtype, buffer=dst_shm.buf)
-    shared_array_main_ts = np.ndarray(ts_numpy_array.shape, dtype=ts_numpy_array.dtype, buffer=ts_shm.buf)
+    shared_array_main_src = np.ndarray(
+        src_numpy_array.shape, dtype=src_numpy_array.dtype, buffer=src_shm.buf
+    )
+    shared_array_main_dst = np.ndarray(
+        dst_numpy_array.shape, dtype=dst_numpy_array.dtype, buffer=dst_shm.buf
+    )
+    shared_array_main_ts = np.ndarray(
+        ts_numpy_array.shape, dtype=ts_numpy_array.dtype, buffer=ts_shm.buf
+    )
     shared_array_main_src[:] = src_numpy_array[:]
     shared_array_main_dst[:] = dst_numpy_array[:]
     shared_array_main_ts[:] = ts_numpy_array[:]
-
 
     src_meta = (src_shm.name, src_numpy_array.shape, src_numpy_array.dtype)
     dst_meta = (dst_shm.name, dst_numpy_array.shape, dst_numpy_array.dtype)
     ts_meta = (ts_shm.name, ts_numpy_array.shape, ts_numpy_array.dtype)
 
-    
     # CUDA sanity
     use_cuda = torch is not None and torch.cuda.is_available()
     if use_cuda:
         ndev = torch.cuda.device_count()
         if ndev < ws:
             raise RuntimeError(f"Need at least {ws} CUDA devices, found {ndev}")
-        log("MAIN", f"CUDA devices={ndev}, using 0..{ws-1}")
+        log("MAIN", f"CUDA devices={ndev}, using 0..{ws - 1}")
     else:
         log("MAIN", "CUDA not available → CPU fallback + gloo")
 
@@ -497,8 +590,8 @@ def main():
     manager = mp.Manager()
 
     # Shared state
-    committed_bid = manager.Value('i', -1)
-    S = manager.Value('i', int(args.staleness))
+    committed_bid = manager.Value("i", -1)
+    S = manager.Value("i", int(args.staleness))
     cond = manager.Condition()
     stop_ev = manager.Event()
 
@@ -511,27 +604,73 @@ def main():
     procs: List[mp.Process] = []
 
     # P0
-    procs.append(mp.Process(target=sampler_proc, name="P0",
-                            args=(q01, src_meta, dst_meta, ts_meta, train_edge_end, val_edge_end, cond, committed_bid, S, stop_ev, args.batches, args.t_sample, ws)))
+    procs.append(
+        mp.Process(
+            target=sampler_proc,
+            name="P0",
+            args=(
+                q01,
+                src_meta,
+                dst_meta,
+                ts_meta,
+                train_edge_end,
+                val_edge_end,
+                cond,
+                committed_bid,
+                S,
+                stop_ev,
+                args.batches,
+                args.t_sample,
+                ws,
+            ),
+        )
+    )
 
     # CP1
-    procs.append(mp.Process(target=cp1_proc, name="CP1",
-                            args=(q01, q12_devs, stop_ev, ws)))
+    procs.append(
+        mp.Process(target=cp1_proc, name="CP1", args=(q01, q12_devs, stop_ev, ws))
+    )
 
     # H2D feeders per device
     for d in range(ws):
-        procs.append(mp.Process(target=h2d_feeder_proc, name=f"H2D:{d}",
-                                args=(d, q12_devs[d], ring_devs[d], stop_ev, args.t_h2d, use_cuda)))
+        procs.append(
+            mp.Process(
+                target=h2d_feeder_proc,
+                name=f"H2D:{d}",
+                args=(d, q12_devs[d], ring_devs[d], stop_ev, args.t_h2d, use_cuda),
+            )
+        )
 
     # CP2 trainers per device
     for d in range(ws):
-        procs.append(mp.Process(target=trainer_proc, name=f"CP2:{d}",
-                                args=(d, ring_devs[d], q23, cond, committed_bid, S, stop_ev,
-                                      args.master_addr, int(args.master_port), ws, args.amp)))
+        procs.append(
+            mp.Process(
+                target=trainer_proc,
+                name=f"CP2:{d}",
+                args=(
+                    d,
+                    ring_devs[d],
+                    q23,
+                    cond,
+                    committed_bid,
+                    S,
+                    stop_ev,
+                    args.master_addr,
+                    int(args.master_port),
+                    ws,
+                    args.amp,
+                ),
+            )
+        )
 
     # CP3
-    procs.append(mp.Process(target=cp3_proc, name="CP3",
-                            args=(q23, cond, committed_bid, stop_ev, ws, args.t_io, args.out_dir)))
+    procs.append(
+        mp.Process(
+            target=cp3_proc,
+            name="CP3",
+            args=(q23, cond, committed_bid, stop_ev, ws, args.t_io, args.out_dir),
+        )
+    )
 
     # Start
     for p in procs:

@@ -7,12 +7,12 @@ class GNN(nn.Module):
     def __init__(
         self,
         gnn: nn.Module,
-        predictor: nn.Module,
+        header: nn.Module,
     ):
         super().__init__()
         self.gnn = gnn
-        self.predictor = predictor
+        self.header = header
 
     def forward(self, ctx: ForwardCtx):
         h = self.gnn(ctx.blockss)
-        return self.predictor(h)
+        return self.header(h)

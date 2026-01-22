@@ -51,11 +51,11 @@ def compute_latest_indices(nid: torch.Tensor, ts: torch.Tensor) -> torch.Tensor:
 
 def keep_latest(data: Mem_or_Mail):
     assert data.ts is not None, "TS must be provided for keep_latest"
-    indices = compute_latest_indices(data.id, data.ts)
+    indices = compute_latest_indices(data.nid, data.ts)
 
     # 2. 切片更新自己特有的字段
-    if indices.numel() < data.id.numel():  # 只有确实有重复才更新，微小优化
-        data.id = data.id[indices]
+    if indices.numel() < data.nid.numel():  # 只有确实有重复才更新，微小优化
+        data.nid = data.nid[indices]
         data.data = data.data[indices]  # MemTsNid 特有的字段
         data.ts = data.ts[indices]
 
@@ -73,11 +73,11 @@ def keep_mean(data: Mem_or_Mail):
     """
     assert data.ts is not None, "TS must be provided for keep_mean"
 
-    if data.id.numel() == 0:
+    if data.nid.numel() == 0:
         return
 
     # 1. ID 映射 (Mapping)
-    unique_nids, compact_idx = torch.unique(data.id, return_inverse=True)
+    unique_nids, compact_idx = torch.unique(data.nid, return_inverse=True)
     M = unique_nids.size(0)
 
     # 2. 处理权重 (Weights)
@@ -109,7 +109,7 @@ def keep_mean(data: Mem_or_Mail):
     new_ts = sum_ts / new_ct  # [M] / [M] -> [M]
 
     # 7. 更新自身
-    data.id = unique_nids
+    data.nid = unique_nids
     data.data = new_data
     data.ts = new_ts
     data.ct = new_ct.long()
@@ -123,16 +123,16 @@ def merge_with_priority(
     规则：优先保留 high_priority_data 的数据。如果 nid 在 high_priority_data 中存在，则忽略 high_priority_data 中的对应行。
     """
     # 1. 判空处理：如果 B 是空的，直接返回 A
-    if low_priority_data.id.numel() == 0:
+    if low_priority_data.nid.numel() == 0:
         return type(high_priority_data)(
-            id=high_priority_data.id,
+            id=high_priority_data.nid,
             data=high_priority_data.data,
             ts=high_priority_data.ts,
         )
     # 如果 A 是空的，直接返回 B
-    if high_priority_data.id.numel() == 0:
+    if high_priority_data.nid.numel() == 0:
         return type(low_priority_data)(
-            id=low_priority_data.id,
+            id=low_priority_data.nid,
             data=low_priority_data.data,
             ts=low_priority_data.ts,
         )
@@ -142,13 +142,13 @@ def merge_with_priority(
     # -------------------------------------------------------
     # mask 为 True 的位置表示：B 中的这个 nid 也在 A 中出现了
     # (注意：self.nid 不需要去重，isin 会自动处理)
-    mask_in_high = torch.isin(low_priority_data.id, high_priority_data.id)
+    mask_in_high = torch.isin(low_priority_data.nid, high_priority_data.nid)
 
     # 我们只保留那些 mask 为 False (即不在 A 中) 的数据
     mask_keep_B = ~mask_in_high
 
     # 2. 对 B 进行过滤
-    b_nid_filtered = low_priority_data.id[mask_keep_B]
+    b_nid_filtered = low_priority_data.nid[mask_keep_B]
     b_mem_filtered = low_priority_data.data[mask_keep_B]
     b_ts_filtered = low_priority_data.ts[mask_keep_B]
 
@@ -158,7 +158,7 @@ def merge_with_priority(
         new_ct = torch.cat([high_priority_data.ct, b_ct_filtered], dim=0)
 
     return type(high_priority_data)(
-        id=torch.cat([high_priority_data.id, b_nid_filtered], dim=0),
+        id=torch.cat([high_priority_data.nid, b_nid_filtered], dim=0),
         data=torch.cat([high_priority_data.data, b_mem_filtered], dim=0),
         ts=torch.cat([high_priority_data.ts, b_ts_filtered], dim=0),
         ct=new_ct,
@@ -208,14 +208,14 @@ class DataSyncer(threading.Thread):
         def write_back_mem(writeback, mem_ts_nid: MemTsNid):
             # write back mem
             if mem_ts_nid is not None and writeback is not None:
-                mask = torch.isin(mem_ts_nid.id, writeback)
+                mask = torch.isin(mem_ts_nid.nid, writeback)
                 write_back_mem = MemTsNid(
-                    id=mem_ts_nid.id[mask],
+                    nid=mem_ts_nid.nid[mask],
                     data=mem_ts_nid.data[mask],
                     ts=mem_ts_nid.ts[mask],
                 )
             assert self.shared is not None
-            id = write_back_mem.id.cpu().long()
+            id = write_back_mem.nid.cpu().long()
             self.shared.mem[id] = write_back_mem.data.cpu()
             self.shared.mem_ts[id] = write_back_mem.ts.cpu()
 
@@ -261,14 +261,14 @@ class DataSyncer(threading.Thread):
         def write_back_box(writeback, box_ts_nid: BoxTsNid):
             if box_ts_nid is not None and writeback is not None:
                 return
-            mask = torch.isin(box_ts_nid.id, writeback)
+            mask = torch.isin(box_ts_nid.nid, writeback)
             write_back_box = BoxTsNid(
-                id=box_ts_nid.id[mask],
+                nid=box_ts_nid.nid[mask],
                 data=box_ts_nid.data[mask],
                 ts=box_ts_nid.ts[mask],
             )
 
-            id = write_back_box.id.cpu().long()
+            id = write_back_box.nid.cpu().long()
 
             self.shared.box[id] = write_back_box.data.cpu()
             self.shared.box_ts[id] = write_back_box.ts.cpu()
@@ -403,7 +403,7 @@ class DataSyncer(threading.Thread):
 
         torch.cuda.current_stream().wait_event(ready_event)
         print(
-            "DataSyncer: ready_event received, processing delta",
+            "DataSyncer: ready_event received, processing DyX",
             macro_bid,
         )
 
@@ -458,7 +458,7 @@ class DataSyncer(threading.Thread):
         device = "cuda"
         requests = {}
 
-        nid = data_td_nid.id
+        nid = data_td_nid.nid
         data = data_td_nid.data
         ts = data_td_nid.ts
         has_ct = strategy == "mean"
@@ -621,7 +621,7 @@ def generate_interaction_mails(
                            对应 root_new_mem_orig 中每个节点的 mail
     """
     # 1. 获取 N 的大小
-    total_nodes = root_new_mem_orig.id.shape[0]
+    total_nodes = root_new_mem_orig.nid.shape[0]
     n = total_nodes // 2
 
     # 2. 切分 Src 和 Dst 的 Memory
@@ -649,7 +649,7 @@ def generate_interaction_mails(
     all_mails = torch.cat([mail_for_src, mail_for_dst], dim=0)
 
     mail_ts_nid = MailTsNid(
-        id=root_new_mem_orig.id,
+        nid=root_new_mem_orig.nid,
         data=all_mails,
         ts=root_new_mem_orig.ts,  # 这里ts的len正好=2N
     )

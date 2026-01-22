@@ -15,7 +15,7 @@ from gnn.components import (
 )
 from schemas.datatypes.cfg import Config
 from schemas.datatypes.data_to_sync import MemTsNid
-from schemas.datatypes.misc import Meta, X
+from schemas.datatypes.misc import DyX, Meta
 from schemas.datatypes.plan import PlanSet
 from worker.data_syncer import DataSyncer
 
@@ -100,7 +100,7 @@ class BaseModel(torch.nn.Module):
     def forward(
         self,
         meta: Meta,
-        x: X,
+        x: DyX,
         plan_set: PlanSet,
         neg_samples=1,
         is_last=False,
@@ -118,7 +118,7 @@ class BaseModel(torch.nn.Module):
             root_new_mem = MemTsNid(
                 ts=ts[:n_root_src_n_pos_dst],  # 新交互的ts
                 data=upd_mem[:n_root_src_n_pos_dst],
-                id=nid[:n_root_src_n_pos_dst],  # 新交互的nid
+                nid=nid[:n_root_src_n_pos_dst],  # 新交互的nid
             )
             self.fill_new_mem(
                 blockss[0][0], upd_mem, self.n_feat_map(blockss[0][0].srcdata["h"])

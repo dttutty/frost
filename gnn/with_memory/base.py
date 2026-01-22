@@ -14,18 +14,18 @@ class MemoryBaseGNN(nn.Module):
         gnn: nn.Module,
         memory_updater: nn.Module,
         sync_q: Queue[SyncTask],
-        predictor: nn.Module,
+        header: nn.Module,
     ):
         super().__init__()
         self.gnn = gnn
         self.memory_updater = memory_updater
         self.sync_q = sync_q
-        self.predictor = predictor
+        self.header = header
 
     def forward(self, ctx: ForwardCtx):
         self._sync_memory(ctx=ctx)
         h = self.gnn(ctx.blockss)
-        return self.predictor(h)
+        return self.header(h)
 
     @torch.no_grad()
     def _sync_memory(self, *, ctx: ForwardCtx):
@@ -38,7 +38,7 @@ class MemoryBaseGNN(nn.Module):
             root_new_mem = MemTsNid(
                 ts=ts[: ctx.n_root_src_n_pos_dst],
                 data=updated_mem[: ctx.n_root_src_n_pos_dst],
-                id=nid[: ctx.n_root_src_n_pos_dst],
+                nid=nid[: ctx.n_root_src_n_pos_dst],
             )
 
         else:
@@ -47,7 +47,7 @@ class MemoryBaseGNN(nn.Module):
             root_new_mem = MemTsNid(
                 ts=ctx.root_info.ts[: ctx.n_root_src_n_pos_dst],
                 data=updated_mem[: ctx.n_root_src_n_pos_dst],
-                id=ctx.root_info.nid[: ctx.n_root_src_n_pos_dst],
+                nid=ctx.root_info.nid[: ctx.n_root_src_n_pos_dst],
             )
 
         ready_event = torch.cuda.Event()

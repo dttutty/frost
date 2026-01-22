@@ -7,7 +7,7 @@ from dgl.heterograph import DGLBlock
 
 from gnn.components import EdgePredictor, TimeEncode
 from schemas.datatypes.data_to_sync import MemTsNid
-from schemas.datatypes.misc import X
+from schemas.datatypes.misc import DyX
 from schemas.datatypes.plan import TensorPlanSet
 from schemas.datatypes.task import SyncTask
 
@@ -183,7 +183,7 @@ class APAN(nn.Module):
         blockss: List[List[DGLBlock]],
         n_root_src_n_pos_dst: int,
         mdt: torch.Tensor,
-        x: X,
+        x: DyX,
         plan_set: TensorPlanSet,
         neg_samples=1,
         is_last: bool = False,
@@ -205,7 +205,7 @@ class APAN(nn.Module):
         root_new_mem = MemTsNid(
             ts=ts[:n_root_src_n_pos_dst],  # 新交互的ts
             data=updated_mem[:n_root_src_n_pos_dst],
-            id=nid[:n_root_src_n_pos_dst],  # 新交互的nid
+            nid=nid[:n_root_src_n_pos_dst],  # 新交互的nid
         )
         ready_event = torch.cuda.Event()
         ready_event.record(torch.cuda.current_stream())
