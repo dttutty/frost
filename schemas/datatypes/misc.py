@@ -97,13 +97,13 @@ class ModelComponents:
 
 
 @dataclass(slots=True, kw_only=True)
-class FeatNid:
-    nid: torch.Tensor | None = None
-    nfeat: torch.Tensor | None = None
+class NFeatNid:
+    nid: torch.Tensor
+    nfeat: torch.Tensor
     is_zipped: bool = True
     is_sorted: bool = False
 
-    def sort_by_nid(self) -> "FeatNid":
+    def sort_by_nid(self) -> "NFeatNid":
         if self.is_sorted:
             return self
 
@@ -117,54 +117,41 @@ class FeatNid:
         self.is_sorted = True
         return self
 
-    def merge_with_another_rootx(self, other: "FeatNid") -> "FeatNid":
-        assert not self.is_merged, "Cannot merge already merged RootX."
-        assert not other.is_merged, "Cannot merge already merged RootX."
-
+    def merge(self, other: "NFeatNid") -> "NFeatNid":
         assert TensorSet.intersection(self.nid, other.nid).numel() == 0, (
             "NID overlap between RootX instances."
         )
-
         self.nid = torch.cat((self.nid, other.nid), dim=0)
-
-        if self.nfeat is not None and other.nfeat is not None:
-            self.nfeat = torch.cat((self.nfeat, other.nfeat), dim=0)
-        elif other.nfeat is not None:
-            self.nfeat = other.nfeat
-
+        self.nfeat = torch.cat((self.nfeat, other.nfeat), dim=0)
         return self
 
-    def unzip_by_root_nid(self, root_nid: torch.Tensor) -> "FeatNid":
-        assert self.is_merged, "Only merged RootX can be unzipped."
+    def unzip_by_root_nid(self, root_nid: torch.Tensor) -> "NFeatNid":
         self = self.sort_by_nid()
         pos = torch.searchsorted(self.nid, root_nid)
         self.nid = root_nid
 
-        if self.nfeat is not None:
-            self.nfeat = self.nfeat[pos]
+        self.nfeat = self.nfeat[pos]
         self.is_zipped = False
-        return self
+        return self.__class__(nid=self.nid, nfeat=self.nfeat)
 
-    def filter_by_root_nid(self, root_nid: torch.Tensor) -> "FeatNid":
-        mask = torch.isin(self.nid, root_nid)
+    def filter_by_nid(self, nid: torch.Tensor) -> "NFeatNid":
+        mask = torch.isin(self.nid, nid)
         nid = self.nid[mask]
-        if self.nfeat is not None:
-            nfeat = self.nfeat[mask]
+        nfeat = self.nfeat[mask]
         return self.__class__(nid=nid, nfeat=nfeat)
 
 
 @dataclass(slots=True, kw_only=True)
 class X:
-    feat: FeatNid
-    mem: MemTsNid
-    box: BoxTsNid
-    is_zipped: bool = True
+    nfeat: NFeatNid | None = None
+    mem: MemTsNid | None = None
+    box: BoxTsNid | None = None
 
     @cached_property
     def is_mem_mail_sorted(self) -> bool:
         return self.mem.is_sorted and self.box.is_sorted
 
-    def mem_mail_sort_by_nid(self) -> "DyX":
+    def sort_mem_and_mail(self) -> "X":
         if self.is_mem_mail_sorted:
             return self
 
@@ -176,34 +163,10 @@ class X:
 
         return self
 
-    def merge_nfeat(self, feat_delta: FeatNid) -> "X":
-        assert TensorSet.intersection(self.feat.id, feat_delta.id).numel() == 0, (
-            "NID overlap between X instances."
-        )
-
-        self.feat.merge_with_another_rootx(feat_delta)
-        self.is_merged = True
-        return self
-
-    def merge_mem_box(self, mem_delta: MemTsNid, box_delta: BoxTsNid) -> "X":
-        assert TensorSet.intersection(self.mem.nid, mem_delta.nid).numel() == 0, (
-            "NID overlap between RootX instances."
-        )
-
-        self.mem.merge_with_another_mem(mem_delta)
-        assert TensorSet.intersection(self.box.nid, box_delta.nid).numel() == 0, (
-            "NID overlap between RootX instances."
-        )
-        self.box.merge_with_another_box(box_delta)
-        self.is_merged = True
-        return self
-
-    def unzip_by_root_nid(self, root_nid: torch.Tensor, all_nid: torch.Tensor) -> "DyX":
-        assert self.is_merged, "Only merged RootX can be unzipped."
-
+    def unzip_and_align(self, root_nid: torch.Tensor) -> "X":
         if self.mem is not None:
-            self = self.sort_by_nid()
-            pos = torch.searchsorted(self.mem.id, root_nid)
+            self = self.sort_mem_and_mail()
+            pos = torch.searchsorted(self.mem.nid, root_nid)
             self.mem.ts = self.mem.ts[pos]
             self.mem.data = self.mem.data[pos]
         if self.box is not None:
@@ -235,14 +198,15 @@ class Meta:
     gnn_mfgs: List[List[DGLBlock]] | None = None
 
     mdb_raw_data: DGLBlockMeta | None
+    reverse_mdt: Optional[X] = None
 
     epoch_split_iter_info: EpochSplitIterInfo
-    x: Optional[DyX] = None
+    x: Optional[X] = None
+    unzipped_x: Optional[X] = None
     batch_node_state_io: Optional[BatchNodeStateIO]
     n_src: int = 1
 
     plan_set: Optional[TensorPlanSet] = None
-    RootX: Optional[RootDyX] = None
 
     @cached_property
     def pos_edge(self) -> torch.Tensor:

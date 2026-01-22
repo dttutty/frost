@@ -164,43 +164,6 @@ def parse_config(f) -> Config:
     return cfg
 
 
-def collate_and_build_graph(
-    mfg_meta_list: List[DGLBlockMeta], history: int
-) -> List[List[DGLBlock]]:
-    blocks = []
-
-    for mfg_meta in mfg_meta_list:
-        # 1. 在 Worker 进程组装 DGLBlock
-        # 此时数据已经在 Worker 的内存空间了
-        block = dgl.create_block(
-            (mfg_meta.col, mfg_meta.row),
-            num_src_nodes=mfg_meta.dim_in,
-            num_dst_nodes=mfg_meta.dim_out,
-        )
-
-        # num_dst_nodes = tgb.dim_out()少
-        # num_src_nodes = tgb.dim_in()多
-
-        # 2. 绑定特征
-        num_roots = mfg_meta.dim_out
-        all_nodes = mfg_meta.nodes
-        block.srcdata["ID"] = all_nodes
-        block.dstdata["ID"] = all_nodes[:num_roots]
-        block.srcdata["ts"] = mfg_meta.ts
-        block.dstdata["ts"] = mfg_meta.ts[:num_roots]
-        block.edata["dt"] = mfg_meta.dts[num_roots:]
-        block.edata["ID"] = mfg_meta.eid
-        # 3. 统一上 GPU (由 Worker 决定何时上 GPU)
-        # block = block.to("cuda:0")
-        blocks.append(block)
-
-    # 4. 处理历史分组逻辑
-    grouped_blocks = list(map(list, zip(*[iter(blocks)] * history)))
-    grouped_blocks.reverse()
-
-    return grouped_blocks
-
-
 def to_apan_mailbox_block(mfg_meta: DGLBlockMeta) -> DGLBlock:
     """
     专门用于 APAN 的异步邮件传播。

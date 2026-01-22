@@ -7,6 +7,8 @@ import torch
 from dgl.heterograph import DGLBlock
 from torch import Tensor
 
+from tensor_set import TensorSet
+
 
 def is_sorted(t: torch.Tensor):
     return torch.all(torch.diff(t) >= 0)
@@ -27,7 +29,10 @@ class MemTsNid:
     def cuda(self) -> "MemTsNid":
         return MemTsNid(nid=self.nid.cuda(), data=self.data.cuda(), ts=self.ts.cuda())
 
-    def merge_with_another_mem(self, other: "MemTsNid") -> "MemTsNid":
+    def merge_mem(self, other: "MemTsNid") -> "MemTsNid":
+        assert TensorSet.intersection(self.nid, other.nid).numel() == 0, (
+            "NID overlap between MemTsNid instances."
+        )
         return MemTsNid(
             nid=torch.cat((self.nid, other.nid), dim=0),
             data=torch.cat((self.data, other.data), dim=0),
@@ -93,13 +98,17 @@ class BoxTsNid:
             ct=self.ct,
         )
 
-    def merge_with_another_box(self, other: "BoxTsNid") -> "BoxTsNid":
-        return BoxTsNid(
+    def merge_box(self, other: "BoxTsNid") -> "BoxTsNid":
+        assert TensorSet.intersection(self.nid, other.nid).numel() == 0, (
+            "NID overlap between BoxTsNid instances."
+        )
+        self = BoxTsNid(
             nid=torch.cat((self.nid, other.nid), dim=0),
             data=torch.cat((self.data, other.data), dim=0),
             ts=torch.cat((self.ts, other.ts), dim=0),
             next_pos=None,
         )
+        return self
 
     def sort_by_nid(self) -> "BoxTsNid":
         sorted_indices = torch.argsort(self.nid)
