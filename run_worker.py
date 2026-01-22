@@ -10,18 +10,18 @@ import torch
 import torch.distributed as dist
 from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.nn.parallel import DistributedDataParallel as DDP
-from worker.assembler.mfg.dy_assembler import DyAssembler
 
+from data_syncer.data_syncer import DataSyncer
 from gnn import TGN
 from gnn.with_memory.base import MemoryBaseGNN
 from gnn.without_memory.base import GNN
 from schemas.datatypes.cfg import Config
-from schemas.datatypes.data_to_sync import BoxTsNid, DyX, MailTsNid, MemTsNid
+from schemas.datatypes.data_to_sync import BoxTsNid, MailTsNid, MemTsNid
 from schemas.datatypes.env import Env
-from schemas.datatypes.misc import DyX, ForwardCtx, Meta, ModelComponents, Shared
+from schemas.datatypes.misc import ForwardCtx, Meta, ModelComponents, Shared, X
 from schemas.datatypes.plan import TensorPlanSet
 from schemas.datatypes.task import P2PTask, SyncTask
-from worker.data_syncer import DataSyncer
+from worker.assembler.dy_asm import DyAssembler
 from worker.h2d import H2D
 from worker.receiver import HostWorkerSyncer as Receiver
 
@@ -98,13 +98,12 @@ class Worker:
         self.fetch_factor = 1
         self.cmd_q = queue.Queue()
 
-        if self.cfg.m is not None:
-            self.DyX_q: Queue[DyX | None] = queue.Queue(maxsize=1)
+        if self.shared is not None:
+            m_cfg = self.cfg.m
+            self.delta_q: Queue[X | None] = queue.Queue(maxsize=1)
             self.mem_p2p_q: Queue[P2PTask] = queue.Queue()
             self.box_p2p_q: Queue[P2PTask] = queue.Queue()
-            self.xpart_q: Queue[Tuple[Meta, DyX, TensorPlanSet]] = queue.Queue(
-                maxsize=1
-            )
+            self.xpart_q: Queue[Tuple[Meta, X, TensorPlanSet]] = queue.Queue(maxsize=1)
             self.sync_q: Queue[SyncTask] = queue.Queue(maxsize=1)
             self.xfull_q = queue.Queue(maxsize=1)
 
@@ -112,8 +111,11 @@ class Worker:
             destination_q_for_h2d = self.xpart_q
             self.h2d_sem = threading.Semaphore(0)
             self.data_syncer = DataSyncer(
-                cfg=cfg,
-                env=self.env,
+                deliver_to=m_cfg.deliver_to,
+                mail_combine=m_cfg.mail_combine,
+                boxsize=m_cfg.boxsize,
+                merge_src=self.cfg.t.merge_src,
+                n_gpu=env.n_gpu,
                 shared=shared,
                 h2d_sem=self.h2d_sem,
                 sync_q=self.sync_q,
@@ -123,14 +125,12 @@ class Worker:
             )
             self.assembler = DyAssembler(
                 xpart_q=self.xpart_q,
-                DyX_q=self.DyX_q,
+                delta_q=self.delta_q,
                 xfull_q=self.xfull_q,
                 stop_ev=self.stop_ev,
             )
         else:
-            self.xfull_q: Queue[Tuple[Meta, DyX, TensorPlanSet]] = queue.Queue(
-                maxsize=1
-            )
+            self.xfull_q: Queue[Tuple[Meta, X, TensorPlanSet]] = queue.Queue(maxsize=1)
             destination_q_for_h2d = self.xfull_q
             self.h2d_sem = None
             self.data_syncer = None
@@ -139,7 +139,6 @@ class Worker:
             nfeat=nfeat,
             efeat=efeat,
             shared=shared,
-            gnn_arch=cfg.g.arch,
             merge_src=self.cfg.t.merge_src,
             meta_q=self.meta_q,
             destination_q=destination_q_for_h2d,
@@ -341,7 +340,7 @@ class Worker:
         if p2p_task is not None:
             mem_DyX = self._exec_p2p(p2p_task)
         else:
-            self.DyX_q.put(None)
+            self.delta_q.put(None)
 
         # 2. 强制后处理 Box 任务
         p2p_task = self.box_p2p_q.get(block=True)
@@ -356,7 +355,7 @@ class Worker:
                 box_DyX = result
 
         DyX = DyX(mem=mem_DyX, box=box_DyX)
-        self.DyX_q.put(DyX)
+        self.delta_q.put(DyX)
         print(f"DataSyncer: rank {self.env.local_rank} put DyX into DyX_q")
 
     @torch.no_grad()
@@ -518,7 +517,7 @@ class Worker:
             self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
             self.assembler.start()  # 启动 Assembler 组装线程
             self.data_syncer.start()
-            self.DyX_q.put(None)
+            self.delta_q.put(None)
 
         _initialize = False
 

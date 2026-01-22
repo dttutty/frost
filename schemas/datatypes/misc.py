@@ -27,7 +27,7 @@ class SampleReturn:
 @dataclass(slots=True)
 class ForwardCtx:
     blockss: List[List[DGLBlock]]
-    x: DyX
+    x: X
     macro_bid: int
     plan_set: TensorPlanSet
     mail_delivery_tensor: Tensor | None
@@ -149,6 +149,8 @@ class X:
 
     @cached_property
     def is_mem_mail_sorted(self) -> bool:
+        assert self.mem is not None
+        assert self.box is not None
         return self.mem.is_sorted and self.box.is_sorted
 
     def sort_mem_and_mail(self) -> "X":

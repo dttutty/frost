@@ -8,6 +8,7 @@ from memorys import (
     TransformerMemoryUpdater,
 )
 
+from data_syncer.data_syncer import DataSyncer
 from gnn.components import (
     EdgePredictor,
     IdentityNormLayer,
@@ -15,9 +16,8 @@ from gnn.components import (
 )
 from schemas.datatypes.cfg import Config
 from schemas.datatypes.data_to_sync import MemTsNid
-from schemas.datatypes.misc import DyX, Meta
+from schemas.datatypes.misc import Meta
 from schemas.datatypes.plan import PlanSet
-from worker.data_syncer import DataSyncer
 
 
 class BaseModel(torch.nn.Module):

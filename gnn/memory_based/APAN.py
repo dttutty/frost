@@ -214,7 +214,7 @@ class APAN(nn.Module):
                 macro_bid=macro_bid,
                 plan_set=plan_set,
                 root_new_mem=root_new_mem,
-                x=x,
+                old_x=x,
                 mail_delivery_tensor=mdt,
                 is_last=is_last,
                 ready_event=ready_event,  # type: ignore

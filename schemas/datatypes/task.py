@@ -8,25 +8,26 @@ from numpy.typing import NDArray
 from torch import Tensor
 
 from .data_to_sync import BoxTsNid, MemTsNid
-from .misc import DyX
-from .plan import TensorDyPlan, TensorPlanSet
+from .misc import X
+from .plan import TensorDyPlan
 
 
 @dataclass(slots=True)
 class MemTask:
+    macro_bid: int
     root_new_mem: MemTsNid
     old_mem_ts_nid: MemTsNid
-    plan: TensorDyPlan
+    mem_plan: TensorDyPlan
     is_last: bool
 
 
 @dataclass(slots=True)
 class BoxTask:
     root_new_mem_orig: MemTsNid
-    pos_efeat: Tensor
+    pos_efeat: Tensor | None
     macro_bid: int
     old_box: BoxTsNid
-    plan: TensorDyPlan
+    box_plan: TensorDyPlan
     is_last: bool
     mail_delivery_tensor: Tensor
 
@@ -50,9 +51,11 @@ class GatherElement:
 @dataclass(slots=True, kw_only=True)
 class SyncTask:
     macro_bid: int
-    plan_set: TensorPlanSet
+    mem_plan: TensorDyPlan
+    box_plan: TensorDyPlan
     root_new_mem: MemTsNid
-    x: DyX
+    pos_efeat: Tensor
+    old_x: X
     mail_delivery_tensor: torch.Tensor | None
     is_last: bool
     ready_event: torch.cuda.Event

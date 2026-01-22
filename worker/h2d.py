@@ -1,3 +1,4 @@
+import os
 import queue
 import threading
 import traceback
@@ -9,15 +10,10 @@ import torch.distributed as dist
 from dgl.heterograph import DGLBlock
 
 # In utils.py
-from schemas.datatypes.misc import (
-    DGLBlockMeta,
-    Meta,
-    Shared,
-    X,
-)
+from schemas.datatypes.misc import DGLBlockMeta, Meta, Shared, X
 from utils import _deduplicate_first_layer_src
-from worker.dy_asm import prep_before_dy_asm
-from worker.st_asm import StAssembler
+from worker.assembler.dy_asm import prep_before_dy_asm
+from worker.assembler.st_asm import StAssembler
 
 
 def collate_and_build_graph(
@@ -63,7 +59,6 @@ class H2D(threading.Thread):
         nfeat: torch.Tensor | None,
         efeat: torch.Tensor | None,
         shared: Shared | None,
-        gnn_arch: str,
         merge_src: bool,
         meta_q: queue.Queue[Meta],
         destination_q: queue.Queue,
@@ -76,7 +71,6 @@ class H2D(threading.Thread):
         self.efeat = efeat
         self.shared = shared
         self.merge_src = merge_src
-        self.gnn_arch = gnn_arch
         self.meta_q = meta_q
         self.destination_q = destination_q
         self.stop_ev = stop_ev
@@ -110,7 +104,7 @@ class H2D(threading.Thread):
             meta.plan_set = meta.plan_set.cuda()
 
         # move nfeat and efeat to gpu
-        if self.nfeat is not None or self.nfeat is not None:
+        if self.nfeat is not None or self.efeat is not None:
             if meta.plan_set is not None and meta.plan_set.nfeat is not None:
                 self.st_asm.fill(meta, meta.plan_set.nfeat)
             else:
@@ -144,7 +138,5 @@ class H2D(threading.Thread):
             print(f"!!! H2D Thread Crashed on Rank {dist.get_rank()} !!!")
             traceback.print_exc()  # 打印详细报错
             self.stop_ev.set()  # 通知其他线程退出
-            # 可选：强制杀掉进程防止死锁等待
-            import os
 
             os._exit(1)

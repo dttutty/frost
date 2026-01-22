@@ -44,7 +44,7 @@ class DyAssembler(threading.Thread):
 
     def __init__(
         self,
-        xpart_q: queue.Queue[X],
+        xpart_q: queue.Queue[Meta],
         delta_q: queue.Queue[X],
         xfull_q: queue.Queue[Tuple[Meta, torch.cuda.Stream]],
         stop_ev: threading.Event,

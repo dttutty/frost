@@ -58,7 +58,7 @@ class MemoryBaseGNN(nn.Module):
                 macro_bid=ctx.macro_bid,
                 plan_set=ctx.plan_set,
                 root_new_mem=root_new_mem,
-                x=ctx.x,
+                old_x=ctx.x,
                 mail_delivery_tensor=ctx.mail_delivery_tensor,
                 is_last=ctx.is_last,
                 ready_event=ready_event,

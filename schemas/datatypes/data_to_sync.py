@@ -47,6 +47,12 @@ class MemTsNid:
         self.is_sorted = True
         return self
 
+    def keep_latest(self):
+        from data_syncer.utils.data_ops import keep_latest
+
+        keep_latest(self)
+        return self
+
 
 @dataclass(slots=True, kw_only=True)
 class BoxTsNid:
