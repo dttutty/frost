@@ -1,12 +1,17 @@
 import argparse
+import logging
 
 import numpy as np
 import pandas as pd
 import torch
 import yaml
 from numba import njit, prange
-from sampler_core import ParallelSampler
 from tqdm import tqdm
+
+from sampler_core import ParallelSampler
+
+
+logger = logging.getLogger(__name__)
 
 
 class NegLinkSampler:

@@ -33,7 +33,7 @@ class ForwardCtx:
     mail_delivery_tensor: Tensor | None
     is_last: bool
     n_root_src_n_pos_dst: int
-    root_info: Roots | None
+    root_info: X | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +181,12 @@ class X:
 
 
 @dataclass(slots=True, kw_only=True)
+class DeltaX:
+    mem: MemTsNid
+    box: BoxTsNid
+
+
+@dataclass(slots=True, kw_only=True)
 class MetaList:
     queue: List[Meta]
 
@@ -267,7 +273,7 @@ class EpochSplitIterInfo:
     split: Literal["train", "val", "test"]
 
     @cached_property
-    def mcaro_position_of_split(self) -> str | None:
+    def macro_position_of_split(self) -> str | None:
         if self.cur_macro_of_split + 1 == self.n_macro_of_split:
             return "last"
         elif self.cur_macro_of_split == 0:

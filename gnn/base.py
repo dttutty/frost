@@ -1,6 +1,8 @@
 # worker/trainer.py
 
 
+import logging
+
 import torch
 from memorys import (
     BasicMemoryUpdater,
@@ -18,6 +20,9 @@ from schemas.datatypes.cfg import Config
 from schemas.datatypes.data_to_sync import MemTsNid
 from schemas.datatypes.misc import Meta
 from schemas.datatypes.plan import PlanSet
+
+
+logger = logging.getLogger(__name__)
 
 
 class BaseModel(torch.nn.Module):

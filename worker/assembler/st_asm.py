@@ -1,3 +1,4 @@
+import logging
 from typing import List
 
 import torch
@@ -5,6 +6,9 @@ from dgl.heterograph import DGLBlock
 
 from schemas.datatypes.misc import Meta, NFeatNid
 from schemas.datatypes.plan import TensorStPlan
+
+
+logger = logging.getLogger(__name__)
 
 
 class StAssembler:

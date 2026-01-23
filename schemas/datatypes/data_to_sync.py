@@ -155,6 +155,23 @@ class MailTsNid:
     def keep_latest_after_gather(self):
         return self
 
+    def merge_with_priority(self, other: "MailTsNid") -> "MailTsNid":
+        from data_syncer.utils.data_ops import merge_with_priority
+
+        return merge_with_priority(self, other)
+
+    def keep_latest(self):
+        from data_syncer.utils.data_ops import keep_latest
+
+        keep_latest(self)
+        return self
+
+    def keep_mean(self):
+        from data_syncer.utils.data_ops import keep_mean
+
+        keep_mean(self)
+        return self
+
     def deliver(
         self, delivery: Union[torch.Tensor, DGLBlock], include_self: bool = False
     ):

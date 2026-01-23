@@ -49,7 +49,7 @@ class SampleCFG:
     neg_samples: int = 1
     sample_support_node: bool = True
     sample_support_for_neg_dst: bool = True
-    neighbor: Optional[List[int]] = None
+    neighbor: List[int]
     prop_time: bool = False
     duration: int = 0
     num_thread: int = 32  # valid if history > 1

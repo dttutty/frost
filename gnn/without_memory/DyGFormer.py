@@ -1,3 +1,5 @@
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,6 +8,9 @@ from torch.nn.utils.rnn import pad_sequence
 from gnn.sample_mixin import SampleMixin
 
 from ..components import TimeEncode
+
+
+logger = logging.getLogger(__name__)
 
 
 class NeighborCooccurrenceEncoder(nn.Module):

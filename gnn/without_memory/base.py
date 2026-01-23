@@ -1,6 +1,11 @@
+import logging
+
 import torch.nn as nn
 
 from schemas.datatypes.misc import ForwardCtx
+
+
+logger = logging.getLogger(__name__)
 
 
 class GNN(nn.Module):

@@ -1,6 +1,8 @@
 # worker/trainer.py
 
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,6 +10,9 @@ from dgl.heterograph import DGLBlock
 
 from gnn.components import TimeEncode
 from schemas.datatypes.misc import Roots
+
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryUpdater(torch.nn.Module):

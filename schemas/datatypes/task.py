@@ -29,7 +29,7 @@ class BoxTask:
     old_box: BoxTsNid
     box_plan: TensorDyPlan
     is_last: bool
-    mail_delivery_tensor: Tensor
+    mail_delivery_tensor: Tensor | None
 
 
 @dataclass(slots=True)

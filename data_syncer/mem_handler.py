@@ -1,3 +1,4 @@
+import logging
 import threading
 from queue import Queue
 from typing import TypeVar
@@ -9,6 +10,7 @@ from schemas.datatypes.task import (
     MemTask,
     P2PTask,
 )
+from thread_base_with_stream import StreamThreadBase
 
 from .utils.data_ops import merge_with_priority
 from .utils.p2p import P2PHandler
@@ -17,9 +19,11 @@ from .utils.p2p import P2PHandler
 AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
 Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 
+logger = logging.getLogger(__name__)
+
 
 @torch.no_grad()
-class MemHandler(threading.Thread):
+class MemHandler(StreamThreadBase):
     def __init__(
         self,
         shared_mem: torch.Tensor,
@@ -30,11 +34,10 @@ class MemHandler(threading.Thread):
         stop_ev: threading.Event,
         p2p_handler: P2PHandler,
     ):
-        super().__init__(daemon=True)
+        super().__init__(name="mem_handler")
         self.shared_mem = shared_mem
         self.shared_mem_ts = shared_mem_ts
         self.h2d_sem = h2d_sem
-        self.stream = torch.cuda.Stream()
         self.mem_task_q: Queue[MemTask] = mem_task_q
         self.mem_p2p_q: Queue[P2PTask | None] = mem_p2p_q
         self.stop_ev = stop_ev

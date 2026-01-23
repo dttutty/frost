@@ -1,14 +1,17 @@
-import os
+import logging
 import threading
-import traceback
 from queue import Queue
 from typing import List, Set, Tuple
 
 import numpy as np
 
 from schemas.datatypes.plan import DyPlan
+from thread_base import ThreadBase
 
 from ..meta_batcher import MetaBundle
+
+
+logger = logging.getLogger(__name__)
 
 
 def handle_remaining(
@@ -155,7 +158,7 @@ def dedup_updates(
     return new_updates, all_update
 
 
-class DynamicPlanner(threading.Thread):
+class DynamicPlanner(ThreadBase):
     """
     这个是对那种mailbox_update=mem_update的planner
     """
@@ -170,6 +173,7 @@ class DynamicPlanner(threading.Thread):
         out_q: Queue[Tuple[MetaBundle, List[DyPlan]] | None],
         stop_ev: threading.Event,
     ):
+        super().__init__(name="dynamic_planner")
         """
         初始化规划器。
 
@@ -185,40 +189,31 @@ class DynamicPlanner(threading.Thread):
         self.stop_ev = stop_ev
         self.pending_infos = None
 
-    def run(self):
-        try:
-            while not self.stop_ev.is_set():
-                self.logic()
-        except Exception:
-            print("!!! Planner Thread Crashed !!!")
-            traceback.print_exc()
-            self.stop_ev.set()
-            os._exit(1)
-
     def logic(self):
-        new_infos = self.in_q.get(block=True)
-        if new_infos is not None:
-            if self.pending_infos is None:
-                current_needs, _ = new_infos
-                self.pending_infos = new_infos
-                self.fetch = current_needs
-            else:
+        while not self.stop_ev.is_set():
+            new_infos = self.in_q.get(block=True)
+            if new_infos is not None:
+                if self.pending_infos is None:
+                    current_needs, _ = new_infos
+                    self.pending_infos = new_infos
+                    self.fetch = current_needs
+                else:
+                    current_needs, current_updates = self.pending_infos
+                    next_needs, _ = new_infos
+                    plan = self._plan(current_needs, current_updates, next_needs)
+
+                    self.out_q.put(plan)
+                    self.pending_infos = new_infos
+
+            elif new_infos is None:
+                assert self.pending_infos is not None
                 current_needs, current_updates = self.pending_infos
-                next_needs, _ = new_infos
+                # 没有下一个 batch 了，next_needs 为空
+                next_needs = [set() for _ in range(self.n_gpus)]
+
                 plan = self._plan(current_needs, current_updates, next_needs)
-
                 self.out_q.put(plan)
-                self.pending_infos = new_infos
-
-        elif new_infos is None:
-            assert self.pending_infos is not None
-            current_needs, current_updates = self.pending_infos
-            # 没有下一个 batch 了，next_needs 为空
-            next_needs = [set() for _ in range(self.n_gpus)]
-
-            plan = self._plan(current_needs, current_updates, next_needs)
-            self.out_q.put(plan)
-            self.pending_infos = None
+                self.pending_infos = None
 
     def _plan(
         self,

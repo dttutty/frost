@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 import traceback
@@ -7,9 +8,13 @@ from typing import List, Set
 import numpy as np
 
 from schemas.datatypes.plan import StPlan
+from thread_base import ThreadBase
 
 
-class StaticPlanner(threading.Thread):
+logger = logging.getLogger(__name__)
+
+
+class StaticPlanner(ThreadBase):
     """
     这个是对那种mailbox_update=mem_update的planner
     """
@@ -24,6 +29,7 @@ class StaticPlanner(threading.Thread):
         out_q: Queue[StPlan | None] | None,
         stop_ev: threading.Event,
     ):
+        super().__init__(name="static_planner")
         """
         初始化规划器。
 
@@ -41,8 +47,7 @@ class StaticPlanner(threading.Thread):
 
     def run(self):
         try:
-            while not self.stop_ev.is_set():
-                self.logic()
+            self.logic()
         except Exception:
             print("!!! Planner Thread Crashed !!!")
             traceback.print_exc()
@@ -50,27 +55,28 @@ class StaticPlanner(threading.Thread):
             os._exit(1)
 
     def logic(self):
-        needs = self.in_q.get(block=True)
-        if needs is not None:
-            if self.pending_needs is None:
-                self.pending_needs = needs
-                self.fetchs = needs
-            else:
+        while not self.stop_ev.is_set():
+            needs = self.in_q.get(block=True)
+            if needs is not None:
+                if self.pending_needs is None:
+                    self.pending_needs = needs
+                    self.fetchs = needs
+                else:
+                    avails = self.pending_needs
+                    plan = self._plan(avails, needs)
+
+                    self.out_q.put(plan)
+                    self.pending_needs = needs
+
+            elif needs is None:
+                assert self.pending_needs is not None
                 avails = self.pending_needs
-                plan = self._plan(avails, needs)
+                # 没有下一个 batch 了，next_needs 为空
+                next_needs = [set() for _ in range(self.n_gpus)]
 
+                plan = self._plan(avails, next_needs)
                 self.out_q.put(plan)
-                self.pending_needs = needs
-
-        elif needs is None:
-            assert self.pending_needs is not None
-            avails = self.pending_needs
-            # 没有下一个 batch 了，next_needs 为空
-            next_needs = [set() for _ in range(self.n_gpus)]
-
-            plan = self._plan(avails, next_needs)
-            self.out_q.put(plan)
-            self.pending_needs = None
+                self.pending_needs = None
 
     def _plan(
         self,

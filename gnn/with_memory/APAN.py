@@ -1,3 +1,4 @@
+import logging
 from typing import List, Tuple
 
 import torch
@@ -7,6 +8,9 @@ from dgl.heterograph import DGLBlock
 from schemas.datatypes.misc import DGLBlockMeta, SampleReturn
 from schemas.datatypes.plan import BatchNodeStateIO
 from utils import extract_raw_data
+
+
+logger = logging.getLogger(__name__)
 
 
 class APAN(nn.Module):

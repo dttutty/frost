@@ -1,5 +1,6 @@
 # worker/trainer.py
 
+import logging
 from typing import List, Tuple
 
 import torch
@@ -9,6 +10,9 @@ from gnn.components import TemporalGraphAttentionLayer
 from gnn.sample_mixin import SampleMixin
 from schemas.datatypes.misc import DGLBlockMeta
 from schemas.datatypes.plan import BatchNodeStateIO
+
+
+logger = logging.getLogger(__name__)
 
 
 class TGN(torch.nn.Module, SampleMixin):

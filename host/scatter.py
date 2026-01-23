@@ -1,15 +1,15 @@
-import os
-import threading
-import traceback  # 记得导入
+import logging
 from queue import Queue  # 这是给多线程用的
-
-import torch.distributed as dist
 
 from schemas.alias import MetaBundle
 from schemas.datatypes.plan import PlanSet
+from thread_base import ThreadBase
 
 
-class Scatter(threading.Thread):
+logger = logging.getLogger(__name__)
+
+
+class Scatter(ThreadBase):
     def __init__(
         self,
         sem,
@@ -21,7 +21,7 @@ class Scatter(threading.Thread):
         nfeat_plan_out_q,
         stop_ev,
     ):
-        super().__init__(daemon=True)
+        super().__init__(name="scatter")
         self.sem = sem
         self.n_gpus = n_gpus
         self.comm = comm
@@ -32,39 +32,29 @@ class Scatter(threading.Thread):
         self.stop_ev = stop_ev
 
     def logic(self):
-        meta_2_scatter = self.send_q.get(block=True)
-        if meta_2_scatter is None:
-            self.comm.scatter_send(None)
-            self.sem.release()
-        else:
-            assert len(meta_2_scatter) == self.n_gpus
-            mem_plans = mail_plans = nfeat_plans = None
-            if self.mem_plan_out_q is not None:
-                mem_plans = self.mem_plan_out_q.get(block=True)
-            if self.mail_plan_out_q is not None:
-                mail_plans = self.mail_plan_out_q.get(block=True)
-            if self.nfeat_plan_out_q is not None:
-                nfeat_plans = self.nfeat_plan_out_q.get(block=True)
-            for i in range(self.n_gpus):
-                planset = PlanSet(
-                    mem=mem_plans[i] if mem_plans is not None else None,
-                    box=mail_plans[i] if mail_plans is not None else None,
-                    nfeat=nfeat_plans[i] if nfeat_plans is not None else None,
-                )
-                planset = planset.tensorfy()
-                planset = planset.sort()
-                meta_2_scatter[i].plan_set = planset
-                del meta_2_scatter[i].batch_node_state_io
+        while not self.stop_ev.is_set():
+            meta_2_scatter = self.send_q.get(block=True)
+            if meta_2_scatter is None:
+                self.comm.scatter_send(None)
+                self.sem.release()
+            else:
+                assert len(meta_2_scatter) == self.n_gpus
+                mem_plans = mail_plans = nfeat_plans = None
+                if self.mem_plan_out_q is not None:
+                    mem_plans = self.mem_plan_out_q.get(block=True)
+                if self.mail_plan_out_q is not None:
+                    mail_plans = self.mail_plan_out_q.get(block=True)
+                if self.nfeat_plan_out_q is not None:
+                    nfeat_plans = self.nfeat_plan_out_q.get(block=True)
+                for i in range(self.n_gpus):
+                    planset = PlanSet(
+                        mem=mem_plans[i] if mem_plans is not None else None,
+                        box=mail_plans[i] if mail_plans is not None else None,
+                        nfeat=nfeat_plans[i] if nfeat_plans is not None else None,
+                    )
+                    planset = planset.tensorfy()
+                    planset = planset.sort()
+                    meta_2_scatter[i].plan_set = planset
+                    del meta_2_scatter[i].batch_node_state_io
 
-            self.comm.scatter_send(meta_2_scatter)
-
-    def run(self):
-        try:
-            while not self.stop_ev.is_set():
-                self.logic()
-
-        except Exception:
-            print(f"!!! Scatter Thread Crashed on Rank {dist.get_rank()} !!!")
-            traceback.print_exc()
-            self.stop_ev.set()
-            os._exit(1)
+                self.comm.scatter_send(meta_2_scatter)

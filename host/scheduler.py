@@ -1,7 +1,11 @@
 # batch_utils.py
+import logging
 import math
 
 import numpy as np
+
+
+logger = logging.getLogger(__name__)
 
 
 def generate_reordered_indexes_1(

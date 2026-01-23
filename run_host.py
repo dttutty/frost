@@ -1,3 +1,4 @@
+import logging
 import math
 import threading
 import time
@@ -8,13 +9,13 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
-from sampler_core import ParallelSampler
 from tqdm import tqdm
 
 from host import Distributor, MetaBatcher, Planner, Scatter
 from host.meta_batcher import MetaBundle
 from host.planner.planner import PlanBundle
 from sampler import NegLinkSampler
+from sampler_core import ParallelSampler
 from schemas.alias import MetaBundleWithoutPlan, MetaBundleWithPlan
 from schemas.datatypes.cfg import Config, SampleCFG
 from schemas.datatypes.env import Env
@@ -24,6 +25,9 @@ from schemas.datatypes.misc import (
     Meta,
     SampleReturn,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class Host:
@@ -65,9 +69,9 @@ class Host:
         self.sample_support_for_neg_dst = cfg.s.sample_support_for_neg_dst
         self.model_name = cfg.t.model_name
 
-        self.meta_in_q = Queue()
-        self.meta_bundle_q = Queue()
-        self.send_q = Queue()
+        self.meta_in_q = Queue[Meta | None]()
+        self.meta_bundle_q = Queue[MetaBundle | None]()
+        self.send_q = Queue[MetaBundle | None]()
 
         self.mem_plan_out_q = Queue() if self.has_mem else None
         self.mail_plan_out_q = Queue() if self.has_mem else None

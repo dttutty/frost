@@ -1,3 +1,4 @@
+import logging
 from typing import TypeVar
 
 import torch
@@ -8,6 +9,7 @@ from schemas.datatypes.data_to_sync import BoxTsNid, MailTsNid, MemTsNid
 
 AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
 Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
+logger = logging.getLogger(__name__)
 
 
 def compute_latest_indices(nid: torch.Tensor, ts: torch.Tensor) -> torch.Tensor:

@@ -1,16 +1,18 @@
-import os
+import logging
 import queue
 import threading
-import traceback  # 记得导入
 from typing import List, Tuple
 
 import torch
-import torch.distributed as dist
 from dgl.heterograph import DGLBlock
 
 from schemas.datatypes.data_to_sync import BoxTsNid, MemTsNid
 from schemas.datatypes.misc import Meta, X
 from schemas.datatypes.plan import TensorPlanSet
+from thread_base_with_stream import StreamThreadBase
+
+
+logger = logging.getLogger(__name__)
 
 
 def prep_before_dy_asm(shared, plan_set: TensorPlanSet) -> tuple[MemTsNid, BoxTsNid]:
@@ -37,7 +39,7 @@ def prep_before_dy_asm(shared, plan_set: TensorPlanSet) -> tuple[MemTsNid, BoxTs
     return mem, box
 
 
-class DyAssembler(threading.Thread):
+class DyAssembler(StreamThreadBase):
     """
     动态数据组装器线程，将分块数据和增量数据合并，并填充到 DGL Block 中。
     """
@@ -51,7 +53,7 @@ class DyAssembler(threading.Thread):
         has_mfg=True,
         has_reverse_mdt=False,
     ):
-        super().__init__(daemon=True)
+        super().__init__(name="dy_assembler")
         self.xpart_q = xpart_q
         self.delta_q = delta_q
         self.xfull_q = xfull_q
@@ -59,6 +61,7 @@ class DyAssembler(threading.Thread):
         self.stream = torch.cuda.Stream()
         self.has_mfg = has_mfg
         self.has_reverse_mdt = has_reverse_mdt
+        self.stop_ev = stop_ev
 
     def fill_block_with_mem_mail(
         self, gnn_mfgs_0: List[DGLBlock], mem: MemTsNid, box: BoxTsNid
@@ -99,35 +102,25 @@ class DyAssembler(threading.Thread):
 
         return meta, x_full
 
-    def q_in_q_out(self):
-        meta, ready_event = self.xpart_q.get(block=True)
-        x_part, plan_set = meta.x, meta.plan_set
-        delta = self.delta_q.get(block=True)
-        assert delta.mem is not None
-        assert delta.box is not None
+    def logic(self):
+        while not self.stop_ev.is_set():
+            meta, ready_event = self.xpart_q.get(block=True)
+            x_part, plan_set = meta.x, meta.plan_set
+            delta = self.delta_q.get(block=True)
+            assert delta.mem is not None
+            assert delta.box is not None
 
-        torch.cuda.current_stream().wait_event(ready_event)
+            torch.cuda.current_stream().wait_event(ready_event)
 
-        meta, x_full = self._merge(meta, x_part, delta.mem, delta.box)
+            meta, x_full = self._merge(meta, x_part, delta.mem, delta.box)
 
-        assert x_full.mem is not None
-        assert x_full.box is not None
-        if meta.gnn_mfgs is not None:
-            self.fill_block_with_mem_mail(meta.gnn_mfgs[0], x_full.mem, x_full.box)
-        else:
-            # 这种是为了APAN哪种种没有mfg的情况
-            meta.x = x_full.unzip_and_align(meta.root_nid)
-        # 3) 把结果交给主线程（主线程取时再 wait_stream）
+            assert x_full.mem is not None
+            assert x_full.box is not None
+            if meta.gnn_mfgs is not None:
+                self.fill_block_with_mem_mail(meta.gnn_mfgs[0], x_full.mem, x_full.box)
+            else:
+                # 这种是为了APAN哪种种没有mfg的情况
+                meta.x = x_full.unzip_and_align(meta.root_nid)
+            # 3) 把结果交给主线程（主线程取时再 wait_stream）
 
-        self.xfull_q.put((meta, self.stream), block=True)
-
-    def run(self):
-        try:  # 【新增】包裹整个 run 逻辑
-            with torch.cuda.stream(self.stream), torch.no_grad():
-                while not self.stop_ev.is_set():
-                    self.q_in_q_out()
-        except Exception:
-            print(f"!!! Assembler Thread Crashed on Rank {dist.get_rank()} !!!")
-            traceback.print_exc()
-            self.stop_ev.set()
-            os._exit(1)
+            self.xfull_q.put((meta), block=True)

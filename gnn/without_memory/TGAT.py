@@ -1,3 +1,4 @@
+import logging
 from typing import List
 
 import torch.nn as nn
@@ -6,6 +7,9 @@ from dgl.heterograph import DGLBlock
 from gnn.sample_mixin import SampleMixin
 
 from ..components import TemporalGraphAttentionLayer
+
+
+logger = logging.getLogger(__name__)
 
 
 class TGAT(nn.Module, SampleMixin):

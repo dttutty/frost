@@ -1,3 +1,4 @@
+import logging
 from queue import Queue
 
 import torch
@@ -6,6 +7,9 @@ import torch.nn as nn
 from schemas.datatypes.data_to_sync import MemTsNid
 from schemas.datatypes.misc import ForwardCtx
 from schemas.datatypes.task import SyncTask
+
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryBaseGNN(nn.Module):

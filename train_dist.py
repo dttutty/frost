@@ -23,6 +23,29 @@ from schemas.datatypes.misc import ModelComponents, Shared
 from utils import load_feat, load_graph, parse_config
 
 
+# 建议做法：通过环境变量控制
+# 在终端运行: export APP_ENV=dev && python main.py  -> 会显示所有日志
+# 在终端运行: python main.py                       -> 只显示 Info 及以上
+
+# 获取环境变量，默认为 'production'
+env = os.getenv("APP_ENV", "production")
+
+if env == "dev":
+    current_level = logging.DEBUG  # 开发模式：什么都看
+else:
+    current_level = logging.INFO  # 生产模式：只看 Info, Warning, Error
+
+logging.basicConfig(
+    level=current_level,  # <--- 关键在这里
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
+logger.debug("这是调试信息 - 只有 dev 模式能看到")
+logger.info("这是普通信息 - 谁都能看到")
+logger.error("这是错误 - 谁都能看到")
+
 start = time.time()
 
 

@@ -5,6 +5,9 @@ from gnn.components import EdgePredictor, TemporalGraphAttentionLayer
 from gnn.sample_mixin import SampleMixin
 
 
+logger = logging.getLogger(__name__)
+
+
 class DySAT_TGL(nn.Module, SampleMixin):
     """
     GCRN: Graph Convolutional Recurrent Network.

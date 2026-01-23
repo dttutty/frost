@@ -15,15 +15,18 @@ from data_syncer.data_syncer import DataSyncer
 from gnn import TGN
 from gnn.with_memory.base import MemoryBaseGNN
 from gnn.without_memory.base import GNN
-from schemas.datatypes.cfg import Config
+from schemas.datatypes.cfg import MemoryCFG, SampleCFG, TrainCFG
 from schemas.datatypes.data_to_sync import BoxTsNid, MailTsNid, MemTsNid
 from schemas.datatypes.env import Env
-from schemas.datatypes.misc import ForwardCtx, Meta, ModelComponents, Shared, X
+from schemas.datatypes.misc import DeltaX, ForwardCtx, Meta, ModelComponents, Shared, X
 from schemas.datatypes.plan import TensorPlanSet
 from schemas.datatypes.task import P2PTask, SyncTask
 from worker.assembler.dy_asm import DyAssembler
 from worker.h2d import H2D
 from worker.receiver import HostWorkerSyncer as Receiver
+
+
+logger = logging.getLogger(__name__)
 
 
 # def tensorfy(self, plan_set: ThreePlan):
@@ -33,45 +36,11 @@ from worker.receiver import HostWorkerSyncer as Receiver
 #             plan.send_cts = torch.tensor(plan.send_cts, dtype=torch.long)
 
 
-def _setup_logger(local_rank: int) -> logging.Logger:
-    level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_str, logging.INFO)
-
-    logger = logging.getLogger(f"worker.rank{local_rank}")
-    logger.setLevel(level)
-    logger.propagate = False  # avoid duplicate logs
-
-    # Remove old handlers (important in some debug/reload cases)
-    if logger.handlers:
-        logger.handlers.clear()
-
-    # Only rank0 prints to stdout by default
-    if local_rank != 0:
-        logger.addHandler(logging.NullHandler())
-        return logger
-
-    h = logging.StreamHandler()
-    fmt = logging.Formatter(
-        fmt="%(asctime)s %(levelname)s [rank%(rank)d] %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
-    # Inject rank into LogRecord
-    class _RankFilter(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            record.rank = local_rank
-            return True
-
-    h.setFormatter(fmt)
-    h.addFilter(_RankFilter())
-    logger.addHandler(h)
-    return logger
-
-
 class Worker:
     def __init__(
         self,
-        cfg: Config,
+        s_cfg: SampleCFG,
+        t_cfg: TrainCFG,
         shared: Shared | None,
         save_to: str,
         nfeat: None | torch.Tensor,
@@ -80,27 +49,28 @@ class Worker:
         nccl,
         gloo,
         model_components: ModelComponents,
+        m_cfg: MemoryCFG | None = None,
     ):
-        self.cfg = cfg
+        self.s_cfg = s_cfg
         self.save_to = save_to
         self.env = env
 
         self.shared = shared
-        self.total_epoch = cfg.t.epoch
+        self.total_epoch = t_cfg.epoch
         self.meta_q = queue.Queue(maxsize=1)
         self.stop_ev = threading.Event()
         self.nfeat = nfeat
         self.efeat = efeat
         self.nccl = nccl
-        self.gloo = gloo
         self.curr_epoch = -1
         self.logger = _setup_logger(self.env.local_rank)
         self.fetch_factor = 1
         self.cmd_q = queue.Queue()
 
         if self.shared is not None:
-            m_cfg = self.cfg.m
-            self.delta_q: Queue[X | None] = queue.Queue(maxsize=1)
+            assert m_cfg is not None
+            box_size = self.shared.box.shape[1]
+            self.delta_q: Queue[DeltaX | None] = queue.Queue(maxsize=1)
             self.mem_p2p_q: Queue[P2PTask] = queue.Queue()
             self.box_p2p_q: Queue[P2PTask] = queue.Queue()
             self.xpart_q: Queue[Tuple[Meta, X, TensorPlanSet]] = queue.Queue(maxsize=1)
@@ -113,8 +83,8 @@ class Worker:
             self.data_syncer = DataSyncer(
                 deliver_to=m_cfg.deliver_to,
                 mail_combine=m_cfg.mail_combine,
-                boxsize=m_cfg.boxsize,
-                merge_src=self.cfg.t.merge_src,
+                boxsize=box_size,
+                merge_src=t_cfg.merge_src,
                 n_gpu=env.n_gpu,
                 shared=shared,
                 h2d_sem=self.h2d_sem,
@@ -139,7 +109,7 @@ class Worker:
             nfeat=nfeat,
             efeat=efeat,
             shared=shared,
-            merge_src=self.cfg.t.merge_src,
+            merge_src=t_cfg.merge_src,
             meta_q=self.meta_q,
             destination_q=destination_q_for_h2d,
             stop_ev=self.stop_ev,
@@ -149,13 +119,9 @@ class Worker:
         self.result_q = queue.Queue()
         self.cmd_q = queue.Queue()
 
-        self.has_memory = False
-        if cfg.m is not None:
-            self.has_memory = True
-
         self.receiver = Receiver(
             env=self.env,
-            gloo=self.gloo,
+            gloo=gloo,
             meta_q=self.meta_q,
             stop_ev=self.stop_ev,
             cmd_q=self.cmd_q,
@@ -183,7 +149,7 @@ class Worker:
             "done_macro_batch": 0,
         }
 
-        if self.has_memory:
+        if self.shared is not None:
             assert model_components.memory_updater is not None
             assert model_components.header is not None
             model = MemoryBaseGNN(
@@ -201,7 +167,7 @@ class Worker:
 
         model = model.cuda()
         find_unused_parameters = False
-        if cfg.s and cfg.s.history > 1:
+        if self.s_cfg.history > 1:
             find_unused_parameters = True
 
         find_unused_parameters = True
@@ -211,7 +177,7 @@ class Worker:
             find_unused_parameters=find_unused_parameters,
         )
         self.criterion = torch.nn.BCEWithLogitsLoss()
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=cfg.t.lr)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=t_cfg.lr)
 
     def reset_ap_auc_count(self):
         self.count_sum = 0
@@ -241,8 +207,9 @@ class Worker:
             padded_local = local_tensor
         return padded_local
 
-    def train(self, meta: Meta, x: DyX, plan_set: TensorPlanSet | None):
-        if meta.position_in_split == "first":
+    def train(self, meta: Meta, x: X, plan_set: TensorPlanSet | None):
+        epoch_split_iter_info = meta.epoch_split_iter_info
+        if epoch_split_iter_info.macro_position_of_split == "first":
             self.reset_ap_auc_count()
         n_pos_edges = meta.pos_edge.shape[0]
         labels = torch.cat(
@@ -276,7 +243,7 @@ class Worker:
         logits = torch.cat([logits_pos, logits_neg])
 
         loss = self.criterion(logits.squeeze(-1), labels)
-        if self.has_memory:
+        if self.shared is not None:
             self.handle_p2p_q()
 
         dist.barrier(group=self.nccl)
@@ -289,7 +256,7 @@ class Worker:
         # reduced_loss = loss.detach().clone()
         # dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=self.nccl)
 
-        if meta.epoch_split_iter_info.mcaro_position_of_split == "last":
+        if epoch_split_iter_info.macro_position_of_split == "last":
             # 此时进行 all_reduce，将所有卡的 Loss 总和加起来
             dist.all_reduce(self.epoch_loss_sum, op=dist.ReduceOp.SUM, group=self.nccl)
             dist.all_reduce(
@@ -331,39 +298,42 @@ class Worker:
 
     @torch.no_grad()
     def handle_p2p_q(self):
-        mem_DyX = None
-        box_DyX = None
+        delta_mem = None
+        delta_box = None
 
         # 1. 强制先处理 Mem 任务 (Deterministic Order: Mem -> Box)
         # 注意：如果某个 microbatch 不需要 mem p2p，DataSyncer 必须 put(None) 作为哨兵
         p2p_task = self.mem_p2p_q.get(block=True)
         if p2p_task is not None:
-            mem_DyX = self._exec_p2p(p2p_task)
-        else:
-            self.delta_q.put(None)
-
-        # 2. 强制后处理 Box 任务
-        p2p_task = self.box_p2p_q.get(block=True)
-        if p2p_task is not None:
+            delta_mem = self._exec_p2p(p2p_task)
+            assert isinstance(delta_mem, MemTsNid)
+            # 2. 强制后处理 Box 任务
+            p2p_task = self.box_p2p_q.get(block=True)
+            assert p2p_task is not None
             # Box 任务可能包含 mail -> box 的转换逻辑
             result = self._exec_p2p(p2p_task)
             if p2p_task.type == "mail":
                 # 原有逻辑: mail_DyX.to_box()
                 # 假设 _exec_p2p 返回的是构建好的对象
-                box_DyX = result.to_box()
+                assert isinstance(result, MailTsNid)
+                delta_box = result.to_box()
             else:
-                box_DyX = result
+                assert isinstance(result, BoxTsNid)
+                delta_box = result
 
-        DyX = DyX(mem=mem_DyX, box=box_DyX)
-        self.delta_q.put(DyX)
-        print(f"DataSyncer: rank {self.env.local_rank} put DyX into DyX_q")
+            delta_x = DeltaX(mem=delta_mem, box=delta_box)
+            self.delta_q.put(delta_x)
+        else:
+            self.delta_q.put(None)
+
+        print(f"DataSyncer: rank {self.env.local_rank} put DeltaX into DeltaX_q")
 
     @torch.no_grad()
-    def eval(self, meta: Meta, x: DyX, plan_set: TensorPlanSet | None):
+    def eval(self, meta: Meta, x: X, plan_set: TensorPlanSet | None):
         ap = 0.0
         auc = 0.0
 
-        if meta.epoch_split_iter_info.mcaro_position_of_split == "first":
+        if meta.epoch_split_iter_info.macro_position_of_split == "first":
             self.reset_ap_auc_count()
 
         n_pos_edges = meta.pos_edge.shape[0]
@@ -376,7 +346,7 @@ class Worker:
         )
         self.model.eval()
         is_last_macrobatch_of_epoch = (
-            meta.epoch_split_iter_info.mcaro_position_of_split == "last"
+            meta.epoch_split_iter_info.macro_position_of_split == "last"
             and meta.epoch_split_iter_info.split == "test"
         )
         forward_ctx = ForwardCtx(
@@ -389,14 +359,14 @@ class Worker:
             n_root_src_n_pos_dst=n_pos_edges * 2,
         )
         logits_pos, logits_neg = self.model(forward_ctx)
-        if self.has_memory:
+        if self.shared is not None:
             self.handle_p2p_q()
         logits = torch.cat([logits_pos, logits_neg], dim=0)
         y_pred = logits.sigmoid()
         # if not (meta.epoch_split_iter_info.split == "test" and meta.epoch_split_iter_info.position_in_split == "last"):
         #     self.receive_next_meta_and_put_in_queue()
         self.logger.debug(
-            f"Worker: rank {self.env.local_rank} received next meta for microbatch {meta.epoch_split_iter_info.cur_macro_of_split}, {meta.epoch_split_iter_info.split} {meta.epoch_split_iter_info.mcaro_position_of_split}"
+            f"Worker: rank {self.env.local_rank} received next meta for microbatch {meta.epoch_split_iter_info.cur_macro_of_split}, {meta.epoch_split_iter_info.split} {meta.epoch_split_iter_info.macro_position_of_split}"
         )
 
         if meta.epoch_split_iter_info.split == "val":
@@ -437,7 +407,7 @@ class Worker:
             f"Rank {self.env.local_rank} preds size: {len(self.my_rank_preds)}, labels size: {len(self.my_rank_labels)}"
         )
 
-        if meta.epoch_split_iter_info.mcaro_position_of_split == "last":
+        if meta.epoch_split_iter_info.macro_position_of_split == "last":
             # A. 统一结算 Loss (新增)
             if meta.epoch_split_iter_info.split == "val":
                 dist.all_reduce(
@@ -512,7 +482,7 @@ class Worker:
         self.logger.info("Worker: Starting H2D thread...")
         self.receiver.start()
         self.h2d.start()  # 启动 H2D 预取线程
-        if self.has_memory:
+        if self.shared is not None:
             self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
             self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
             self.assembler.start()  # 启动 Assembler 组装线程
@@ -528,7 +498,7 @@ class Worker:
                 # self.receive_next_meta_and_put_in_queue()
                 _initialize = True
                 # print meta split and mark
-            if self.has_memory:
+            if self.shared is not None:
                 meta, plan_set, sorted_x, assemble_stream = self.xfull_q.get()
                 print(
                     "Worker: got x_full", meta.epoch_split_iter_info.cur_macro_of_split
@@ -546,7 +516,7 @@ class Worker:
                     "Worker: got x_full", meta.epoch_split_iter_info.cur_macro_of_split
                 )
             self.logger.info(
-                f"Worker: rank {self.env.local_rank} processing microbatch {meta.epoch_split_iter_info.cur_macro_of_split}, {meta.epoch_split_iter_info.split} {meta.epoch_split_iter_info.mcaro_position_of_split}"
+                f"Worker: rank {self.env.local_rank} processing microbatch {meta.epoch_split_iter_info.cur_macro_of_split}, {meta.epoch_split_iter_info.split} {meta.epoch_split_iter_info.macro_position_of_split}"
             )
 
             def check_sparse_table(name, ids, data):
@@ -580,17 +550,17 @@ class Worker:
             if meta.epoch_split_iter_info.split == "train":  # if training
                 self.train(meta, sorted_x, plan_set)
             elif meta.epoch_split_iter_info.split in ["val", "test"]:  # if evaluating
-                if meta.epoch_split_iter_info.mcaro_position_of_split == "first":
+                if meta.epoch_split_iter_info.macro_position_of_split == "first":
                     self.reset_ap_auc_count()
                 self.eval(meta, sorted_x, plan_set)
             # pint split and mark
             self.logger.debug(
-                f"Worker: rank {self.env.local_rank} finished processing microbatch {meta.epoch_split_iter_info.cur_macro_of_split}, {meta.epoch_split_iter_info.split} {meta.epoch_split_iter_info.mcaro_position_of_split}"
+                f"Worker: rank {self.env.local_rank} finished processing microbatch {meta.epoch_split_iter_info.cur_macro_of_split}, {meta.epoch_split_iter_info.split} {meta.epoch_split_iter_info.macro_position_of_split}"
             )
 
             if (
                 meta.epoch_split_iter_info.split == "test"
-                and meta.epoch_split_iter_info.mcaro_position_of_split == "last"
+                and meta.epoch_split_iter_info.macro_position_of_split == "last"
             ):  # last microbatch of an epoch
                 self.logger.info(
                     f"Worker: Finished epoch {self.curr_epoch} test phase."
@@ -605,7 +575,7 @@ class Worker:
             # print total epochs and current_epoch
             if (
                 meta.epoch_split_iter_info.split == "test"
-                and meta.epoch_split_iter_info.mcaro_position_of_split == "last"
+                and meta.epoch_split_iter_info.macro_position_of_split == "last"
             ):
                 self.logger.info(f"total_epoch {self.total_epoch}")
                 self.logger.info(
@@ -614,7 +584,7 @@ class Worker:
             if (
                 self.total_epoch == self.curr_epoch + 1
                 and meta.epoch_split_iter_info.split == "test"
-                and meta.epoch_split_iter_info.mcaro_position_of_split == "last"
+                and meta.epoch_split_iter_info.macro_position_of_split == "last"
             ):  # last microbatch of the final epoch
                 torch.cuda.synchronize()
                 self.logger.info(
@@ -673,5 +643,5 @@ class Worker:
             dist.barrier()
 
     def load_memory(self, memory_state):
-        if self.has_memory:
+        if self.shared is not None:
             self.model.module.load_memory_state(memory_state)

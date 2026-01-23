@@ -1,6 +1,5 @@
-import os
+import logging
 import threading
-import traceback
 from queue import Queue
 from typing import List, Set, Union
 
@@ -9,6 +8,10 @@ import numpy as np
 from host.planner.dynamic_planner import DynamicPlanner
 from schemas.alias import MetaBundle, PlanBundle
 from schemas.datatypes.plan import BatchNodeStateIO
+from thread_base import ThreadBase
+
+
+logger = logging.getLogger(__name__)
 
 
 def find_all_gpu_distances_list(gpus_groups: list) -> np.ndarray:
@@ -107,7 +110,7 @@ def find_all_gpu_distances_list(gpus_groups: list) -> np.ndarray:
     return distance_matrix
 
 
-class Planner(threading.Thread):
+class Planner(ThreadBase):
     """
     这个是对那种mailbox_update=mem_update的planner
     """
@@ -120,9 +123,9 @@ class Planner(threading.Thread):
         gpu_topo: list,
         in_q: Queue[MetaBundle | None],
         out_q: Queue[MetaBundle | None],
-        mem_plan_out_q: Queue[PlanBundle | None],
-        mail_plan_out_q: Queue[PlanBundle | None],
-        nfeat_plan_out_q: Queue[PlanBundle | None],
+        mem_plan_out_q: Queue[PlanBundle | None] | None,
+        mail_plan_out_q: Queue[PlanBundle | None] | None,
+        nfeat_plan_out_q: Queue[PlanBundle | None] | None,
         stop_ev: threading.Event,
     ):
         """
@@ -166,7 +169,7 @@ class Planner(threading.Thread):
         if nfeat_plan_out_q:
             self.nfeat_plan_in_q = Queue()
             self.nfeat_planner = DynamicPlanner(
-                gpus_distance=gpus_distance,
+                gpus_distance=self.gpus_distance,
                 in_q=self.nfeat_plan_in_q,
                 out_q=nfeat_plan_out_q,
                 stop_ev=stop_ev,
@@ -174,42 +177,33 @@ class Planner(threading.Thread):
 
         self.stop_ev = stop_ev
 
-    def run(self):
-        try:
-            while not self.stop_ev.is_set():
-                self.logic()
-        except Exception:
-            print("!!! Planner Thread Crashed !!!")
-            traceback.print_exc()
-            self.stop_ev.set()
-            os._exit(1)
-
     def logic(self):
-        metas = self.meta_bundle_q.get(block=True)
-        if metas is not None:
-            assert len(metas) == self.n_gpus
-            state_ios: List[BatchNodeStateIO] = [
-                meta.batch_node_state_io for meta in metas
-            ]
-            if self.mem_plan_in_q is not None:
-                next_needs = [state_io.mem_needed for state_io in state_ios]
-                next_updates = [state_io.mem_updated for state_io in state_ios]
-                self.mem_plan_in_q.put((next_needs, next_updates))
-            if self.mail_plan_in_q is not None:
-                next_needs = [state_io.mailbox_needed for state_io in state_ios]
-                next_updates = [state_io.mailbox_updated for state_io in state_ios]
-                self.mail_plan_in_q.put((next_needs, next_updates))
-            if self.nfeat_plan_in_q is not None:
-                next_needs = [state_io.nfeat_needed for state_io in state_ios]
-                self.nfeat_plan_in_q.put(next_needs)
-            for meta in metas:
-                del meta.batch_node_state_io  # 释放内存
-            self.out_q.put(metas)
-        elif metas is None:
-            if self.mem_plan_in_q is not None:
-                self.mem_plan_in_q.put(None)
-            if self.mail_plan_in_q is not None:
-                self.mail_plan_in_q.put(None)
-            if self.nfeat_plan_in_q is not None:
-                self.nfeat_plan_in_q.put(None)
-            self.out_q.put(None)
+        while not self.stop_ev.is_set():
+            metas = self.meta_bundle_q.get(block=True)
+            if metas is not None:
+                assert len(metas) == self.n_gpus
+                state_ios: List[BatchNodeStateIO] = [
+                    meta.batch_node_state_io for meta in metas
+                ]
+                if self.mem_plan_in_q is not None:
+                    next_needs = [state_io.mem_needed for state_io in state_ios]
+                    next_updates = [state_io.mem_updated for state_io in state_ios]
+                    self.mem_plan_in_q.put((next_needs, next_updates))
+                if self.mail_plan_in_q is not None:
+                    next_needs = [state_io.mailbox_needed for state_io in state_ios]
+                    next_updates = [state_io.mailbox_updated for state_io in state_ios]
+                    self.mail_plan_in_q.put((next_needs, next_updates))
+                if self.nfeat_plan_in_q is not None:
+                    next_needs = [state_io.nfeat_needed for state_io in state_ios]
+                    self.nfeat_plan_in_q.put(next_needs)
+                for meta in metas:
+                    del meta.batch_node_state_io  # 释放内存
+                self.out_q.put(metas)
+            elif metas is None:
+                if self.mem_plan_in_q is not None:
+                    self.mem_plan_in_q.put(None)
+                if self.mail_plan_in_q is not None:
+                    self.mail_plan_in_q.put(None)
+                if self.nfeat_plan_in_q is not None:
+                    self.nfeat_plan_in_q.put(None)
+                self.out_q.put(None)

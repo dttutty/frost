@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 
 import dgl
@@ -8,6 +9,9 @@ import torch
 # worker/trainer.py
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+logger = logging.getLogger(__name__)
 
 
 class TimeEncode(nn.Module):

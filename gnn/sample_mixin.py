@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 from typing import List, Tuple
 
 import torch
 
 from schemas.datatypes.misc import DGLBlockMeta, SampleReturn
 from schemas.datatypes.plan import BatchNodeStateIO
+
+
+logger = logging.getLogger(__name__)
 
 
 class SampleMixin:

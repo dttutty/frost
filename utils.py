@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import List
 
@@ -20,6 +21,9 @@ from schemas.datatypes.misc import (
     DGLBlockMeta,
     ExtFullGraph,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def dgl_blocks_to_tensor_dicts(blocks):

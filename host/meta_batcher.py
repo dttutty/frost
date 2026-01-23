@@ -1,15 +1,16 @@
-import os
+import logging
 import threading
-import traceback  # 记得导入
 from queue import Queue
-
-import torch.distributed as dist
 
 from schemas.alias import MetaBundle
 from schemas.datatypes.misc import Meta
+from thread_base import ThreadBase
 
 
-class MetaBatcher(threading.Thread):
+logger = logging.getLogger(__name__)
+
+
+class MetaBatcher(ThreadBase):
     def __init__(
         self,
         n_gpus: int,
@@ -17,29 +18,19 @@ class MetaBatcher(threading.Thread):
         out_q: Queue[MetaBundle | None],
         stop_ev: threading.Event,
     ):
-        super().__init__(daemon=True)
+        super().__init__(name="meta_batcher")
         self.n_gpus = n_gpus
         self.in_q = in_q
         self.out_q = out_q
         self.stop_ev = stop_ev
 
     def logic(self):
-        meta_list = []
-        while len(meta_list) < self.n_gpus:
-            meta = self.in_q.get(block=True)
-            if meta is None:
-                self.out_q.put(None)
-            else:
-                meta_list.append(meta)
-        self.out_q.put(meta_list)
-
-    def run(self):
-        try:
-            while not self.stop_ev.is_set():
-                self.logic()
-
-        except Exception:
-            print(f"!!! MetaBatcher Thread Crashed on Rank {dist.get_rank()} !!!")
-            traceback.print_exc()
-            self.stop_ev.set()
-            os._exit(1)
+        while not self.stop_ev.is_set():
+            meta_list = []
+            while len(meta_list) < self.n_gpus:
+                meta = self.in_q.get(block=True)
+                if meta is None:
+                    self.out_q.put(None)
+                else:
+                    meta_list.append(meta)
+            self.out_q.put(meta_list)

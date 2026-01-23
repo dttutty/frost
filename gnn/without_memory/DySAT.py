@@ -1,3 +1,4 @@
+import logging
 from typing import List
 
 import dgl
@@ -10,6 +11,9 @@ from dgl.heterograph import DGLBlock
 from gnn.sample_mixin import SampleMixin
 
 from ..components import EdgePredictor
+
+
+logger = logging.getLogger(__name__)
 
 
 class StructuralGATLayer(nn.Module):

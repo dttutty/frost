@@ -1,3 +1,4 @@
+import logging
 from queue import Queue
 from typing import List, TypeVar
 
@@ -10,6 +11,8 @@ from schemas.datatypes.task import GatherElement, P2PTask
 
 AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
 Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
+
+logger = logging.getLogger(__name__)
 
 
 class P2PHandler:
