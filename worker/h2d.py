@@ -79,6 +79,7 @@ class H2D(StreamThreadBase):
         self.stop_ev = stop_ev
         self.h2d_sem = h2d_sem
         self.history = history
+        self.ready_macro = 0
         self.st_asm = StAssembler(shared_nfeat=nfeat, shared_efeat=efeat)
 
     @torch.no_grad()
@@ -90,6 +91,9 @@ class H2D(StreamThreadBase):
             logger.debug("H2D: acquired semaphore, starting H2D operation")
 
             meta: Meta = self.meta_q.get(block=True)
+            if meta is None:
+                self.destination_q.put((None, None), block=True)
+                continue
 
             # move pos_efeat to gpu
             if self.efeat is not None:

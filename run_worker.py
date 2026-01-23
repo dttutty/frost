@@ -79,7 +79,7 @@ class Worker:
 
             assert shared is not None, "Shared memory must be provided if memory exists"
             destination_q_for_h2d = self.xpart_q
-            self.h2d_sem = threading.Semaphore(0)
+            self.h2d_sem = threading.BoundedSemaphore(0)
             self.data_syncer = DataSyncer(
                 deliver_to=m_cfg.deliver_to,
                 mail_combine=m_cfg.mail_combine,
@@ -485,6 +485,8 @@ class Worker:
         if self.shared is not None:
             self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
             self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
+            self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
+            self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
             self.assembler.start()  # 启动 Assembler 组装线程
             self.data_syncer.start()
             self.delta_q.put(None)
