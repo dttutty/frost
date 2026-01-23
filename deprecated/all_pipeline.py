@@ -130,7 +130,7 @@ def ts() -> str:
 
 
 def log(who: str, msg: str) -> None:
-    print(f"[{ts()}] [{who}] {msg}", flush=True)
+    logger.debug(f"[{ts()}] [{who}] {msg}", flush=True)
 
 
 # -----------------------------
@@ -541,7 +541,7 @@ def main():
     free_port = find_free_port()
     if args.master_port is None:
         args.master_port = free_port
-    print(f"Using port {args.master_port}")
+    logger.debug(f"Using port {args.master_port}")
     ws = args.world_size
     assert ws >= 1
     from utils import load_graph

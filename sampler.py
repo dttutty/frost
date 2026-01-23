@@ -42,7 +42,7 @@ class NegLinkInductiveSampler:
 
 #         # Check for valid node_id
 #         if node_id < 0 or node_id >= len(indptr) - 1:
-#             print(f"Error: node_id {node_id} is out of bounds.")
+#             logger.debug(f"Error: node_id {node_id} is out of bounds.")
 #             return np.array([], dtype=indices.dtype)
 
 #         # Get the start and end pointers from the indptr array
@@ -235,10 +235,10 @@ if __name__ == "__main__":
         #         total_nodes += idx.shape[0]
         #         unique_nodes += unts.shape[0]
 
-    print("total time  : {:.4f}".format(tot_time))
-    print("pointer time: {:.4f}".format(ptr_time))
-    print("coo time    : {:.4f}".format(coo_time))
-    print("search time : {:.4f}".format(sea_time))
-    print("sample time : {:.4f}".format(sam_time))
-    # print('unique time : {:.4f}'.format(uni_time))
-    # print('unique per  : {:.4f}'.format(unique_nodes / total_nodes))
+    logger.debug("total time  : {:.4f}".format(tot_time))
+    logger.debug("pointer time: {:.4f}".format(ptr_time))
+    logger.debug("coo time    : {:.4f}".format(coo_time))
+    logger.debug("search time : {:.4f}".format(sea_time))
+    logger.debug("sample time : {:.4f}".format(sam_time))
+    # logger.debug('unique time : {:.4f}'.format(uni_time))
+    # logger.debug('unique per  : {:.4f}'.format(unique_nodes / total_nodes))

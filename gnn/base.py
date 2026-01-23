@@ -158,11 +158,11 @@ class BaseModel(torch.nn.Module):
             hist_out = all_outputs[-1, :, :]
         # predictor header
 
-        # print("7.fter get_emb")
+        # logger.debug("7.fter get_emb")
         return_value = self.edge_predictor(hist_out, neg_samples=neg_samples)
-        # print("8.after edge_predictor")
+        # logger.debug("8.after edge_predictor")
 
-        print("exit forward, meta.macro_bid:", meta.macro_bid)
+        logger.debug("exit forward, meta.macro_bid:", meta.macro_bid)
 
         self.data_syncer.run(
             plan_set,

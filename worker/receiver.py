@@ -35,7 +35,9 @@ class HostWorkerSyncer(StreamThreadBase):
             # 【重要】需要一个退出机制
             # 约定：如果 host 发来 None 或者特殊的结束信号，就退出循环
             if next_meta is None:
-                print(f"Rank {self.env.local_rank}: Received stop. Exiting receiver.")
+                logger.debug(
+                    f"Rank {self.env.local_rank}: Received stop. Exiting receiver."
+                )
                 break
             elif isinstance(next_meta, str):
                 self.cmd_q.put(next_meta)

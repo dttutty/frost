@@ -29,7 +29,7 @@ def bootstrap_visible_devices(host_is_last: bool = True):
     visible_gpus_at_start = [x for x in raw.split(",") if x] if raw else []
     num_visible_gpus_at_start = len(visible_gpus_at_start)
 
-    print(
+    logger.debug(
         f"[Bootstrap] Rank {rank}/{world_size} (Local Rank {local_rank}) "
         f"sees initial CUDA_VISIBLE_DEVICES='{raw}'"
     )
@@ -37,7 +37,9 @@ def bootstrap_visible_devices(host_is_last: bool = True):
     # Your strategy: the last rank is the host and should not see any GPUs.
     if host_is_last and world_size > 1 and rank == world_size - 1:
         os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Host sees no GPUs
-        print(f"[Bootstrap] Rank {rank} is the host. CUDA_VISIBLE_DEVICES set to ''.")
+        logger.debug(
+            f"[Bootstrap] Rank {rank} is the host. CUDA_VISIBLE_DEVICES set to ''."
+        )
     else:
         # Each worker process is pinned to a single GPU using its LOCAL_RANK.
         if visible_gpus_at_start:
@@ -46,13 +48,13 @@ def bootstrap_visible_devices(host_is_last: bool = True):
             # local_rank=0 % num_visible=1 results in index 0, keeping "0".
             target_gpu = visible_gpus_at_start[local_rank % num_visible_gpus_at_start]
             os.environ["CUDA_VISIBLE_DEVICES"] = target_gpu
-            print(
+            logger.debug(
                 f"[Bootstrap] Rank {rank} is a worker. "
                 f"CUDA_VISIBLE_DEVICES narrowed to '{target_gpu}'."
             )
         # If raw was empty (e.g., CPU mode), it remains empty.
         else:
-            print(
+            logger.debug(
                 f"[Bootstrap] Rank {rank} sees no initial GPUs. Not changing environment."
             )
 
@@ -65,8 +67,8 @@ if __name__ == "__main__":
     # --- STEP 2: NOW, import and run the main application logic ---
     # isort/ruff are happy because the import is at the top-level of this logic block.
     # The main_app.py file can have all its imports at the top without issues.
-    print("-" * 50)
-    print("Bootstrap complete. Importing main application (and torch)...")
+    logger.debug("-" * 50)
+    logger.debug("Bootstrap complete. Importing main application (and torch)...")
 
     # We add the current directory to sys.path to ensure 'train' can be imported.
     # In a real project, this would be handled by packaging.

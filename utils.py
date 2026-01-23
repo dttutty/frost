@@ -161,7 +161,9 @@ def parse_config(f) -> Config:
     gnn_conf = GNNCFG(**conf["gnn"][0])
     train_conf = TrainCFG(**conf["train"][0])
 
-    print(f"Parsed config: {sample_param}, {memory_param}, {gnn_conf}, {train_conf}")
+    logger.info(
+        f"Parsed config: {sample_param}, {memory_param}, {gnn_conf}, {train_conf}"
+    )
 
     cfg = Config(s=sample_param, m=memory_param, g=gnn_conf, t=train_conf)
     cfg.t.batch_size = int(cfg.t.batch_size)

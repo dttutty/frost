@@ -34,10 +34,10 @@ import numpy as np
 import pandas as pd
 import torch
 from gnn.TGN import *
-from sampler import *
 from sklearn.metrics import average_precision_score, f1_score
 from tqdm import tqdm
 
+from sampler import *
 from utils import *
 
 
@@ -228,7 +228,7 @@ def generate_temporal_embeddings(ldf, emb_file_name):
         )
     emb = torch.cat(emb, dim=0)
     torch.save(emb, "embs/" + emb_file_name)
-    print("Saved to embs/" + emb_file_name)
+    logger.debug("Saved to embs/" + emb_file_name)
 
 
 def get_temporal_embeddings(ldf, emb_file_name):
@@ -236,10 +236,10 @@ def get_temporal_embeddings(ldf, emb_file_name):
     emb_path.parent.mkdir(parents=True, exist_ok=True)  # ensure 'embs/' exists
 
     try:
-        print(f"Loading temporal embeddings from {emb_path}")
+        logger.debug(f"Loading temporal embeddings from {emb_path}")
         return torch.load(emb_path)
     except FileNotFoundError:
-        print("Generating temporal embeddings…")
+        logger.debug("Generating temporal embeddings…")
         emb = generate_temporal_embeddings(ldf, emb_file_name)
         torch.save(emb, emb_path)
         return emb
@@ -370,12 +370,12 @@ for e in range(args.epoch):
                 )
             accs.append(acc)
         acc = float(torch.tensor(accs).mean())
-    print("Epoch: {}\tVal acc: {:.4f}".format(e, acc))
+    logger.debug("Epoch: {}\tVal acc: {:.4f}".format(e, acc))
     if acc > best_acc:
         best_e = e
         best_acc = acc
         torch.save(model.state_dict(), save_path)
-print("Loading model at epoch {}...".format(best_e))
+logger.debug("Loading model at epoch {}...".format(best_e))
 model.load_state_dict(torch.load(save_path))
 
 testLoader.shuffle()
@@ -396,4 +396,4 @@ with torch.no_grad():
             )
         accs.append(acc)
     acc = float(torch.tensor(accs).mean())
-print("Testing acc: {:.4f}".format(acc))
+logger.debug("Testing acc: {:.4f}".format(acc))

@@ -76,7 +76,7 @@ PAT_TEST = re.compile(r"test ap:\s*([0-9.]+)\s+test auc:\s*([0-9.]+)", re.I)
 try:
     import yaml
 except ImportError:
-    print("Please install pyyaml: pip install pyyaml", file=sys.stderr)
+    logger.debug("Please install pyyaml: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
 
@@ -147,7 +147,7 @@ def build_config_paths(config_dir: Path, names: list[str]) -> list[Path]:
     for n in names:
         p = config_dir / f"{n}.yml"
         if not p.is_file():
-            print(f"Missing config file: {p}", file=sys.stderr)
+            logger.debug(f"Missing config file: {p}", file=sys.stderr)
             sys.exit(2)
         paths.append(p)
     return paths
@@ -1095,12 +1095,12 @@ def main():
                     )
 
     if failures:
-        print("\nSome runs failed:", file=sys.stderr)
+        logger.debug("\nSome runs failed:", file=sys.stderr)
         for name, rc in failures:
-            print(f"- {name} -> {rc}", file=sys.stderr)
+            logger.debug(f"- {name} -> {rc}", file=sys.stderr)
         sys.exit(1)
 
-    print("\nAll runs completed successfully.")
+    logger.debug("\nAll runs completed successfully.")
 
 
 if __name__ == "__main__":

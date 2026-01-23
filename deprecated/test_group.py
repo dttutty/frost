@@ -7,9 +7,9 @@ def generate_reordered_indexes(reorder, batch_size, num_samples, group_indexes):
     group_idx = list()
     for i in range(reorder):
         group_idx += list(range(0 - i, reorder - i))
-    print("Group index:", group_idx)
+    logger.debug("Group index:", group_idx)
     group_idx = np.repeat(np.array(group_idx), batch_size // reorder)
-    print("Group index repeated:", group_idx)
+    logger.debug("Group index repeated:", group_idx)
     group_idx = np.tile(group_idx, num_samples // batch_size + 1)[:num_samples]
     group_indexes.append(group_indexes[0] + group_idx)
     base_idx = group_indexes[0]
@@ -28,14 +28,14 @@ def batches_assign(index, batch_size):
 reorder = 3
 batch_size = 8
 train = pd.Series(np.arange(30), name="value")
-# print("Train data:", train)
+# logger.debug("Train data:", train)
 batches_assignment = batches_assign(train, batch_size)
 group_indexes = [batches_assignment]
 group_indexes = generate_reordered_indexes(
     reorder, batch_size, len(train), group_indexes
 )
 for i, group in enumerate(group_indexes):
-    print(f"Group {i}:", group)
+    logger.debug(f"Group {i}:", group)
 for _, rows in train.groupby(group_indexes[1]):
-    print("Rows in group:")
-    print(rows.values)
+    logger.debug("Rows in group:")
+    logger.debug(rows.values)

@@ -1,11 +1,13 @@
+import time
+
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-import math
-import time
-from torch.utils.data import DataLoader, Dataset # For training loop example
+from torch.utils.data import DataLoader, Dataset  # For training loop example
+
 
 # ============== 1. Helper Modules ==============
+
 
 class TimeEncoder(nn.Module):
     """
@@ -13,11 +15,14 @@ class TimeEncoder(nn.Module):
     Input shape: (batch_size, 1) tensor of time differences
     Output shape: (batch_size, time_dim)
     """
+
     def __init__(self, time_dim):
         super().__init__()
         self.time_dim = time_dim
         # Basis frequency coefficient (adjust if needed)
-        self.basis_freq = nn.Parameter(torch.from_numpy(1 / 10 ** np.linspace(0, 9, time_dim)).float())
+        self.basis_freq = nn.Parameter(
+            torch.from_numpy(1 / 10 ** np.linspace(0, 9, time_dim)).float()
+        )
         self.phase = nn.Parameter(torch.zeros(time_dim).float())
 
     def forward(self, ts_diff):
@@ -26,9 +31,12 @@ class TimeEncoder(nn.Module):
         # Ensure ts_diff is float and on the correct device
         ts_diff = ts_diff.float().to(self.basis_freq.device)
 
-        map_ts = ts_diff * self.basis_freq.view(1, -1) + self.phase.view(1, -1) # [batch_size, time_dim]
+        map_ts = ts_diff * self.basis_freq.view(1, -1) + self.phase.view(
+            1, -1
+        )  # [batch_size, time_dim]
         harmonic = torch.cos(map_ts)
         return harmonic
+
 
 class MessageFunction(nn.Module):
     """
@@ -36,12 +44,13 @@ class MessageFunction(nn.Module):
     Input: source_memory, dest_memory, time_encoding, edge_features
     Output: message vector
     """
+
     def __init__(self, memory_dim, time_dim, edge_feat_dim, message_dim):
         super().__init__()
         input_dim = 2 * memory_dim + time_dim + edge_feat_dim
         self.layer = nn.Sequential(
             nn.Linear(input_dim, message_dim),
-            nn.ReLU()
+            nn.ReLU(),
             # Optionally add more layers
         )
 
@@ -50,15 +59,17 @@ class MessageFunction(nn.Module):
         message = self.layer(input_features)
         return message
 
+
 class MessageAggregator(nn.Module):
     """
     Aggregates messages for a node. 'mean' or 'last'.
     Input: node_ids (for mapping), messages (associated with node_ids)
     Output: aggregated_messages (one per unique node_id)
     """
-    def __init__(self, agg_method='mean'):
+
+    def __init__(self, agg_method="mean"):
         super().__init__()
-        if agg_method not in ['mean', 'last']:
+        if agg_method not in ["mean", "last"]:
             raise ValueError("Aggregation method must be 'mean' or 'last'")
         self.agg_method = agg_method
 
@@ -88,15 +99,17 @@ class MessageAggregator(nn.Module):
 
         for nid in unique_node_ids:
             node_messages = messages[node_ids == nid]
-            if self.agg_method == 'mean':
+            if self.agg_method == "mean":
                 agg_messages.append(node_messages.mean(dim=0))
-            elif self.agg_method == 'last':
+            elif self.agg_method == "last":
                 # This assumes messages are chronologically ordered *for each node*
                 # In many batch implementations, 'mean' is easier.
                 agg_messages.append(node_messages[-1])
 
         if not agg_messages:
-             return unique_node_ids, torch.empty((0, messages.shape[1]), device=device) # Handle case with no messages
+            return unique_node_ids, torch.empty(
+                (0, messages.shape[1]), device=device
+            )  # Handle case with no messages
 
         agg_messages = torch.stack(agg_messages)
         return unique_node_ids, agg_messages
@@ -108,11 +121,12 @@ class MemoryUpdater(nn.Module):
     Input: aggregated_message, previous_memory
     Output: new_memory
     """
-    def __init__(self, memory_dim, message_dim, update_type='gru'):
+
+    def __init__(self, memory_dim, message_dim, update_type="gru"):
         super().__init__()
-        if update_type == 'gru':
+        if update_type == "gru":
             self.updater = nn.GRUCell(message_dim, memory_dim)
-        elif update_type == 'rnn':
+        elif update_type == "rnn":
             self.updater = nn.RNNCell(message_dim, memory_dim)
         else:
             raise ValueError("Memory update type must be 'gru' or 'rnn'")
@@ -123,6 +137,7 @@ class MemoryUpdater(nn.Module):
         new_memory = self.updater(agg_message, prev_memory)
         return new_memory
 
+
 class EmbeddingModule(nn.Module):
     """
     Computes temporal node embeddings using memory and recent messages/neighbors.
@@ -131,6 +146,7 @@ class EmbeddingModule(nn.Module):
     Input: node_ids, node_memory (at the time of embedding computation)
     Output: node_embeddings
     """
+
     def __init__(self, memory_dim, embedding_dim):
         super().__init__()
         # Simple projection from memory to embedding space
@@ -145,10 +161,20 @@ class EmbeddingModule(nn.Module):
 
 # ============== 2. TGN Model ==============
 
+
 class TGN(nn.Module):
-    def __init__(self, num_nodes, edge_feat_dim,
-                 memory_dim, time_dim, embedding_dim, message_dim,
-                 agg_method='mean', mem_update_type='gru', dropout=0.1):
+    def __init__(
+        self,
+        num_nodes,
+        edge_feat_dim,
+        memory_dim,
+        time_dim,
+        embedding_dim,
+        message_dim,
+        agg_method="mean",
+        mem_update_type="gru",
+        dropout=0.1,
+    ):
         super().__init__()
 
         self.num_nodes = num_nodes
@@ -160,13 +186,17 @@ class TGN(nn.Module):
 
         # --- State (managed outside forward, updated by methods) ---
         # Node memory vectors
-        self.memory = nn.Parameter(torch.zeros((num_nodes, memory_dim)), requires_grad=False)
+        self.memory = nn.Parameter(
+            torch.zeros((num_nodes, memory_dim)), requires_grad=False
+        )
         # Last interaction timestamp for each node
         self.last_update_ts = nn.Parameter(torch.zeros(num_nodes), requires_grad=False)
 
         # --- Modules ---
         self.time_encoder = TimeEncoder(time_dim)
-        self.message_fn = MessageFunction(memory_dim, time_dim, edge_feat_dim, message_dim)
+        self.message_fn = MessageFunction(
+            memory_dim, time_dim, edge_feat_dim, message_dim
+        )
         self.aggregator = MessageAggregator(agg_method)
         self.memory_updater = MemoryUpdater(memory_dim, message_dim, mem_update_type)
         self.embedding_module = EmbeddingModule(memory_dim, embedding_dim)
@@ -181,7 +211,7 @@ class TGN(nn.Module):
         Returns:
             embeddings (Tensor): Computed embeddings. Shape [len(node_ids), embedding_dim].
         """
-        node_ids = node_ids.long() # Ensure correct type
+        node_ids = node_ids.long()  # Ensure correct type
         # Fetch current memory for the nodes
         # Use clone().detach() if memory is modified elsewhere and you need a snapshot
         node_memory = self.memory[node_ids]
@@ -201,7 +231,7 @@ class TGN(nn.Module):
             edge_features (Tensor): Features of interactions. Shape [batch_size, edge_feat_dim].
         """
         batch_size = len(src_nodes)
-        device = src_nodes.device # Get device from input tensors
+        device = src_nodes.device  # Get device from input tensors
 
         # Ensure inputs are LongTensors where needed
         src_nodes = src_nodes.long()
@@ -227,9 +257,13 @@ class TGN(nn.Module):
 
         # --- Compute messages ---
         # Message from source perspective (for destination memory update)
-        msg_for_dst = self.message_fn(prev_src_mem, prev_dst_mem, time_enc_dst, edge_features)
+        msg_for_dst = self.message_fn(
+            prev_src_mem, prev_dst_mem, time_enc_dst, edge_features
+        )
         # Message from destination perspective (for source memory update)
-        msg_for_src = self.message_fn(prev_dst_mem, prev_src_mem, time_enc_src, edge_features)
+        msg_for_src = self.message_fn(
+            prev_dst_mem, prev_src_mem, time_enc_src, edge_features
+        )
 
         # Apply dropout to messages
         msg_for_dst = self.dropout(msg_for_dst)
@@ -240,11 +274,13 @@ class TGN(nn.Module):
         all_nodes = torch.cat([src_nodes, dst_nodes])
         all_messages = torch.cat([msg_for_src, msg_for_dst])
 
-        unique_update_nodes, aggregated_messages = self.aggregator(all_nodes, all_messages)
+        unique_update_nodes, aggregated_messages = self.aggregator(
+            all_nodes, all_messages
+        )
 
-        if unique_update_nodes.nelement() == 0: # Handle case with no messages/updates
-             print("Warning: No nodes to update.")
-             return # Nothing to update
+        if unique_update_nodes.nelement() == 0:  # Handle case with no messages/updates
+            logger.debug("Warning: No nodes to update.")
+            return  # Nothing to update
 
         # --- Update memory for nodes that received messages ---
         # Fetch previous memory for the unique nodes needing updates
@@ -267,16 +303,17 @@ class TGN(nn.Module):
             # A more precise way might involve iterating or using scatter_max
             max_ts_map = {}
             all_involved_nodes_unique = torch.unique(all_nodes)
-            for nid in all_involved_nodes_unique.cpu().numpy(): # Iterate on CPU for efficiency if many nodes
+            for nid in (
+                all_involved_nodes_unique.cpu().numpy()
+            ):  # Iterate on CPU for efficiency if many nodes
                 node_timestamps = timestamps[(src_nodes == nid) | (dst_nodes == nid)]
                 if len(node_timestamps) > 0:
                     max_ts_map[nid] = torch.max(node_timestamps)
 
             for nid, max_ts in max_ts_map.items():
-                 # Update only if the current batch time is later
-                 if max_ts > self.last_update_ts[nid]:
-                      self.last_update_ts[nid] = max_ts.to(device)
-
+                # Update only if the current batch time is later
+                if max_ts > self.last_update_ts[nid]:
+                    self.last_update_ts[nid] = max_ts.to(device)
 
     def detach_memory(self):
         """Detaches the memory and last_update_ts from the computation graph."""
@@ -286,10 +323,12 @@ class TGN(nn.Module):
     def reset_state(self):
         """Resets memory and last update times to zero."""
         with torch.no_grad():
-            self.memory.fill_(0.)
-            self.last_update_ts.fill_(0.)
+            self.memory.fill_(0.0)
+            self.last_update_ts.fill_(0.0)
+
 
 # ============== 3. Conceptual Training Loop ==============
+
 
 # --- Dummy Data Generation ---
 # Replace with your actual data loading
@@ -308,8 +347,12 @@ class DummyTemporalDataset(Dataset):
                 self.dst[i] = np.random.randint(0, num_nodes)
 
         # Generate increasing timestamps
-        self.ts = np.sort(np.random.rand(num_interactions) * num_interactions).astype(np.float32)
-        self.edge_feats = np.random.randn(num_interactions, edge_feat_dim).astype(np.float32)
+        self.ts = np.sort(np.random.rand(num_interactions) * num_interactions).astype(
+            np.float32
+        )
+        self.edge_feats = np.random.randn(num_interactions, edge_feat_dim).astype(
+            np.float32
+        )
         # Labels (e.g., 1 for existing edge) - needed for loss
         self.labels = np.ones(num_interactions).astype(np.float32)
 
@@ -317,15 +360,25 @@ class DummyTemporalDataset(Dataset):
         return self.num_interactions
 
     def __getitem__(self, idx):
-        return self.src[idx], self.dst[idx], self.ts[idx], self.edge_feats[idx], self.labels[idx]
+        return (
+            self.src[idx],
+            self.dst[idx],
+            self.ts[idx],
+            self.edge_feats[idx],
+            self.labels[idx],
+        )
+
 
 def collate_fn(batch):
     src, dst, ts, edge_feats, labels = zip(*batch)
-    return (torch.tensor(src, dtype=torch.long),
-            torch.tensor(dst, dtype=torch.long),
-            torch.tensor(ts, dtype=torch.float),
-            torch.from_numpy(np.stack(edge_feats, axis=0)),
-            torch.tensor(labels, dtype=torch.float))
+    return (
+        torch.tensor(src, dtype=torch.long),
+        torch.tensor(dst, dtype=torch.long),
+        torch.tensor(ts, dtype=torch.float),
+        torch.from_numpy(np.stack(edge_feats, axis=0)),
+        torch.tensor(labels, dtype=torch.float),
+    )
+
 
 # --- Training Setup ---
 NUM_NODES = 100
@@ -337,7 +390,7 @@ MESSAGE_DIM = 32
 BATCH_SIZE = 64
 LEARNING_RATE = 0.0003
 EPOCHS = 5
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # --- Instantiate Model, Optimizer, Loss ---
 model = TGN(
@@ -346,28 +399,38 @@ model = TGN(
     memory_dim=MEMORY_DIM,
     time_dim=TIME_DIM,
     embedding_dim=EMBEDDING_DIM,
-    message_dim=MESSAGE_DIM
+    message_dim=MESSAGE_DIM,
 ).to(DEVICE)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-criterion = nn.BCEWithLogitsLoss() # For link prediction
+criterion = nn.BCEWithLogitsLoss()  # For link prediction
 
 # --- Create DataLoader ---
-dataset = DummyTemporalDataset(num_interactions=5000, num_nodes=NUM_NODES, edge_feat_dim=EDGE_FEAT_DIM)
-dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn) # shuffle=False is crucial for time order
+dataset = DummyTemporalDataset(
+    num_interactions=5000, num_nodes=NUM_NODES, edge_feat_dim=EDGE_FEAT_DIM
+)
+dataloader = DataLoader(
+    dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn
+)  # shuffle=False is crucial for time order
 
 # --- Training Loop ---
-print(f"Starting training on {DEVICE}...")
+logger.debug(f"Starting training on {DEVICE}...")
 for epoch in range(EPOCHS):
     start_epoch_time = time.time()
     model.train()
-    model.reset_state() # Reset memory at the start of each epoch
+    model.reset_state()  # Reset memory at the start of each epoch
     total_loss = 0
 
     for batch_idx, (src, dst, ts, edge_feats, labels) in enumerate(dataloader):
         optimizer.zero_grad()
 
-        src, dst, ts, edge_feats, labels = src.to(DEVICE), dst.to(DEVICE), ts.to(DEVICE), edge_feats.to(DEVICE), labels.to(DEVICE)
+        src, dst, ts, edge_feats, labels = (
+            src.to(DEVICE),
+            dst.to(DEVICE),
+            ts.to(DEVICE),
+            edge_feats.to(DEVICE),
+            labels.to(DEVICE),
+        )
 
         # --- TGN Core Logic for Link Prediction ---
         # 1. Compute embeddings for positive edges *at interaction time*
@@ -379,11 +442,15 @@ for epoch in range(EPOCHS):
 
         # 2. Generate Negative Samples (Simple Random Sampling)
         #    A better strategy uses historical or degree-based sampling.
-        num_neg_samples = 1 # Number of negative samples per positive one
-        neg_dst = torch.randint(0, NUM_NODES, (len(src) * num_neg_samples,), device=DEVICE)
+        num_neg_samples = 1  # Number of negative samples per positive one
+        neg_dst = torch.randint(
+            0, NUM_NODES, (len(src) * num_neg_samples,), device=DEVICE
+        )
         # TODO: Ensure neg_dst != actual dst for corresponding src
 
-        neg_src_emb = model.compute_embedding(src.repeat_interleave(num_neg_samples)) # Repeat src for each neg sample
+        neg_src_emb = model.compute_embedding(
+            src.repeat_interleave(num_neg_samples)
+        )  # Repeat src for each neg sample
         neg_dst_emb = model.compute_embedding(neg_dst)
 
         # 3. Calculate Scores (Dot product is common)
@@ -414,14 +481,17 @@ for epoch in range(EPOCHS):
 
         # Optional: Print progress
         if (batch_idx + 1) % 20 == 0:
-            print(f'Epoch {epoch+1}/{EPOCHS}, Batch {batch_idx+1}/{len(dataloader)}, Loss: {loss.item():.4f}')
-
+            logger.debug(
+                f"Epoch {epoch + 1}/{EPOCHS}, Batch {batch_idx + 1}/{len(dataloader)}, Loss: {loss.item():.4f}"
+            )
 
     epoch_time = time.time() - start_epoch_time
     avg_loss = total_loss / len(dataloader)
-    print(f'Epoch {epoch+1} finished. Avg Loss: {avg_loss:.4f}, Time: {epoch_time:.2f}s')
+    logger.debug(
+        f"Epoch {epoch + 1} finished. Avg Loss: {avg_loss:.4f}, Time: {epoch_time:.2f}s"
+    )
 
-print("Training finished.")
+logger.debug("Training finished.")
 
 # --- Evaluation (Conceptual) ---
 # model.eval()

@@ -59,6 +59,8 @@ import time
 import numpy as np
 import torch
 from gnn.TGN import TGN
+from sklearn.metrics import average_precision_score, roc_auc_score
+
 from sampler import (
     AvoidInfoLeakNegLinkSampler,
     NegLinkInductiveSampler,
@@ -66,8 +68,6 @@ from sampler import (
     ParallelSampler,
     create_sampler,
 )
-from sklearn.metrics import average_precision_score, roc_auc_score
-
 from utils import (
     extract_raw_data,
     load_feat,
@@ -117,7 +117,7 @@ def get_inductive_links(df, train_edge_end, val_edge_end):
         if row.src in new_node_set or row.dst in new_node_set:
             inductive_inds.append(val_edge_end + index)
 
-    print("Inductive links", len(inductive_inds), len(test_df))
+    logger.debug("Inductive links", len(inductive_inds), len(test_df))
     return [i for i in range(val_edge_end)] + inductive_inds
 
 
@@ -210,7 +210,7 @@ if args.use_inductive:
     inductive_nodes = set(test_df.src.values).union(
         test_df.dst.values
     )  # fixed by sqp17
-    print("inductive nodes", len(inductive_nodes))
+    logger.debug("inductive nodes", len(inductive_nodes))
     train_neg_link_sampler = NegLinkInductiveSampler(inductive_nodes)
     eval_neg_link_sampler = NegLinkInductiveSampler(inductive_nodes)
 else:
@@ -374,7 +374,7 @@ if train_param.reorder is not None:
         )
 
 for e in range(5):
-    print("Epoch {:d}:".format(e))
+    logger.debug("Epoch {:d}:".format(e))
     total_sampling_time = 0
     time_prep = 0
     time_tot = 0
@@ -395,7 +395,7 @@ for e in range(5):
         args=(train_data, train_param.batch_size, batch_plan_queue),
     )
     producer_thread.start()
-    print("[Sampler] Ready to start sampling. Waiting for first batch...")
+    logger.debug("[Sampler] Ready to start sampling. Waiting for first batch...")
     with tqdm(desc="[Sampler] Processing Batches") as pbar:
         batch_num = 0
 
@@ -500,10 +500,10 @@ for e in range(5):
             time_tot += time.time() - t_tot_s
         producer_thread.join()
     ap, auc = eval("val")
-    print(
+    logger.debug(
         "\ttrain loss:{:.4f}  val ap:{:4f}  val auc:{:4f}".format(total_loss, ap, auc)
     )
-    print(
+    logger.debug(
         "\ttotal time:{:.2f}s sample time:{:.2f}s prep time:{:.2f}s".format(
             time_tot, total_sampling_time, time_prep
         )
@@ -514,11 +514,13 @@ for e in range(5):
         best_e = e
         best_ap = ap
         epochs_without_improvement = 0
-        print(f"\tNew best validation AP: {best_ap:.4f}. Saving model to {path_saver}")
+        logger.debug(
+            f"\tNew best validation AP: {best_ap:.4f}. Saving model to {path_saver}"
+        )
         torch.save(model.state_dict(), path_saver)
     else:
         epochs_without_improvement += 1
-        print(
+        logger.debug(
             f"\tValidation AP did not improve for {epochs_without_improvement} epoch(s)."
         )
         # Trigger early stopping if patience is reached
@@ -526,17 +528,17 @@ for e in range(5):
         args.early_stop_patience > 0
         and epochs_without_improvement >= args.early_stop_patience
     ):
-        print(
+        logger.debug(
             f"\nEarly stopping triggered after {epochs_without_improvement} epochs without improvement."
         )
-        print(
+        logger.debug(
             f"The best model was from epoch {best_e} with validation AP {best_ap:.4f}."
         )
         # break # Exit the training loop
 
     profiler.report()
 
-print("Loading model at epoch {}...".format(best_e))
+logger.debug("Loading model at epoch {}...".format(best_e))
 model.load_state_dict(torch.load(path_saver))
 model.eval()
 if sampler is not None:
@@ -548,6 +550,6 @@ if mailbox is not None:
     eval("val")
 ap, auc = eval("test")
 if args.eval_neg_samples > 1:
-    print("\ttest AP:{:4f}  test MRR:{:4f}".format(ap, auc))
+    logger.debug("\ttest AP:{:4f}  test MRR:{:4f}".format(ap, auc))
 else:
-    print("\ttest AP:{:4f}  test AUC:{:4f}".format(ap, auc))
+    logger.debug("\ttest AP:{:4f}  test AUC:{:4f}".format(ap, auc))

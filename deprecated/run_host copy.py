@@ -86,7 +86,7 @@ class Host:
         # 3. 初始化采样器
         self.pos_sampler = None
         if self.cfg.s.sample_support_node:
-            print("Initializing positive sampler...", self.cfg.s.neighbor)
+            logger.debug("Initializing positive sampler...", self.cfg.s.neighbor)
             self.pos_sampler = ParallelSampler(
                 graph["indptr"],
                 graph["indices"],
@@ -115,11 +115,11 @@ class Host:
         公共的训练入口方法
         """
         for e in range(self.t_cfg.epoch):
-            print(f"Epoch {e}:")
+            logger.debug(f"Epoch {e}:")
             self._handle_a_split(self.tr_df, "train")
-            print("Validating...")
+            logger.debug("Validating...")
             self._handle_a_split(self.va_df, "val")
-            print("Testing...")
+            logger.debug("Testing...")
             self._handle_a_split(self.te_df, "test")
 
         self._cleanup()
@@ -174,7 +174,7 @@ class Host:
                 this_split_curr_minibatch_id // self.env.n_gpu
             )
             mark = None
-            print(
+            logger.debug(
                 "this_split_curr_minibatch_id",
                 this_split_curr_minibatch_id,
                 "this_split_curr_macrobatch_bid",
@@ -209,7 +209,7 @@ class Host:
                 mini_ids = [td.mini_bid for td in meta_2_scatter]
                 split_info = [td.split for td in meta_2_scatter]
                 mark_info = [td.mark for td in meta_2_scatter]
-                print(
+                logger.debug(
                     f"Host: Scattering batch {mini_ids} ({split_info}, {mark_info})..."
                 )
                 assert len(meta_2_scatter) == self.env.n_gpu
@@ -232,7 +232,7 @@ class Host:
             mini_ids = [td.mini_bid for td in meta_2_scatter]
             split_info = [td.split for td in meta_2_scatter]
             mark_info = [td.mark for td in meta_2_scatter]
-            print(f"Host: Scattering batch {mini_ids} ({split_info}, {mark_info})...")
+            logger.debug(f"Host: Scattering batch {mini_ids} ({split_info}, {mark_info})...")
             meta_2_scatter = copy.deepcopy(meta_2_scatter)
 
             self.comm.scatter_send(meta_2_scatter)
@@ -327,7 +327,7 @@ class Host:
         self.meta_q.append(meta)
 
     def _cleanup(self):
-        print("Host: Broadcasting CLEANUP command...")
+        logger.debug("Host: Broadcasting CLEANUP command...")
 
         # 【新增】: 构造一个由 None 组成的列表，发送给所有 Worker
         # 这会解除 Worker 端 Receiver 线程在 scatter_object_list 上的阻塞
@@ -339,10 +339,10 @@ class Host:
             [None], stop_signal, src=dist.get_rank(), group=self.gloo
         )
 
-        print("Host: Stop signal sent. Entering final barrier...")
+        logger.debug("Host: Stop signal sent. Entering final barrier...")
         dist.barrier()  # 建议指定 group=self.gloo 或者 nccl_pg，通常 gloo 用于控制流
-        print("Host: All processes reached the final barrier.")
+        logger.debug("Host: All processes reached the final barrier.")
         end = time.time()
 
-        print(f"Elapsed time: {end - self.start_time:.2f} seconds")
+        logger.debug(f"Elapsed time: {end - self.start_time:.2f} seconds")
         dist.destroy_process_group()

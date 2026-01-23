@@ -186,7 +186,7 @@ def train_one_epoch(model, edge_enumerator, sampler, opt, scaler, device, epoch,
     dist.all_reduce(loss_t, op=dist.ReduceOp.SUM)
     mean_loss = (loss_t[0] / loss_t[1]).item()
     if is_main():
-        print(f"epoch {epoch} train_loss {mean_loss:.4f}")
+        logger.debug(f"epoch {epoch} train_loss {mean_loss:.4f}")
     return mean_loss
 
 
@@ -196,7 +196,9 @@ def main_worker(args):
         f"cuda:{args.local_rank}" if torch.cuda.is_available() else "cpu"
     )
     if is_main():
-        print(f"World size={args.world_size}, backend={args.backend}, device={device}")
+        logger.debug(
+            f"World size={args.world_size}, backend={args.backend}, device={device}"
+        )
 
     set_seed(args.seed)
 
@@ -245,7 +247,7 @@ def main_worker(args):
         start_epoch = ckpt["epoch"] + 1
         best_acc = ckpt.get("best_acc", 0.0)
         if is_main():
-            print(f"Resumed from epoch {ckpt['epoch']} best_acc={best_acc:.4f}")
+            logger.debug(f"Resumed from epoch {ckpt['epoch']} best_acc={best_acc:.4f}")
 
     # train loop
     for epoch in range(start_epoch, args.epochs):
@@ -256,7 +258,7 @@ def main_worker(args):
         # eval
         acc = evaluate(model, edge_enumerator, sampler, device)
         if is_main():
-            print(f"epoch {epoch} val_acc {acc:.4f}")
+            logger.debug(f"epoch {epoch} val_acc {acc:.4f}")
 
             # save last
             save_ckpt(

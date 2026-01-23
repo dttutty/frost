@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
-import numpy as np
 from collections import Counter
+
+import numpy as np
+
 
 def load_edges(npz_path):
     """
@@ -9,16 +11,17 @@ def load_edges(npz_path):
     return a Counter of directed edges (u, v).
     """
     data = np.load(npz_path)
-    indptr = data['indptr']
-    indices = data['indices']
+    indptr = data["indptr"]
+    indices = data["indices"]
     edges = Counter()
     num_nodes = len(indptr) - 1
 
     for u in range(num_nodes):
-        start, end = indptr[u], indptr[u+1]
+        start, end = indptr[u], indptr[u + 1]
         for v in indices[start:end]:
             edges[(u, int(v))] += 1
     return edges
+
 
 def check_symmetry(edges):
     """
@@ -29,20 +32,30 @@ def check_symmetry(edges):
             return False
     return True
 
+
 def main():
-    p = argparse.ArgumentParser(description="Check if a CSR .npz was built with add_reverse=True")
-    p.add_argument("npz_file", help="Path to the .npz file (must contain 'indptr' and 'indices')")
+    p = argparse.ArgumentParser(
+        description="Check if a CSR .npz was built with add_reverse=True"
+    )
+    p.add_argument(
+        "npz_file", help="Path to the .npz file (must contain 'indptr' and 'indices')"
+    )
     args = p.parse_args()
 
-    print(f"Loading edges from {args.npz_file}...")
+    logger.debug(f"Loading edges from {args.npz_file}...")
     edges = load_edges(args.npz_file)
-    print(f"Total directed edges loaded: {sum(edges.values())}")
+    logger.debug(f"Total directed edges loaded: {sum(edges.values())}")
 
-    print("Checking symmetry of the edge set...")
+    logger.debug("Checking symmetry of the edge set...")
     if check_symmetry(edges):
-        print("✔ Every edge has a matching reverse: likely generated with add_reverse=True")
+        logger.debug(
+            "✔ Every edge has a matching reverse: likely generated with add_reverse=True"
+        )
     else:
-        print("✘ Not every edge is paired: likely generated with add_reverse=False")
+        logger.debug(
+            "✘ Not every edge is paired: likely generated with add_reverse=False"
+        )
+
 
 if __name__ == "__main__":
     main()

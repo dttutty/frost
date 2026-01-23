@@ -186,11 +186,11 @@ def sample_and_scatter_batch(
     #                         sample_param.strategy=='recent', sample_param.prop_time,
     #                         sample_param.history, float(sample_param.duration))
 
-    # print('Sample nodes:', root_nodes.shape[0], 'edges:', edges.shape[0], 'ts:', ts.shape[0])
+    # logger.debug('Sample nodes:', root_nodes.shape[0], 'edges:', edges.shape[0], 'ts:', ts.shape[0])
     ret, total_sample_time = sampler_wrapper(
         sample_param.no_neg, root_nodes, sampler, ts, total_sample_time
     )
-    # print('Sampled blocks:', len(ret), 'total sample time:', total_sample_time)
+    # logger.debug('Sampled blocks:', len(ret), 'total sample time:', total_sample_time)
     if gnn_param.arch != "identity":
         # eg. if sample_param.history = 3, sample_param.layer = 2, ret = [block1,block2, block3,block4, block5,block6]
         # then grouped_blocks = [[block1,block2],[block3,block4],[block5,block6]]
@@ -220,7 +220,7 @@ def sample_and_scatter_batch(
         # # =================================================================
         # # === 阶段 1A: 发起【所有】的数据发送 ===
         # # =================================================================
-        # print("Host: Phase 1A - Initiating all data sends...")
+        # logger.debug("Host: Phase 1A - Initiating all data sends...")
         # send_requests = []
         # for rank, data_payload in enumerate(batch_to_send):
         #     pickled_payload = pickle.dumps(data_payload)
@@ -236,15 +236,15 @@ def sample_and_scatter_batch(
         # # !!! 必须在发起任何接收之前，先等待发送完成 !!!
         # # 这是确保 Host 自身任务清理干净的关键同步点。
         # # =================================================================
-        # print("Host: Phase 1B - Waiting for data sends to complete...")
+        # logger.debug("Host: Phase 1B - Waiting for data sends to complete...")
         # for req in send_requests:
         #     req.wait()
-        # print("Host: All data has been sent successfully.")
+        # logger.debug("Host: All data has been sent successfully.")
 
         # # =================================================================
         # # === 阶段 2A: 发起【所有】的 ACK 接收 ===
         # # =================================================================
-        # print("Host: Phase 2A - Initiating non-blocking receives for all ACKs...")
+        # logger.debug("Host: Phase 2A - Initiating non-blocking receives for all ACKs...")
         # recv_requests = []
         # ack_buffers = []
         # for rank in range(len(batch_to_send)):
@@ -256,11 +256,11 @@ def sample_and_scatter_batch(
         # # =================================================================
         # # === 阶段 2B: 等待【所有】的 ACK 接收完成 ===
         # # =================================================================
-        # print("Host: Phase 2B - Waiting for all ACKs to be received...")
+        # logger.debug("Host: Phase 2B - Waiting for all ACKs to be received...")
         # for i, req in enumerate(recv_requests):
         #     req.wait()
 
-        # print("Host: All workers have acknowledged. Proceeding to next step.")
+        # logger.debug("Host: All workers have acknowledged. Proceeding to next step.")
 
         if mode == "eval":
             ap_tot += gather_receive(world_size, dst=local_rank)
@@ -388,7 +388,7 @@ def run_epoch(
     train_df = df[:train_edge_end]
     val_df = df[train_edge_end:val_edge_end]
     test_df = df[val_edge_end:]
-    print("Epoch {:d}:".format(e))
+    logger.debug("Epoch {:d}:".format(e))
     total_sample_time = 0
     time_tot = 0
     sampler.reset()
@@ -452,7 +452,7 @@ def run_epoch(
             )
             time_tot += time.time() - t_tot_s
             pbar.update(1)
-        print("Training time:", time_tot)
+        logger.debug("Training time:", time_tot)
         broadcast_state("loss_reduce")
         gathered_loss = gather_receive(world_size, dst=local_rank)
         total_loss = np.sum(np.array(gathered_loss) * train_param.batch_size)
@@ -487,10 +487,10 @@ def run_epoch(
                 pbar,
                 local_rank,
             )
-    print(
+    logger.debug(
         "\ttrain loss:{:.4f}  val ap:{:4f}  val auc:{:4f}".format(total_loss, ap, auc)
     )
-    print(
+    logger.debug(
         "\ttotal time:{:.2f}s sample time:{:.2f}s".format(time_tot, total_sample_time)
     )
     return best_ap, best_e, tap, tauc
@@ -555,8 +555,8 @@ def run_host(
             local_rank,
         )
 
-    print("Best model at epoch {}.".format(best_e))
-    print("\ttest ap:{:4f}  test auc:{:4f}".format(tap, tauc))
+    logger.debug("Best model at epoch {}.".format(best_e))
+    logger.debug("\ttest ap:{:4f}  test auc:{:4f}".format(tap, tauc))
 
     # let all process exit
     broadcast_state("exit")

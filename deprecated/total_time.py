@@ -25,18 +25,18 @@ def calculate_average_total_time(file_path):
                         # 跳过无法转换为浮点数的值
                         continue
     except FileNotFoundError:
-        print(f"错误: 文件 '{file_path}' 未找到。")
+        logger.debug(f"错误: 文件 '{file_path}' 未找到。")
         return None
     except Exception as e:
-        print(f"读取文件时发生错误: {e}")
+        logger.debug(f"读取文件时发生错误: {e}")
         return None
 
     if total_times:
         average_time = sum(total_times) / len(total_times)
-        print(average_time)
+        logger.debug(average_time)
         return average_time
     else:
-        print("未在文件中找到 'total time' 数据。")
+        logger.debug("未在文件中找到 'total time' 数据。")
         return None
 
 
@@ -60,4 +60,4 @@ avg_total_time = calculate_average_total_time(
 )
 
 # if avg_total_time is not None:
-#     print(f"平均 'total time': {avg_total_time:.2f} 秒")
+#     logger.debug(f"平均 'total time': {avg_total_time:.2f} 秒")

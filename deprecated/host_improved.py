@@ -4,12 +4,12 @@ import time
 import numpy as np
 import torch
 import torch.distributed as dist
+from tqdm import tqdm
+
 from sampler import NegLinkSampler
 
 # Assume these are your existing imports
 from sampler_core import ParallelSampler
-from tqdm import tqdm
-
 from utils import (
     dgl_blocks_to_tensor_dicts,  # Helper from previous answer
     extract_raw_data,
@@ -32,7 +32,7 @@ def run_host(
     It samples data, creates task packages, and dispatches them to workers.
     """
     ngpus = world_size - 1
-    print(f"Host process (rank {rank}) started, coordinating {ngpus} workers.")
+    logger.debug(f"Host process (rank {rank}) started, coordinating {ngpus} workers.")
 
     # --- Initialize Samplers ---
     cfg_batch_size = train_param.batch_size
@@ -66,7 +66,7 @@ def run_host(
     # --- Main Epoch Loop ---
     best_ap = best_e = tap = tauc = 0
     for e in range(train_param.epoch):
-        print(f"Epoch {e}:")
+        logger.debug(f"Epoch {e}:")
         sampler.reset()
         # The memory_mailbox object would be managed by workers now,
         # but the host can signal a reset.
@@ -100,7 +100,7 @@ def run_host(
             loss_val = dist.recv_object(src=i)
             total_loss += loss_val
 
-        print(
+        logger.debug(
             f"\tTraining time: {time.time() - t_start:.2f}s, Approx. total loss: {total_loss / ngpus:.4f}"
         )
 
@@ -132,7 +132,7 @@ def run_host(
 
         ap = np.mean(ap_tot)
         auc = np.mean(auc_tot)
-        print(f"\tValidation AP: {ap:.4f}, AUC: {auc:.4f}")
+        logger.debug(f"\tValidation AP: {ap:.4f}, AUC: {auc:.4f}")
 
         # --- Check for Best Model and Test ---
         if ap > best_ap:
@@ -147,7 +147,7 @@ def run_host(
             # ...
 
     # --- Finalization ---
-    print("Training finished. Sending exit signal to workers.")
+    logger.debug("Training finished. Sending exit signal to workers.")
     for i in range(ngpus):
         dist.send_object({"mode": "exit"}, dst=i)
 
@@ -203,7 +203,7 @@ def run_worker(rank, world_size):
     The logic for the Worker processes.
     It initializes the model and then enters a loop to receive and process tasks.
     """
-    print(f"Worker {rank} started.")
+    logger.debug(f"Worker {rank} started.")
     device = torch.device(f"cuda:{rank}")
     host_rank = world_size - 1
 
@@ -221,12 +221,12 @@ def run_worker(rank, world_size):
         mode = task_package["mode"]
 
         if mode == "exit":
-            print(f"Worker {rank} received exit signal. Terminating.")
+            logger.debug(f"Worker {rank} received exit signal. Terminating.")
             break
 
         if mode == "save_model":
             # torch.save(model.state_dict(), f'model_rank_{rank}.pt')
-            print(f"Worker {rank} saved model.")
+            logger.debug(f"Worker {rank} saved model.")
             continue
 
         # If it's a data processing task, unpack the data

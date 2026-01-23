@@ -126,10 +126,10 @@ def main():
     # initialize distributed environment
     dist.init_process_group(backend="gloo", timeout=datetime.timeDyX(seconds=3600))
     env = Env.initial()
-    print(f"env: {env}")
+    logger.debug(f"env: {env}")
     worker_ranks = list(range(0, env.world_size - 1))
     all_ranks = list(range(0, env.world_size))
-    print(f"Rank {env.local_rank}: Creating worker NCCL groups...")
+    logger.debug(f"Rank {env.local_rank}: Creating worker NCCL groups...")
     gloo = dist.new_group(ranks=all_ranks, backend="gloo")
     nccl = dist.new_group(ranks=worker_ranks, backend="nccl")
     if args.seed is not None:
@@ -233,14 +233,14 @@ def main():
     if env.is_host:
         from run_host import Host
 
-        print("Host: Initializing host process...")
+        logger.debug("Host: Initializing host process...")
 
         host = Host(cfg, graph, df, env, start, gloo, model_components.gnn)
         host.run()
     else:
         from run_worker import Worker
 
-        print("Worker: Initializing worker process...")
+        logger.debug("Worker: Initializing worker process...")
 
         worker = Worker(
             cfg, shared, save_to, nfeat, efeat, env, nccl, gloo, model_components

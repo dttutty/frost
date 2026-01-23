@@ -82,7 +82,7 @@ class DataSyncer(StreamThreadBase):
                 root_new_mem = sync_task.root_new_mem
                 old_x = sync_task.old_x
                 torch.cuda.current_stream().wait_event(sync_task.ready_event)
-                print(
+                logger.debug(
                     "DataSyncer: ready_event received, processing DyX",
                     sync_task.macro_bid,
                 )

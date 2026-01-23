@@ -110,19 +110,19 @@ def train_from_fetch(
     model.train()
     optimizer.zero_grad()
     # print cpu_to_gpu_thread.blockss_on_gpu
-    # print(f"--- [Rank {local_rank}] Checking devices before model call ---")
+    # logger.debug(f"--- [Rank {local_rank}] Checking devices before model call ---")
     # if cpu_to_gpu_thread.blockss_on_gpu:
     #     # DGLBlock的device属性可以这么拿
-    #     print(f"  - blockss_on_gpu[0].device: {cpu_to_gpu_thread.blockss_on_gpu[0][0].device}")
+    #     logger.debug(f"  - blockss_on_gpu[0].device: {cpu_to_gpu_thread.blockss_on_gpu[0][0].device}")
     # if cpu_to_gpu_thread.node_feats_on_gpu is not None:
-    #     print(f"  - node_feats_on_gpu.device: {cpu_to_gpu_thread.node_feats_on_gpu.device}")
+    #     logger.debug(f"  - node_feats_on_gpu.device: {cpu_to_gpu_thread.node_feats_on_gpu.device}")
     # if cpu_to_gpu_thread.edge_feats_on_gpu is not None:
-    #     print(f"  - edge_feats_on_gpu.device: {cpu_to_gpu_thread.edge_feats_on_gpu.device}")
+    #     logger.debug(f"  - edge_feats_on_gpu.device: {cpu_to_gpu_thread.edge_feats_on_gpu.device}")
     # if cpu_to_gpu_thread.deduplicated_mem is not None:
-    #     print(f"  - deduplicated_mem.device: {cpu_to_gpu_thread.deduplicated_mem.device}")
+    #     logger.debug(f"  - deduplicated_mem.device: {cpu_to_gpu_thread.deduplicated_mem.device}")
     # if cpu_to_gpu_thread.deduplicated_mem_input is not None:
-    #     print(f"  - deduplicated_mem_input.device: {cpu_to_gpu_thread.deduplicated_mem_input.device}")
-    # print(f"----------------------------------------------------------")
+    #     logger.debug(f"  - deduplicated_mem_input.device: {cpu_to_gpu_thread.deduplicated_mem_input.device}")
+    # logger.debug(f"----------------------------------------------------------")
     pred_pos, pred_neg = model(
         is_dedup,
         cpu_to_gpu_thread.blockss_on_gpu,
@@ -178,7 +178,7 @@ def run_evaluation_step(
     prev_th_hold_notmoved_data: Meta = scatter_receive()
     blocks_on_cpu = prev_th_hold_notmoved_data.gnn_mfgs_raw = (gnn_mfgs_raw,)
     if not blocks_on_cpu or len(blocks_on_cpu) == 0:
-        print(
+        logger.debug(
             f"Rank {local_rank}: Received empty batch during evaluation, skipping step."
         )
         # 该函数需要返回三个值，对于跳过的情况，返回 None, tot_loss, None 是合适的

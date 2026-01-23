@@ -49,7 +49,7 @@ class StaticPlanner(ThreadBase):
         try:
             self.logic()
         except Exception:
-            print("!!! Planner Thread Crashed !!!")
+            logger.debug("!!! Planner Thread Crashed !!!")
             traceback.print_exc()
             self.stop_ev.set()
             os._exit(1)

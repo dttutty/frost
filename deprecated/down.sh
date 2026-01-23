@@ -38,4 +38,4 @@ wget -P ./DATA/WIKI https://s3.us-west-2.amazonaws.com/dgl-data/dataset/tgl/WIKI
 
 node_np, edge_np = load_feat('GDELT') //413 182
 _, node_feat_dim, _, _, edge_feat_dim, _ = get_node_edge_dimensions(node_np, edge_np)
-print(node_feat_dim, edge_feat_dim)
+logger.debug(node_feat_dim, edge_feat_dim)

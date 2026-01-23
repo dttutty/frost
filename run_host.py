@@ -171,11 +171,11 @@ class Host:
         公共的训练入口方法
         """
         for e in range(self.total_epoch):
-            print(f"Epoch {e}:")
+            logger.debug(f"Epoch {e}:")
             self._handle_a_split(self.tr_df, "train", cur_epoch=e)
-            print("Validating...")
+            logger.debug("Validating...")
             self._handle_a_split(self.va_df, "val", cur_epoch=e)
-            print("Testing...")
+            logger.debug("Testing...")
             self._handle_a_split(self.te_df, "test", cur_epoch=e)
         self._cleanup()
         # wandb.finish()
@@ -279,11 +279,11 @@ class Host:
         self.meta_in_q.put(meta)
 
     def _cleanup(self):
-        print("Host: Broadcasting CLEANUP command...")
+        logger.debug("Host: Broadcasting CLEANUP command...")
 
         dist.barrier()  # 建议指定 group=self.gloo 或者 nccl_pg，通常 gloo 用于控制流
-        print("Host: All processes reached the final barrier.")
+        logger.debug("Host: All processes reached the final barrier.")
         end = time.time()
 
-        print(f"Elapsed time: {end - self.start_time:.2f} seconds")
+        logger.debug(f"Elapsed time: {end - self.start_time:.2f} seconds")
         dist.destroy_process_group()

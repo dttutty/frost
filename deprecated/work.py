@@ -17,7 +17,7 @@ except Exception:
 
 # ---------------- Simulated ops ----------------
 def blocks_to_cuda(batch):
-    print(f"  (Feeder)  Step 1: blocks_to_cuda for batch {batch['id']}...")
+    logger.debug(f"  (Feeder)  Step 1: blocks_to_cuda for batch {batch['id']}...")
     time.sleep(0.2)
     batch["nfeat_src"] = f"nfeat_for_{batch['id']}"
     batch["efeat_src"] = f"efeat_for_{batch['id']}"
@@ -27,7 +27,7 @@ def blocks_to_cuda(batch):
 
 def copy_to_gpu(data_src, type):
     delay = {"nfeat": 0.8, "efeat": 0.5, "mail": 0.3}[type]
-    print(
+    logger.debug(
         f"    ({type.upper()}_Copy)  Step 2: Copying '{data_src}' (takes {delay}s)..."
     )
     time.sleep(delay)
@@ -35,7 +35,7 @@ def copy_to_gpu(data_src, type):
 
 
 def compute_on_gpu(gpu_batch):
-    print(
+    logger.debug(
         f"        (MAIN_THREAD::Compute)  Computing on assembled batch {gpu_batch['id']}..."
     )
     time.sleep(1.0)
@@ -43,7 +43,9 @@ def compute_on_gpu(gpu_batch):
 
 
 def move_to_cpu(gpu_result):
-    print(f"          (MoverCPU) Moving result for batch {gpu_result['id']} to CPU...")
+    logger.debug(
+        f"          (MoverCPU) Moving result for batch {gpu_result['id']} to CPU..."
+    )
     time.sleep(0.1)
     return {
         "id": gpu_result["id"],
@@ -233,7 +235,7 @@ class AggregatorThread(threading.Thread):
             )
             self.pending_batches[batch_id][part_type] = part_data
             if len(self.pending_batches[batch_id]) == self.num_workers:
-                print(f"      (Aggregator) Assembled complete batch {batch_id}!")
+                logger.debug(f"      (Aggregator) Assembled complete batch {batch_id}!")
                 complete_batch = {"id": batch_id, **self.pending_batches.pop(batch_id)}
                 self.dest_q.put(complete_batch)
         self.dest_q.put(None)
@@ -251,12 +253,12 @@ class DataMoveToCPUThread(threading.Thread):
             if gpu_result is None:
                 break
             cpu_result = move_to_cpu(gpu_result)
-            print(
+            logger.debug(
                 f"            (Final) Result for batch {cpu_result['id']} is ready on CPU: {cpu_result['result']}"
             )
             # Inform coordinator (with optional distributed barrier per batch)
             self.coordinator.on_cpu_done(cpu_result["id"])
-        print("CPU Mover Thread Finished.")
+        logger.debug("CPU Mover Thread Finished.")
 
 
 # ---------------- Main ----------------
@@ -275,7 +277,7 @@ def maybe_init_dist(backend_env: str):
             dist.init_process_group(backend="gloo", init_method="env://")
         rank = dist.get_rank()
         world_size = dist.get_world_size()
-        print(f"[Dist] Initialized: rank={rank}, world_size={world_size}")
+        logger.debug(f"[Dist] Initialized: rank={rank}, world_size={world_size}")
         return True, rank, world_size
     return False, rank, world_size
 
@@ -340,7 +342,9 @@ def main():
             raw_data_queue.put({"id": i})
     raw_data_queue.put(None)
 
-    print("\n" + "=" * 25 + f" MAIN THREAD COMPUTE LOOP (rank {rank}) " + "=" * 25)
+    logger.debug(
+        "\n" + "=" * 25 + f" MAIN THREAD COMPUTE LOOP (rank {rank}) " + "=" * 25
+    )
     processed_batches = 0
     expected_batches = sum(1 for i in range(num_batches) if (i % world_size) == rank)
 
@@ -355,12 +359,12 @@ def main():
         cpu_bound_queue.put(compute_result)
         processed_batches += 1
 
-    print("=" * 24 + " MAIN THREAD LOOP FINISHED " + "=" * 25 + "\n")
+    logger.debug("=" * 24 + " MAIN THREAD LOOP FINISHED " + "=" * 25 + "\n")
 
     # Shutdown CPU mover
     cpu_bound_queue.put(None)
 
-    print("MAIN THREAD: Waiting for all background threads to join...")
+    logger.debug("MAIN THREAD: Waiting for all background threads to join...")
     for t in background_threads:
         t.join()
 
@@ -370,7 +374,7 @@ def main():
         dist.destroy_process_group()
 
     coordinator.stop()
-    print("Program finished successfully.")
+    logger.debug("Program finished successfully.")
 
 
 if __name__ == "__main__":

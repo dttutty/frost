@@ -82,7 +82,7 @@ class BoxHandler(StreamThreadBase):
             assert mail_combine == "mean"
             new_mail.keep_mean()
         new_mail = new_mail.merge_with_priority(old_mail)
-        print("DataSyncer: merged new mail with old mail", macro_bid)
+        logger.debug("DataSyncer: merged new mail with old mail", macro_bid)
 
         if is_last is not None:
             self.p2p_handler.p2p(
@@ -146,23 +146,23 @@ class BoxHandler(StreamThreadBase):
 
             # handle mail or box sync
             # generate new mails from root_new_mem
-            print("DataSyncer: generating new mails", macro_bid)
+            logger.debug("DataSyncer: generating new mails", macro_bid)
             new_mail = generate_interaction_mails(
                 box_task.root_new_mem_orig,
                 box_task.pos_efeat,
             )
             mail_combine = self.mail_combine
-            print("DataSyncer: start p2p for mail/box", macro_bid)
+            logger.debug("DataSyncer: start p2p for mail/box", macro_bid)
             if mail_delivery_tensor is None:
                 box_ts_nid = self.handle_small_box(new_mail, mail_combine, box_task)
             else:
                 box_ts_nid = self.handle_large_box(new_mail, mail_combine, box_task)
 
-            print("DataSyncer: finished p2p processing", macro_bid)
+            logger.debug("DataSyncer: finished p2p processing", macro_bid)
 
             self.write_back_box(
                 box_task.box_plan.writeback,
                 box_ts_nid,
             )
-            print("DataSyncer: finished write back", macro_bid)
+            logger.debug("DataSyncer: finished write back", macro_bid)
             self.h2d_sem.release()

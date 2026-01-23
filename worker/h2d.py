@@ -87,7 +87,7 @@ class H2D(StreamThreadBase):
             if self.h2d_sem is not None:
                 self.h2d_sem.acquire()
                 self.h2d_sem.acquire()
-            print("H2D: acquired semaphore, starting H2D operation")
+            logger.debug("H2D: acquired semaphore, starting H2D operation")
 
             meta: Meta = self.meta_q.get(block=True)
 

@@ -34,10 +34,10 @@ import numpy as np
 import torch
 from dgl.utils.shared_mem import create_shared_mem_array, get_shared_mem_array
 from gnn.TGN import *
-from sampler import *
 from sklearn.metrics import average_precision_score, roc_auc_score
 from tqdm import tqdm
 
+from sampler import *
 from utils import *
 from utils import blocks_to_cuda
 
@@ -410,7 +410,7 @@ else:
         if processed_edge_id >= len(df):
             return
         while df.time[processed_edge_id] < time:
-            # print('curr:',processed_edge_id,df.time[processed_edge_id],'target:',time)
+            # logger.debug('curr:',processed_edge_id,df.time[processed_edge_id],'target:',time)
             multi_blocks = list()
             multi_root = list()
             multi_ts = list()
@@ -543,7 +543,7 @@ else:
     if not os.path.isdir("embs"):
         os.mkdir("embs")
     embs = torch.cat(embs, dim=0)
-    print("Embedding shape:", embs.shape)
+    logger.debug("Embedding shape:", embs.shape)
     torch.save(embs, "embs/" + emb_file_name)
 
     # let all process exit

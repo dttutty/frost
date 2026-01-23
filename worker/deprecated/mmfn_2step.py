@@ -286,7 +286,7 @@ class MMFN:
             mem_td_nid.ts,
         )
         mm: MemoryMailbox = self.mm
-        # print(f"[Mailbox Update]Batch: {batch}")
+        # logger.debug(f"[Mailbox Update]Batch: {batch}")
         # before update mailbox, we need to prepare the memory
         # e.g. number_edges(5,6) = num_src(1,2) = num_src(3,4) = 2, mem_dim = 2 edge_dim = 3
         n_src = root_nodes.shape[0] // (neg_samples + 2)

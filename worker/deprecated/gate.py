@@ -35,7 +35,7 @@ class GlobalMicrobatchGate:
         # 如果 store 不支持 add，回退逻辑也是错的，不如直接让它失败。
 
         except Exception as e:
-            print(
+            logger.debug(
                 f"FATAL: Store backend does not support atomic 'add'. Race condition possible. Error: {e}"
             )
             # 重新抛出异常，因为没有 'add' 就无法安全工作

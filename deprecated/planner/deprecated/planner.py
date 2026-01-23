@@ -538,9 +538,9 @@ class Planner:
 
             batch.plan_set = batch.plan_set.tensorfy()
             batch.plan_set = batch.plan_set.sort()
-        #     print(fields(td_list[b_id].plan_set))
-        # print(fields(td_list[0].plan_set))
-        # print(fields(td_list[1].plan_set))
+        #     logger.debug(fields(td_list[b_id].plan_set))
+        # logger.debug(fields(td_list[0].plan_set))
+        # logger.debug(fields(td_list[1].plan_set))
         self.initialized = True
 
         return meta_list

@@ -326,7 +326,7 @@ class Worker:
         else:
             self.delta_q.put(None)
 
-        print(f"DataSyncer: rank {self.env.local_rank} put DeltaX into DeltaX_q")
+        logger.debug(f"DataSyncer: rank {self.env.local_rank} put DeltaX into DeltaX_q")
 
     @torch.no_grad()
     def eval(self, meta: Meta, x: X, plan_set: TensorPlanSet | None):
@@ -492,7 +492,7 @@ class Worker:
         _initialize = False
 
         while True:
-            print("Worker: waiting for x_full...")
+            logger.debug("Worker: waiting for x_full...")
             if _initialize is False:
                 self.curr_epoch += 1
                 # self.receive_next_meta_and_put_in_queue()
@@ -500,11 +500,11 @@ class Worker:
                 # print meta split and mark
             if self.shared is not None:
                 meta, plan_set, sorted_x, assemble_stream = self.xfull_q.get()
-                print(
+                logger.debug(
                     "Worker: got x_full", meta.epoch_split_iter_info.cur_macro_of_split
                 )
                 torch.cuda.current_stream().wait_stream(assemble_stream)
-                print(
+                logger.debug(
                     "Worker: waited for x_full",
                     meta.epoch_split_iter_info.cur_macro_of_split,
                 )
@@ -512,7 +512,7 @@ class Worker:
                 meta, sorted_x, plan_set, ready_event = self.xfull_q.get()
                 torch.cuda.current_stream().wait_event(ready_event)
 
-                print(
+                logger.debug(
                     "Worker: got x_full", meta.epoch_split_iter_info.cur_macro_of_split
                 )
             self.logger.info(
@@ -537,14 +537,14 @@ class Worker:
                 assert not has_dup, f"{name}: duplicated ids found"
 
             # if __debug__:
-            #     print("Worker: checking sparse tables", meta.epoch_split_iter_info.cur_macro_of_split)
+            #     logger.debug("Worker: checking sparse tables", meta.epoch_split_iter_info.cur_macro_of_split)
             #     if sorted_x.mem:
             #         check_sparse_table("mem", sorted_x.mem.id, sorted_x.mem.data)
             #     if sorted_x.box:
             #         check_sparse_table("box", sorted_x.box.id, sorted_x.box.data)
             if plan_set is not None:
                 plan_set = plan_set.cuda()
-            print("plan_set moved to cuda")
+            logger.debug("plan_set moved to cuda")
             # torch.cuda.synchronize()
 
             if meta.epoch_split_iter_info.split == "train":  # if training
