@@ -1,42 +1,40 @@
 import logging
-import queue
 import threading
-from typing import List, Tuple
+from queue import Queue as Q
 
 import torch
 from dgl.heterograph import DGLBlock
 
 from schemas.datatypes.data_to_sync import BoxTsNid, MemTsNid
-from schemas.datatypes.misc import Meta, X
-from schemas.datatypes.plan import TensorPlanSet
+from schemas.datatypes.misc import MemNBox, Meta, Shared
+from schemas.datatypes.plan import TensorDyPlan
 from thread_base_with_stream import StreamThreadBase
 
 
 logger = logging.getLogger(__name__)
 
 
-def prep_before_dy_asm(shared, plan_set: TensorPlanSet) -> tuple[MemTsNid, BoxTsNid]:
+def prep_part_mem_n_box(
+    shared: Shared, mem_plan: TensorDyPlan, box_plan: TensorDyPlan
+) -> MemNBox:
     # this is compatible with no mfg and mfg case
     # pre move part data to gpu, avoid h2d in assembler
     assert shared is not None
-    assert plan_set.mem is not None
-    mem_fetch_nids = plan_set.mem.fetch
+    assert mem_plan is not None
+    mem_fetch_nids = mem_plan.fetch
     mem = MemTsNid(
         nid=mem_fetch_nids,
         data=shared.mem[mem_fetch_nids],
         ts=shared.mem_ts[mem_fetch_nids],
     ).cuda()
-    if plan_set.box is not None:
-        mail_fetch_nids = plan_set.box.fetch
-    else:
-        mail_fetch_nids = mem_fetch_nids
+    mail_fetch_nids = box_plan.fetch
     box = BoxTsNid(
         nid=mail_fetch_nids,
         data=shared.box[mail_fetch_nids],
         ts=shared.box_ts[mail_fetch_nids],
     ).cuda()
-
-    return mem, box
+    mem_n_box = MemNBox(mem=mem, box=box)
+    return mem_n_box
 
 
 class DyAssembler(StreamThreadBase):
@@ -46,26 +44,22 @@ class DyAssembler(StreamThreadBase):
 
     def __init__(
         self,
-        xpart_q: queue.Queue[Meta],
-        delta_q: queue.Queue[X],
-        xfull_q: queue.Queue[Tuple[Meta, torch.cuda.Stream]],
+        in_q: Q[tuple[Meta, torch.cuda.Event] | None],
+        delta_q: Q[tuple[MemNBox | None, torch.cuda.Event]],
+        out_q: Q[tuple[Meta, torch.cuda.Event] | None],
         stop_ev: threading.Event,
-        has_mfg=True,
-        has_reverse_mdt=False,
-    ):
+        has_reverse_mdt: bool = False,
+    ) -> None:
         super().__init__(name="dy_assembler")
-        self.xpart_q = xpart_q
+        self.in_q = in_q
         self.delta_q = delta_q
-        self.xfull_q = xfull_q
-        self.stop_ev = stop_ev
-        self.stream = torch.cuda.Stream()
-        self.has_mfg = has_mfg
+        self.out_q = out_q
         self.has_reverse_mdt = has_reverse_mdt
         self.stop_ev = stop_ev
 
     def fill_block_with_mem_mail(
-        self, gnn_mfgs_0: List[DGLBlock], mem: MemTsNid, box: BoxTsNid
-    ):
+        self, gnn_mfgs_0: list[DGLBlock], mem: MemTsNid, box: BoxTsNid
+    ) -> None:
         for block in gnn_mfgs_0:
             assert mem.is_sorted  # make sure mem.id is sorted
             assert box.is_sorted  # make sure box.id is sorted
@@ -84,43 +78,42 @@ class DyAssembler(StreamThreadBase):
 
     def _merge(
         self,
-        meta: Meta,
-        x_part: X,
-        mem_delta: MemTsNid,
-        box_delta: BoxTsNid,
-    ):
-        assert x_part.mem is not None
-        assert x_part.box is not None
+        mem_n_box: MemNBox,
+        delta: MemNBox,
+    ) -> MemNBox:
+        mem = mem_n_box.mem.merge_mem(delta.mem)
+        box = mem_n_box.box.merge_box(delta.box)
 
-        x_part.mem = x_part.mem.merge_mem(mem_delta)
-        x_part.box = x_part.box.merge_box(box_delta)
+        mem = mem.sort_by_nid()
+        box = box.sort_by_nid()
 
-        x_full = x_part
+        return MemNBox(mem=mem, box=box)
 
-        x_full.mem = x_full.mem.sort_by_nid()  # 你的 sort
-        x_full.box = x_full.box.sort_by_nid()  # 你的 sort
-
-        return meta, x_full
-
-    def logic(self):
+    def logic(self) -> None:
         while not self.stop_ev.is_set():
-            meta, ready_event = self.xpart_q.get(block=True)
-            x_part, plan_set = meta.x, meta.plan_set
-            delta = self.delta_q.get(block=True)
-            assert delta.mem is not None
-            assert delta.box is not None
+            in_data = self.in_q.get(block=True)
+            if in_data is None:
+                self.out_q.put(None, block=True)
+                break
+            meta, meta_ready_event = in_data
+            mem_n_box = meta.mem_n_box
+            assert mem_n_box is not None
+            torch.cuda.current_stream().wait_event(meta_ready_event)
+            delta, delta_ready_event = self.delta_q.get(block=True)
+            torch.cuda.current_stream().wait_event(delta_ready_event)
+            if delta is None:
+                mem_n_box_full = mem_n_box
+            else:
+                mem_n_box_full = self._merge(mem_n_box, delta)
 
-            torch.cuda.current_stream().wait_event(ready_event)
-
-            meta, x_full = self._merge(meta, x_part, delta.mem, delta.box)
-
-            assert x_full.mem is not None
-            assert x_full.box is not None
             if meta.gnn_mfgs is not None:
-                self.fill_block_with_mem_mail(meta.gnn_mfgs[0], x_full.mem, x_full.box)
+                self.fill_block_with_mem_mail(
+                    meta.gnn_mfgs[0], mem_n_box_full.mem, mem_n_box_full.box
+                )
             else:
                 # 这种是为了APAN哪种种没有mfg的情况
-                meta.x = x_full.unzip_and_align(meta.root_nid)
+                meta.mem_n_box = mem_n_box_full.unzip_and_align(meta.root_nid)
             # 3) 把结果交给主线程（主线程取时再 wait_stream）
-
-            self.xfull_q.put((meta), block=True)
+            ready_event: torch.cuda.Event = torch.cuda.Event()
+            ready_event.record(torch.cuda.current_stream())
+            self.out_q.put((meta, ready_event), block=True)

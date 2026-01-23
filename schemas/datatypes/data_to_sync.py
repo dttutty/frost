@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Union
 
 import torch
 from dgl.heterograph import DGLBlock
@@ -10,7 +9,7 @@ from torch import Tensor
 from tensor_set import TensorSet
 
 
-def is_sorted(t: torch.Tensor):
+def is_sorted(t: torch.Tensor) -> bool:
     return torch.all(torch.diff(t) >= 0)
 
 
@@ -21,15 +20,15 @@ class MemTsNid:
     ts: Tensor
     is_sorted: bool = False
 
-    def clone(self) -> "MemTsNid":
+    def clone(self) -> MemTsNid:
         return MemTsNid(
             nid=self.nid.clone(), data=self.data.clone(), ts=self.ts.clone()
         )
 
-    def cuda(self) -> "MemTsNid":
+    def cuda(self) -> MemTsNid:
         return MemTsNid(nid=self.nid.cuda(), data=self.data.cuda(), ts=self.ts.cuda())
 
-    def merge_mem(self, other: "MemTsNid") -> "MemTsNid":
+    def merge_mem(self, other: MemTsNid) -> MemTsNid:
         assert TensorSet.intersection(self.nid, other.nid).numel() == 0, (
             "NID overlap between MemTsNid instances."
         )
@@ -39,7 +38,7 @@ class MemTsNid:
             ts=torch.cat((self.ts, other.ts), dim=0),
         )
 
-    def sort_by_nid(self) -> "MemTsNid":
+    def sort_by_nid(self) -> MemTsNid:
         sorted_indices = torch.argsort(self.nid)
         self.nid = self.nid[sorted_indices]
         self.data = self.data[sorted_indices]
@@ -47,8 +46,8 @@ class MemTsNid:
         self.is_sorted = True
         return self
 
-    def keep_latest(self):
-        from data_syncer.utils.data_ops import keep_latest
+    def keep_latest(self) -> MemTsNid:
+        from worker.data_syncer.utils.data_ops import keep_latest
 
         keep_latest(self)
         return self
@@ -59,12 +58,12 @@ class BoxTsNid:
     nid: Tensor
     data: Tensor
     ts: torch.Tensor
-    next_pos: Optional[Tensor] = None
+    next_pos: Tensor | None = None
     # if next_pos is None, then this BoxTsNid is actually a MailTsNid
-    ct: Optional[Tensor] = None  # 如果mean的话(每次只能累计一个mail)
+    ct: Tensor | None = None  # 如果mean的话(每次只能累计一个mail)
     is_sorted: bool = False
 
-    def cuda(self) -> "BoxTsNid":
+    def cuda(self) -> BoxTsNid:
         return BoxTsNid(
             nid=self.nid.cuda(),
             data=self.data.cuda(),
@@ -73,7 +72,7 @@ class BoxTsNid:
             ct=self.ct.cuda() if self.ct is not None else None,
         )
 
-    def merge_1_mail(self, new_mails: MailTsNid) -> "BoxTsNid":
+    def merge_1_mail(self, new_mails: MailTsNid) -> BoxTsNid:
         assert self.next_pos is not None, "next_pos must be provided for merge_1_mail"
         if __debug__:
             assert is_sorted(self.nid)
@@ -86,16 +85,16 @@ class BoxTsNid:
 
         return self
 
-    def merge_n_mail(self, new_mails: MailTsNid) -> "BoxTsNid":
+    def merge_n_mail(self, new_mails: MailTsNid) -> BoxTsNid:
         raise NotImplementedError
 
-    def keep_latest_after_gather(self):
+    def keep_latest_after_gather(self) -> BoxTsNid:
         return self
 
-    def keep_mean_after_gather(self):
+    def keep_mean_after_gather(self) -> BoxTsNid:
         return self
 
-    def to_mail(self):
+    def to_mail(self) -> MailTsNid:
         assert self.next_pos is None, "next_pos must be None for mail"
         return MailTsNid(
             nid=self.nid,
@@ -104,7 +103,7 @@ class BoxTsNid:
             ct=self.ct,
         )
 
-    def merge_box(self, other: "BoxTsNid") -> "BoxTsNid":
+    def merge_box(self, other: BoxTsNid) -> BoxTsNid:
         assert TensorSet.intersection(self.nid, other.nid).numel() == 0, (
             "NID overlap between BoxTsNid instances."
         )
@@ -116,7 +115,7 @@ class BoxTsNid:
         )
         return self
 
-    def sort_by_nid(self) -> "BoxTsNid":
+    def sort_by_nid(self) -> BoxTsNid:
         sorted_indices = torch.argsort(self.nid)
         self.nid = self.nid[sorted_indices]
         self.data = self.data[sorted_indices]
@@ -135,7 +134,7 @@ class MailTsNid:
     ts: Tensor
     ct: Tensor | None = None
 
-    def cuda(self) -> "MailTsNid":
+    def cuda(self) -> MailTsNid:
         return MailTsNid(
             nid=self.nid.cuda(),
             data=self.data.cuda(),
@@ -143,7 +142,7 @@ class MailTsNid:
             ct=self.ct.cuda() if self.ct is not None else None,
         )
 
-    def to_box(self):
+    def to_box(self) -> BoxTsNid:
         return BoxTsNid(
             nid=self.nid,
             data=self.data.unsqueeze(1),
@@ -152,29 +151,29 @@ class MailTsNid:
             next_pos=None,
         )
 
-    def keep_latest_after_gather(self):
+    def keep_latest_after_gather(self) -> MailTsNid:
         return self
 
-    def merge_with_priority(self, other: "MailTsNid") -> "MailTsNid":
-        from data_syncer.utils.data_ops import merge_with_priority
+    def merge_with_priority(self, other: MailTsNid) -> MailTsNid:
+        from worker.data_syncer.utils.data_ops import merge_with_priority
 
         return merge_with_priority(self, other)
 
-    def keep_latest(self):
-        from data_syncer.utils.data_ops import keep_latest
+    def keep_latest(self) -> MailTsNid:
+        from worker.data_syncer.utils.data_ops import keep_latest
 
         keep_latest(self)
         return self
 
-    def keep_mean(self):
-        from data_syncer.utils.data_ops import keep_mean
+    def keep_mean(self) -> MailTsNid:
+        from worker.data_syncer.utils.data_ops import keep_mean
 
         keep_mean(self)
         return self
 
     def deliver(
-        self, delivery: Union[torch.Tensor, DGLBlock], include_self: bool = False
-    ):
+        self, delivery: torch.Tensor | DGLBlock, include_self: bool = False
+    ) -> MailTsNid:
         if isinstance(delivery, torch.Tensor):
             # 走 “mail_delivery_tensor: Tensor” 这条逻辑
             return self._deliver_tensor(delivery, include_self)
@@ -186,7 +185,7 @@ class MailTsNid:
 
     def _deliver_tensor(
         self, mail_delivery_tensor: Tensor, include_self: bool = False
-    ) -> "MailTsNid":
+    ) -> MailTsNid:
         """
         执行多对多 (Many-to-Many) 的消息分发 Join。
 
@@ -297,8 +296,8 @@ class MailTsNid:
         )
 
     def _deliver_block(
-        self, mail_delivery_block, include_self: bool = False
-    ) -> "MailTsNid":
+        self, mail_delivery_block: DGLBlock, include_self: bool = False
+    ) -> MailTsNid:
         """
         使用 DGL Block 做多对多消息投递。
 

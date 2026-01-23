@@ -2,7 +2,7 @@ import logging
 import math
 import threading
 import time
-from queue import Queue  # 这是给多线程用的
+from queue import Queue as Q  # 这是给多线程用的
 from typing import Literal
 
 import numpy as np
@@ -31,12 +31,12 @@ logger = logging.getLogger(__name__)
 
 
 class Host:
-    meta_bundle_q: Queue[MetaBundle | None]
-    meta_in_q: Queue[Meta | None]
-    mem_plan_out_q: Queue[PlanBundle | None] | None
-    mail_plan_out_q: Queue[PlanBundle | None] | None
-    nfeat_plan_out_q: Queue[PlanBundle | None] | None
-    send_q: Queue[MetaBundleWithPlan | MetaBundleWithoutPlan | None]
+    meta_bundle_q: Q[MetaBundle | None]
+    meta_in_q: Q[Meta | None]
+    mem_plan_out_q: Q[PlanBundle | None] | None
+    mail_plan_out_q: Q[PlanBundle | None] | None
+    nfeat_plan_out_q: Q[PlanBundle | None] | None
+    send_q: Q[MetaBundleWithPlan | MetaBundleWithoutPlan | None]
 
     def __init__(
         self,
@@ -45,9 +45,9 @@ class Host:
         df: pd.DataFrame,
         env: Env,
         start_time: float,
-        gloo,
-        gnn,
-    ):
+        gloo: dist.ProcessGroup,
+        gnn: torch.nn.Module,
+    ) -> None:
         """
         initialize the host with configuration, graph data, edge dataframe, and environment settings
         """
@@ -69,13 +69,13 @@ class Host:
         self.sample_support_for_neg_dst = cfg.s.sample_support_for_neg_dst
         self.model_name = cfg.t.model_name
 
-        self.meta_in_q = Queue[Meta | None]()
-        self.meta_bundle_q = Queue[MetaBundle | None]()
-        self.send_q = Queue[MetaBundle | None]()
+        self.meta_in_q = Q[Meta | None]()
+        self.meta_bundle_q = Q[MetaBundle | None]()
+        self.send_q = Q[MetaBundle | None]()
 
-        self.mem_plan_out_q = Queue() if self.has_mem else None
-        self.mail_plan_out_q = Queue() if self.has_mem else None
-        self.nfeat_plan_out_q = Queue() if self.has_nfeat else None
+        self.mem_plan_out_q = Q() if self.has_mem else None
+        self.mail_plan_out_q = Q() if self.has_mem else None
+        self.nfeat_plan_out_q = Q() if self.has_nfeat else None
         if self.has_nfeat or self.has_mem:
             self.meta_batcher = MetaBatcher(
                 n_gpus=env.n_gpu,
@@ -133,7 +133,7 @@ class Host:
         self._init_sampler(graph, cfg.s)
         self._init_dataset(df)
 
-    def _init_dataset(self, df: pd.DataFrame):
+    def _init_dataset(self, df: pd.DataFrame) -> None:
         # preprocess dataframe
         df["src"] = df["src"].astype(np.int64)
         df["dst"] = df["dst"].astype(np.int64)
@@ -146,7 +146,7 @@ class Host:
         self.va_df = df[train_edge_end:val_edge_end]
         self.te_df = df[val_edge_end:]
 
-    def _init_sampler(self, graph: ExtFullGraph, s_cfg: SampleCFG):
+    def _init_sampler(self, graph: ExtFullGraph, s_cfg: SampleCFG) -> None:
         self.neg_sampler = NegLinkSampler(graph)
         self.ngh_sampler = None
         if self.sample_support_node:
@@ -166,7 +166,7 @@ class Host:
             )
             self.sample_history = s_cfg.history
 
-    def run(self):
+    def run(self) -> None:
         """
         公共的训练入口方法
         """
@@ -182,7 +182,9 @@ class Host:
 
     @staticmethod
     def _plan_gpu_batches(
-        num_samples, target_batch_size: int, n_gpu: int
+        num_samples: int,
+        target_batch_size: int,
+        n_gpu: int,
     ) -> tuple[int, int]:
         """
         this is to ensure iterations number is divisible by number of gpus
@@ -200,7 +202,7 @@ class Host:
 
     def _handle_a_split(
         self, df: pd.DataFrame, split: Literal["train", "val", "test"], cur_epoch: int
-    ):
+    ) -> None:
         df = df.reset_index(drop=True)
 
         iteration_total, adjusted_train_batch_size = self._plan_gpu_batches(

@@ -1,6 +1,6 @@
 import logging
 import threading
-from queue import Queue
+from queue import Queue as Q
 from typing import TypeVar
 
 import torch
@@ -27,8 +27,8 @@ class MemHandler(StreamThreadBase):
     def __init__(
         self,
         shared_mem: torch.Tensor,
-        mem_task_q: Queue[MemTask],
-        mem_p2p_q: Queue[P2PTask | None],
+        mem_task_q: Q[MemTask],
+        mem_p2p_q: Q[P2PTask | None],
         shared_mem_ts: torch.Tensor,
         h2d_sem: threading.Semaphore,
         stop_ev: threading.Event,
@@ -38,8 +38,8 @@ class MemHandler(StreamThreadBase):
         self.shared_mem = shared_mem
         self.shared_mem_ts = shared_mem_ts
         self.h2d_sem = h2d_sem
-        self.mem_task_q: Queue[MemTask] = mem_task_q
-        self.mem_p2p_q: Queue[P2PTask | None] = mem_p2p_q
+        self.mem_task_q: Q[MemTask] = mem_task_q
+        self.mem_p2p_q: Q[P2PTask | None] = mem_p2p_q
         self.stop_ev = stop_ev
         self.p2p_handler = p2p_handler
 

@@ -1,15 +1,12 @@
 import logging
 import threading
-from queue import Queue
+from queue import Queue as Q
 from typing import TypeVar
 
 import torch
 
 from schemas.datatypes.data_to_sync import BoxTsNid, MailTsNid, MemTsNid
-from schemas.datatypes.task import (
-    BoxTask,
-    P2PTask,
-)
+from schemas.datatypes.task import BoxTask, P2PTask
 from thread_base_with_stream import StreamThreadBase
 
 from .utils.interaction_ops import generate_interaction_mails
@@ -28,15 +25,15 @@ class BoxHandler(StreamThreadBase):
     def __init__(
         self,
         shared_box: torch.Tensor,
-        box_task_q: Queue[BoxTask],
-        box_p2p_q: Queue[P2PTask | None],
+        box_task_q: Q[BoxTask],
+        box_p2p_q: Q[P2PTask | None],
         shared_box_ts: torch.Tensor,
         h2d_sem: threading.Semaphore,
         stop_ev: threading.Event,
         p2p_handler: P2PHandler,
         mail_combine: str,
         merge_src: bool,
-    ):
+    ) -> None:
         super().__init__(name="box_handler")
         self.shared_box = shared_box
         self.shared_box_ts = shared_box_ts
@@ -48,7 +45,11 @@ class BoxHandler(StreamThreadBase):
         self.mail_combine = mail_combine
         self.merge_src = merge_src
 
-    def write_back_box(self, writeback, box_ts_nid: BoxTsNid):
+    def write_back_box(
+        self,
+        writeback: torch.Tensor,
+        box_ts_nid: BoxTsNid,
+    ) -> None:
         if box_ts_nid is not None and writeback is not None:
             return
         mask = torch.isin(box_ts_nid.nid, writeback)
@@ -68,7 +69,7 @@ class BoxHandler(StreamThreadBase):
         new_mail: MailTsNid,
         mail_combine: str,
         box_task: BoxTask,
-    ):
+    ) -> BoxTsNid:
         box = box_task.old_box
         box_plan = box_task.box_plan
         is_last = box_task.is_last
@@ -103,7 +104,7 @@ class BoxHandler(StreamThreadBase):
         new_mail: MailTsNid,
         mail_combine: str,
         box_task: BoxTask,
-    ):
+    ) -> BoxTsNid:
         mail_delivery_tensor = box_task.mail_delivery_tensor
         assert mail_delivery_tensor is not None
         box = box_task.old_box
@@ -138,7 +139,7 @@ class BoxHandler(StreamThreadBase):
             pass  # this case is handler by mem_handler, mem_handler will put None to p2p_q
         return box_ts_nid
 
-    def logic(self):
+    def logic(self) -> None:
         while not self.stop_ev.is_set():
             box_task: BoxTask = self.box_task_q.get(block=True)
             mail_delivery_tensor = box_task.mail_delivery_tensor

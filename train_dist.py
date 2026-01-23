@@ -18,22 +18,22 @@ from dgl.utils.shared_mem import (
 from gnn import APAN, JODIE, TGAT, TGN, DyGFormer, DySAT_TGL
 from gnn.components import EdgePredictor, TimeEncode
 from gnn.memory_updater import MemoryUpdater, TransformerMemoryUpdater
+from schemas.datatypes.cfg import GNNCFG, SampleCFG, TrainCFG
 from schemas.datatypes.env import Env
 from schemas.datatypes.misc import ModelComponents, Shared
 from utils import load_feat, load_graph, parse_config
 
 
-# 建议做法：通过环境变量控制
+# 建议做法 通过环境变量控制
 # 在终端运行: export APP_ENV=dev && python main.py  -> 会显示所有日志
 # 在终端运行: python main.py                       -> 只显示 Info 及以上
 
-# 获取环境变量，默认为 'production'
+# 获取环境变量 默认为 'production'
 env = os.getenv("APP_ENV", "production")
 
-if env == "dev":
-    current_level = logging.DEBUG  # 开发模式：什么都看
-else:
-    current_level = logging.INFO  # 生产模式：只看 Info, Warning, Error
+# 开发模式 什么都看 / 生产模式 只看 Info, Warning, Error
+current_level = logging.DEBUG if env == "dev" else logging.INFO
+
 
 logging.basicConfig(
     level=current_level,  # <--- 关键在这里
@@ -55,7 +55,7 @@ logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO))
 log = logging.getLogger(__name__)
 
 
-def get_free_port():
+def get_free_port() -> int:
     """在 master 节点上获取一个空闲端口"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("", 0))
@@ -64,7 +64,7 @@ def get_free_port():
     return port
 
 
-def set_seed(seed: int):
+def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -77,7 +77,7 @@ def broadcast_data(data=None, src=0) -> Any:
     return payload[0]
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, help="dataset name")
     parser.add_argument("--config", type=str, help="path to config file")
@@ -124,7 +124,7 @@ def main():
     os.environ["MKL_NUM_THREADS"] = str(args.omp_num_threads)
 
     # initialize distributed environment
-    dist.init_process_group(backend="gloo", timeout=datetime.timeDyX(seconds=3600))
+    dist.init_process_group(backend="gloo", timeout=datetime.timedelta(seconds=3600))
     env = Env.initial()
     logger.debug(f"env: {env}")
     worker_ranks = list(range(0, env.world_size - 1))
@@ -154,9 +154,7 @@ def main():
         if not os.path.isdir("models"):
             os.mkdir("models")
         config_base_name = os.path.basename(args.config)
-        save_to = "models/{}_{}_{}.pkl".format(
-            args.dataset, config_base_name, time.time()
-        )
+        save_to = f"models/{args.dataset}_{config_base_name}_{time.time()}.pkl"
         if node_np is not None:
             nfeat = csm("nfeat", [n_nodes, ndim], dtype=node_np.dtype)
             nfeat.copy_(node_np)
@@ -243,19 +241,32 @@ def main():
         logger.debug("Worker: Initializing worker process...")
 
         worker = Worker(
-            cfg, shared, save_to, nfeat, efeat, env, nccl, gloo, model_components
+            s_cfg=cfg.s,
+            t_cfg=cfg.t,
+            shared=shared,
+            save_to=save_to,
+            nfeat=nfeat,
+            efeat=efeat,
+            env=env,
+            nccl=nccl,
+            gloo=gloo,
+            model_components=model_components,
+            m_cfg=cfg.m,
         )
         worker.run()
 
 
-def _init_gnn(t_cfg, m_cfg=None, g_cfg=None, s_cfg=None) -> ModelComponents:
+def _init_gnn(
+    t_cfg: TrainCFG,
+    m_cfg: TrainCFG | None = None,
+    g_cfg: GNNCFG | None = None,
+    s_cfg: SampleCFG | None = None,
+) -> ModelComponents:
     memory_updater = None
     gnn = None
     header = None
-    has_memory = False
     d_mail = 0
     if m_cfg is not None:
-        has_memory = True
         d_mail = 2 * m_cfg.d_mem + t_cfg.edim
     match t_cfg.model_name.lower():
         case "tgn":

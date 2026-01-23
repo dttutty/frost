@@ -1,17 +1,16 @@
 import logging
-import queue
 import threading
-from typing import List
+from queue import Queue as Q
 
 import dgl
 import torch
 from dgl.heterograph import DGLBlock
 
 # In utils.py
-from schemas.datatypes.misc import DGLBlockMeta, Meta, Shared, X
+from schemas.datatypes.misc import DGLBlockMeta, Meta, Shared
 from thread_base_with_stream import StreamThreadBase
 from utils import _deduplicate_first_layer_src
-from worker.assembler.dy_asm import prep_before_dy_asm
+from worker.assembler.dy_asm import prep_part_mem_n_box
 from worker.assembler.st_asm import StAssembler
 
 
@@ -20,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 @torch.no_grad()
 def collate_and_build_graph(
-    mfg_meta_list: List[DGLBlockMeta], history: int
-) -> List[List[DGLBlock]]:
+    mfg_meta_list: list[DGLBlockMeta], history: int
+) -> list[list[DGLBlock]]:
     blocks = []
 
     for mfg_meta in mfg_meta_list:
@@ -50,7 +49,11 @@ def collate_and_build_graph(
         blocks.append(block)
 
     # 4. 处理历史分组逻辑
-    grouped_blocks = list(map(list, zip(*[iter(blocks)] * history)))
+    def chunked(iterable: list, n: int) -> list:
+        return [iterable[i : i + n] for i in range(0, len(iterable), n)]
+
+    grouped_blocks = chunked(blocks, history)
+
     grouped_blocks.reverse()
 
     return grouped_blocks
@@ -63,38 +66,35 @@ class H2D(StreamThreadBase):
         efeat: torch.Tensor | None,
         shared: Shared | None,
         merge_src: bool,
-        meta_q: queue.Queue[Meta],
-        destination_q: queue.Queue,
+        in_q: Q[tuple[Meta, torch.cuda.Event] | None],
+        out_q: Q[tuple[Meta, torch.cuda.Event] | None],
         stop_ev: threading.Event,
         h2d_sem: threading.Semaphore | None,
         history: int = 1,
-    ):
+    ) -> None:
         super().__init__(name="h2d")
         self.nfeat = nfeat
         self.efeat = efeat
         self.shared = shared
         self.merge_src = merge_src
-        self.meta_q = meta_q
-        self.destination_q = destination_q
+        self.in_q = in_q
+        self.out_q = out_q
         self.stop_ev = stop_ev
         self.h2d_sem = h2d_sem
         self.history = history
-        self.ready_macro = 0
         self.st_asm = StAssembler(shared_nfeat=nfeat, shared_efeat=efeat)
 
     @torch.no_grad()
-    def logic(self):
+    def logic(self) -> None:
         while not self.stop_ev.is_set():
-            if self.h2d_sem is not None:
-                self.h2d_sem.acquire()
-                self.h2d_sem.acquire()
             logger.debug("H2D: acquired semaphore, starting H2D operation")
 
-            meta: Meta = self.meta_q.get(block=True)
-            if meta is None:
-                self.destination_q.put((None, None), block=True)
-                continue
-
+            in_data = self.in_q.get(block=True)
+            if in_data is None:
+                self.out_q.put(None, block=True)
+                break
+            meta, meta_ready_event = in_data
+            torch.cuda.current_stream().wait_event(meta_ready_event)
             # move pos_efeat to gpu
             if self.efeat is not None:
                 meta.pos_efeat = self.efeat[meta.pos_edge_id].cuda()
@@ -104,33 +104,54 @@ class H2D(StreamThreadBase):
                 meta.gnn_mfgs = collate_and_build_graph(meta.gnn_mfgs_raw, self.history)
 
             # init x
-            meta.x = X()
 
             # move plan to gpu
             if meta.plan_set is not None:
+                if meta.plan_set.mem is not None and meta.plan_set.box is None:
+                    meta.plan_set.box = meta.plan_set.mem
                 meta.plan_set = meta.plan_set.cuda()
 
             # move nfeat and efeat to gpu
             if self.nfeat is not None or self.efeat is not None:
+                # prepare if has n_feat
                 if meta.plan_set is not None and meta.plan_set.nfeat is not None:
-                    self.st_asm.fill(meta, meta.plan_set.nfeat)
-                else:
-                    self.st_asm.fill(meta)
+                    meta.nfeat = self.st_asm.prepare_nfeat_cache(
+                        nfeat_plan=meta.plan_set.nfeat,
+                    )
 
+                # can run no matter has nfeat or not
+                if meta.gnn_mfgs is not None:
+                    meta.gnn_mfgs = self.st_asm.fill_mfg_with_efeat_n_nfeat(
+                        gnn_mfgs=meta.gnn_mfgs, nfeat=meta.nfeat
+                    )
+
+                # mfg version do not need nfeat output
+                if meta.gnn_mfgs is not None:
+                    del meta.nfeat  # mfg版本不需要nfeat输出
+
+            # move mem and box to gpu
             if self.shared is not None:
+                assert self.h2d_sem is not None
+                self.h2d_sem.acquire()
+                self.h2d_sem.acquire()
                 assert meta.plan_set is not None
-                meta.x.mem, meta.x.box = prep_before_dy_asm(self.shared, meta.plan_set)
+                assert meta.plan_set.mem is not None
+                assert meta.plan_set.box is not None
+                meta.mem_n_box = prep_part_mem_n_box(
+                    self.shared, meta.plan_set.mem, meta.plan_set.box
+                )
 
             # even there is no next batch, we still need plan_set for writeback
             if self.merge_src:
                 assert meta.gnn_mfgs is not None
                 meta.gnn_mfgs[0] = _deduplicate_first_layer_src(meta.gnn_mfgs[0])
 
+            # move gnn_mfgs to gpu
             if meta.gnn_mfgs is not None:
                 for blocks in meta.gnn_mfgs:
                     for block in blocks:
                         block = block.to("cuda:0")
 
-            ready_event = torch.cuda.Event()
+            ready_event: torch.cuda.Event = torch.cuda.Event()
             ready_event.record(torch.cuda.current_stream())
-            self.destination_q.put((meta, ready_event), block=True)
+            self.out_q.put((meta, ready_event), block=True)

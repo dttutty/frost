@@ -9,24 +9,27 @@ from numba import njit, prange
 from tqdm import tqdm
 
 from sampler_core import ParallelSampler
+from schemas.datatypes.misc import ExtFullGraph
 
 
 logger = logging.getLogger(__name__)
 
 
 class NegLinkSampler:
-    def __init__(self, g):
-        self.num_nodes = g["indptr"].shape[0] - 1
+    def __init__(self, g: ExtFullGraph) -> None:
+        self.num_nodes = g.indptr.shape[0] - 1
 
-    def sample(self, src_ids, src_tss, num_neg=1):
+    def sample(
+        self, src_ids: torch.Tensor, src_tss: torch.Tensor, num_neg: int = 1
+    ) -> torch.Tensor:
         return torch.randint(0, self.num_nodes, (len(src_ids) * num_neg,))
 
 
 class NegLinkInductiveSampler:
-    def __init__(self, nodes):
+    def __init__(self, nodes) -> None:
         self.nodes = list(nodes)
 
-    def sample(self, n):
+    def sample(self, n: int) -> np.ndarray:
         return np.random.choice(self.nodes, size=n)
 
 
@@ -176,9 +179,9 @@ if __name__ == "__main__":
     parser.add_argument("--num_thread", type=int, default=64, help="number of thread")
     args = parser.parse_args()
 
-    df = pd.read_csv("DATA/{}/edges.csv".format(args.data))
-    g = np.load("DATA/{}/ext_full.npz".format(args.data))
-    sample_config = yaml.safe_load(open(args.config, "r"))["sampling"][0]
+    df = pd.read_csv(f"DATA/{args.data}/edges.csv")
+    g = np.load(f"DATA/{args.data}/ext_full.npz")
+    sample_config = yaml.safe_load(open(args.config))["sampling"][0]
 
     sampler = ParallelSampler(
         g["indptr"],
@@ -235,10 +238,10 @@ if __name__ == "__main__":
         #         total_nodes += idx.shape[0]
         #         unique_nodes += unts.shape[0]
 
-    logger.debug("total time  : {:.4f}".format(tot_time))
-    logger.debug("pointer time: {:.4f}".format(ptr_time))
-    logger.debug("coo time    : {:.4f}".format(coo_time))
-    logger.debug("search time : {:.4f}".format(sea_time))
-    logger.debug("sample time : {:.4f}".format(sam_time))
+    logger.debug(f"total time  : {tot_time:.4f}")
+    logger.debug(f"pointer time: {ptr_time:.4f}")
+    logger.debug(f"coo time    : {coo_time:.4f}")
+    logger.debug(f"search time : {sea_time:.4f}")
+    logger.debug(f"sample time : {sam_time:.4f}")
     # logger.debug('unique time : {:.4f}'.format(uni_time))
     # logger.debug('unique per  : {:.4f}'.format(unique_nodes / total_nodes))

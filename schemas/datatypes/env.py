@@ -38,7 +38,7 @@ class Env:
         return self.world_size - 1
 
     @classmethod
-    def initial(cls) -> "Env":
+    def initial(cls) -> Env:
         assert dist.is_initialized()
         world_size = dist.get_world_size()
         local_rank = dist.get_rank()

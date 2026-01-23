@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import List, Literal, Optional
+from typing import Literal
 
 import numpy as np
 import torch
@@ -19,15 +19,15 @@ from .plan import BatchNodeStateIO, PlanSet, TensorPlanSet
 
 @dataclass(slots=True, kw_only=True)
 class SampleReturn:
-    ngh2root_mfgs_raw: List[DGLBlockMeta] | None
+    ngh2root_mfgs_raw: list[DGLBlockMeta] | None
     root2ngh_mfg_raw: DGLBlockMeta | None
     batch_node_state_io: BatchNodeStateIO
 
 
 @dataclass(slots=True)
 class ForwardCtx:
-    blockss: List[List[DGLBlock]]
-    x: X
+    blockss: list[list[DGLBlock]]
+    mem_n_box: MemNBox | None
     macro_bid: int
     plan_set: TensorPlanSet
     mail_delivery_tensor: Tensor | None
@@ -53,7 +53,7 @@ class ExtFullGraph:
         return int(self.indices.shape[0])
 
     @staticmethod
-    def load(path: str) -> "ExtFullGraph":
+    def load(path: str) -> ExtFullGraph:
         npz = np.load(path)
         return ExtFullGraph(
             indptr=npz["indptr"].astype(np.int64, copy=False),
@@ -66,9 +66,9 @@ class ExtFullGraph:
 @dataclass(slots=True, kw_only=True)
 class ScatterResult:
     m_id: int
-    total_sample_time: Optional[float] = None
-    ap: Optional[List[float]] = None
-    auc: Optional[List[float]] = None
+    total_sample_time: float | None = None
+    ap: list[float] | None = None
+    auc: list[float] | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -76,7 +76,7 @@ class NodeFeat:
     id: Tensor
     data: Tensor
 
-    def cuda(self) -> "NodeFeat":
+    def cuda(self) -> NodeFeat:
         return NodeFeat(id=self.id.cuda(), data=self.data.cuda())
 
 
@@ -85,7 +85,7 @@ class EdgeFeat:
     id: Tensor
     data: Tensor
 
-    def cuda(self) -> "EdgeFeat":
+    def cuda(self) -> EdgeFeat:
         return EdgeFeat(id=self.id.cuda(), data=self.data.cuda())
 
 
@@ -103,7 +103,7 @@ class NFeatNid:
     is_zipped: bool = True
     is_sorted: bool = False
 
-    def sort_by_nid(self) -> "NFeatNid":
+    def sort_by_nid(self) -> NFeatNid:
         if self.is_sorted:
             return self
 
@@ -117,7 +117,7 @@ class NFeatNid:
         self.is_sorted = True
         return self
 
-    def merge(self, other: "NFeatNid") -> "NFeatNid":
+    def merge(self, other: NFeatNid) -> NFeatNid:
         assert TensorSet.intersection(self.nid, other.nid).numel() == 0, (
             "NID overlap between RootX instances."
         )
@@ -125,7 +125,7 @@ class NFeatNid:
         self.nfeat = torch.cat((self.nfeat, other.nfeat), dim=0)
         return self
 
-    def unzip_by_root_nid(self, root_nid: torch.Tensor) -> "NFeatNid":
+    def unzip_by_root_nid(self, root_nid: torch.Tensor) -> NFeatNid:
         self = self.sort_by_nid()
         pos = torch.searchsorted(self.nid, root_nid)
         self.nid = root_nid
@@ -134,18 +134,32 @@ class NFeatNid:
         self.is_zipped = False
         return self.__class__(nid=self.nid, nfeat=self.nfeat)
 
-    def filter_by_nid(self, nid: torch.Tensor) -> "NFeatNid":
+    def filter_by_nid(self, nid: torch.Tensor) -> NFeatNid:
         mask = torch.isin(self.nid, nid)
         nid = self.nid[mask]
         nfeat = self.nfeat[mask]
         return self.__class__(nid=nid, nfeat=nfeat)
 
 
+def unzip_and_align(mem_n_box: MemNBox, delta_x: MemNBox, root_nid: torch.Tensor) -> X:
+    if delta_x.mem is not None:
+        delta_x = delta_x.sort_mem_and_mail()
+        pos = torch.searchsorted(delta_x.mem.nid, root_nid)
+        delta_x.mem.ts = delta_x.mem.ts[pos]
+        delta_x.mem.data = delta_x.mem.data[pos]
+    if delta_x.box is not None:
+        delta_x.box = delta_x.box[pos]
+    if delta_x.box_ts is not None:
+        delta_x.box_ts = delta_x.box_ts[pos]
+
+    delta_x.is_zipped = False
+    return delta_x
+
+
 @dataclass(slots=True, kw_only=True)
-class X:
-    nfeat: NFeatNid | None = None
-    mem: MemTsNid | None = None
-    box: BoxTsNid | None = None
+class MemNBox:
+    mem: MemTsNid
+    box: BoxTsNid
 
     @cached_property
     def is_mem_mail_sorted(self) -> bool:
@@ -153,7 +167,7 @@ class X:
         assert self.box is not None
         return self.mem.is_sorted and self.box.is_sorted
 
-    def sort_mem_and_mail(self) -> "X":
+    def sort_mem_and_mail(self) -> MemNBox:
         if self.is_mem_mail_sorted:
             return self
 
@@ -165,30 +179,10 @@ class X:
 
         return self
 
-    def unzip_and_align(self, root_nid: torch.Tensor) -> "X":
-        if self.mem is not None:
-            self = self.sort_mem_and_mail()
-            pos = torch.searchsorted(self.mem.nid, root_nid)
-            self.mem.ts = self.mem.ts[pos]
-            self.mem.data = self.mem.data[pos]
-        if self.box is not None:
-            self.box = self.box[pos]
-        if self.box_ts is not None:
-            self.box_ts = self.box_ts[pos]
-
-        self.is_zipped = False
-        return self
-
-
-@dataclass(slots=True, kw_only=True)
-class DeltaX:
-    mem: MemTsNid
-    box: BoxTsNid
-
 
 @dataclass(slots=True, kw_only=True)
 class MetaList:
-    queue: List[Meta]
+    queue: list[Meta]
 
     def __len__(self) -> int:
         return len(self.queue)
@@ -200,21 +194,20 @@ class Meta:
     root_ts: Tensor  # 没有3倍处理,这个信息不需要传输到gpu
 
     pos_edge_id: Tensor  # 没有3倍处理,这个信息不需要传输到gpu
-    pos_efeat: Optional[Tensor] = None
+    pos_efeat: Tensor | None = None
 
-    gnn_mfgs_raw: List[DGLBlockMeta] | None
-    gnn_mfgs: List[List[DGLBlock]] | None = None
+    gnn_mfgs_raw: list[DGLBlockMeta] | None
+    gnn_mfgs: list[list[DGLBlock]] | None = None
 
     mdb_raw_data: DGLBlockMeta | None
-    reverse_mdt: Optional[X] = None
 
     epoch_split_iter_info: EpochSplitIterInfo
-    x: Optional[X] = None
-    unzipped_x: Optional[X] = None
-    batch_node_state_io: Optional[BatchNodeStateIO]
+    nfeat: NFeatNid | None = None
+    mem_n_box: MemNBox | None = None
+    batch_node_state_io: BatchNodeStateIO | None
     n_src: int = 1
 
-    plan_set: Optional[TensorPlanSet] = None
+    plan_set: TensorPlanSet | None = None
 
     @cached_property
     def pos_edge(self) -> torch.Tensor:
@@ -243,7 +236,7 @@ class Meta:
             uniq_all = self.uniq_root
         return uniq_all
 
-    def __getstate__(self):
+    def __getstate__(self) -> dict:
         d = dict(self.__dict__)
         d.pop("pos_edge", None)
         d.pop("pos_edge_ts", None)
@@ -255,8 +248,8 @@ class Meta:
 
 @dataclass(slots=True, kw_only=True)
 class ScatterData:
-    metas: List[Meta]
-    planset: Optional[PlanSet | TensorPlanSet] = None
+    metas: list[Meta]
+    planset: PlanSet | TensorPlanSet | None = None
 
 
 @dataclass(slots=True, kw_only=True)

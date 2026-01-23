@@ -1,34 +1,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Set
 
 import torch
 from numpy.typing import NDArray
 
 
-def set_to_tensor(s: Set[int]) -> torch.Tensor:
+def set_to_tensor(s: set[int]) -> torch.Tensor:
     return torch.tensor(list(s)).long()
 
 
 @dataclass(slots=True, kw_only=True)
 class BatchNodeStateIO:
-    mem_needed: Set[int] | None | torch.Tensor
-    mem_updated: Set[int] | None | torch.Tensor
-    mailbox_needed: Set[int] | None | torch.Tensor
-    mailbox_updated: Set[int] | None | torch.Tensor
-    nfeat_needed: Set[int] | None | torch.Tensor
+    mem_needed: set[int] | None | torch.Tensor
+    mem_updated: set[int] | None | torch.Tensor
+    mailbox_needed: set[int] | None | torch.Tensor
+    mailbox_updated: set[int] | None | torch.Tensor
+    nfeat_needed: set[int] | None | torch.Tensor
 
 
 @dataclass(slots=True, kw_only=True)
 class BatchNodeStateIOAPAN:
     # this is for mailboxsize=1
-    mem_needed: Set[int] | None | torch.Tensor
-    mem_updated: Set[int] | None | torch.Tensor
-    mailbox_needed: Set[int] | None | torch.Tensor
+    mem_needed: set[int] | None | torch.Tensor
+    mem_updated: set[int] | None | torch.Tensor
+    mailbox_needed: set[int] | None | torch.Tensor
     # 并不是所有节点都需要弄到GPU上,只有mailbox_needed - mailbox_updated的节点信息才需要全部搬到GPU上
-    mailbox_updated: Set[int] | None | torch.Tensor
-    nfeat_needed: Set[int] | None | torch.Tensor
+    mailbox_updated: set[int] | None | torch.Tensor
+    nfeat_needed: set[int] | None | torch.Tensor
 
 
 @dataclass(slots=True, kw_only=True)
@@ -37,7 +36,7 @@ class PlanSet:
     box: DyPlan | None
     nfeat: StPlan | None
 
-    def tensorfy(self) -> "TensorPlanSet":
+    def tensorfy(self) -> TensorPlanSet:
         return TensorPlanSet(
             mem=self.mem.tensorfy() if self.mem is not None else None,
             box=self.box.tensorfy() if self.box is not None else None,
@@ -55,17 +54,17 @@ class TensorPlanSet:
     box: TensorDyPlan | None = None
     nfeat: TensorStPlan | None = None
 
-    def to(self, device: torch.device) -> "TensorPlanSet":
+    def to(self, device: torch.device) -> TensorPlanSet:
         return self.__class__(
             mem=self.mem.to(device) if self.mem is not None else None,
             box=self.box.to(device) if self.box is not None else None,
             nfeat=self.nfeat.to(device) if self.nfeat is not None else None,
         )
 
-    def cuda(self) -> "TensorPlanSet":
+    def cuda(self) -> TensorPlanSet:
         return self.to(torch.device("cuda"))
 
-    def sort(self) -> "TensorPlanSet":
+    def sort(self) -> TensorPlanSet:
         return self.__class__(
             mem=self.mem.sort() if self.mem is not None else None,
             box=self.box.sort() if self.box is not None else None,
@@ -75,13 +74,13 @@ class TensorPlanSet:
 
 @dataclass(slots=True, kw_only=True)
 class DyPlan:
-    p2p: List[Set[int]]
-    fetch: Set[int]
+    p2p: list[set[int]]
+    fetch: set[int]
     rec_cts: NDArray
     send_cts: NDArray
-    writeback: Optional[Set[int]] = None
+    writeback: set[int] | None = None
 
-    def tensorfy(self) -> "TensorDyPlan":
+    def tensorfy(self) -> TensorDyPlan:
         return TensorDyPlan(
             p2p=[torch.tensor(list(s)).long() for s in self.p2p],
             fetch=torch.tensor(list(self.fetch)).long(),
@@ -97,10 +96,10 @@ class DyPlan:
 
 @dataclass(slots=True, kw_only=True)
 class StPlan:
-    to_cache: Set[int]
-    fetch: Set[int]
+    to_cache: set[int]
+    fetch: set[int]
 
-    def tensorfy(self) -> "TensorStPlan":
+    def tensorfy(self) -> TensorStPlan:
         return TensorStPlan(
             to_cache=torch.tensor(list(self.to_cache)).long(),
             fetch=torch.tensor(list(self.fetch)).long(),
@@ -109,13 +108,13 @@ class StPlan:
 
 @dataclass(slots=True, kw_only=True)
 class TensorDyPlan:
-    p2p: List[torch.Tensor]
+    p2p: list[torch.Tensor]
     fetch: torch.Tensor
     rec_cts: NDArray
     send_cts: NDArray
-    writeback: Optional[torch.Tensor] = None
+    writeback: torch.Tensor | None = None
 
-    def to(self, device: torch.device) -> "TensorDyPlan":
+    def to(self, device: torch.device) -> TensorDyPlan:
         return self.__class__(
             p2p=[s.to(device) for s in self.p2p],
             fetch=self.fetch.to(device),
@@ -126,10 +125,10 @@ class TensorDyPlan:
             ),
         )
 
-    def cuda(self) -> "TensorDyPlan":
+    def cuda(self) -> TensorDyPlan:
         return self.to(torch.device("cuda"))
 
-    def sort(self) -> "TensorDyPlan":
+    def sort(self) -> TensorDyPlan:
         new_fetch, _ = torch.sort(self.fetch)
         new_p2p = [torch.sort(s).values for s in self.p2p]
         if self.writeback is not None:
@@ -152,16 +151,16 @@ class TensorStPlan:
     to_cache: torch.Tensor
     fetch: torch.Tensor
 
-    def to(self, device: torch.device) -> "TensorStPlan":
+    def to(self, device: torch.device) -> TensorStPlan:
         return self.__class__(
             to_cache=self.to_cache.to(device),
             fetch=self.fetch.to(device),
         )
 
-    def cuda(self) -> "TensorStPlan":
+    def cuda(self) -> TensorStPlan:
         return self.to(torch.device("cuda"))
 
-    def sort(self) -> "TensorStPlan":
+    def sort(self) -> TensorStPlan:
         new_to_cache, _ = torch.sort(self.to_cache)
         new_fetch, _ = torch.sort(self.fetch)
         return self.__class__(

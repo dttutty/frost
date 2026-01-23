@@ -1,19 +1,22 @@
 from __future__ import annotations
 
-from typing import List, Tuple, TypeAlias
+from typing import TypeAlias
 
 import numpy as np
+import torch
 from numpy.typing import NDArray
 
 from .datatypes.misc import Meta
 from .datatypes.plan import DyPlan, PlanSet
 
 
-MetaBundleWithPlan: TypeAlias = Tuple[List[Meta], List[PlanSet]]
-MetaBundleWithoutPlan: TypeAlias = Tuple[List[Meta], None]
-MetaBundle: TypeAlias = List[Meta]
+MetaBundleWithPlan: TypeAlias = tuple[list[Meta], list[PlanSet]]
+MetaBundleWithoutPlan: TypeAlias = tuple[list[Meta], None]
+MetaBundle: TypeAlias = list[Meta]
 
 
-PlanBundle: TypeAlias = List[DyPlan]
+PlanBundle: TypeAlias = list[DyPlan]
 IntArr = NDArray[np.int64]
 FloatArr = NDArray[np.floating]
+
+MetaWEvent: TypeAlias = tuple[Meta, torch.cuda.Event]

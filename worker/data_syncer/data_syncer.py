@@ -1,6 +1,6 @@
 import logging
 import threading
-from queue import Queue
+from queue import Queue as Q
 from typing import TypeVar
 
 import torch
@@ -22,26 +22,24 @@ logger = logging.getLogger(__name__)
 class DataSyncer(StreamThreadBase):
     def __init__(
         self,
-        deliver_to: str,
         mail_combine: str,
-        boxsize: int,
         merge_src: bool,
         n_gpu: int,
         shared: Shared,
         h2d_sem: threading.Semaphore,
-        sync_q: Queue[SyncTask],
+        sync_q: Q[SyncTask],
         stop_ev: threading.Event,
-        mem_p2p_q: Queue,
-        box_p2p_q: Queue,
-    ):
+        mem_p2p_q: Q,
+        box_p2p_q: Q,
+    ) -> None:
         super().__init__(name="data_syncer")
         self.sync_q = sync_q
         # 将原 GNN init 中关于 mailbox 和 deliver 的配置移到这里
         self.h2d_sem = h2d_sem
         self.box_stream = torch.cuda.Stream()
         self.stop_ev = stop_ev
-        self.mem_task_q: Queue[MemTask] = Queue()
-        self.box_task_q: Queue[BoxTask] = Queue()
+        self.mem_task_q: Q[MemTask] = Q()
+        self.box_task_q: Q[BoxTask] = Q()
 
         self.p2p_handler = P2PHandler(
             n_gpu=n_gpu,
@@ -68,14 +66,12 @@ class DataSyncer(StreamThreadBase):
             stop_ev=stop_ev,
             p2p_handler=self.p2p_handler,
             mail_combine=mail_combine,
-            boxsize=boxsize,
-            deliver_to=deliver_to,
             merge_src=merge_src,
         )
         self.box_handler.start()
 
     @torch.no_grad()
-    def logic(self):
+    def logic(self) -> None:
         while self.stop_ev.is_set() is False:
             sync_task = self.sync_q.get(block=True)
             if sync_task is not None:

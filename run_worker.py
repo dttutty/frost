@@ -3,25 +3,25 @@ import math
 import os
 import queue
 import threading
-from queue import Queue
-from typing import Tuple, Union
+from queue import Queue as Q
 
 import torch
 import torch.distributed as dist
 from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from data_syncer.data_syncer import DataSyncer
 from gnn import TGN
 from gnn.with_memory.base import MemoryBaseGNN
 from gnn.without_memory.base import GNN
+from schemas.alias import MetaWEvent
 from schemas.datatypes.cfg import MemoryCFG, SampleCFG, TrainCFG
 from schemas.datatypes.data_to_sync import BoxTsNid, MailTsNid, MemTsNid
 from schemas.datatypes.env import Env
-from schemas.datatypes.misc import DeltaX, ForwardCtx, Meta, ModelComponents, Shared, X
+from schemas.datatypes.misc import ForwardCtx, MemNBox, Meta, ModelComponents, Shared, X
 from schemas.datatypes.plan import TensorPlanSet
 from schemas.datatypes.task import P2PTask, SyncTask
 from worker.assembler.dy_asm import DyAssembler
+from worker.data_syncer.data_syncer import DataSyncer
 from worker.h2d import H2D
 from worker.receiver import HostWorkerSyncer as Receiver
 
@@ -46,44 +46,41 @@ class Worker:
         nfeat: None | torch.Tensor,
         efeat: None | torch.Tensor,
         env: Env,
-        nccl,
-        gloo,
+        nccl: dist.ProcessGroup,
+        gloo: dist.ProcessGroup,
         model_components: ModelComponents,
         m_cfg: MemoryCFG | None = None,
-    ):
+    ) -> None:
         self.s_cfg = s_cfg
         self.save_to = save_to
         self.env = env
 
         self.shared = shared
         self.total_epoch = t_cfg.epoch
-        self.meta_q = queue.Queue(maxsize=1)
+        self.meta_q = queue.Queue()
         self.stop_ev = threading.Event()
         self.nfeat = nfeat
         self.efeat = efeat
         self.nccl = nccl
         self.curr_epoch = -1
-        self.logger = _setup_logger(self.env.local_rank)
+        self.logger = logger
         self.fetch_factor = 1
         self.cmd_q = queue.Queue()
 
         if self.shared is not None:
             assert m_cfg is not None
-            box_size = self.shared.box.shape[1]
-            self.delta_q: Queue[DeltaX | None] = queue.Queue(maxsize=1)
-            self.mem_p2p_q: Queue[P2PTask] = queue.Queue()
-            self.box_p2p_q: Queue[P2PTask] = queue.Queue()
-            self.xpart_q: Queue[Tuple[Meta, X, TensorPlanSet]] = queue.Queue(maxsize=1)
-            self.sync_q: Queue[SyncTask] = queue.Queue(maxsize=1)
-            self.xfull_q = queue.Queue(maxsize=1)
+            self.delta_q: Q[tuple[MemNBox | None, torch.cuda.Event]] = Q()
+            self.mem_p2p_q: Q[P2PTask] = Q()
+            self.box_p2p_q: Q[P2PTask] = Q()
+            self.xpart_q: Q[MetaWEvent | None] = Q()
+            self.sync_q: Q[SyncTask] = Q()
+            self.xfull_q: Q[MetaWEvent | None] = Q()
 
             assert shared is not None, "Shared memory must be provided if memory exists"
             destination_q_for_h2d = self.xpart_q
             self.h2d_sem = threading.BoundedSemaphore(0)
             self.data_syncer = DataSyncer(
-                deliver_to=m_cfg.deliver_to,
                 mail_combine=m_cfg.mail_combine,
-                boxsize=box_size,
                 merge_src=t_cfg.merge_src,
                 n_gpu=env.n_gpu,
                 shared=shared,
@@ -94,13 +91,13 @@ class Worker:
                 box_p2p_q=self.box_p2p_q,
             )
             self.assembler = DyAssembler(
-                xpart_q=self.xpart_q,
+                in_q=self.xpart_q,
                 delta_q=self.delta_q,
-                xfull_q=self.xfull_q,
+                out_q=self.xfull_q,
                 stop_ev=self.stop_ev,
             )
         else:
-            self.xfull_q: Queue[Tuple[Meta, X, TensorPlanSet]] = queue.Queue(maxsize=1)
+            self.xfull_q: Q[MetaWEvent | None] = Q()
             destination_q_for_h2d = self.xfull_q
             self.h2d_sem = None
             self.data_syncer = None
@@ -110,8 +107,8 @@ class Worker:
             efeat=efeat,
             shared=shared,
             merge_src=t_cfg.merge_src,
-            meta_q=self.meta_q,
-            destination_q=destination_q_for_h2d,
+            in_q=self.meta_q,
+            out_q=destination_q_for_h2d,
             stop_ev=self.stop_ev,
             h2d_sem=self.h2d_sem,
         )
@@ -122,9 +119,8 @@ class Worker:
         self.receiver = Receiver(
             env=self.env,
             gloo=gloo,
-            meta_q=self.meta_q,
+            out_q=self.meta_q,
             stop_ev=self.stop_ev,
-            cmd_q=self.cmd_q,
         )
 
         self.best_ap_epoch = {
@@ -171,7 +167,7 @@ class Worker:
             find_unused_parameters = True
 
         find_unused_parameters = True
-        self.model: Union[DDP, TGN] = DDP(
+        self.model: DDP | TGN = DDP(
             model,
             process_group=self.nccl,
             find_unused_parameters=find_unused_parameters,
@@ -321,7 +317,7 @@ class Worker:
                 assert isinstance(result, BoxTsNid)
                 delta_box = result
 
-            delta_x = DeltaX(mem=delta_mem, box=delta_box)
+            delta_x = MemNBox(mem=delta_mem, box=delta_box)
             self.delta_q.put(delta_x)
         else:
             self.delta_q.put(None)

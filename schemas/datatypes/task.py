@@ -8,7 +8,6 @@ from numpy.typing import NDArray
 from torch import Tensor
 
 from .data_to_sync import BoxTsNid, MemTsNid
-from .misc import X
 from .plan import TensorDyPlan
 
 
