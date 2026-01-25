@@ -1,6 +1,5 @@
 import logging
 import os
-from typing import List
 
 import dgl
 import pandas as pd
@@ -26,7 +25,7 @@ from schemas.datatypes.misc import (
 logger = logging.getLogger(__name__)
 
 
-def dgl_blocks_to_tensor_dicts(blocks):
+def dgl_blocks_to_tensor_dicts(blocks: list[DGLBlock]) -> list[dict]:
     """Converts a list of DGL blocks to a list of serializable tensor dictionaries."""
     tensor_dicts = []
     for block in blocks:
@@ -44,7 +43,10 @@ def dgl_blocks_to_tensor_dicts(blocks):
     return tensor_dicts
 
 
-def tensor_dicts_to_dgl_blocks(tensor_dicts, device="cpu"):
+def tensor_dicts_to_dgl_blocks(
+    tensor_dicts: list[dict],
+    device="cpu",
+) -> list[DGLBlock]:
     """Reconstructs a list of DGL blocks from a list of tensor dictionaries."""
     blocks = []
     for d in tensor_dicts:
@@ -61,7 +63,11 @@ def tensor_dicts_to_dgl_blocks(tensor_dicts, device="cpu"):
     return blocks
 
 
-def get_ids(blocks, node_feats, edge_feats):
+def get_ids(
+    blocks: list[list[DGLBlock]],
+    node_feats: torch.Tensor | None,
+    edge_feats: torch.Tensor | None,
+) -> tuple[list[torch.Tensor], list[torch.Tensor] | None]:
     nids = list()
     eids = list()
     if node_feats is not None:
@@ -77,12 +83,9 @@ def get_ids(blocks, node_feats, edge_feats):
     return nids, eids
 
 
-from typing import Optional, Tuple
-
-
 def load_feat(
     dataset: str, feat_type: str, n_count: int, rnd_dim: int = 128
-) -> Tuple[Optional[torch.Tensor], int, Optional[torch.dtype]]:
+) -> tuple[torch.Tensor | None, int, torch.dtype | None]:
     """
     Load features for either nodes or edges based on feat_type.
     Returns (feat, d_feat, dtype).
@@ -131,9 +134,9 @@ def load_feat(
     return feat, d_feat, dtype
 
 
-def load_graph(d) -> tuple[ExtFullGraph, pd.DataFrame, int, int]:
+def load_graph(d: str) -> tuple[ExtFullGraph, pd.DataFrame, int, int]:
     g: ExtFullGraph = ExtFullGraph.load(f"DATA/{d}/ext_full.npz")
-    df = pd.read_csv("DATA/{}/edges.csv".format(d))
+    df = pd.read_csv(f"DATA/{d}/edges.csv")
     src = df["src"].to_numpy()
     dst = df["dst"].to_numpy()
     n_nodes_infer_from_df = max(src.max(), dst.max()) + 1
@@ -143,8 +146,8 @@ def load_graph(d) -> tuple[ExtFullGraph, pd.DataFrame, int, int]:
     return g, df, n_nodes_infer_from_g, n_edges
 
 
-def parse_config(f) -> Config:
-    conf = yaml.safe_load(open(f, "r"))
+def parse_config(f: str) -> Config:
+    conf = yaml.safe_load(open(f))
 
     cfg_s = conf.get("sampling")
     if cfg_s is None:
@@ -253,7 +256,7 @@ def get_global_edges_directly(mfg_meta):
     return torch.stack([global_src, global_dst], dim=0)
 
 
-def node_to_dgl_blocks(root_nodes, ts) -> List[List[DGLBlock]]:
+def node_to_dgl_blocks(root_nodes, ts) -> list[list[DGLBlock]]:
     blocks = list()
     block = dgl.create_block(
         ([], []), num_src_nodes=root_nodes.shape[0], num_dst_nodes=root_nodes.shape[0]
@@ -263,7 +266,7 @@ def node_to_dgl_blocks(root_nodes, ts) -> List[List[DGLBlock]]:
     return blocks
 
 
-def blocks_to_cuda(blockss: List[List[DGLBlock]]) -> List[List[DGLBlock]]:
+def blocks_to_cuda(blockss: list[list[DGLBlock]]) -> list[list[DGLBlock]]:
     for blocks in blockss:
         for block in blocks:
             block = block.to("cuda:0")

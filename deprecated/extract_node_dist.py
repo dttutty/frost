@@ -37,7 +37,7 @@ from gnn.TGN import *
 from sklearn.metrics import average_precision_score, roc_auc_score
 from tqdm import tqdm
 
-from sampler import *
+from neg_sampler import *
 from utils import *
 from utils import blocks_to_cuda
 
@@ -86,11 +86,11 @@ torch.distributed.broadcast_object_list(dim_feats, src=0)
 if args.local_rank > 0 and args.local_rank < args.num_gpus:
     node_feats = None
     edge_feats = None
-    if os.path.exists("DATA/{}/node_features.pt".format(args.data)):
+    if os.path.exists(f"DATA/{args.data}/node_features.pt"):
         node_feats = get_shared_mem_array(
             "node_feats", (dim_feats[0], dim_feats[1]), dtype=dim_feats[2]
         )
-    if os.path.exists("DATA/{}/edge_features.pt".format(args.data)):
+    if os.path.exists(f"DATA/{args.data}/edge_features.pt"):
         edge_feats = get_shared_mem_array(
             "edge_feats", (dim_feats[3], dim_feats[4]), dtype=dim_feats[5]
         )
@@ -395,7 +395,7 @@ else:
         )
     neg_link_sampler = NegLinkSampler(g["indptr"].shape[0] - 1)
 
-    ldf = pd.read_csv("DATA/{}/labels.csv".format(args.data))
+    ldf = pd.read_csv(f"DATA/{args.data}/labels.csv")
     args.batch_size = math.ceil(
         len(ldf) / (len(ldf) // args.batch_size // args.num_gpus * args.num_gpus)
     )

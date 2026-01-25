@@ -1,13 +1,14 @@
 import logging
 import threading
-from queue import Queue
-from typing import List, Set, Union
+from queue import Queue as Q
+from typing import Literal
 
 import numpy as np
 
 from host.planner.dynamic_planner import DynamicPlanner
-from schemas.alias import MetaBundle, PlanBundle
-from schemas.datatypes.plan import BatchNodeStateIO
+from host.planner.static_planner import StaticPlanner
+from schemas.alias import MetaBundle, MetasDyNeed, MetasStNeed
+from schemas.datatypes.plan import BatchNodeStateIO, DyPlan, StPlan
 from thread_base import ThreadBase
 
 
@@ -29,7 +30,7 @@ def find_all_gpu_distances_list(gpus_groups: list) -> np.ndarray:
 
     # --- 内部辅助函数 ---
 
-    def _find_all_gpu_ids(node: Union[int, list]) -> Set[int]:
+    def _find_all_gpu_ids(node: int | list) -> set[int]:
         """递归查找所有叶节点 (GPU IDs)。"""
         if isinstance(node, int):
             return {node}
@@ -38,7 +39,7 @@ def find_all_gpu_distances_list(gpus_groups: list) -> np.ndarray:
             return set().union(*(_find_all_gpu_ids(child) for child in node))
         return set()
 
-    def _get_max_depth(node: Union[int, list]) -> int:
+    def _get_max_depth(node: int | list) -> int:
         """递归查找最大嵌套深度。"""
         if isinstance(node, int):
             return 0  # Leaf node has depth 0
@@ -63,9 +64,7 @@ def find_all_gpu_distances_list(gpus_groups: list) -> np.ndarray:
     # 3. 获取拓扑的最大深度
     max_depth = _get_max_depth(gpus_groups)
 
-    def _fill_distances(
-        current_node: Union[int, list], current_depth: int
-    ) -> List[int]:
+    def _fill_distances(current_node: int | list, current_depth: int) -> list[int]:
         """
         递归辅助函数。
         填充距离矩阵，并返回在此节点下找到的 GPU ID 列表。
@@ -84,7 +83,7 @@ def find_all_gpu_distances_list(gpus_groups: list) -> np.ndarray:
         distance = max_depth - current_depth
 
         # 2. 递归到子节点
-        child_gpu_groups: List[List[int]] = []
+        child_gpu_groups: list[list[int]] = []
         for child_node in current_node:
             gpus_in_child = _fill_distances(child_node, current_depth + 1)
             child_gpu_groups.append(gpus_in_child)
@@ -115,19 +114,16 @@ class Planner(ThreadBase):
     这个是对那种mailbox_update=mem_update的planner
     """
 
-    gpus_distance: np.ndarray
-    n_gpus: int
-
     def __init__(
         self,
         gpu_topo: list,
-        in_q: Queue[MetaBundle | None],
-        out_q: Queue[MetaBundle | None],
-        mem_plan_out_q: Queue[PlanBundle | None] | None,
-        mail_plan_out_q: Queue[PlanBundle | None] | None,
-        nfeat_plan_out_q: Queue[PlanBundle | None] | None,
+        in_q: Q[MetaBundle | None | Literal["end_of_epoch"]],
+        out_q: Q[MetaBundle | None | Literal["end_of_epoch"]],
+        mem_plan_out_q: Q[list[DyPlan] | None] | None,
+        mail_plan_out_q: Q[list[DyPlan] | None] | None,
+        nfeat_plan_out_q: Q[list[StPlan] | None] | None,
         stop_ev: threading.Event,
-    ):
+    ) -> None:
         """
         初始化规划器。
 
@@ -143,9 +139,12 @@ class Planner(ThreadBase):
         self.out_q = out_q
 
         # mem_plan
-        self.mem_plan_in_q = None
+        self.mem_plan_in_q: None | Q[MetasDyNeed | None | Literal["end_of_epoch"]] = (
+            None
+        )
         if mem_plan_out_q:
-            self.mem_plan_in_q = Queue()
+            self.mem_plan_in_q = Q()
+            assert mem_plan_out_q is not None
             self.mem_planner = DynamicPlanner(
                 gpus_distance=self.gpus_distance,
                 in_q=self.mem_plan_in_q,
@@ -154,9 +153,12 @@ class Planner(ThreadBase):
             )
 
         # mail plan
-        self.mail_plan_in_q = None
+        self.mail_plan_in_q: None | Q[MetasDyNeed | None | Literal["end_of_epoch"]] = (
+            None
+        )
         if mail_plan_out_q:
-            self.mail_plan_in_q = Queue()
+            self.mail_plan_in_q = Q()
+            assert mail_plan_out_q is not None
             self.mail_planner = DynamicPlanner(
                 gpus_distance=self.gpus_distance,
                 in_q=self.mail_plan_in_q,
@@ -165,10 +167,13 @@ class Planner(ThreadBase):
             )
 
         # nfeat plan
-        self.nfeat_plan_in_q = None
+        self.nfeat_plan_in_q: None | Q[MetasStNeed | None | Literal["end_of_epoch"]] = (
+            None
+        )
         if nfeat_plan_out_q:
-            self.nfeat_plan_in_q = Queue()
-            self.nfeat_planner = DynamicPlanner(
+            self.nfeat_plan_in_q = Q()
+            assert nfeat_plan_out_q is not None
+            self.nfeat_planner = StaticPlanner(
                 gpus_distance=self.gpus_distance,
                 in_q=self.nfeat_plan_in_q,
                 out_q=nfeat_plan_out_q,
@@ -177,15 +182,17 @@ class Planner(ThreadBase):
 
         self.stop_ev = stop_ev
 
-    def logic(self):
+    def logic(self) -> None:
         while not self.stop_ev.is_set():
             metas = self.meta_bundle_q.get(block=True)
-            if metas is not None:
+            if isinstance(metas, list):
                 assert len(metas) == self.n_gpus
-                state_ios: List[BatchNodeStateIO] = [
-                    meta.batch_node_state_io for meta in metas
-                ]
+                state_ios: list[BatchNodeStateIO] = []
+                for meta in metas:
+                    assert meta.batch_node_state_io is not None
+                    state_ios.append(meta.batch_node_state_io)
                 if self.mem_plan_in_q is not None:
+                    assert self.mem_plan_in_q is not None
                     next_needs = [state_io.mem_needed for state_io in state_ios]
                     next_updates = [state_io.mem_updated for state_io in state_ios]
                     self.mem_plan_in_q.put((next_needs, next_updates))
@@ -199,6 +206,14 @@ class Planner(ThreadBase):
                 for meta in metas:
                     del meta.batch_node_state_io  # 释放内存
                 self.out_q.put(metas)
+            elif metas == "end_of_epoch":
+                if self.mem_plan_in_q is not None:
+                    self.mem_plan_in_q.put("end_of_epoch")
+                if self.mail_plan_in_q is not None:
+                    self.mail_plan_in_q.put("end_of_epoch")
+                if self.nfeat_plan_in_q is not None:
+                    self.nfeat_plan_in_q.put("end_of_epoch")
+                self.out_q.put("end_of_epoch")
             elif metas is None:
                 if self.mem_plan_in_q is not None:
                     self.mem_plan_in_q.put(None)
@@ -207,3 +222,4 @@ class Planner(ThreadBase):
                 if self.nfeat_plan_in_q is not None:
                     self.nfeat_plan_in_q.put(None)
                 self.out_q.put(None)
+                break

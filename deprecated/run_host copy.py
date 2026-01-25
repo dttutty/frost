@@ -12,11 +12,11 @@ from planner import ApanPlanner, sliding_planner
 from sampler_core import ParallelSampler
 from tqdm import tqdm
 
-from host.comm import Distributor
+from deprecated.comm import Distributor
 from host.planner.dynamic_planner import (
     compute_whats_need_by_gpu,
 )
-from sampler import NegLinkSampler, create_sampler
+from neg_sampler import NegLinkSampler, create_sampler
 from schemas import Config, Env, Meta
 from utils import analyze_need, extract_raw_data
 
@@ -298,9 +298,9 @@ class Host:
             assert self.cfg.s.history == 1
             # 只把 history[1] 的反向 block 交给 mailbox, APAN 和 JODIE 专用, only support history=1
             mdb = extract_raw_data(ret)[0]
-            from gnn.with_memory import APAN
+            from gnn.with_memory import apan
 
-            APAN.analyze_dynam()
+            apan.analyze_dynam()
 
         unique_nodes = compute_whats_need_by_gpu(blockss[0])
         meta = Meta(

@@ -26,14 +26,18 @@ class SampleReturn:
 
 @dataclass(slots=True)
 class ForwardCtx:
-    blockss: list[list[DGLBlock]]
-    mem_n_box: MemNBox | None
+    blockss: list[list[DGLBlock]] | NecessrayData
     macro_bid: int
     plan_set: TensorPlanSet
     mail_delivery_tensor: Tensor | None
     is_last: bool
     n_root_src_n_pos_dst: int
-    root_info: X | None
+
+
+@dataclass(slots=True, kw_only=True)
+class NecessrayData:
+    nfeat: NFeatNid | None
+    mem_n_box: MemNBox | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +164,7 @@ def unzip_and_align(mem_n_box: MemNBox, delta_x: MemNBox, root_nid: torch.Tensor
 class MemNBox:
     mem: MemTsNid
     box: BoxTsNid
+    is_unzipped: bool = False
 
     @cached_property
     def is_mem_mail_sorted(self) -> bool:
@@ -200,6 +205,7 @@ class Meta:
     gnn_mfgs: list[list[DGLBlock]] | None = None
 
     mdb_raw_data: DGLBlockMeta | None
+    mdt: torch.Tensor | None = None
 
     epoch_split_iter_info: EpochSplitIterInfo
     nfeat: NFeatNid | None = None
@@ -261,7 +267,6 @@ class EpochSplitIterInfo:
     n_macro_of_split: int
 
     cur_macro_of_epoch: int
-    n_macro_of_epoch: None = None
 
     split: Literal["train", "val", "test"]
 
@@ -275,25 +280,15 @@ class EpochSplitIterInfo:
             return None
 
     @cached_property
-    def macro_lication_of_epoch(self) -> str | None:
-        if self.cur_macro_of_epoch + 1 == self.n_macro_of_epoch:
-            return "last"
-        elif self.cur_macro_of_epoch == 0:
-            return "first"
-        else:
-            return None
+    def is_last_macro_of_epoch(self) -> bool:
+        return self.macro_position_of_split == "last" and self.split == "test"
 
     @cached_property
-    def macro_lication_of_all_epochs(self) -> str | None:
-        if (
+    def is_last_macro_of_all_epoch(self) -> bool:
+        return (
             self.cur_epoch + 1 == self.n_epoch
-            and self.cur_macro_of_epoch + 1 == self.n_macro_of_epoch
-        ):
-            return "last"
-        elif self.cur_epoch == 0 and self.cur_macro_of_epoch == 0:
-            return "first"
-        else:
-            return None
+            and self.macro_position_of_split == "last"
+        )
 
 
 @dataclass(slots=True, kw_only=True)

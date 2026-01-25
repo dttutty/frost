@@ -20,3 +20,6 @@ IntArr = NDArray[np.int64]
 FloatArr = NDArray[np.floating]
 
 MetaWEvent: TypeAlias = tuple[Meta, torch.cuda.Event]
+
+MetasDyNeed: TypeAlias = tuple[list[set[int]], list[set[int]]]
+MetasStNeed: TypeAlias = list[set[int]]

@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 from tqdm import tqdm
 
-from sampler import NegLinkSampler
+from neg_sampler import NegLinkSampler
 
 # Assume these are your existing imports
 from sampler_core import ParallelSampler

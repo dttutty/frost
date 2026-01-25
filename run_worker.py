@@ -10,14 +10,18 @@ import torch.distributed as dist
 from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from gnn import TGN
 from gnn.with_memory.base import MemoryBaseGNN
 from gnn.without_memory.base import GNN
 from schemas.alias import MetaWEvent
 from schemas.datatypes.cfg import MemoryCFG, SampleCFG, TrainCFG
 from schemas.datatypes.data_to_sync import BoxTsNid, MailTsNid, MemTsNid
 from schemas.datatypes.env import Env
-from schemas.datatypes.misc import ForwardCtx, MemNBox, Meta, ModelComponents, Shared, X
+from schemas.datatypes.misc import (
+    MemNBox,
+    Meta,
+    ModelComponents,
+    Shared,
+)
 from schemas.datatypes.plan import TensorPlanSet
 from schemas.datatypes.task import P2PTask, SyncTask
 from worker.assembler.dy_asm import DyAssembler
@@ -37,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 
 class Worker:
+    data_syncer: DataSyncer | None
+
     def __init__(
         self,
         s_cfg: SampleCFG,
@@ -52,20 +58,22 @@ class Worker:
         m_cfg: MemoryCFG | None = None,
     ) -> None:
         self.s_cfg = s_cfg
+        self.n_neg = s_cfg.neg_samples
         self.save_to = save_to
         self.env = env
 
         self.shared = shared
         self.total_epoch = t_cfg.epoch
-        self.meta_q = queue.Queue()
+        self.meta_q: Q[tuple[Meta, torch.cuda.Event] | None] = Q()
         self.stop_ev = threading.Event()
-        self.nfeat = nfeat
-        self.efeat = efeat
         self.nccl = nccl
         self.curr_epoch = -1
-        self.logger = logger
+        self.logger: logging.Logger = logger
         self.fetch_factor = 1
-        self.cmd_q = queue.Queue()
+        self.model: GNN | MemoryBaseGNN | DDP
+        self.xfull_q: Q[MetaWEvent | None] = Q()
+
+        self.h2d_sem: threading.BoundedSemaphore = threading.BoundedSemaphore(0)
 
         if self.shared is not None:
             assert m_cfg is not None
@@ -74,11 +82,9 @@ class Worker:
             self.box_p2p_q: Q[P2PTask] = Q()
             self.xpart_q: Q[MetaWEvent | None] = Q()
             self.sync_q: Q[SyncTask] = Q()
-            self.xfull_q: Q[MetaWEvent | None] = Q()
-
             assert shared is not None, "Shared memory must be provided if memory exists"
             destination_q_for_h2d = self.xpart_q
-            self.h2d_sem = threading.BoundedSemaphore(0)
+
             self.data_syncer = DataSyncer(
                 mail_combine=m_cfg.mail_combine,
                 merge_src=t_cfg.merge_src,
@@ -96,10 +102,10 @@ class Worker:
                 out_q=self.xfull_q,
                 stop_ev=self.stop_ev,
             )
+            self.data_syncer.start()
+            self.assembler.start()  # 启动 Assembler 组装线程
         else:
-            self.xfull_q: Q[MetaWEvent | None] = Q()
             destination_q_for_h2d = self.xfull_q
-            self.h2d_sem = None
             self.data_syncer = None
 
         self.h2d = H2D(
@@ -113,13 +119,15 @@ class Worker:
             h2d_sem=self.h2d_sem,
         )
 
-        self.result_q = queue.Queue()
-        self.cmd_q = queue.Queue()
+        self.result_q = Q()
+        self.cmd_q = Q()
 
         self.receiver = Receiver(
             env=self.env,
             gloo=gloo,
+            cmd_q=self.cmd_q,
             out_q=self.meta_q,
+            result_q=self.result_q,
             stop_ev=self.stop_ev,
         )
 
@@ -148,7 +156,8 @@ class Worker:
         if self.shared is not None:
             assert model_components.memory_updater is not None
             assert model_components.header is not None
-            model = MemoryBaseGNN(
+            self.gnn = model_components.gnn
+            self.model = MemoryBaseGNN(
                 gnn=model_components.gnn,
                 memory_updater=model_components.memory_updater,
                 sync_q=self.sync_q,
@@ -156,29 +165,34 @@ class Worker:
             )
         else:
             assert model_components.header is not None
-            model = GNN(
+            self.gnn = model_components.gnn
+
+            self.model = GNN(
                 gnn=model_components.gnn,
                 header=model_components.header,
             )
 
-        model = model.cuda()
+        self.model = self.model.cuda()
         find_unused_parameters = False
         if self.s_cfg.history > 1:
             find_unused_parameters = True
 
         find_unused_parameters = True
-        self.model: DDP | TGN = DDP(
-            model,
+        self.model = DDP(
+            self.model,
             process_group=self.nccl,
             find_unused_parameters=find_unused_parameters,
         )
         self.criterion = torch.nn.BCEWithLogitsLoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=t_cfg.lr)
 
-    def reset_ap_auc_count(self):
+        self.h2d.start()  # 启动 H2D 预取线程
+        self.receiver.start()  # 启动 Receiver 接收线程
+
+    def reset_ap_auc_count(self) -> None:
         self.count_sum = 0
-        self.my_rank_preds = []
-        self.my_rank_labels = []
+        self.my_rank_preds: list[torch.Tensor] = []
+        self.my_rank_labels: list[torch.Tensor] = []
 
         # [新增] 初始化 Loss 累积器 (必须在 GPU 上，避免 copy)
         self.epoch_loss_sum = torch.tensor(0.0, device="cuda")
@@ -188,7 +202,7 @@ class Worker:
         self.val_batch_count = torch.tensor(0.0, device="cuda")
 
     def pad_tensor(
-        self, local_tensor: torch.Tensor, max_size: int, fill=-1
+        self, local_tensor: torch.Tensor, max_size: int, fill: int = -1
     ) -> torch.Tensor:
         if local_tensor.shape[0] < max_size:
             pad_len = max_size - local_tensor.shape[0]
@@ -203,40 +217,29 @@ class Worker:
             padded_local = local_tensor
         return padded_local
 
-    def train(self, meta: Meta, x: X, plan_set: TensorPlanSet | None):
-        epoch_split_iter_info = meta.epoch_split_iter_info
-        if epoch_split_iter_info.macro_position_of_split == "first":
+    def train(self, meta: Meta, plan_set: TensorPlanSet | None) -> None:
+        meta_info = meta.epoch_split_iter_info
+        if meta_info.macro_position_of_split == "first":
             self.reset_ap_auc_count()
         n_pos_edges = meta.pos_edge.shape[0]
         labels = torch.cat(
             [
                 torch.ones(n_pos_edges, device="cuda"),
-                torch.zeros(n_pos_edges, device="cuda"),
+                torch.zeros(n_pos_edges * self.n_neg, device="cuda"),
             ],
             dim=0,
         )
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         self.logger.debug(
-            f"Rank {self.env.local_rank} training microbatch {meta.macro_bid}"
+            f"Rank {self.env.local_rank} training microbatch {meta_info.cur_macro_of_epoch}"
         )
-        n_root_src_n_pos_dst = meta.pos_edge.shape[0] * 2
-        forward_ctx = ForwardCtx(
-            blockss=meta.gnn_mfgs,
-            x=x,
-            macro_bid=meta.macro_bid,
-            plan_set=plan_set,
-            mail_delivery_tensor=meta.mdt,
-            is_last=False,
-            n_root_src_n_pos_dst=n_root_src_n_pos_dst,
-        )
-        logits_pos, logits_neg = self.model(forward_ctx)
+
+        logits = self.model(meta)
 
         self.logger.debug(
-            f"Rank {self.env.local_rank} finished forward for microbatch {meta.macro_bid}"
+            f"Rank {self.env.local_rank} finished forward for microbatch {meta_info.cur_macro_of_epoch}"
         )
-
-        logits = torch.cat([logits_pos, logits_neg])
 
         loss = self.criterion(logits.squeeze(-1), labels)
         if self.shared is not None:
@@ -252,7 +255,7 @@ class Worker:
         # reduced_loss = loss.detach().clone()
         # dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=self.nccl)
 
-        if epoch_split_iter_info.macro_position_of_split == "last":
+        if meta_info.macro_position_of_split == "last":
             # 此时进行 all_reduce，将所有卡的 Loss 总和加起来
             dist.all_reduce(self.epoch_loss_sum, op=dist.ReduceOp.SUM, group=self.nccl)
             dist.all_reduce(
@@ -266,7 +269,7 @@ class Worker:
 
         # if self.env.l
 
-    def _exec_p2p(self, p2p_task):
+    def _exec_p2p(self, p2p_task: P2PTask) -> MemTsNid | BoxTsNid | MailTsNid | None:
         nid, data, ts, type = p2p_task.nid, p2p_task.data, p2p_task.ts, p2p_task.type
         recv_nid, send_nid, out_splits, in_splits = (
             nid.recv,
@@ -278,12 +281,26 @@ class Worker:
         recv_ts, send_ts = ts.recv, ts.send
 
         dist.all_to_all_single(
-            recv_nid, send_nid, out_splits, in_splits, group=self.nccl
+            output=recv_nid,
+            input=send_nid,
+            output_split_sizes=out_splits,
+            input_split_sizes=in_splits,
+            group=self.nccl,
         )
         dist.all_to_all_single(
-            recv_data, send_x, out_splits, in_splits, group=self.nccl
+            output=recv_data,
+            input=send_x,
+            output_split_sizes=out_splits,
+            input_split_sizes=in_splits,
+            group=self.nccl,
         )
-        dist.all_to_all_single(recv_ts, send_ts, out_splits, in_splits, group=self.nccl)
+        dist.all_to_all_single(
+            output=recv_ts,
+            input=send_ts,
+            output_split_sizes=out_splits,
+            input_split_sizes=in_splits,
+            group=self.nccl,
+        )
 
         if type == "mem":
             return MemTsNid(nid=recv_nid, data=recv_data, ts=recv_ts)
@@ -293,7 +310,7 @@ class Worker:
             return MailTsNid(nid=recv_nid, data=recv_data, ts=recv_ts)
 
     @torch.no_grad()
-    def handle_p2p_q(self):
+    def handle_p2p_q(self) -> None:
         delta_mem = None
         delta_box = None
 
@@ -318,14 +335,18 @@ class Worker:
                 delta_box = result
 
             delta_x = MemNBox(mem=delta_mem, box=delta_box)
-            self.delta_q.put(delta_x)
         else:
-            self.delta_q.put(None)
+            delta_x = None
+        ready_event: torch.cuda.Event = torch.cuda.Event()
+        ready_event.record(torch.cuda.current_stream())
+        self.delta_q.put((delta_x, ready_event))
 
-        logger.debug(f"DataSyncer: rank {self.env.local_rank} put DeltaX into DeltaX_q")
+        self.logger.debug(
+            f"DataSyncer: rank {self.env.local_rank} put DeltaX into DeltaX_q"
+        )
 
     @torch.no_grad()
-    def eval(self, meta: Meta, x: X, plan_set: TensorPlanSet | None):
+    def eval(self, meta: Meta, x: X, plan_set: TensorPlanSet | None) -> None:
         ap = 0.0
         auc = 0.0
 
@@ -341,20 +362,8 @@ class Worker:
             dim=0,
         )
         self.model.eval()
-        is_last_macrobatch_of_epoch = (
-            meta.epoch_split_iter_info.macro_position_of_split == "last"
-            and meta.epoch_split_iter_info.split == "test"
-        )
-        forward_ctx = ForwardCtx(
-            blockss=meta.gnn_mfgs,
-            x=x,
-            macro_bid=meta.epoch_split_iter_info.macro_bid,
-            plan_set=plan_set,
-            mail_delivery_tensor=meta.mdt,
-            is_last=is_last_macrobatch_of_epoch,
-            n_root_src_n_pos_dst=n_pos_edges * 2,
-        )
-        logits_pos, logits_neg = self.model(forward_ctx)
+
+        logits_pos, logits_neg = self.model(meta)
         if self.shared is not None:
             self.handle_p2p_q()
         logits = torch.cat([logits_pos, logits_neg], dim=0)
@@ -463,7 +472,7 @@ class Worker:
 
         return ap, auc
 
-    def run(self):
+    def run(self) -> None:
         while True:
             # 处理命令（非阻塞/短超时）
             try:
@@ -474,17 +483,14 @@ class Worker:
             if cmd == "SAVE_MODEL":
                 self.save_model(os.path)  # 这里在主线程执行
 
-    def run_pipeline(self):
+    def run_pipeline(self) -> None:
         self.logger.info("Worker: Starting H2D thread...")
-        self.receiver.start()
-        self.h2d.start()  # 启动 H2D 预取线程
+
+        self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
+        self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
+        self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
+        self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
         if self.shared is not None:
-            self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
-            self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
-            self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
-            self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
-            self.assembler.start()  # 启动 Assembler 组装线程
-            self.data_syncer.start()
             self.delta_q.put(None)
 
         _initialize = False
@@ -517,7 +523,9 @@ class Worker:
                 f"Worker: rank {self.env.local_rank} processing microbatch {meta.epoch_split_iter_info.cur_macro_of_split}, {meta.epoch_split_iter_info.split} {meta.epoch_split_iter_info.macro_position_of_split}"
             )
 
-            def check_sparse_table(name, ids, data):
+            def check_sparse_table(
+                name: str, ids: torch.Tensor | None, data: torch.Tensor | None
+            ) -> None:
                 pass
                 if ids is None or data is None:
                     return
@@ -604,7 +612,7 @@ class Worker:
                 break
 
     # 供外部保存/加载
-    def save_model(self, path):
+    def save_model(self, path) -> None:
         if dist.is_available() and dist.is_initialized():
             rank = dist.get_rank()
         else:
@@ -619,7 +627,7 @@ class Worker:
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
 
-    def load_model(self, path):
+    def load_model(self, path) -> None:
         # 让所有rank都在文件写完后再开始读（更稳）
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
@@ -640,6 +648,6 @@ class Worker:
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
 
-    def load_memory(self, memory_state):
+    def load_memory(self, memory_state) -> None:
         if self.shared is not None:
             self.model.module.load_memory_state(memory_state)

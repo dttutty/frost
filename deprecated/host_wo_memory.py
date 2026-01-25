@@ -10,7 +10,7 @@ from memorys import MemoryMailbox
 from sampler_core import ParallelSampler
 from tqdm import tqdm
 
-from sampler import NegLinkSampler
+from neg_sampler import NegLinkSampler
 from schemas.datatypes.env import Env
 from utils import extract_raw_data, node_to_dgl_blocks
 

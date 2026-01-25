@@ -11,12 +11,10 @@ import torch
 import torch.distributed as dist
 from tqdm import tqdm
 
-from host import Distributor, MetaBatcher, Planner, Scatter
+from host import MetaBatcher, Planner, Scatter
 from host.meta_batcher import MetaBundle
-from host.planner.planner import PlanBundle
-from sampler import NegLinkSampler
+from neg_sampler import NegLinkSampler
 from sampler_core import ParallelSampler
-from schemas.alias import MetaBundleWithoutPlan, MetaBundleWithPlan
 from schemas.datatypes.cfg import Config, SampleCFG
 from schemas.datatypes.env import Env
 from schemas.datatypes.misc import (
@@ -25,19 +23,13 @@ from schemas.datatypes.misc import (
     Meta,
     SampleReturn,
 )
+from schemas.datatypes.plan import DyPlan, StPlan
 
 
 logger = logging.getLogger(__name__)
 
 
 class Host:
-    meta_bundle_q: Q[MetaBundle | None]
-    meta_in_q: Q[Meta | None]
-    mem_plan_out_q: Q[PlanBundle | None] | None
-    mail_plan_out_q: Q[PlanBundle | None] | None
-    nfeat_plan_out_q: Q[PlanBundle | None] | None
-    send_q: Q[MetaBundleWithPlan | MetaBundleWithoutPlan | None]
-
     def __init__(
         self,
         cfg: Config,
@@ -62,23 +54,29 @@ class Host:
         # 1. 初始化通信器
 
         self.gloo = gloo
-        self.comm = Distributor(env, group=self.gloo)
         gpu_topo = [0, 1]
         self.stop_ev = threading.Event()
         self.sample_support_node = cfg.s.sample_support_node
         self.sample_support_for_neg_dst = cfg.s.sample_support_for_neg_dst
         self.model_name = cfg.t.model_name
 
-        self.meta_in_q = Q[Meta | None]()
-        self.meta_bundle_q = Q[MetaBundle | None]()
-        self.send_q = Q[MetaBundle | None]()
+        self.meta_in_q: Q[Meta | None | Literal["end_of_epoch"]] = Q()
+        self.meta_bundle_q: Q[MetaBundle | None | Literal["end_of_epoch"]] = Q()
+        self.send_q: Q[MetaBundle | None | Literal["end_of_epoch"]] = Q()
 
-        self.mem_plan_out_q = Q() if self.has_mem else None
-        self.mail_plan_out_q = Q() if self.has_mem else None
-        self.nfeat_plan_out_q = Q() if self.has_nfeat else None
+        self.mem_plan_out_q: Q[list[DyPlan] | None] | None = None
+        self.mail_plan_out_q: Q[list[DyPlan] | None] | None = None
+        self.nfeat_plan_out_q: Q[list[StPlan] | None] | None = None
+        self.planner: Planner | None = None
+        if self.has_mem:
+            self.mem_plan_out_q = Q()
+            self.mail_plan_out_q = Q()
+        if self.has_nfeat:
+            self.nfeat_plan_out_q = Q()
+
         if self.has_nfeat or self.has_mem:
             self.meta_batcher = MetaBatcher(
-                n_gpus=env.n_gpu,
+                n_gpu=env.n_gpu,
                 in_q=self.meta_in_q,
                 out_q=self.meta_bundle_q,
                 stop_ev=self.stop_ev,
@@ -93,36 +91,23 @@ class Host:
                 nfeat_plan_out_q=self.nfeat_plan_out_q,
                 stop_ev=self.stop_ev,
             )
-
-            self.sem = threading.Semaphore()
-            self.scatter = Scatter(
-                sem=self.sem,
-                n_gpus=env.n_gpu,
-                comm=self.comm,
-                send_q=self.send_q,
-                mem_plan_out_q=self.mem_plan_out_q,
-                mail_plan_out_q=self.mail_plan_out_q,
-                nfeat_plan_out_q=self.nfeat_plan_out_q,
-                stop_ev=self.stop_ev,
-            )
         else:
             self.meta_batcher = MetaBatcher(
-                n_gpus=env.n_gpu,
+                n_gpu=env.n_gpu,
                 in_q=self.meta_in_q,
                 out_q=self.send_q,
                 stop_ev=self.stop_ev,
             )
-            self.planner = None
-            self.scatter = Scatter(
-                sem=self.sem,
-                n_gpus=env.n_gpu,
-                comm=self.comm,
-                send_q=self.send_q,
-                mem_plan_out_q=self.mem_plan_out_q,
-                mail_plan_out_q=self.mail_plan_out_q,
-                nfeat_plan_out_q=self.nfeat_plan_out_q,
-                stop_ev=self.stop_ev,
-            )
+        self.scatter = Scatter(
+            n_gpu=env.n_gpu,
+            in_q=self.send_q,
+            mem_plan_out_q=self.mem_plan_out_q,
+            mail_plan_out_q=self.mail_plan_out_q,
+            nfeat_plan_out_q=self.nfeat_plan_out_q,
+            env=env,
+            group=gloo,
+            stop_ev=self.stop_ev,
+        )
 
         # 3rd module: scatter sender
         # 3. 初始化采样器
@@ -203,12 +188,12 @@ class Host:
     def _handle_a_split(
         self, df: pd.DataFrame, split: Literal["train", "val", "test"], cur_epoch: int
     ) -> None:
-        df = df.reset_index(drop=True)
+        df = df.reset_index(names=["eid"])
 
-        iteration_total, adjusted_train_batch_size = self._plan_gpu_batches(
+        _, new_batch_size = self._plan_gpu_batches(
             len(df), self.batch_size, n_gpu=self.n_gpu
         )
-        batches_assignment = df.index // adjusted_train_batch_size
+        batches_assignment = df.index // new_batch_size
         # this will be improved for future random group training
         grouped_df = df.groupby(batches_assignment)
         n_mini = grouped_df.ngroups
@@ -217,12 +202,8 @@ class Host:
         assert n_macro_of_split >= 3, "need at least 3 macro batches"
 
         # this is total macro batches for current epoch, including train num_macro_batches, val num_macro_batches and test num_macro_batches
-        for cur_split_mini, (group_key, edges) in enumerate(
-            tqdm(
-                grouped_df,
-                total=n_mini,
-                desc=f"Host processing {split} split",
-            )
+        for _, edges in tqdm(
+            grouped_df, total=n_mini, desc=f"Host processing {split} split"
         ):
             cur_macro_of_split = self.curr_mini_of_epoch // self.n_gpu
 
@@ -232,7 +213,6 @@ class Host:
                 cur_macro_of_split=cur_macro_of_split,
                 n_macro_of_split=n_macro_of_split,
                 cur_macro_of_epoch=self.curr_mini_of_epoch // self.n_gpu,
-                n_macro_of_epoch=None,
                 split=split,
             )
             self._add_to_td_list(edges, epoch_split_iter_info)
@@ -241,8 +221,8 @@ class Host:
         if split == "test":
             self._cleanup_per_epoch()
 
-    def _cleanup_per_epoch(self):
-        self.meta_in_q.put(None)
+    def _cleanup_per_epoch(self) -> None:
+        self.meta_in_q.put("end_of_epoch")
         if self.ngh_sampler is not None:
             self.ngh_sampler.reset()
         self.curr_mini_of_epoch = 0
@@ -250,10 +230,10 @@ class Host:
 
     def _add_to_td_list(
         self, edges: pd.DataFrame, epoch_split_iter_info: EpochSplitIterInfo
-    ):
-        src = torch.as_tensor(edges.src.values, dtype=torch.long)
-        dst = torch.as_tensor(edges.dst.values, dtype=torch.long)
-        ts = torch.as_tensor(edges.time.values, dtype=torch.long)
+    ) -> None:
+        src = torch.as_tensor(edges["src"].values, dtype=torch.long)
+        dst = torch.as_tensor(edges["dst"].values, dtype=torch.long)
+        ts = torch.as_tensor(edges["time"].values, dtype=torch.long)
 
         # sample neg destination nodes
         neg_dst = self.neg_sampler.sample(src, dst)
@@ -271,7 +251,7 @@ class Host:
             root_nid=torch.cat([src, dst, neg_dst], dim=0),
             root_ts=ts.repeat(3),
             gnn_mfgs_raw=sample_ret.ngh2root_mfgs_raw,
-            pos_edge_id=torch.as_tensor(edges.index.values, dtype=torch.long),
+            pos_edge_id=torch.as_tensor(edges["eid"].values, dtype=torch.long),
             epoch_split_iter_info=epoch_split_iter_info,
             mdb_raw_data=sample_ret.root2ngh_mfg_raw,
             batch_node_state_io=sample_ret.batch_node_state_io,
@@ -280,12 +260,7 @@ class Host:
 
         self.meta_in_q.put(meta)
 
-    def _cleanup(self):
-        logger.debug("Host: Broadcasting CLEANUP command...")
-
-        dist.barrier()  # 建议指定 group=self.gloo 或者 nccl_pg，通常 gloo 用于控制流
-        logger.debug("Host: All processes reached the final barrier.")
+    def _cleanup(self) -> None:
+        self.meta_in_q.put(None)
         end = time.time()
-
         logger.debug(f"Elapsed time: {end - self.start_time:.2f} seconds")
-        dist.destroy_process_group()

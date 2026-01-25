@@ -37,11 +37,11 @@ from gnn.TGN import *
 from sklearn.metrics import average_precision_score, f1_score
 from tqdm import tqdm
 
-from sampler import *
+from neg_sampler import *
 from utils import *
 
 
-ldf = pd.read_csv("DATA/{}/labels.csv".format(args.data))
+ldf = pd.read_csv(f"DATA/{args.data}/labels.csv")
 role = ldf["ext_roll"].values
 # train_node_end = ldf[ldf['ext_roll'].gt(0)].index[0]
 # val_node_end = ldf[ldf['ext_roll'].gt(1)].index[0]
@@ -370,12 +370,12 @@ for e in range(args.epoch):
                 )
             accs.append(acc)
         acc = float(torch.tensor(accs).mean())
-    logger.debug("Epoch: {}\tVal acc: {:.4f}".format(e, acc))
+    logger.debug(f"Epoch: {e}\tVal acc: {acc:.4f}")
     if acc > best_acc:
         best_e = e
         best_acc = acc
         torch.save(model.state_dict(), save_path)
-logger.debug("Loading model at epoch {}...".format(best_e))
+logger.debug(f"Loading model at epoch {best_e}...")
 model.load_state_dict(torch.load(save_path))
 
 testLoader.shuffle()
@@ -396,4 +396,4 @@ with torch.no_grad():
             )
         accs.append(acc)
     acc = float(torch.tensor(accs).mean())
-logger.debug("Testing acc: {:.4f}".format(acc))
+logger.debug(f"Testing acc: {acc:.4f}")

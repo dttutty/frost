@@ -1,7 +1,6 @@
 # worker/trainer.py
 
 import logging
-from typing import List, Tuple
 
 import torch
 from dgl.heterograph import DGLBlock
@@ -25,7 +24,7 @@ class TGN(torch.nn.Module, SampleMixin):
         dim_out: int = 100,
         att_h: int = 2,
         dropout: float = 0.2,
-    ):
+    ) -> None:
         super().__init__()
         # parse from cfg
         self.dim_node = dim_node
@@ -49,7 +48,7 @@ class TGN(torch.nn.Module, SampleMixin):
         )
 
     @staticmethod
-    def analyze_block(mfg_meta: DGLBlockMeta) -> Tuple[set, set]:
+    def analyze_block(mfg_meta: DGLBlockMeta) -> tuple[set, set]:
         """
         Analyzes the provided list of DGLBlockMeta to determine the maximum
         number of source and destination nodes across the last n_history blocks.
@@ -71,7 +70,12 @@ class TGN(torch.nn.Module, SampleMixin):
         return all_nodes, root_nodes
 
     @staticmethod
-    def analyze_dynam(blockss: List[DGLBlockMeta], src, pos_dst, neg_dst):
+    def analyze_dynam(
+        blockss: list[DGLBlockMeta],
+        src: torch.Tensor,
+        pos_dst: torch.Tensor,
+        neg_dst: torch.Tensor,
+    ) -> BatchNodeStateIO:
         assert len(blockss) == 1, "TGN only supports 1 layer currently"
 
         all_nodes, root_nodes = TGN.analyze_block(blockss[0])
@@ -86,8 +90,8 @@ class TGN(torch.nn.Module, SampleMixin):
 
     def forward(
         self,
-        mfgs: List[List[DGLBlock]],
-    ):
+        mfgs: list[list[DGLBlock]],
+    ) -> torch.Tensor:
         block = mfgs[0][0]
         updated_mem: torch.Tensor = block.srcdata["updated_mem"]
         # fill in updated memory to blocks

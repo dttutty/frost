@@ -1,5 +1,4 @@
 import logging
-from typing import Optional
 
 import dgl
 import dgl.function as fn
@@ -9,6 +8,7 @@ import torch
 # worker/trainer.py
 import torch.nn as nn
 import torch.nn.functional as F
+from dgl.heterograph import DGLBlock
 
 
 logger = logging.getLogger(__name__)
@@ -20,8 +20,8 @@ class TimeEncode(nn.Module):
     Formula: cos(w * t + b) where w is determined by 1 / 10^linspace(0, 9, dim)
     """
 
-    def __init__(self, dim):
-        super(TimeEncode, self).__init__()
+    def __init__(self, dim: int) -> None:
+        super().__init__()
         self.dim = dim
         self.w = nn.Linear(1, dim)
         # TGN original implementation uses numpy linspace
@@ -30,7 +30,7 @@ class TimeEncode(nn.Module):
         self.w.weight = nn.Parameter((torch.from_numpy(1 / 10**seq)).reshape(dim, -1))
         self.w.bias = nn.Parameter(torch.zeros(dim))
 
-    def forward(self, t):
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
         # t shape: [batch_size] -> [batch_size, 1]
         output = torch.cos(self.w(t.reshape((-1, 1))))
         return output
@@ -42,15 +42,15 @@ class EdgePredictor(nn.Module):
     Logic: MLP(h_src + h_dst) -> score
     """
 
-    def __init__(self, dim_in, neg_samples=1):
-        super(EdgePredictor, self).__init__()
+    def __init__(self, dim_in: int, neg_samples: int = 1) -> None:
+        super().__init__()
         self.dim_in = dim_in
         self.neg_samples = neg_samples
         self.src_fc = nn.Linear(dim_in, dim_in)
         self.dst_fc = nn.Linear(dim_in, dim_in)
         self.out_fc = nn.Linear(dim_in, 1)
 
-    def forward(self, h):
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
         # h contains: [True Edges Src, True Edges Dst, Neg Edges Dst]
         num_edge = h.shape[0] // (self.neg_samples + 2)
 
@@ -62,19 +62,22 @@ class EdgePredictor(nn.Module):
         # Tile src for negative samples: [src1, src2] -> [src1, src1, src2, src2] if neg=2
         h_neg_edge = F.relu(h_src.tile(self.neg_samples, 1) + h_neg_dst)
 
-        return self.out_fc(h_pos_edge), self.out_fc(h_neg_edge)
+        ret_1 = self.out_fc(h_pos_edge)
+        ret_2 = self.out_fc(h_neg_edge)
+
+        return torch.cat([ret_1, ret_2])
 
 
 class TransfomerAttentionLayer(torch.nn.Module):
     def __init__(
         self,
-        dim_node,
-        dim_edge,
-        dim_time,
-        att_h,
-        dropout,
-        dim_out,
-        combined=False,
+        dim_node: int,
+        dim_edge: int,
+        dim_time: int,
+        att_h: int,
+        dropout: float,
+        dim_out: int,
+        combined: bool = False,
     ):
         super(TransfomerAttentionLayer, self).__init__()
         self.num_head = att_h
@@ -110,7 +113,7 @@ class TransfomerAttentionLayer(torch.nn.Module):
             self.w_v = torch.nn.Linear(dim_node + dim_edge + dim_time, dim_out)
         self.w_out = torch.nn.Linear(dim_node + dim_out, dim_out)
 
-    def forward(self, b):
+    def forward(self, b: DGLBlock) -> torch.Tensor:
         assert self.dim_time + self.dim_node + self.dim_edge > 0
         if b.num_edges() == 0:
             return torch.zeros(
@@ -202,12 +205,12 @@ class TransfomerAttentionLayer(torch.nn.Module):
 
 
 class NodeClassificationHeader(torch.nn.Module):
-    def __init__(self, dim_in, d_hid, num_class):
-        super(NodeClassificationHeader, self).__init__()
+    def __init__(self, dim_in: int, d_hid: int, num_class: int) -> None:
+        super().__init__()
         self.fc1 = torch.nn.Linear(dim_in, d_hid)
         self.fc2 = torch.nn.Linear(d_hid, num_class)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.fc1(x)
         x = torch.nn.functional.relu(x)
         x = self.fc2(x)
@@ -216,7 +219,7 @@ class NodeClassificationHeader(torch.nn.Module):
 
 def _cat_optional(
     x: torch.Tensor,
-    *extras: Optional[torch.Tensor],
+    *extras: torch.Tensor | None,
     dim: int = 1,
 ) -> torch.Tensor:
     parts = [x]
@@ -233,9 +236,15 @@ class TemporalGraphAttentionLayer(nn.Module):
     """
 
     def __init__(
-        self, dim_node, dim_edge, dim_time=0, dim_out=100, num_head=2, dropout=0.2
-    ):
-        super(TemporalGraphAttentionLayer, self).__init__()
+        self,
+        dim_node: int,
+        dim_edge: int,
+        dim_time: int = 0,
+        dim_out: int = 100,
+        num_head: int = 2,
+        dropout: float = 0.2,
+    ) -> None:
+        super().__init__()
         self.num_head = num_head
         self.dim_out = dim_out
 
@@ -244,10 +253,9 @@ class TemporalGraphAttentionLayer(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(dim_out)
+        self.time_enc: TimeEncode | None = None
         if dim_time > 0:
             self.time_enc = TimeEncode(dim_time)
-        else:
-            self.time_enc = None
 
         # Q: Source Node Features + Time (0)
         self.w_q = nn.Linear(dim_node + dim_time, dim_out)
@@ -257,7 +265,7 @@ class TemporalGraphAttentionLayer(nn.Module):
 
         self.w_out = nn.Linear(dim_node + dim_out, dim_out)
 
-    def forward(self, b):
+    def forward(self, b: DGLBlock) -> torch.Tensor:
         """
         b: DGL Block (MFG)
         b.srcdata['h']: Node features for both src and dst nodes.
@@ -345,9 +353,9 @@ class TemporalGraphAttentionLayer(nn.Module):
 
 
 class IdentityNormLayer(torch.nn.Module):
-    def __init__(self, d_hid):
-        super(IdentityNormLayer, self).__init__()
+    def __init__(self, d_hid: int) -> None:
+        super().__init__()
         self.norm = torch.nn.LayerNorm(d_hid)
 
-    def forward(self, b):
+    def forward(self, b: DGLBlock) -> torch.Tensor:
         return self.norm(b.srcdata["h"])

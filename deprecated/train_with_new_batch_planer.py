@@ -61,7 +61,7 @@ import torch
 from gnn.TGN import TGN
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-from sampler import (
+from neg_sampler import (
     AvoidInfoLeakNegLinkSampler,
     NegLinkInductiveSampler,
     NegLinkSampler,
@@ -347,9 +347,9 @@ def eval(mode="val"):
 if not os.path.isdir("models"):
     os.mkdir("models")
 if args.model_name == "":
-    path_saver = "models/{}_{}.pkl".format(args.data, time.time())
+    path_saver = f"models/{args.data}_{time.time()}.pkl"
 else:
-    path_saver = "models/{}.pkl".format(args.model_name)
+    path_saver = f"models/{args.model_name}.pkl"
 best_ap = 0
 best_e = 0
 val_losses = list()
@@ -374,7 +374,7 @@ if train_param.reorder is not None:
         )
 
 for e in range(5):
-    logger.debug("Epoch {:d}:".format(e))
+    logger.debug(f"Epoch {e:d}:")
     total_sampling_time = 0
     time_prep = 0
     time_tot = 0
@@ -500,13 +500,9 @@ for e in range(5):
             time_tot += time.time() - t_tot_s
         producer_thread.join()
     ap, auc = eval("val")
+    logger.debug(f"\ttrain loss:{total_loss:.4f}  val ap:{ap:4f}  val auc:{auc:4f}")
     logger.debug(
-        "\ttrain loss:{:.4f}  val ap:{:4f}  val auc:{:4f}".format(total_loss, ap, auc)
-    )
-    logger.debug(
-        "\ttotal time:{:.2f}s sample time:{:.2f}s prep time:{:.2f}s".format(
-            time_tot, total_sampling_time, time_prep
-        )
+        f"\ttotal time:{time_tot:.2f}s sample time:{total_sampling_time:.2f}s prep time:{time_prep:.2f}s"
     )
 
     # if e > 2 and ap > best_ap:
@@ -538,7 +534,7 @@ for e in range(5):
 
     profiler.report()
 
-logger.debug("Loading model at epoch {}...".format(best_e))
+logger.debug(f"Loading model at epoch {best_e}...")
 model.load_state_dict(torch.load(path_saver))
 model.eval()
 if sampler is not None:
@@ -550,6 +546,6 @@ if mailbox is not None:
     eval("val")
 ap, auc = eval("test")
 if args.eval_neg_samples > 1:
-    logger.debug("\ttest AP:{:4f}  test MRR:{:4f}".format(ap, auc))
+    logger.debug(f"\ttest AP:{ap:4f}  test MRR:{auc:4f}")
 else:
-    logger.debug("\ttest AP:{:4f}  test AUC:{:4f}".format(ap, auc))
+    logger.debug(f"\ttest AP:{ap:4f}  test AUC:{auc:4f}")

@@ -12,22 +12,11 @@ def set_to_tensor(s: set[int]) -> torch.Tensor:
 
 @dataclass(slots=True, kw_only=True)
 class BatchNodeStateIO:
-    mem_needed: set[int] | None | torch.Tensor
-    mem_updated: set[int] | None | torch.Tensor
-    mailbox_needed: set[int] | None | torch.Tensor
-    mailbox_updated: set[int] | None | torch.Tensor
-    nfeat_needed: set[int] | None | torch.Tensor
-
-
-@dataclass(slots=True, kw_only=True)
-class BatchNodeStateIOAPAN:
-    # this is for mailboxsize=1
-    mem_needed: set[int] | None | torch.Tensor
-    mem_updated: set[int] | None | torch.Tensor
-    mailbox_needed: set[int] | None | torch.Tensor
-    # 并不是所有节点都需要弄到GPU上,只有mailbox_needed - mailbox_updated的节点信息才需要全部搬到GPU上
-    mailbox_updated: set[int] | None | torch.Tensor
-    nfeat_needed: set[int] | None | torch.Tensor
+    mem_needed: set[int]
+    mem_updated: set[int]
+    mailbox_needed: set[int]
+    mailbox_updated: set[int]
+    nfeat_needed: set[int]
 
 
 @dataclass(slots=True, kw_only=True)

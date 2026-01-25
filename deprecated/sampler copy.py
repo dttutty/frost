@@ -26,65 +26,65 @@ class NegLinkSampler:
 
 
 class NegLinkInductiveSampler:
-    def __init__(self, nodes) -> None:
+    def __init__(self, nodes: np.ndarray) -> None:
         self.nodes = list(nodes)
 
     def sample(self, n: int) -> np.ndarray:
         return np.random.choice(self.nodes, size=n)
 
 
-# class RealNegLinkSampler:
-#     def __init__(self, g):
-#         self.g = g
-#         self.max_node_id = g['indptr'].shape[0] - 2  # max node id is len(indptr) - 2
+class RealNegLinkSampler:
+    def __init__(self, g: ExtFullGraph) -> None:
+        self.g = g
+        self.max_node_id = g.indptr.shape[0] - 2  # max node id is len(indptr) - 2
 
-#     def get_all_neighbors(self, node_id, node_ts):
-#         # Extract the CSR arrays from the NpzFile object
-#         indptr = self.g['indptr']
-#         indices = self.g['indices']
+    def get_all_neighbors(self, node_id: int, node_ts: int) -> np.ndarray:
+        # Extract the CSR arrays from the NpzFile object
+        indptr = self.g.indptr
+        indices = self.g.indices
 
-#         # Check for valid node_id
-#         if node_id < 0 or node_id >= len(indptr) - 1:
-#             logger.debug(f"Error: node_id {node_id} is out of bounds.")
-#             return np.array([], dtype=indices.dtype)
+        # Check for valid node_id
+        if node_id < 0 or node_id >= len(indptr) - 1:
+            logger.debug(f"Error: node_id {node_id} is out of bounds.")
+            return np.array([], dtype=indices.dtype)
 
-#         # Get the start and end pointers from the indptr array
-#         start = indptr[node_id]
-#         end = indptr[node_id + 1]
+        # Get the start and end pointers from the indptr array
+        start = indptr[node_id]
+        end = indptr[node_id + 1]
 
-#         # Slice the indices array to get the neighbors
-#         return indices[start:end]
+        # Slice the indices array to get the neighbors
+        return indices[start:end]
 
-#     def sample_real_neg_dst(self, src_id, real_pos_dst, num_neg_sample):
-#         real_pos_set = set(real_pos_dst.tolist())
-#         neg_samples = []
-#         batch_size = max(4, num_neg_sample * 2)
-#         while len(neg_samples) < num_neg_sample:
-#             candidates = np.random.randint(
-#                 0, self.max_node_id + 1, size=batch_size
-#             )
-#             for c in candidates:
-#                 if c != src_id and c not in real_pos_set:
-#                     neg_samples.append(c)
-#                     if len(neg_samples) == num_neg_sample:
-#                         break
-#         return np.array(neg_samples, dtype=np.int32)
+    def sample_real_neg_dst(
+        self, src_id: int, real_pos_dst: np.ndarray, num_neg_sample: int
+    ) -> np.ndarray:
+        real_pos_set = set(real_pos_dst.tolist())
+        neg_samples: list[int] = []
+        batch_size = max(4, num_neg_sample * 2)
+        while len(neg_samples) < num_neg_sample:
+            candidates = np.random.randint(0, self.max_node_id + 1, size=batch_size)
+            for c in candidates:
+                if c != src_id and c not in real_pos_set:
+                    neg_samples.append(c)
+                    if len(neg_samples) == num_neg_sample:
+                        break
+        return np.array(neg_samples, dtype=np.int32)
 
-#     def sample(self, src_ids, num_neg_sample=1):
-#         neg_matrix = np.empty((len(src_ids), num_neg_sample), dtype=np.int32)
-#         for i, src in enumerate(src_ids):
-#             src = int(src)
-#             pos = self.get_all_neighbors(src)
-#             neg = self.sample_real_neg_dst(src, pos, num_neg_sample)
-#             neg_matrix[i] = neg
-#         src_cross = np.tile(src_ids, num_neg_sample)
-#         neg_cross = neg_matrix.T.reshape(-1)
-#         return neg_cross
+    def sample(self, src_ids: np.ndarray, num_neg_sample: int = 1) -> np.ndarray:
+        neg_matrix = np.empty((len(src_ids), num_neg_sample), dtype=np.int32)
+        for i, src in enumerate(src_ids):
+            src = int(src)
+            pos = self.get_all_neighbors(src)
+            neg = self.sample_real_neg_dst(src, pos, num_neg_sample)
+            neg_matrix[i] = neg
+        src_cross = np.tile(src_ids, num_neg_sample)
+        neg_cross = neg_matrix.T.reshape(-1)
+        return neg_cross
 
 
 # Numba-accelerated helper to fetch CSR neighbors\
 @njit
-def _get_neighbors(indptr, indices, node_id):
+def _get_neighbors(indptr: np.ndarray, indices: np.ndarray, node_id: int) -> np.ndarray:
     if node_id < 0 or node_id >= indptr.shape[0] - 1:
         return np.empty(0, dtype=indices.dtype)
     start = indptr[node_id]
@@ -97,7 +97,9 @@ def _get_neighbors(indptr, indices, node_id):
 
 # Numba-accelerated single-node negative sampling\
 @njit
-def _sample_neg_for_src(indptr, indices, max_node_id, src_id, num_neg):
+def _sample_neg_for_src(
+    indptr: np.ndarray, indices: np.ndarray, max_node_id: int, src_id: int, num_neg: int
+) -> np.ndarray:
     neigh = _get_neighbors(indptr, indices, src_id)
     negs = np.empty(num_neg, dtype=np.int32)
     count = 0
@@ -119,7 +121,13 @@ def _sample_neg_for_src(indptr, indices, max_node_id, src_id, num_neg):
 
 # Numba-accelerated batch sampling and cross-pairing\
 @njit(parallel=True)
-def sample(src_ids, indptr, indices, num_neg, max_node_id):
+def sample(
+    src_ids: np.ndarray,
+    indptr: np.ndarray,
+    indices: np.ndarray,
+    num_neg: int,
+    max_node_id: int,
+) -> np.ndarray:
     n = src_ids.shape[0]
     # matrix to hold per-source neg samples
     neg_mat = np.empty((n, num_neg), dtype=np.int32)
@@ -139,18 +147,20 @@ def sample(src_ids, indptr, indices, num_neg, max_node_id):
 
 
 # Wrapper class
-def create_sampler(g):
-    indptr = g["indptr"]
-    indices = g["indices"]
+def create_sampler(g: ExtFullGraph) -> object:
+    indptr = g.indptr
+    indices = g.indices
     max_node_id = indptr.shape[0] - 2
 
     class NumbaNegSampler:
-        def __init__(self):
+        def __init__(self) -> None:
             self.indptr = indptr
             self.indices = indices
             self.max_node_id = max_node_id
 
-        def sample(self, src_ids, src_tss, num_neg=1):
+        def sample(
+            self, src_ids: np.ndarray, src_tss: np.ndarray, num_neg: int = 1
+        ) -> np.ndarray:
             src_arr = np.asarray(src_ids, dtype=np.int32)
             return sample(src_arr, self.indptr, self.indices, num_neg, self.max_node_id)
 
@@ -158,11 +168,13 @@ def create_sampler(g):
 
 
 class AvoidInfoLeakNegLinkSampler:
-    def __init__(self, sampler):
+    def __init__(self, sampler: object) -> None:
         self.sampler = sampler
 
-    def sample(self, src_ids, src_tss, num_neg=1):
-        return sampler.sample_negatives(
+    def sample(
+        self, src_ids: np.ndarray, src_tss: np.ndarray, num_neg: int = 1
+    ) -> np.ndarray:
+        return self.sampler.sample_negatives(
             root_nodes=src_ids.astype(np.int32),
             root_ts=src_tss.astype(np.float32),
             num_neg_samples=num_neg,
@@ -201,14 +213,14 @@ if __name__ == "__main__":
     num_nodes = max(int(df["src"].max()), int(df["dst"].max()))
     neg_link_sampler = NegLinkSampler(num_nodes)
 
-    tot_time = 0
-    ptr_time = 0
-    coo_time = 0
-    sea_time = 0
-    sam_time = 0
-    uni_time = 0
-    total_nodes = 0
-    unique_nodes = 0
+    tot_time: float = 0
+    ptr_time: float = 0
+    coo_time: float = 0
+    sea_time: float = 0
+    sam_time: float = 0
+    uni_time: float = 0
+    total_nodes: int = 0
+    unique_nodes: int = 0
     for _, rows in tqdm(
         df.groupby(df.index // args.batch_size), total=len(df) // args.batch_size
     ):

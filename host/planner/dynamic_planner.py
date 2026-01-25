@@ -1,24 +1,23 @@
 import logging
 import threading
 from queue import Queue
-from typing import List, Set, Tuple
+from typing import Literal
 
 import numpy as np
 
+from schemas.alias import MetasDyNeed
 from schemas.datatypes.plan import DyPlan
 from thread_base import ThreadBase
-
-from ..meta_batcher import MetaBundle
 
 
 logger = logging.getLogger(__name__)
 
 
 def handle_remaining(
-    needs: List[Set[int]],
-    avails: List[Set[int]],
+    needs: list[set[int]],
+    avails: list[set[int]],
     gpus_distance: np.ndarray,
-) -> Tuple[List[Set[int]], List[List[Set[int]]], np.ndarray]:
+) -> tuple[list[set[int]], list[list[set[int]]]]:
     """
     (纯 Python Set 版本)
     计算陈旧数据的 P2P 计划和 CPU 预取。
@@ -26,10 +25,9 @@ def handle_remaining(
     Receiver-Centric
     """
     n_gpus = len(gpus_distance)
-    p2p_counts = np.zeros((n_gpus, n_gpus), dtype=np.int32)
 
     # 初始化结果容器
-    p2p_plan: List[List[Set[int]]] = [
+    p2p_plan: list[list[set[int]]] = [
         [set() for _ in range(n_gpus)] for _ in range(n_gpus)
     ]
 
@@ -46,7 +44,7 @@ def handle_remaining(
             # 获取 Sender 拥有的
             available = avails[s]
             # 获取 Receiver 目前还缺少的 (注意：这里是动态更新的 remaining_needs)
-            need: Set[int] = needs[r]
+            need: set[int] = needs[r]
 
             # 交集：sender 有 且 receiver 缺
             to_transfer = available & need
@@ -60,18 +58,16 @@ def handle_remaining(
                 need.difference_update(to_transfer)
 
                 # 3. 计数
-                p2p_counts[s, r] = len(to_transfer)  # 记录 s 发给 r 的数量
 
-    return needs, p2p_plan, p2p_counts
+    return needs, p2p_plan
 
 
 def handle_update(
-    needs: List[Set[int]],
-    avails: List[Set[int]],
-) -> Tuple[
-    List[Set[int]],  # leftovers_on_gpu
-    List[List[Set[int]]],  # p2p_transfer_plan
-    np.ndarray,
+    needs: list[set[int]],
+    avails: list[set[int]],
+) -> tuple[
+    list[set[int]],  # leftovers_on_gpu
+    list[list[set[int]]],  # p2p_transfer_plan
 ]:
     """
     (纯 Python Set 版本 - 逻辑简化)
@@ -88,11 +84,12 @@ def handle_update(
     # 等价于: needed_mask & ~all_fresh_nids_mask
 
     # 初始化结果容器
-    p2p_plan = [[set() for _ in range(n_gpus)] for _ in range(n_gpus)]
+    p2p_plan: list[list[set[int]]] = [
+        [set() for _ in range(n_gpus)] for _ in range(n_gpus)
+    ]
     leftovers = []
 
     # 使用 numpy 数组以保持返回类型兼容性
-    p2p_counts = np.zeros((n_gpus, n_gpus), dtype=np.int32)
 
     # 3. 计算 P2P 计划 (双层循环: Sender -> Receiver)
     # 逻辑: Sender 有的 & Receiver 需要的 = 传输内容
@@ -115,7 +112,6 @@ def handle_update(
                 everything_sender_sends.update(to_transfer)
 
                 # 更新计数
-                p2p_counts[s, r] = len(to_transfer)
 
         # 4. 计算 Leftovers (Sender 持有有，但没人要的)
         # 等价于: fresh_held_mask & ~all_nids_to_send_mask
@@ -125,13 +121,12 @@ def handle_update(
     return (
         leftovers,
         p2p_plan,
-        p2p_counts,
     )
 
 
 def dedup_updates(
-    updates: List[Set[int]], reverse: bool = True
-) -> Tuple[List[Set[int]], Set[int]]:
+    updates: list[set[int]], reverse: bool = True
+) -> tuple[list[set[int]], set[int]]:
     """
     (简化逻辑版)
     对每个 GPU 持有的节点列表进行去重，确保一个节点只由一个 GPU 负责。
@@ -144,10 +139,10 @@ def dedup_updates(
             False -> 正序优先 (Rank 0 优先保留节点)
     """
     n_gpus = len(updates)
-    new_updates: List[Set[int]] = [set() for _ in range(n_gpus)]
+    new_updates: list[set[int]] = [set() for _ in range(n_gpus)]
     if n_gpus == 0:
         return new_updates, set()
-    all_update: Set[int] = set()
+    all_update: set[int] = set()
     # seen_nodes is the set of nodes that have already been assigned to higher-priority GPUs
     iterator = range(n_gpus - 1, -1, -1) if reverse else range(n_gpus)
     for i in iterator:
@@ -169,11 +164,11 @@ class DynamicPlanner(ThreadBase):
     def __init__(
         self,
         gpus_distance: np.ndarray,
-        in_q: Queue[MetaBundle | None],
-        out_q: Queue[Tuple[MetaBundle, List[DyPlan]] | None],
+        in_q: Queue[MetasDyNeed | None | Literal["end_of_epoch"]],
+        out_q: Queue[list[DyPlan] | None],
         stop_ev: threading.Event,
-    ):
-        super().__init__(name="dynamic_planner")
+    ) -> None:
+        super().__init__(name="dynamic_planner", stop_ev=stop_ev)
         """
         初始化规划器。
 
@@ -187,86 +182,89 @@ class DynamicPlanner(ThreadBase):
         self.in_q = in_q
         self.out_q = out_q
         self.stop_ev = stop_ev
-        self.pending_infos = None
+        self.pending: tuple[list[set[int]], list[set[int]]] | None = None
 
-    def logic(self):
+    def logic(self) -> None:
         while not self.stop_ev.is_set():
-            new_infos = self.in_q.get(block=True)
-            if new_infos is not None:
-                if self.pending_infos is None:
-                    current_needs, _ = new_infos
-                    self.pending_infos = new_infos
-                    self.fetch = current_needs
+            in_q_data = self.in_q.get(block=True)
+            if isinstance(in_q_data, tuple):
+                if self.pending is None:
+                    needs, _ = in_q_data
+                    self.pending = in_q_data
+                    self.fetchs_of_1 = needs
                 else:
-                    current_needs, current_updates = self.pending_infos
-                    next_needs, _ = new_infos
-                    plan = self._plan(current_needs, current_updates, next_needs)
-
+                    needs, updates = self.pending
+                    next_needs, _ = in_q_data
+                    plan = self._plan(needs, updates, next_needs)
                     self.out_q.put(plan)
-                    self.pending_infos = new_infos
-
-            elif new_infos is None:
-                assert self.pending_infos is not None
-                current_needs, current_updates = self.pending_infos
+                    self.pending = in_q_data
+            elif in_q_data == "end_of_epoch":
+                assert self.pending is not None
+                needs, updates = self.pending
                 # 没有下一个 batch 了，next_needs 为空
                 next_needs = [set() for _ in range(self.n_gpus)]
-
-                plan = self._plan(current_needs, current_updates, next_needs)
+                plan = self._plan(needs, updates, next_needs)
+                # this time will generate a plan, but next time will not generate plan
                 self.out_q.put(plan)
-                self.pending_infos = None
+                self.pending = None
+            else:
+                self.out_q.put(None)
+                break
 
     def _plan(
         self,
-        avails: List[Set[int]],
-        update_avails: List[Set[int]],
-        needs: List[Set[int]],
-    ) -> List[DyPlan]:
+        avails_of_1: list[set[int]],
+        update_avails_of_1: list[set[int]],
+        needs_of_2: list[set[int]],
+    ) -> list[DyPlan]:
         """规划内存（Memory）的P2P、CPU预取和CPU写回。"""
 
-        update_avails, all_update_avails = dedup_updates(
-            update_avails,
-            reverse=True,
+        update_avails_of_1, all_update_avails_of_1 = dedup_updates(
+            update_avails_of_1, reverse=True
         )
 
         n_gpus = self.n_gpus
 
         # === 解决痛点 2：中间结果存入 self ===
-        leftovers, fresh_p2p, fresh_p2p_cts = handle_update(needs, update_avails)
+        leftovers_of_1, fresh_p2p_1to2 = handle_update(needs_of_2, update_avails_of_1)
 
         # 1. 预处理：确定每个 GPU 实际持有的 "Stale" 数据
         # 如果提供了 fresh 集合，必须从持有列表中排除它们（因为 fresh 优先用于 fresh plan）
-        avails = [avail - all_update_avails for avail in avails]
-        needs = [need - all_update_avails for need in needs]
+        avails_of_1 = [avail - all_update_avails_of_1 for avail in avails_of_1]
+        needs_of_2 = [need - all_update_avails_of_1 for need in needs_of_2]
 
-        needs, stale_p2p, stale_p2p_cts = handle_remaining(
-            needs,  # <-- 从 self 读取
-            avails,
+        needs_of_2, stale_p2p_1to2 = handle_remaining(
+            needs_of_2,  # <-- 从 self 读取
+            avails_of_1,
             self.gpus_distance,
         )  # 这种没有新mem的节点,直接发送旧的mem就可以(由distance最近的发)
 
         plans = []
-        p2p = [[set() for _ in range(n_gpus)] for _ in range(n_gpus)]
+        p2p: list[list[set[int]]] = [
+            [set() for _ in range(n_gpus)] for _ in range(n_gpus)
+        ]
+        p2p_cts = np.zeros((n_gpus, n_gpus), dtype=np.int32)
 
-        fetch = self.fetch
-        self.fetch = needs
+        fetchs_of_1 = self.fetchs_of_1
+        self.fetchs_of_1 = needs_of_2
 
         for src in range(n_gpus):
             for dst in range(n_gpus):
-                intersection = fresh_p2p[src][dst] & stale_p2p[src][dst]
-                assert len(intersection) == 0, (
-                    "Fresh and Stale P2P sets should be disjoint."
-                )
-                p2p[src][dst] = fresh_p2p[src][dst] | stale_p2p[src][dst]
+                if __debug__:
+                    intersection = fresh_p2p_1to2[src][dst] & stale_p2p_1to2[src][dst]
+                    assert len(intersection) == 0, (
+                        "Fresh and Stale P2P sets should be disjoint."
+                    )
+                p2p[src][dst] = fresh_p2p_1to2[src][dst] | stale_p2p_1to2[src][dst]
+                p2p_cts[src, dst] = len(p2p[src][dst])
 
-            rec_cts = fresh_p2p_cts[:, src] + stale_p2p_cts[:, src]
-            send_cts = fresh_p2p_cts[src, :] + stale_p2p_cts[src, :]
-
+        for src in range(n_gpus):
             plan = DyPlan(
                 p2p=p2p[src],
-                fetch=fetch[src],
-                writeback=leftovers[src],
-                rec_cts=rec_cts,  # 两个长度相等,可以逐位相加
-                send_cts=send_cts,  # 两个长度相等,可以逐位相加
+                fetch=fetchs_of_1[src],
+                writeback=leftovers_of_1[src],
+                rec_cts=p2p_cts[:, src],  # 两个长度相等,可以逐位相加
+                send_cts=p2p_cts[src, :],  # 两个长度相等,可以逐位相加
             )
             plans.append(plan)
         return plans

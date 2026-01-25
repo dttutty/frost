@@ -22,16 +22,18 @@ class JODIETimeEmbedding(nn.Module):
     since the last update to predict the future state.
     """
 
-    def __init__(self, dim_out):
+    def __init__(self, dim_out: int) -> None:
         "dim_out = gnn dim_out = dim memory"
-        super(JODIETimeEmbedding, self).__init__()
+        super().__init__()
         self.time_emb = nn.Linear(1, dim_out)
         stdv = 1.0 / math.sqrt(self.time_emb.in_features)
         with torch.no_grad():
             self.time_emb.weight.normal_(0.0, stdv)
             self.time_emb.bias.normal_(0.0, stdv)
 
-    def forward(self, h, mem_ts, ts):
+    def forward(
+        self, h: torch.Tensor, mem_ts: torch.Tensor, ts: torch.Tensor
+    ) -> torch.Tensor:
         # Time difference normalization as per JODIE paper/code
         time_diff = (ts - mem_ts) / (ts + 1)
         # Scaling the embedding: h * (1 + w * DyX_t)
@@ -42,7 +44,9 @@ class JODIETimeEmbedding(nn.Module):
 
 
 class JODIE(nn.Module):
-    def __init__(self, dim_node, dim_memory=100, dim_time=100):
+    def __init__(
+        self, dim_node: int, dim_memory: int = 100, dim_time: int = 100
+    ) -> None:
         """
         Args:
             dim_node: Dimension of raw node features (nfeat).
@@ -51,7 +55,7 @@ class JODIE(nn.Module):
             dim_time: Dimension of time encoding.
             dropout: Dropout rate.
         """
-        super(JODIE, self).__init__()
+        super().__init__()
         self.dim_node = dim_node
 
         if dim_time > 0:
@@ -68,7 +72,7 @@ class JODIE(nn.Module):
         self.jodie_time_proj = JODIETimeEmbedding(dim_out=dim_memory)
 
     @staticmethod
-    def analyze_need(root_nodes):
+    def analyze_need(root_nodes: set[int]) -> BatchNodeStateIO:
         all_nodes = root_nodes
         return BatchNodeStateIO(
             mem_needed=all_nodes,
@@ -93,8 +97,8 @@ class JODIE(nn.Module):
 
     def forward(
         self,
-        mfgs,
-    ):
+        mfgs: list[list[torch.Tensor]],
+    ) -> torch.Tensor:
         """
         mfgs: List of DGL Blocks.
               mfgs[0] is the target block containing memory and mailbox info.

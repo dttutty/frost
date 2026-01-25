@@ -12,20 +12,25 @@ class ThreadBase(threading.Thread):
     def __init__(
         self,
         name: str,
-    ):
-        super().__init__(daemon=True, name=name)
+        stop_ev: threading.Event,
+    ) -> None:
+        super().__init__(
+            daemon=True,
+            name=name,
+        )
+        self.logger = logging.getLogger(name)
+        self.stop_ev = stop_ev
 
-    def logic(self):
+    def logic(self) -> None:
         pass
 
-    def run(self):
+    def run(self) -> None:
         try:
             self.logic()
-
         except Exception:
             cls_name = self.__class__.__name__
             thread_name = threading.current_thread().name
-            rank = "Unknown"
+            rank: str | int = "Unknown"
             try:
                 if dist.is_available() and dist.is_initialized():
                     rank = dist.get_rank()

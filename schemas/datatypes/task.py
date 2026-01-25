@@ -7,6 +7,8 @@ import torch
 from numpy.typing import NDArray
 from torch import Tensor
 
+from schemas.datatypes.misc import MemNBox
+
 from .data_to_sync import BoxTsNid, MemTsNid
 from .plan import TensorDyPlan
 
@@ -53,8 +55,9 @@ class SyncTask:
     mem_plan: TensorDyPlan
     box_plan: TensorDyPlan
     root_new_mem: MemTsNid
-    pos_efeat: Tensor
-    old_x: X
+    pos_efeat: Tensor | None
+    old_x: MemNBox
     mail_delivery_tensor: torch.Tensor | None
-    is_last: bool
+    all_epoch_last_macro: bool
+    this_epoch_last_macro: bool
     ready_event: torch.cuda.Event

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Tuple
 
 import torch
 
@@ -14,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 class SampleMixin:
     @staticmethod
-    def extract_raw_data(ret: List) -> List[DGLBlockMeta]:
+    def extract_raw_data(ret: list) -> list[DGLBlockMeta]:
         # 用简单的字典或者 NamedTuple 存储纯数据
         mfg_meta_list = []
         for tgb in ret:
@@ -34,9 +33,9 @@ class SampleMixin:
         return mfg_meta_list
 
     @staticmethod
-    def analyze_block(
-        mfg_meta_list: List[DGLBlockMeta], n_history: int
-    ) -> Tuple[set, set]:
+    def analyze_blocks(
+        mfg_meta_list: list[DGLBlockMeta], n_history: int
+    ) -> tuple[set, set]:
         all_nodes = set()
         root_nodes = set()
         for index, mfg_meta in enumerate(mfg_meta_list):
@@ -49,7 +48,7 @@ class SampleMixin:
 
     @classmethod
     def analyze_need(
-        cls, mfg_meta_list: List[DGLBlockMeta], n_history: int
+        cls, mfg_meta_list: list[DGLBlockMeta], n_history: int
     ) -> BatchNodeStateIO:
         """
         Analyzes the provided list of DGLBlockMeta to determine the maximum
@@ -62,7 +61,7 @@ class SampleMixin:
             BatchNodeStateIO: An object containing the sets of all source nodes
                             and the set of all root nodes.
         """
-        all_nodes, root_nodes = cls.analyze_block(mfg_meta_list, n_history)
+        all_nodes, root_nodes = cls.analyze_blocks(mfg_meta_list, n_history)
         batch_node_state_io = BatchNodeStateIO(
             mem_needed=all_nodes,
             mem_updated=root_nodes,
