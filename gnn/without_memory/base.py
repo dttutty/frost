@@ -3,6 +3,7 @@ import logging
 import torch
 import torch.nn as nn
 
+from gnn.components import EdgePredictor
 from schemas.datatypes.misc import Meta
 
 
@@ -13,7 +14,7 @@ class GNN(nn.Module):
     def __init__(
         self,
         gnn: nn.Module,
-        header: nn.Module,
+        header: EdgePredictor,
     ) -> None:
         super().__init__()
         self.gnn = gnn

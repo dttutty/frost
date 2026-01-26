@@ -222,4 +222,10 @@ class Planner(ThreadBase):
                 if self.nfeat_plan_in_q is not None:
                     self.nfeat_plan_in_q.put(None)
                 self.out_q.put(None)
+                if self.mem_plan_in_q is not None:
+                    self.mem_planner.join()
+                if self.mail_plan_in_q is not None:
+                    self.mail_planner.join()
+                if self.nfeat_plan_in_q is not None:
+                    self.nfeat_planner.join()
                 break

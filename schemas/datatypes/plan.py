@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import torch
 from numpy.typing import NDArray
 
+from tensor_set import TensorSet
+
 
 def set_to_tensor(s: set[int]) -> torch.Tensor:
     return torch.tensor(list(s)).long()
@@ -12,11 +14,11 @@ def set_to_tensor(s: set[int]) -> torch.Tensor:
 
 @dataclass(slots=True, kw_only=True)
 class BatchNodeStateIO:
-    mem_needed: set[int]
-    mem_updated: set[int]
-    mailbox_needed: set[int]
-    mailbox_updated: set[int]
-    nfeat_needed: set[int]
+    mem_needed: TensorSet
+    mem_updated: TensorSet
+    mailbox_needed: TensorSet
+    mailbox_updated: TensorSet
+    nfeat_needed: TensorSet
 
 
 @dataclass(slots=True, kw_only=True)

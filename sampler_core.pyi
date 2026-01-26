@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import List
-
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
@@ -28,7 +26,7 @@ class ParallelSampler:
     ) -> None: ...
     def sample(self, root_nodes: ArrayLike, root_ts: ArrayLike) -> None: ...
     def reset(self) -> None: ...
-    def get_ret(self) -> List[TemporalGraphBlock]: ...
+    def get_ret(self) -> list[TemporalGraphBlock]: ...
 
 class TemporalGraphBlock:
     def __init__(

@@ -250,7 +250,7 @@ def main() -> None:
             env=env,
             nccl=nccl,
             gloo=gloo,
-            model_components=model_components,
+            components=model_components,
             m_cfg=cfg.m,
         )
         worker.run()

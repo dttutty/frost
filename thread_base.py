@@ -15,7 +15,7 @@ class ThreadBase(threading.Thread):
         stop_ev: threading.Event,
     ) -> None:
         super().__init__(
-            daemon=True,
+            daemon=False,
             name=name,
         )
         self.logger = logging.getLogger(name)

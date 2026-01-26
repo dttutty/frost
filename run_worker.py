@@ -1,14 +1,15 @@
 import logging
-import math
 import os
-import queue
 import threading
 from queue import Queue as Q
+from typing import Literal
 
 import torch
 import torch.distributed as dist
-from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torchmetrics import MetricCollection
+from torchmetrics.aggregation import MeanMetric
+from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
 
 from gnn.with_memory.base import MemoryBaseGNN
 from gnn.without_memory.base import GNN
@@ -16,18 +17,12 @@ from schemas.alias import MetaWEvent
 from schemas.datatypes.cfg import MemoryCFG, SampleCFG, TrainCFG
 from schemas.datatypes.data_to_sync import BoxTsNid, MailTsNid, MemTsNid
 from schemas.datatypes.env import Env
-from schemas.datatypes.misc import (
-    MemNBox,
-    Meta,
-    ModelComponents,
-    Shared,
-)
-from schemas.datatypes.plan import TensorPlanSet
+from schemas.datatypes.misc import MemNBox, Meta, ModelComponents, Result, Shared
 from schemas.datatypes.task import P2PTask, SyncTask
 from worker.assembler.dy_asm import DyAssembler
 from worker.data_syncer.data_syncer import DataSyncer
 from worker.h2d import H2D
-from worker.receiver import HostWorkerSyncer as Receiver
+from worker.receiver import Receiver as Receiver
 
 
 logger = logging.getLogger(__name__)
@@ -54,7 +49,7 @@ class Worker:
         env: Env,
         nccl: dist.ProcessGroup,
         gloo: dist.ProcessGroup,
-        model_components: ModelComponents,
+        components: ModelComponents,
         m_cfg: MemoryCFG | None = None,
     ) -> None:
         self.s_cfg = s_cfg
@@ -64,23 +59,24 @@ class Worker:
 
         self.shared = shared
         self.total_epoch = t_cfg.epoch
-        self.meta_q: Q[tuple[Meta, torch.cuda.Event] | None] = Q()
+        self.meta_q: Q[Meta | None | Literal["end_of_epoch"]] = Q()
         self.stop_ev = threading.Event()
         self.nccl = nccl
-        self.curr_epoch = -1
+        self.curr_epoch = 0
         self.logger: logging.Logger = logger
         self.fetch_factor = 1
         self.model: GNN | MemoryBaseGNN | DDP
-        self.xfull_q: Q[MetaWEvent | None] = Q()
+        self.full_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q()
 
         self.h2d_sem: threading.BoundedSemaphore = threading.BoundedSemaphore(0)
+        self.destination_q_for_h2d: Q[MetaWEvent | None | Literal["end_of_epoch"]]
 
         if self.shared is not None:
             assert m_cfg is not None
             self.delta_q: Q[tuple[MemNBox | None, torch.cuda.Event]] = Q()
             self.mem_p2p_q: Q[P2PTask] = Q()
             self.box_p2p_q: Q[P2PTask] = Q()
-            self.xpart_q: Q[MetaWEvent | None] = Q()
+            self.xpart_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q()
             self.sync_q: Q[SyncTask] = Q()
             assert shared is not None, "Shared memory must be provided if memory exists"
             destination_q_for_h2d = self.xpart_q
@@ -99,13 +95,13 @@ class Worker:
             self.assembler = DyAssembler(
                 in_q=self.xpart_q,
                 delta_q=self.delta_q,
-                out_q=self.xfull_q,
+                out_q=self.full_q,
                 stop_ev=self.stop_ev,
             )
             self.data_syncer.start()
             self.assembler.start()  # 启动 Assembler 组装线程
         else:
-            destination_q_for_h2d = self.xfull_q
+            destination_q_for_h2d = self.full_q
             self.data_syncer = None
 
         self.h2d = H2D(
@@ -119,57 +115,33 @@ class Worker:
             h2d_sem=self.h2d_sem,
         )
 
-        self.result_q = Q()
-        self.cmd_q = Q()
+        self.result_q: Q[Result | None] = Q()
 
         self.receiver = Receiver(
             env=self.env,
             gloo=gloo,
-            cmd_q=self.cmd_q,
             out_q=self.meta_q,
             result_q=self.result_q,
             stop_ev=self.stop_ev,
         )
 
-        self.best_ap_epoch = {
-            "val_ap": 0.0,
-            "val_auc": 0.0,
-            "epoch": -1,
-            "test_ap": 0.0,
-            "test_auc": 0.0,
-        }
-        self.best_auc_epoch = {
-            "val_ap": 0.0,
-            "val_auc": 0.0,
-            "epoch": -1,
-            "test_ap": 0.0,
-            "test_auc": 0.0,
-        }
-
-        self.state = {
-            "total_epoch": math.inf,
-            "done_epoch": 0,
-            "total_macro_batch": math.inf,
-            "done_macro_batch": 0,
-        }
-
         if self.shared is not None:
-            assert model_components.memory_updater is not None
-            assert model_components.header is not None
-            self.gnn = model_components.gnn
+            assert components.memory_updater is not None
+            assert components.header is not None
+            self.gnn = components.gnn
             self.model = MemoryBaseGNN(
-                gnn=model_components.gnn,
-                memory_updater=model_components.memory_updater,
+                gnn=components.gnn,
+                memory_updater=components.memory_updater,
                 sync_q=self.sync_q,
-                header=model_components.header,
+                header=components.header,
             )
         else:
-            assert model_components.header is not None
-            self.gnn = model_components.gnn
+            assert components.header is not None
+            self.gnn = components.gnn
 
             self.model = GNN(
-                gnn=model_components.gnn,
-                header=model_components.header,
+                gnn=components.gnn,
+                header=components.header,
             )
 
         self.model = self.model.cuda()
@@ -185,89 +157,77 @@ class Worker:
         )
         self.criterion = torch.nn.BCEWithLogitsLoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=t_cfg.lr)
+        self.train_loss_tracker = MeanMetric(process_group=self.nccl).cuda()
 
+        # 2. 验证阶段：全都要
+        # Loss 用于看过拟合，AUC/AP 用于选模型
+        self.val_metrics = MetricCollection(
+            {
+                "val_loss": MeanMetric(
+                    process_group=self.nccl
+                ),  # 这里的 Loss 是单纯统计数值
+                "val_auc": BinaryAUROC(
+                    thresholds=10000, process_group=self.nccl
+                ),  # 推荐开分桶加速
+                "val_ap": BinaryAveragePrecision(
+                    thresholds=10000, process_group=self.nccl
+                ),
+            }
+        ).cuda()
+
+        # 3. 测试阶段：只看指标
+        self.test_metrics = MetricCollection(
+            {
+                "test_auc": BinaryAUROC(thresholds=10000, process_group=self.nccl),
+                "test_ap": BinaryAveragePrecision(
+                    thresholds=10000, process_group=self.nccl
+                ),
+            }
+        ).cuda()
         self.h2d.start()  # 启动 H2D 预取线程
         self.receiver.start()  # 启动 Receiver 接收线程
+        self.local_best_auc = 0.0
 
-    def reset_ap_auc_count(self) -> None:
-        self.count_sum = 0
-        self.my_rank_preds: list[torch.Tensor] = []
-        self.my_rank_labels: list[torch.Tensor] = []
+    def on_train_epoch_end(self) -> Result | None:
+        # 3. 只有在 Epoch 结束时，才做一次全局同步，计算精准的平均 Loss 记入日志
+        train_loss = self.train_loss_tracker.compute()
 
-        # [新增] 初始化 Loss 累积器 (必须在 GPU 上，避免 copy)
-        self.epoch_loss_sum = torch.tensor(0.0, device="cuda")
-        self.epoch_batch_count = torch.tensor(0.0, device="cuda")
-
-        self.val_loss_sum = torch.tensor(0.0, device="cuda")
-        self.val_batch_count = torch.tensor(0.0, device="cuda")
-
-    def pad_tensor(
-        self, local_tensor: torch.Tensor, max_size: int, fill: int = -1
-    ) -> torch.Tensor:
-        if local_tensor.shape[0] < max_size:
-            pad_len = max_size - local_tensor.shape[0]
-            # Create padding shape: (pad_len, dim1, dim2, ...)
-            pad_shape = list(local_tensor.shape)
-            pad_shape[0] = pad_len
-            padding = torch.full(
-                pad_shape, fill, dtype=local_tensor.dtype, device="cuda"
+        val_results = self.val_metrics.compute()
+        test_results = self.test_metrics.compute()
+        if dist.get_rank() == 0:
+            print(f"Epoch{self.curr_epoch} Done. ")
+            print(f"Train Loss: {train_loss}, Val Loss {val_results['val_loss']}")
+            print(f"Val AUC: {val_results['val_auc']}, Val AP: {val_results['val_ap']}")
+            print(
+                f"Test AUC: {test_results['test_auc']}, Test AP: {test_results['test_ap']}"
             )
-            padded_local = torch.cat([local_tensor, padding], dim=0)
-        else:
-            padded_local = local_tensor
-        return padded_local
-
-    def train(self, meta: Meta, plan_set: TensorPlanSet | None) -> None:
-        meta_info = meta.epoch_split_iter_info
-        if meta_info.macro_position_of_split == "first":
-            self.reset_ap_auc_count()
-        n_pos_edges = meta.pos_edge.shape[0]
-        labels = torch.cat(
-            [
-                torch.ones(n_pos_edges, device="cuda"),
-                torch.zeros(n_pos_edges * self.n_neg, device="cuda"),
-            ],
-            dim=0,
+        self.val_metrics.reset()
+        self.test_metrics.reset()
+        self.train_loss_tracker.reset()
+        res = Result(
+            train_loss=train_loss.item(),
+            val_loss=val_results["val_loss"].item(),
+            val_auc=val_results["val_auc"].item(),
+            val_ap=val_results["val_ap"].item(),
+            test_auc=test_results["test_auc"].item(),
+            test_ap=test_results["test_ap"].item(),
         )
+        if dist.get_rank() == 0:
+            return res
+        else:
+            return None
+
+    def train(self, meta: Meta) -> None:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
-        self.logger.debug(
-            f"Rank {self.env.local_rank} training microbatch {meta_info.cur_macro_of_epoch}"
-        )
-
         logits = self.model(meta)
-
-        self.logger.debug(
-            f"Rank {self.env.local_rank} finished forward for microbatch {meta_info.cur_macro_of_epoch}"
-        )
-
-        loss = self.criterion(logits.squeeze(-1), labels)
+        loss = self.criterion(logits.squeeze(-1), meta.labels)
         if self.shared is not None:
             self.handle_p2p_q()
-
         dist.barrier(group=self.nccl)
         loss.backward()
         self.optimizer.step()
-
-        # self.receive_next_meta_and_put_in_queue()
-        self.epoch_loss_sum += loss.detach()
-        self.epoch_batch_count += 1.0
-        # reduced_loss = loss.detach().clone()
-        # dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=self.nccl)
-
-        if meta_info.macro_position_of_split == "last":
-            # 此时进行 all_reduce，将所有卡的 Loss 总和加起来
-            dist.all_reduce(self.epoch_loss_sum, op=dist.ReduceOp.SUM, group=self.nccl)
-            dist.all_reduce(
-                self.epoch_batch_count, op=dist.ReduceOp.SUM, group=self.nccl
-            )
-
-            if self.env.local_rank == 1:  # 或者 rank 0
-                # 只有在这里才调用 .item()，此时 Epoch 已经结束，不影响训练流水线
-                avg_loss = (self.epoch_loss_sum / self.epoch_batch_count).item()
-                self.logger.info(f"[Epoch End] Training Average Loss: {avg_loss:.6f}")
-
-        # if self.env.l
+        self.train_loss_tracker.update(loss)
 
     def _exec_p2p(self, p2p_task: P2PTask) -> MemTsNid | BoxTsNid | MailTsNid | None:
         nid, data, ts, type = p2p_task.nid, p2p_task.data, p2p_task.ts, p2p_task.type
@@ -346,277 +306,73 @@ class Worker:
         )
 
     @torch.no_grad()
-    def eval(self, meta: Meta, x: X, plan_set: TensorPlanSet | None) -> None:
-        ap = 0.0
-        auc = 0.0
-
-        if meta.epoch_split_iter_info.macro_position_of_split == "first":
-            self.reset_ap_auc_count()
-
-        n_pos_edges = meta.pos_edge.shape[0]
-        labels = torch.cat(
-            [
-                torch.ones(n_pos_edges, device="cuda"),
-                torch.zeros(n_pos_edges, device="cuda"),
-            ],
-            dim=0,
-        )
+    def eval(self, meta: Meta) -> None:
+        assert meta.labels is not None
         self.model.eval()
-
         logits_pos, logits_neg = self.model(meta)
         if self.shared is not None:
             self.handle_p2p_q()
         logits = torch.cat([logits_pos, logits_neg], dim=0)
         y_pred = logits.sigmoid()
-        # if not (meta.epoch_split_iter_info.split == "test" and meta.epoch_split_iter_info.position_in_split == "last"):
-        #     self.receive_next_meta_and_put_in_queue()
-        self.logger.debug(
-            f"Worker: rank {self.env.local_rank} received next meta for microbatch {meta.epoch_split_iter_info.cur_macro_of_split}, {meta.epoch_split_iter_info.split} {meta.epoch_split_iter_info.macro_position_of_split}"
-        )
 
         if meta.epoch_split_iter_info.split == "val":
-            loss = self.criterion(logits.squeeze(-1), labels)
+            loss = self.criterion(logits.squeeze(-1), meta.labels)
 
-            self.val_loss_sum += loss.detach()
-            self.val_batch_count += 1.0
-
-            # reduced_loss = loss.detach().clone()
-            # print meta.split
-
-            # dist.all_reduce(
-            #     reduced_loss,
-            #     op=dist.ReduceOp.SUM,
-            #     group=self.nccl,
-            # )
-            # if self.env.local_rank == 0:
-            #     # only rank 0 prints eval loss
-            #     self.logger.info(
-            #         f"[Microbatch {meta.macro_bid}, loss {reduced_loss.item()}"
-            #     )
+            self.val_metrics.update(preds=y_pred, target=meta.labels)
+            self.val_metrics["val_loss"].update(loss)
         else:
-            # torch.cuda.synchronize()
             assert meta.epoch_split_iter_info.split == "test"
-            self.logger.info(
-                f"Rank {self.env.local_rank} finished forward for microbatch {meta.epoch_split_iter_info.cur_macro_of_split}"
-            )
-
-            if self.env.local_rank == 0:
-                # only rank 0 prints eval loss
-                self.logger.info(
-                    f"[Microbatch {meta.epoch_split_iter_info.cur_macro_of_split}, test done]"
-                )
-        self.my_rank_preds.append(y_pred)
-        self.my_rank_labels.append(labels)
-        # print self.my_rank_preds and self.my_rank_labels sizes
-        self.logger.debug(
-            f"Rank {self.env.local_rank} preds size: {len(self.my_rank_preds)}, labels size: {len(self.my_rank_labels)}"
-        )
-
-        if meta.epoch_split_iter_info.macro_position_of_split == "last":
-            # A. 统一结算 Loss (新增)
-            if meta.epoch_split_iter_info.split == "val":
-                dist.all_reduce(
-                    self.val_loss_sum, op=dist.ReduceOp.SUM, group=self.nccl
-                )
-                dist.all_reduce(
-                    self.val_batch_count, op=dist.ReduceOp.SUM, group=self.nccl
-                )
-
-                if self.env.local_rank == 0:  # 只有 Rank 0 打印
-                    avg_val_loss = (self.val_loss_sum / self.val_batch_count).item()
-                    self.logger.info(f"[Val End] Average Loss: {avg_val_loss:.6f}")
-
-            my_rank_preds = torch.cat(self.my_rank_preds)
-            my_rank_labels = torch.cat(self.my_rank_labels)
-
-            # Only take the valid data length for this specific rank
-
-            local_size = torch.tensor(
-                [my_rank_preds.shape[0]], dtype=torch.long, device="cuda"
-            )
-            all_sizes = [torch.zeros_like(local_size) for _ in range(self.env.n_gpu)]
-            self.logger.debug(f"Rank {self.env.local_rank} before gather all_sizes")
-
-            dist.all_gather(all_sizes, local_size, group=self.nccl)
-
-            # Convert size tensors to integers list
-            size_list = [size.item() for size in all_sizes]
-            max_size = int(max(size_list))
-            pad_preds = self.pad_tensor(my_rank_preds, max_size, fill=-1)
-            pad_labels = self.pad_tensor(my_rank_labels, max_size, fill=-1)
-
-            preds_list = [torch.zeros_like(pad_preds) for _ in range(self.env.n_gpu)]
-            labels_list = [torch.zeros_like(pad_labels) for _ in range(self.env.n_gpu)]
-            self.logger.debug(f"Rank {self.env.local_rank} before gather preds_list")
-            dist.all_gather(preds_list, pad_preds, group=self.nccl)
-            self.logger.debug(f"Rank {self.env.local_rank} before gather labels_list")
-
-            dist.all_gather(labels_list, pad_labels, group=self.nccl)
-            self.logger.debug(
-                f"Rank {self.env.local_rank} after gather all preds and labels"
-            )
-            if self.env.local_rank == 0:
-                all_rank_preds = []
-                all_rank_labels = []
-                for i in range(self.env.n_gpu):
-                    real_length = size_list[i]
-                    all_rank_preds.append(preds_list[i][:real_length])
-                    all_rank_labels.append(labels_list[i][:real_length])
-                all_labels = torch.cat(all_rank_labels).cpu().numpy()
-                all_preds = torch.cat(all_rank_preds).cpu().numpy()
-                ap = average_precision_score(all_labels, all_preds)
-                auc = roc_auc_score(all_labels, all_preds)
-                self.logger.info(
-                    f"Evaluation results at epoch end - AP: {ap:.4f}, AUC: {auc:.4f}"
-                )
-
-        return ap, auc
+            self.test_metrics.update(preds=y_pred, target=meta.labels)
 
     def run(self) -> None:
-        while True:
-            # 处理命令（非阻塞/短超时）
-            try:
-                cmd, payload = self.cmd_q.get_nowait()
-            except queue.Empty:
-                cmd = None
-
-            if cmd == "SAVE_MODEL":
-                self.save_model(os.path)  # 这里在主线程执行
-
-    def run_pipeline(self) -> None:
         self.logger.info("Worker: Starting H2D thread...")
-
         self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
         self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
         self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
         self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
         if self.shared is not None:
-            self.delta_q.put(None)
-
-        _initialize = False
+            ready_event: torch.cuda.Event = torch.cuda.Event()
+            ready_event.record(torch.cuda.current_stream())
+            self.delta_q.put((None, ready_event))
 
         while True:
-            logger.debug("Worker: waiting for x_full...")
-            if _initialize is False:
+            full = self.full_q.get()
+            if isinstance(full, tuple):
+                meta, ready_event = full
+                torch.cuda.current_stream().wait_stream(ready_event)
+                m_info = meta.epoch_split_iter_info
+                if m_info.split == "train":  # if training
+                    self.train(meta)
+                elif m_info.split in ["val", "test"]:  # if evaluating
+                    self.eval(meta)
+            if full == "end_of_epoch":
+                result = self.on_train_epoch_end()
+                self.result_q.put(result)
+                self.save_model(path="last.ckpt")
+                val_auc = result.val_auc if result is not None else 0.0
+                if val_auc > self.local_best_auc:
+                    self.local_best_auc = val_auc
+                    # 只有打破纪录才写磁盘
+                    self.save_model(path="best.ckpt")
                 self.curr_epoch += 1
-                # self.receive_next_meta_and_put_in_queue()
-                _initialize = True
-                # print meta split and mark
-            if self.shared is not None:
-                meta, plan_set, sorted_x, assemble_stream = self.xfull_q.get()
-                logger.debug(
-                    "Worker: got x_full", meta.epoch_split_iter_info.cur_macro_of_split
-                )
-                torch.cuda.current_stream().wait_stream(assemble_stream)
-                logger.debug(
-                    "Worker: waited for x_full",
-                    meta.epoch_split_iter_info.cur_macro_of_split,
-                )
-            else:
-                meta, sorted_x, plan_set, ready_event = self.xfull_q.get()
-                torch.cuda.current_stream().wait_event(ready_event)
-
-                logger.debug(
-                    "Worker: got x_full", meta.epoch_split_iter_info.cur_macro_of_split
-                )
-            self.logger.info(
-                f"Worker: rank {self.env.local_rank} processing microbatch {meta.epoch_split_iter_info.cur_macro_of_split}, {meta.epoch_split_iter_info.split} {meta.epoch_split_iter_info.macro_position_of_split}"
-            )
-
-            def check_sparse_table(
-                name: str, ids: torch.Tensor | None, data: torch.Tensor | None
-            ) -> None:
-                pass
-                if ids is None or data is None:
-                    return
-                assert ids.numel() == data.size(0), (
-                    f"{name}: ids rows {ids.numel()} != data rows {data.size(0)}"
-                )
-                mn = int(ids.min().item())
-                assert mn >= 0, f"{name}: negative global id min={mn}"
-
-                # 如果你要求 ids 排序（方便 searchsorted）
-                assert torch.all(ids[1:] >= ids[:-1]), f"{name}: ids not sorted"
-
-                # 如果你要求 unique（可选）
-                has_dup = torch.any(ids[1:] == ids[:-1])
-                assert not has_dup, f"{name}: duplicated ids found"
-
-            # if __debug__:
-            #     logger.debug("Worker: checking sparse tables", meta.epoch_split_iter_info.cur_macro_of_split)
-            #     if sorted_x.mem:
-            #         check_sparse_table("mem", sorted_x.mem.id, sorted_x.mem.data)
-            #     if sorted_x.box:
-            #         check_sparse_table("box", sorted_x.box.id, sorted_x.box.data)
-            if plan_set is not None:
-                plan_set = plan_set.cuda()
-            logger.debug("plan_set moved to cuda")
-            # torch.cuda.synchronize()
-
-            if meta.epoch_split_iter_info.split == "train":  # if training
-                self.train(meta, sorted_x, plan_set)
-            elif meta.epoch_split_iter_info.split in ["val", "test"]:  # if evaluating
-                if meta.epoch_split_iter_info.macro_position_of_split == "first":
-                    self.reset_ap_auc_count()
-                self.eval(meta, sorted_x, plan_set)
-            # pint split and mark
-            self.logger.debug(
-                f"Worker: rank {self.env.local_rank} finished processing microbatch {meta.epoch_split_iter_info.cur_macro_of_split}, {meta.epoch_split_iter_info.split} {meta.epoch_split_iter_info.macro_position_of_split}"
-            )
-
-            if (
-                meta.epoch_split_iter_info.split == "test"
-                and meta.epoch_split_iter_info.macro_position_of_split == "last"
-            ):  # last microbatch of an epoch
-                self.logger.info(
-                    f"Worker: Finished epoch {self.curr_epoch} test phase."
-                )
                 if self.shared:
                     self.shared.reset()
-                # print current_epoch
-                self.logger.info(f"Worker: Current epoch {self.curr_epoch} completed.")
-                _initialize = False
-                self.logger.debug("DyX set to None after epoch end")
-
-            # print total epochs and current_epoch
-            if (
-                meta.epoch_split_iter_info.split == "test"
-                and meta.epoch_split_iter_info.macro_position_of_split == "last"
-            ):
-                self.logger.info(f"total_epoch {self.total_epoch}")
-                self.logger.info(
-                    f"Worker: rank {self.env.local_rank} completed microbatch {meta.epoch_split_iter_info.cur_macro_of_split}. Current epoch: {self.curr_epoch}/{self.total_epoch}."
-                )
-            if (
-                self.total_epoch == self.curr_epoch + 1
-                and meta.epoch_split_iter_info.split == "test"
-                and meta.epoch_split_iter_info.macro_position_of_split == "last"
-            ):  # last microbatch of the final epoch
+            if full is None:
                 torch.cuda.synchronize()
-                self.logger.info(
-                    "Worker: Training finished. Waiting for receiver to shutdown..."
-                )
-                self.stop_ev.set()
-
-                # 【新增】等待 Receiver 线程优雅结束
-                # 因为 Host 发送了 None，Receiver 里的循环会 break，线程会结束
-                if self.receiver.is_alive():
-                    self.receiver.join(timeout=30)  # 等待最多30秒
-                    if self.receiver.is_alive():
-                        self.logger.warning(
-                            "Worker: Receiver thread did not exit cleanly!"
-                        )
-
-                self.logger.info("Worker: Receiver shutdown. Entering final barrier...")
-                dist.barrier()  # 这里的 group 要和 Host 的 barrier group 一致
                 break
 
+    def cleanup(self) -> None:
+        self.h2d.join()
+        self.receiver.join()
+        if self.data_syncer is not None:
+            self.data_syncer.join()
+        self.assembler.join()
+        dist.barrier()
+        dist.destroy_process_group()
+
     # 供外部保存/加载
-    def save_model(self, path) -> None:
-        if dist.is_available() and dist.is_initialized():
-            rank = dist.get_rank()
-        else:
-            rank = 0
+    def save_model(self, path: str) -> None:
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
 
         if rank == 0:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -627,7 +383,7 @@ class Worker:
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
 
-    def load_model(self, path) -> None:
+    def load_model(self, path: str) -> None:
         # 让所有rank都在文件写完后再开始读（更稳）
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
@@ -648,6 +404,6 @@ class Worker:
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
 
-    def load_memory(self, memory_state) -> None:
+    def load_memory(self, memory_state: dict) -> None:
         if self.shared is not None:
             self.model.module.load_memory_state(memory_state)

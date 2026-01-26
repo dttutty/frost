@@ -1,12 +1,13 @@
 import logging
 import threading
 from queue import Queue as Q
-from typing import Any, Literal
+from typing import Literal
 
 import torch.distributed as dist
 
 from schemas.alias import MetaBundle
 from schemas.datatypes.env import Env
+from schemas.datatypes.misc import Meta, Result
 from schemas.datatypes.plan import DyPlan, PlanSet, StPlan
 from thread_base import ThreadBase
 
@@ -23,6 +24,7 @@ class Scatter(ThreadBase):
         mail_plan_out_q: Q[list[DyPlan] | None] | None,
         nfeat_plan_out_q: Q[list[StPlan] | None] | None,
         env: Env,
+        result_q: Q[Result],
         group: dist.ProcessGroup,
         stop_ev: threading.Event,
     ) -> None:
@@ -33,6 +35,7 @@ class Scatter(ThreadBase):
         self.mail_plan_out_q = mail_plan_out_q
         self.nfeat_plan_out_q = nfeat_plan_out_q
         self.stop_ev = stop_ev
+        self.result_q = result_q
 
         self.world_size: int = env.world_size
         self.local_rank: int = env.local_rank
@@ -64,10 +67,10 @@ class Scatter(ThreadBase):
             group=self.group,
         )
 
-    def gather_receive(self) -> list[Any]:
+    def gather_receive(self) -> Result:
         assert self.local_rank == self.host_rank, "只有 Host 进程可以 gather"
 
-        gathered_list = [None] * self.world_size
+        gathered_list: list[Result | None] = [None] * self.world_size
 
         # Host 也必须参与，并提供一个“占位”的发送值
         dist.gather_object(
@@ -75,18 +78,21 @@ class Scatter(ThreadBase):
             gathered_list,
             dst=self.host_rank,  # Host 发送的占位数据
         )
-
+        data_0_result = gathered_list[0]
+        assert data_0_result is not None, "Worker 返回的 Result 不能为 None
         # 丢掉 Host 自己的槽位（最后一个），只返回 workers 的结果
-        return gathered_list[:-1]
+        return data_0_result
 
     def logic(self) -> None:
         while not self.stop_ev.is_set():
             meta_2_scatter = self.in_q.get(block=True)
             if meta_2_scatter is None:
                 self.scatter_send(None)
+                break
             elif meta_2_scatter == "end_of_epoch":
                 self.scatter_send("end_of_epoch")
                 data = self.gather_receive()
+                self.result_q.put(data)
             else:
                 assert len(meta_2_scatter) == self.n_gpu
                 mem_plans = mail_plans = nfeat_plans = None

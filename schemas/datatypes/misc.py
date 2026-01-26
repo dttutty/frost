@@ -10,6 +10,7 @@ from dgl.heterograph import DGLBlock
 from numpy.typing import NDArray
 from torch import Tensor
 
+from gnn.components import EdgePredictor
 from tensor_set import TensorSet
 
 from ..alias import IntArr
@@ -97,7 +98,7 @@ class EdgeFeat:
 class ModelComponents:
     memory_updater: torch.nn.Module | None
     gnn: torch.nn.Module
-    header: torch.nn.Module | None
+    header: EdgePredictor | None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -194,6 +195,16 @@ class MetaList:
 
 
 @dataclass(slots=True, kw_only=True)
+class Result:
+    train_loss: float
+    val_loss: float
+    val_auc: float
+    val_ap: float
+    test_auc: float
+    test_ap: float
+
+
+@dataclass(slots=True, kw_only=True)
 class Meta:
     root_nid: Tensor
     root_ts: Tensor  # 没有3倍处理,这个信息不需要传输到gpu
@@ -214,6 +225,7 @@ class Meta:
     n_src: int = 1
 
     plan_set: TensorPlanSet | None = None
+    labels: Tensor | None = None
 
     @cached_property
     def pos_edge(self) -> torch.Tensor:

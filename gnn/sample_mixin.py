@@ -4,6 +4,7 @@ import logging
 
 import torch
 
+from sampler_core import ParallelSampler
 from schemas.datatypes.misc import DGLBlockMeta, SampleReturn
 from schemas.datatypes.plan import BatchNodeStateIO
 
@@ -12,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 
 class SampleMixin:
-    @staticmethod
-    def extract_raw_data(ret: list) -> list[DGLBlockMeta]:
+    @classmethod
+    def extract_raw_data(cls, ret: list) -> list[DGLBlockMeta]:
         # 用简单的字典或者 NamedTuple 存储纯数据
         mfg_meta_list = []
         for tgb in ret:
@@ -32,9 +33,9 @@ class SampleMixin:
             mfg_meta_list.append(mfg_meta)
         return mfg_meta_list
 
-    @staticmethod
+    @classmethod
     def analyze_blocks(
-        mfg_meta_list: list[DGLBlockMeta], n_history: int
+        cls, mfg_meta_list: list[DGLBlockMeta], n_history: int
     ) -> tuple[set, set]:
         all_nodes = set()
         root_nodes = set()
@@ -74,7 +75,7 @@ class SampleMixin:
     @classmethod
     def sample(
         cls,
-        ngh_sampler,
+        ngh_sampler: ParallelSampler,
         src: torch.Tensor,
         dst: torch.Tensor,
         neg_dst: torch.Tensor,

@@ -87,13 +87,13 @@ class AsyncStallCoordinator:
 
         self._stop = False
         self._sync_thread = threading.Thread(
-            target=self._sync_loop, name=f"AsyncStallSync_r{rank}", daemon=True
+            target=self._sync_loop, name=f"AsyncStallSync_r{rank}", daemon=False
         )
 
-    def start(self):
+    def start(self) -> None:
         self._sync_thread.start()
 
-    def stop(self):
+    def stop(self) -> None:
         self._stop = True
         # Wake waiters so they can re-check condition and exit
         with self._cond:
@@ -115,7 +115,7 @@ class AsyncStallCoordinator:
             self._recompute_local_prefix()
         # No barrier here; background thread will publish global state
 
-    def wait_mail_permission(self, batch_id: int):
+    def wait_mail_permission(self, batch_id: int) -> None:
         if self.mem_stallness <= 0:
             return
         threshold = int(batch_id) - self.mem_stallness
@@ -125,7 +125,7 @@ class AsyncStallCoordinator:
             while self._global_prefix_done < threshold and not self._stop:
                 self._cond.wait(timeout=0.02)  # short timed waits to avoid dead waits
 
-    def _sync_loop(self):
+    def _sync_loop(self) -> None:
         # All ranks call all_reduce at a steady cadence to keep call counts aligned.
         # This thread is independent; it won't block the main/data-prep threads.
         while not self._stop:

@@ -1,12 +1,14 @@
 import logging
 import threading
 from queue import Queue as Q
+from typing import Literal
 
 import torch
 from dgl.heterograph import DGLBlock
 
+from schemas.alias import MetaWEvent
 from schemas.datatypes.data_to_sync import BoxTsNid, MemTsNid
-from schemas.datatypes.misc import MemNBox, Meta, Shared
+from schemas.datatypes.misc import MemNBox, Shared
 from schemas.datatypes.plan import TensorDyPlan
 from thread_base_with_stream import StreamThreadBase
 
@@ -44,9 +46,9 @@ class DyAssembler(StreamThreadBase):
 
     def __init__(
         self,
-        in_q: Q[tuple[Meta, torch.cuda.Event] | None],
+        in_q: Q[MetaWEvent | None | Literal["end_of_epoch"]],
         delta_q: Q[tuple[MemNBox | None, torch.cuda.Event]],
-        out_q: Q[tuple[Meta, torch.cuda.Event] | None],
+        out_q: Q[MetaWEvent | None | Literal["end_of_epoch"]],
         stop_ev: threading.Event,
         has_reverse_mdt: bool = False,
     ) -> None:
@@ -95,6 +97,10 @@ class DyAssembler(StreamThreadBase):
             if in_data is None:
                 self.out_q.put(None, block=True)
                 break
+            elif in_data == "end_of_epoch":
+                delta, delta_ready_event = self.delta_q.get(block=True)
+                self.out_q.put("end_of_epoch", block=True)
+                continue
             meta, meta_ready_event = in_data
             mem_n_box = meta.mem_n_box
             assert mem_n_box is not None

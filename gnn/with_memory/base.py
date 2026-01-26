@@ -5,6 +5,9 @@ import torch
 import torch.nn as nn
 
 from gnn.components import EdgePredictor
+from gnn.with_memory.apan import APAN
+from gnn.with_memory.jodie import JODIE
+from gnn.with_memory.tgn import TGN
 from schemas.datatypes.data_to_sync import MemTsNid
 from schemas.datatypes.misc import Meta
 from schemas.datatypes.task import SyncTask
@@ -16,7 +19,7 @@ logger = logging.getLogger(__name__)
 class MemoryBaseGNN(nn.Module):
     def __init__(
         self,
-        gnn: nn.Module,
+        gnn: TGN | JODIE | APAN,
         memory_updater: nn.Module,
         sync_q: Queue[SyncTask],
         header: EdgePredictor,
@@ -29,7 +32,14 @@ class MemoryBaseGNN(nn.Module):
 
     def forward(self, meta: Meta) -> torch.Tensor:
         self._sync_memory(meta=meta)
-        h = self.gnn(meta.gnn_mfgs)
+        if isinstance(self.gnn, TGN):
+            h = self.gnn(mfgs=meta.gnn_mfgs)
+        else:
+            h = self.gnn(
+                root_info=meta.mem_n_box,
+                nfeat=meta.nfeat,
+                ts=meta.root_ts,
+            )
         return self.header(h)
 
     @torch.no_grad()
@@ -40,7 +50,6 @@ class MemoryBaseGNN(nn.Module):
             # only support 1-layer gnn for memory update
             # only support 1-history window for memory update
             assert len(meta.gnn_mfgs) == 1 and len(meta.gnn_mfgs[0]) == 1
-            assert not meta.mem_n_box.is_unzipped
             block = meta.gnn_mfgs[0][0]
             if block is not None:
                 updated_mem = self.memory_updater(block)

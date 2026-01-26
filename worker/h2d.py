@@ -1,6 +1,7 @@
 import logging
 import threading
 from queue import Queue as Q
+from typing import Literal
 
 import dgl
 import torch
@@ -66,11 +67,12 @@ class H2D(StreamThreadBase):
         efeat: torch.Tensor | None,
         shared: Shared | None,
         merge_src: bool,
-        in_q: Q[tuple[Meta, torch.cuda.Event] | None],
-        out_q: Q[tuple[Meta, torch.cuda.Event] | None],
+        in_q: Q[Meta | None | Literal["end_of_epoch"]],
+        out_q: Q[tuple[Meta, torch.cuda.Event] | None | Literal["end_of_epoch"]],
         stop_ev: threading.Event,
         h2d_sem: threading.Semaphore | None,
         history: int = 1,
+        n_neg: int = 1,
     ) -> None:
         super().__init__(name="h2d")
         self.nfeat = nfeat
@@ -82,6 +84,7 @@ class H2D(StreamThreadBase):
         self.stop_ev = stop_ev
         self.h2d_sem = h2d_sem
         self.history = history
+        self.n_neg = n_neg  # TODO: make it configurable
         self.st_asm = StAssembler(shared_nfeat=nfeat, shared_efeat=efeat)
 
     @torch.no_grad()
@@ -89,12 +92,13 @@ class H2D(StreamThreadBase):
         while not self.stop_ev.is_set():
             logger.debug("H2D: acquired semaphore, starting H2D operation")
 
-            in_data = self.in_q.get(block=True)
-            if in_data is None:
+            meta = self.in_q.get(block=True)
+            if meta is None:
                 self.out_q.put(None, block=True)
                 break
-            meta, meta_ready_event = in_data
-            torch.cuda.current_stream().wait_event(meta_ready_event)
+            elif meta == "end_of_epoch":
+                self.out_q.put("end_of_epoch", block=True)
+                continue
             # move pos_efeat to gpu
             if self.efeat is not None:
                 meta.pos_efeat = self.efeat[meta.pos_edge_id].cuda()
@@ -104,6 +108,13 @@ class H2D(StreamThreadBase):
                 meta.gnn_mfgs = collate_and_build_graph(meta.gnn_mfgs_raw, self.history)
 
             # init x
+            n_pos_edges = meta.pos_edge.shape[0]
+            meta.labels = torch.cat(
+                [
+                    torch.ones(n_pos_edges, device="cuda"),
+                    torch.zeros(n_pos_edges * self.n_neg, device="cuda"),
+                ],
+            )
 
             # move plan to gpu
             if meta.plan_set is not None:

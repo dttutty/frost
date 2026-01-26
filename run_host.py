@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
+from host.result_writer import ResultAggregator
 from tqdm import tqdm
 
 from host import MetaBatcher, Planner, Scatter
@@ -21,6 +22,7 @@ from schemas.datatypes.misc import (
     EpochSplitIterInfo,
     ExtFullGraph,
     Meta,
+    Result,
     SampleReturn,
 )
 from schemas.datatypes.plan import DyPlan, StPlan
@@ -98,6 +100,7 @@ class Host:
                 out_q=self.send_q,
                 stop_ev=self.stop_ev,
             )
+        self.result_q: Q[Result] = Q()
         self.scatter = Scatter(
             n_gpu=env.n_gpu,
             in_q=self.send_q,
@@ -105,9 +108,40 @@ class Host:
             mail_plan_out_q=self.mail_plan_out_q,
             nfeat_plan_out_q=self.nfeat_plan_out_q,
             env=env,
+            result_q=self.result_q,
             group=gloo,
             stop_ev=self.stop_ev,
         )
+        self.result_aggr = ResultAggregator(
+            n_gpu=env.n_gpu,
+            in_q=self.result_q,
+            stop_ev=self.stop_ev,
+        )
+
+        self.best_ap_epoch = {
+            "val_ap": 0.0,
+            "val_auc": 0.0,
+            "epoch": -1,
+            "test_ap": 0.0,
+            "test_auc": 0.0,
+        }
+        self.best_auc_epoch = {
+            "val_ap": 0.0,
+            "val_auc": 0.0,
+            "epoch": -1,
+            "test_ap": 0.0,
+            "test_auc": 0.0,
+        }
+        self.state = {
+            "total_epoch": math.inf,
+            "done_epoch": 0,
+            "total_macro_batch": math.inf,
+            "done_macro_batch": 0,
+        }
+
+        self.patience = cfg.t.patience if hasattr(cfg.t, "patience") else 50  # 默认 50
+        self.patience_counter = 0
+        self.last_epoch_result = None
 
         # 3rd module: scatter sender
         # 3. 初始化采样器
@@ -130,6 +164,67 @@ class Host:
         self.tr_df = df[:train_edge_end]
         self.va_df = df[train_edge_end:val_edge_end]
         self.te_df = df[val_edge_end:]
+
+    def handle_result_q(self) -> None:
+        res: Result = self.result_q.get(block=True)
+
+        # 将结果存下来，供 early_stop_check 使用
+        self.last_epoch_result = res
+
+        # 打印日志 (Host 端统一打印，Worker 端就可以静默了)
+        logger.info(
+            f"[Epoch {self.state['done_epoch']}] "
+            f"Train Loss: {res.train_loss:.4f} | Val Loss: {res.val_loss:.4f} | "
+            f"Val AUC: {res.val_auc:.4f} | Val AP: {res.val_ap:.4f}"
+        )
+
+    def early_stop_check(self, cur_epoch: int) -> bool:
+        """
+        检查是否触发早停，并更新最佳模型记录。
+        返回: True 表示需要停止训练，False 表示继续。
+        """
+        res = self.last_epoch_result
+        if res is None:
+            return False
+
+        # --- 更新最佳指标 (AUC 和 AP 分别记录) ---
+
+        # 1. 检查 AUC
+        if res.val_auc > self.best_auc_epoch["val_auc"]:
+            self.best_auc_epoch = {
+                "val_ap": res.val_ap,
+                "val_auc": res.val_auc,
+                "epoch": cur_epoch,
+                "test_ap": res.test_ap,
+                "test_auc": res.test_auc,
+            }
+            # 只有当主要指标 (通常是 AUC) 提升时，才重置耐心值
+            self.patience_counter = 0
+            logger.info(f"🌟 New Best AUC: {res.val_auc:.4f} @ Epoch {cur_epoch}")
+            # TODO: 这里可以添加 save_checkpoint()
+        else:
+            self.patience_counter += 1
+
+        # 2. 检查 AP (仅记录，不影响早停，除非你以 AP 为准)
+        if res.val_ap > self.best_ap_epoch["val_ap"]:
+            self.best_ap_epoch = {
+                "val_ap": res.val_ap,
+                "val_auc": res.val_auc,
+                "epoch": cur_epoch,
+                "test_ap": res.test_ap,
+                "test_auc": res.test_auc,
+            }
+            logger.info(f"✨ New Best AP: {res.val_ap:.4f} @ Epoch {cur_epoch}")
+
+        # --- 早停判断 ---
+        if self.patience_counter >= self.patience:
+            logger.warning(
+                f"🛑 Early stopping triggered at epoch {cur_epoch}. "
+                f"Best AUC was {self.best_auc_epoch['val_auc']:.4f} at epoch {self.best_auc_epoch['epoch']}."
+            )
+            return True
+
+        return False
 
     def _init_sampler(self, graph: ExtFullGraph, s_cfg: SampleCFG) -> None:
         self.neg_sampler = NegLinkSampler(graph)
@@ -162,6 +257,9 @@ class Host:
             self._handle_a_split(self.va_df, "val", cur_epoch=e)
             logger.debug("Testing...")
             self._handle_a_split(self.te_df, "test", cur_epoch=e)
+            self.handle_result_q()
+            if self.early_stop_check(e):
+                break
         self._cleanup()
         # wandb.finish()
 
@@ -262,5 +360,10 @@ class Host:
 
     def _cleanup(self) -> None:
         self.meta_in_q.put(None)
+        self.meta_batcher.join()
+        if self.planner is not None:
+            self.planner.join()
+        self.scatter.join()
+        self.result_aggr.join()
         end = time.time()
         logger.debug(f"Elapsed time: {end - self.start_time:.2f} seconds")

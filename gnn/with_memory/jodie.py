@@ -4,6 +4,8 @@ import math
 import torch
 import torch.nn as nn
 
+from gnn.sample_mixin import SampleMixin
+from sampler_core import ParallelSampler
 from schemas.datatypes.misc import SampleReturn
 from schemas.datatypes.plan import BatchNodeStateIO
 
@@ -43,7 +45,7 @@ class JODIETimeEmbedding(nn.Module):
         return rst
 
 
-class JODIE(nn.Module):
+class JODIE(nn.Module, SampleMixin):
     def __init__(
         self, dim_node: int, dim_memory: int = 100, dim_time: int = 100
     ) -> None:
@@ -71,8 +73,8 @@ class JODIE(nn.Module):
         self.layer_norm = nn.LayerNorm(dim_memory)
         self.jodie_time_proj = JODIETimeEmbedding(dim_out=dim_memory)
 
-    @staticmethod
-    def analyze_need(root_nodes: set[int]) -> BatchNodeStateIO:
+    @classmethod
+    def analyze_need(cls, root_nodes: set[int]) -> BatchNodeStateIO:
         all_nodes = root_nodes
         return BatchNodeStateIO(
             mem_needed=all_nodes,
@@ -82,11 +84,19 @@ class JODIE(nn.Module):
             nfeat_needed=all_nodes,
         )
 
-    @staticmethod
-    def sample(ngh_sampler, src, dst, neg_dst, ts):
+    @classmethod
+    def sample(
+        cls,
+        ngh_sampler: ParallelSampler,
+        src: torch.Tensor,
+        dst: torch.Tensor,
+        neg_dst: torch.Tensor,
+        ts: torch.Tensor,
+        sample_history: int = 1,  # <--- 必须加回这个参数，并给个默认值
+    ) -> SampleReturn:
         roots = torch.cat([src, dst, neg_dst])
         root_nodes = set(roots.numpy().tolist())
-        batch_node_state_io = JODIE.analyze_need(root_nodes)
+        batch_node_state_io = cls.analyze_need(root_nodes)
 
         sample_ret = SampleReturn(
             ngh2root_mfgs_raw=None,
@@ -113,10 +123,8 @@ class JODIE(nn.Module):
         if self.dim_node > 0:
             # Assumes block.srcdata['nfeat'] holds the raw node features initially
             nfeat = block.srcdata["nfeat"]
-            if self.node_feat_map:
-                node_emb = self.node_feat_map(nfeat)
-            else:
-                node_emb = nfeat
+            node_emb = self.node_feat_map(nfeat) if self.node_feat_map else nfeat
+
             h_combined = updated_memory + node_emb
         else:
             h_combined = updated_memory

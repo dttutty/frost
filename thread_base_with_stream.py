@@ -14,13 +14,13 @@ class StreamThreadBase(threading.Thread):
         self,
         name: str,
     ):
-        super().__init__(daemon=True, name=name)
+        super().__init__(daemon=False, name=name)
         self.stream: torch.cuda.Stream = torch.cuda.Stream()
 
-    def logic(self):
+    def logic(self) -> None:
         pass
 
-    def run(self):
+    def run(self) -> None:
         try:
             with torch.cuda.stream(self.stream):
                 self.logic()
