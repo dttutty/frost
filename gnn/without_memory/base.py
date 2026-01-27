@@ -21,5 +21,5 @@ class GNN(nn.Module):
         self.header = header
 
     def forward(self, meta: Meta) -> torch.Tensor:
-        h = self.gnn(meta.gnn_mfgs)
+        h = self.gnn(meta.n2r_mfgs)
         return self.header(h)

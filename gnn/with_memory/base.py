@@ -5,6 +5,11 @@ import torch
 import torch.nn as nn
 
 from gnn.components import EdgePredictor
+from gnn.memory_updater import (
+    MfgMemoryUpdater,
+    NoMfgMemoryUpdater,
+    TransformerMemoryUpdater,
+)
 from gnn.with_memory.apan import APAN
 from gnn.with_memory.jodie import JODIE
 from gnn.with_memory.tgn import TGN
@@ -20,8 +25,8 @@ class MemoryBaseGNN(nn.Module):
     def __init__(
         self,
         gnn: TGN | JODIE | APAN,
-        memory_updater: nn.Module,
-        sync_q: Queue[SyncTask],
+        memory_updater: TransformerMemoryUpdater | MfgMemoryUpdater,
+        sync_q: Queue[tuple[SyncTask, torch.cuda.Event] | None],
         header: EdgePredictor,
     ) -> None:
         super().__init__()
@@ -31,30 +36,34 @@ class MemoryBaseGNN(nn.Module):
         self.header = header
 
     def forward(self, meta: Meta) -> torch.Tensor:
-        self._sync_memory(meta=meta)
+        self.update_and_sync_memory(meta=meta)
         if isinstance(self.gnn, TGN):
-            h = self.gnn(mfgs=meta.gnn_mfgs)
+            h = self.gnn(mfgs=meta.n2r_mfgs)
         else:
+            assert meta.mem_n_box is not None
             h = self.gnn(
-                root_info=meta.mem_n_box,
+                mem_n_box=meta.mem_n_box.mem,
                 nfeat=meta.nfeat,
                 ts=meta.root_ts,
             )
         return self.header(h)
 
     @torch.no_grad()
-    def _sync_memory(self, meta: Meta) -> None:
+    def update_and_sync_memory(self, meta: Meta) -> None:
         assert meta.mem_n_box is not None
         n_root_src_n_pos_dst = meta.n_src * 2
-        if meta.gnn_mfgs is not None:
+        if meta.n2r_mfgs is not None:
+            assert isinstance(self.memory_updater, MfgMemoryUpdater)
             # only support 1-layer gnn for memory update
             # only support 1-history window for memory update
-            assert len(meta.gnn_mfgs) == 1 and len(meta.gnn_mfgs[0]) == 1
-            block = meta.gnn_mfgs[0][0]
+            assert len(meta.n2r_mfgs) == 1 and len(meta.n2r_mfgs[0]) == 1
+            block = meta.n2r_mfgs[0][0]
             if block is not None:
-                updated_mem = self.memory_updater(block)
+                block, updated_mem = self.memory_updater(block)
                 ts = block.srcdata["ts"]
                 nid = block.srcdata["ID"]
+
+                # 可能不跟root_ts一一对应
 
                 root_new_mem = MemTsNid(
                     ts=ts[:n_root_src_n_pos_dst],
@@ -63,35 +72,36 @@ class MemoryBaseGNN(nn.Module):
                 )
 
         else:
+            assert isinstance(
+                self.memory_updater, (TransformerMemoryUpdater, NoMfgMemoryUpdater)
+            )
             assert meta.mem_n_box.is_unzipped
             mem_n_box = meta.mem_n_box
-            updated_mem = self.memory_updater(root_info=mem_n_box)
+            updated_mem = self.memory_updater(
+                mem_n_box=mem_n_box, root_ts=meta.root_ts.repeat_interleave(3)
+            )
             root_new_mem = MemTsNid(
                 ts=meta.root_ts.repeat_interleave(2),
                 data=updated_mem[:n_root_src_n_pos_dst],
-                nid=meta.root_nid,
+                nid=meta.root_nid[:n_root_src_n_pos_dst],
             )
 
         ready_event: torch.cuda.Event = torch.cuda.Event()
         ready_event.record(torch.cuda.current_stream())
 
-        epoch_split_iter_info = meta.epoch_split_iter_info
+        m_state = meta.m_state
         plan_set = meta.plan_set
         assert plan_set
         assert plan_set.box is not None
         assert plan_set.mem is not None
-
-        self.sync_q.put(
-            SyncTask(
-                macro_bid=epoch_split_iter_info.cur_macro_of_epoch,
-                mem_plan=plan_set.mem,
-                box_plan=plan_set.box,
-                root_new_mem=root_new_mem,
-                pos_efeat=meta.pos_efeat,
-                old_x=meta.mem_n_box,
-                mail_delivery_tensor=meta.mdt,
-                all_epoch_last_macro=epoch_split_iter_info.is_last_macro_of_all_epoch,
-                this_epoch_last_macro=epoch_split_iter_info.is_last_macro_of_epoch,
-                ready_event=ready_event,
-            )
+        sync_task = SyncTask(
+            macro_bid=m_state.cur_macro_of_epoch,
+            mem_plan=plan_set.mem,
+            box_plan=plan_set.box,
+            root_new_mem=root_new_mem,
+            pos_efeat=meta.pos_efeat,
+            old_mem_n_box=meta.mem_n_box,
+            is_all_epoch_last_macro=m_state.is_last_macro_of_all_epoch,
+            is_this_epoch_last_macro=m_state.is_last_macro_of_epoch,
         )
+        self.sync_q.put((sync_task, ready_event))

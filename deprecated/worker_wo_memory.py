@@ -176,7 +176,7 @@ def run_evaluation_step(
             prev_cup_to_gpu_thread.cleanup()
         prev_cup_to_gpu_thread = None
     prev_th_hold_notmoved_data: Meta = scatter_receive()
-    blocks_on_cpu = prev_th_hold_notmoved_data.gnn_mfgs_raw = (gnn_mfgs_raw,)
+    blocks_on_cpu = prev_th_hold_notmoved_data.n2r_meta = (gnn_mfgs_raw,)
     if not blocks_on_cpu or len(blocks_on_cpu) == 0:
         logger.debug(
             f"Rank {local_rank}: Received empty batch during evaluation, skipping step."

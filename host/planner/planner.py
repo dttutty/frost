@@ -189,8 +189,8 @@ class Planner(ThreadBase):
                 assert len(metas) == self.n_gpus
                 state_ios: list[BatchNodeStateIO] = []
                 for meta in metas:
-                    assert meta.batch_node_state_io is not None
-                    state_ios.append(meta.batch_node_state_io)
+                    assert meta.state is not None
+                    state_ios.append(meta.state)
                 if self.mem_plan_in_q is not None:
                     assert self.mem_plan_in_q is not None
                     next_needs = [state_io.mem_needed for state_io in state_ios]
@@ -204,7 +204,7 @@ class Planner(ThreadBase):
                     next_needs = [state_io.nfeat_needed for state_io in state_ios]
                     self.nfeat_plan_in_q.put(next_needs)
                 for meta in metas:
-                    del meta.batch_node_state_io  # 释放内存
+                    del meta.state  # 释放内存
                 self.out_q.put(metas)
             elif metas == "end_of_epoch":
                 if self.mem_plan_in_q is not None:

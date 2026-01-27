@@ -104,8 +104,8 @@ class H2D(StreamThreadBase):
                 meta.pos_efeat = self.efeat[meta.pos_edge_id].cuda()
 
             # make mfg from raw data
-            if meta.gnn_mfgs_raw is not None:
-                meta.gnn_mfgs = collate_and_build_graph(meta.gnn_mfgs_raw, self.history)
+            if meta.n2r_meta is not None:
+                meta.n2r_mfgs = collate_and_build_graph(meta.n2r_meta, self.history)
 
             # init x
             n_pos_edges = meta.pos_edge.shape[0]
@@ -131,13 +131,13 @@ class H2D(StreamThreadBase):
                     )
 
                 # can run no matter has nfeat or not
-                if meta.gnn_mfgs is not None:
-                    meta.gnn_mfgs = self.st_asm.fill_mfg_with_efeat_n_nfeat(
-                        gnn_mfgs=meta.gnn_mfgs, nfeat=meta.nfeat
+                if meta.n2r_mfgs is not None:
+                    meta.n2r_mfgs = self.st_asm.fill_mfg_with_efeat_n_nfeat(
+                        gnn_mfgs=meta.n2r_mfgs, nfeat=meta.nfeat
                     )
 
                 # mfg version do not need nfeat output
-                if meta.gnn_mfgs is not None:
+                if meta.n2r_mfgs is not None:
                     del meta.nfeat  # mfg版本不需要nfeat输出
 
             # move mem and box to gpu
@@ -154,12 +154,12 @@ class H2D(StreamThreadBase):
 
             # even there is no next batch, we still need plan_set for writeback
             if self.merge_src:
-                assert meta.gnn_mfgs is not None
-                meta.gnn_mfgs[0] = _deduplicate_first_layer_src(meta.gnn_mfgs[0])
+                assert meta.n2r_mfgs is not None
+                meta.n2r_mfgs[0] = _deduplicate_first_layer_src(meta.n2r_mfgs[0])
 
             # move gnn_mfgs to gpu
-            if meta.gnn_mfgs is not None:
-                for blocks in meta.gnn_mfgs:
+            if meta.n2r_mfgs is not None:
+                for blocks in meta.n2r_mfgs:
                     for block in blocks:
                         block = block.to("cuda:0")
 

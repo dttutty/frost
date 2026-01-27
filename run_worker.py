@@ -15,7 +15,7 @@ from gnn.with_memory.base import MemoryBaseGNN
 from gnn.without_memory.base import GNN
 from schemas.alias import MetaWEvent
 from schemas.datatypes.cfg import MemoryCFG, SampleCFG, TrainCFG
-from schemas.datatypes.data_to_sync import BoxTsNid, MailTsNid, MemTsNid
+from schemas.datatypes.data_to_sync import BoxTsNid, MemTsNid
 from schemas.datatypes.env import Env
 from schemas.datatypes.misc import MemNBox, Meta, ModelComponents, Result, Shared
 from schemas.datatypes.task import P2PTask, SyncTask
@@ -229,7 +229,9 @@ class Worker:
         self.optimizer.step()
         self.train_loss_tracker.update(loss)
 
-    def _exec_p2p(self, p2p_task: P2PTask) -> MemTsNid | BoxTsNid | MailTsNid | None:
+    def _exec_p2p(
+        self, p2p_task: P2PTask, type: Literal["mem", "box"]
+    ) -> MemTsNid | BoxTsNid:
         nid, data, ts, type = p2p_task.nid, p2p_task.data, p2p_task.ts, p2p_task.type
         recv_nid, send_nid, out_splits, in_splits = (
             nid.recv,
@@ -266,8 +268,6 @@ class Worker:
             return MemTsNid(nid=recv_nid, data=recv_data, ts=recv_ts)
         elif type == "box":
             return BoxTsNid(nid=recv_nid, data=recv_data, ts=recv_ts)
-        elif type == "mail":
-            return MailTsNid(nid=recv_nid, data=recv_data, ts=recv_ts)
 
     @torch.no_grad()
     def handle_p2p_q(self) -> None:
@@ -276,34 +276,28 @@ class Worker:
 
         # 1. 强制先处理 Mem 任务 (Deterministic Order: Mem -> Box)
         # 注意：如果某个 microbatch 不需要 mem p2p，DataSyncer 必须 put(None) 作为哨兵
-        p2p_task = self.mem_p2p_q.get(block=True)
-        if p2p_task is not None:
-            delta_mem = self._exec_p2p(p2p_task)
-            assert isinstance(delta_mem, MemTsNid)
-            # 2. 强制后处理 Box 任务
-            p2p_task = self.box_p2p_q.get(block=True)
-            assert p2p_task is not None
-            # Box 任务可能包含 mail -> box 的转换逻辑
-            result = self._exec_p2p(p2p_task)
-            if p2p_task.type == "mail":
-                # 原有逻辑: mail_DyX.to_box()
-                # 假设 _exec_p2p 返回的是构建好的对象
-                assert isinstance(result, MailTsNid)
-                delta_box = result.to_box()
-            else:
-                assert isinstance(result, BoxTsNid)
-                delta_box = result
-
-            delta_x = MemNBox(mem=delta_mem, box=delta_box)
-        else:
+        mem_p2p_q = self.mem_p2p_q.get(block=True)
+        if mem_p2p_q is None:
+            box_p2p_q = self.box_p2p_q.get(block=True)
+            assert box_p2p_q is None
             delta_x = None
-        ready_event: torch.cuda.Event = torch.cuda.Event()
-        ready_event.record(torch.cuda.current_stream())
-        self.delta_q.put((delta_x, ready_event))
-
-        self.logger.debug(
-            f"DataSyncer: rank {self.env.local_rank} put DeltaX into DeltaX_q"
-        )
+            return
+        if mem_p2p_q == "skip":
+            box_p2p_q = self.box_p2p_q.get(block=True)
+            assert box_p2p_q == "skip"
+            self.delta_q.put("skip")
+        else:
+            delta_mem = self._exec_p2p(mem_p2p_q, "mem")
+            box_p2p_q = self.box_p2p_q.get(block=True)
+            assert box_p2p_q is not None
+            delta_box = self._exec_p2p(box_p2p_q, "box")
+            delta_x = MemNBox(mem=delta_mem, box=delta_box)
+            ready_event: torch.cuda.Event = torch.cuda.Event()
+            ready_event.record(torch.cuda.current_stream())
+            self.delta_q.put((delta_x, ready_event))
+            self.logger.debug(
+                f"DataSyncer: rank {self.env.local_rank} put DeltaX into DeltaX_q"
+            )
 
     @torch.no_grad()
     def eval(self, meta: Meta) -> None:
@@ -315,13 +309,13 @@ class Worker:
         logits = torch.cat([logits_pos, logits_neg], dim=0)
         y_pred = logits.sigmoid()
 
-        if meta.epoch_split_iter_info.split == "val":
+        if meta.m_state.split == "val":
             loss = self.criterion(logits.squeeze(-1), meta.labels)
 
             self.val_metrics.update(preds=y_pred, target=meta.labels)
             self.val_metrics["val_loss"].update(loss)
         else:
-            assert meta.epoch_split_iter_info.split == "test"
+            assert meta.m_state.split == "test"
             self.test_metrics.update(preds=y_pred, target=meta.labels)
 
     def run(self) -> None:
@@ -340,7 +334,7 @@ class Worker:
             if isinstance(full, tuple):
                 meta, ready_event = full
                 torch.cuda.current_stream().wait_stream(ready_event)
-                m_info = meta.epoch_split_iter_info
+                m_info = meta.m_state
                 if m_info.split == "train":  # if training
                     self.train(meta)
                 elif m_info.split in ["val", "test"]:  # if evaluating

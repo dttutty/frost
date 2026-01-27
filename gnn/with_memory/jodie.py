@@ -4,10 +4,9 @@ import math
 import torch
 import torch.nn as nn
 
-from gnn.sample_mixin import SampleMixin
-from sampler_core import ParallelSampler
-from schemas.datatypes.misc import SampleReturn
+from schemas.datatypes.data_to_sync import MemTsNid
 from schemas.datatypes.plan import BatchNodeStateIO
+from tensor_set import TensorSet
 
 from ..components import TimeEncode
 
@@ -45,7 +44,17 @@ class JODIETimeEmbedding(nn.Module):
         return rst
 
 
-class JODIE(nn.Module, SampleMixin):
+def analyze_need(root_nodes: TensorSet) -> BatchNodeStateIO:
+    return BatchNodeStateIO(
+        mem_needed=root_nodes,
+        mem_updated=root_nodes,
+        mailbox_needed=None,
+        mailbox_updated=None,
+        nfeat_needed=root_nodes,
+    )
+
+
+class JODIE(nn.Module):
     def __init__(
         self, dim_node: int, dim_memory: int = 100, dim_time: int = 100
     ) -> None:
@@ -63,91 +72,54 @@ class JODIE(nn.Module, SampleMixin):
         if dim_time > 0:
             self.memory_time_enc = TimeEncode(dim_time)
 
-        if dim_node > 0 and dim_node != dim_memory:
-            self.node_feat_map = nn.Linear(dim_node, dim_memory)
-        else:
-            self.node_feat_map = None
+        self.node_feat_map = (
+            nn.Linear(dim_node, dim_memory)
+            if dim_node > 0 and dim_node != dim_memory
+            else None
+        )
 
         # --- 2. GNN / Embedding Layer ---
         # JODIE.yml: arch='identity', time_transform='JODIE'
         self.layer_norm = nn.LayerNorm(dim_memory)
         self.jodie_time_proj = JODIETimeEmbedding(dim_out=dim_memory)
 
-    @classmethod
-    def analyze_need(cls, root_nodes: set[int]) -> BatchNodeStateIO:
-        all_nodes = root_nodes
-        return BatchNodeStateIO(
-            mem_needed=all_nodes,
-            mem_updated=all_nodes,
-            mailbox_needed=None,
-            mailbox_updated=None,
-            nfeat_needed=all_nodes,
-        )
-
-    @classmethod
-    def sample(
-        cls,
-        ngh_sampler: ParallelSampler,
-        src: torch.Tensor,
-        dst: torch.Tensor,
-        neg_dst: torch.Tensor,
-        ts: torch.Tensor,
-        sample_history: int = 1,  # <--- 必须加回这个参数，并给个默认值
-    ) -> SampleReturn:
-        roots = torch.cat([src, dst, neg_dst])
-        root_nodes = set(roots.numpy().tolist())
-        batch_node_state_io = cls.analyze_need(root_nodes)
-
-        sample_ret = SampleReturn(
-            ngh2root_mfgs_raw=None,
-            root2ngh_mfg_raw=None,
-            batch_node_state_io=batch_node_state_io,
-        )
-        return sample_ret
-
     def forward(
         self,
-        mfgs: list[list[torch.Tensor]],
+        mem: MemTsNid,
+        nfeat: torch.Tensor | None,
+        ts: torch.Tensor,
     ) -> torch.Tensor:
         """
         mfgs: List of DGL Blocks.
               mfgs[0] is the target block containing memory and mailbox info.
         """
         # JODIE typically has 1 layer (Identity), so we focus on mfgs[0]
-        block = mfgs[0][0]
-        updated_memory: torch.Tensor = block.srcdata["updated_mem"]
+        updated_memory: torch.Tensor = mem.data
+        ts = ts.repeat_interleave(2)  # because mem contains src + pos dst
 
         # 4. Combine with Node Features (Static)
         # JODIE.yml: combine_node_feature=True
         # Logic from RNNMemeoryUpdater:
         if self.dim_node > 0:
             # Assumes block.srcdata['nfeat'] holds the raw node features initially
-            nfeat = block.srcdata["nfeat"]
             node_emb = self.node_feat_map(nfeat) if self.node_feat_map else nfeat
 
             h_combined = updated_memory + node_emb
         else:
             h_combined = updated_memory
 
-        # Store results back to block for the next step
-        block.srcdata["h"] = h_combined
-
         # In a real training loop, you'd also update the global memory storage here
         # or return updated_memory to be handled by the trainer.
 
         # --- Step 2: GNN / Embedding Transform ---
         # 2a. Normalization (IdentityNormLayer)
-        h = self.layer_norm(block.srcdata["h"])
+        h = self.layer_norm(h_combined)
         # h dim : [n_nodes, dim_memory]
 
         # 2b. JODIE Time Projection
         # Projects the embedding to the *current* interaction time `ts`
         # Using the *last* memory update time `mem_ts`
         # Note: JODIE paper projects the embedding *before* interaction based on elapsed time.
-        h_projected = self.jodie_time_proj(
-            h,
-            block.srcdata["mem_ts"],  # Time of the memory we just used/updated
-            block.srcdata["ts"],  # Current interaction time
-        )
+        h_projected = self.jodie_time_proj(h, mem.ts, ts)
 
         return h_projected

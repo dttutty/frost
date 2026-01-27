@@ -1,6 +1,6 @@
 import logging
 from queue import Queue
-from typing import List, TypeVar
+from typing import Literal, TypeVar
 
 import torch
 from numpy.typing import NDArray
@@ -21,7 +21,7 @@ class P2PHandler:
         n_gpu: int,
         mem_p2p_q: Queue[P2PTask | None],
         box_p2p_q: Queue[P2PTask | None],
-    ):
+    ) -> None:
         super().__init__()
         self.n_gpu = n_gpu
         self.mem_p2p_q = mem_p2p_q
@@ -30,11 +30,12 @@ class P2PHandler:
     def p2p(
         self,
         data_td_nid: AllType,
-        p2p: List[torch.Tensor],
+        p2p: list[torch.Tensor],
         rec_cts: NDArray,
         send_cts: NDArray,
-        strategy,
-    ):
+        strategy: Literal["latest", "mean", "all"],
+        target_q: Queue[P2PTask | None],
+    ) -> None:
         """
         这一步之前,必须确保data_td_nid里面的数据全部是unique的
         如果是mem,需要确保已经是保留最新的(latest),或者平均的(mean,带ct)
@@ -43,17 +44,14 @@ class P2PHandler:
         如果是feat,需要所有节点的feat
         """
         device = "cuda"
-        requests = {}
 
         nid = data_td_nid.nid
         data = data_td_nid.data
         ts = data_td_nid.ts
-        has_ct = strategy == "mean"
-        if has_ct:
-            ct = data_td_nid.ct
+
         x_dim = data.shape[1]
 
-        buckets_ids, buckets_x, buckets_ts, buckets_ct = [], [], [], []
+        buckets_ids, buckets_x, buckets_ts = [], [], []
 
         for dst_gpu_id in range(self.n_gpu):
             nids_to_send_tensor = p2p[dst_gpu_id]
@@ -63,22 +61,16 @@ class P2PHandler:
             buckets_ids.append(nid[send_mask_for_dst])
             buckets_x.append(data[send_mask_for_dst])
             buckets_ts.append(ts[send_mask_for_dst])
-            if has_ct:  # "mail"才有ct
-                buckets_ct.append(ct[send_mask_for_dst])
 
         send_nid = torch.cat(buckets_ids, dim=0)
         send_x = torch.cat(buckets_x, dim=0)
         send_ts = torch.cat(buckets_ts, dim=0)
-        if has_ct:
-            send_ct = torch.cat(buckets_ct, dim=0)
 
         total_recv = sum(rec_cts)
 
         recv_nid = torch.empty(total_recv, dtype=nid.dtype, device=device)
         recv_data = torch.empty(total_recv, x_dim, dtype=data.dtype, device=device)
         recv_ts = torch.empty(total_recv, dtype=ts.dtype, device=device)
-        if has_ct:  # "mail"才有ct
-            recv_ct = torch.empty(total_recv, dtype=ct.dtype, device=device)
 
         in_splits = send_cts
         out_splits = rec_cts
@@ -86,23 +78,24 @@ class P2PHandler:
         p2p_data = GatherElement(recv_data, send_x, out_splits, in_splits)
         p2p_ts = GatherElement(recv_ts, send_ts, out_splits, in_splits)
 
-        if has_ct:  # "mail"才有ct
-            p2p_ct = GatherElement(recv_ct, send_ct, out_splits, in_splits)
         match data_td_nid:
             case MemTsNid():
                 p2p_type = "mem"
-                self.mem_p2p_q.put(
+                target_q.put(
                     P2PTask(nid=p2p_nid, data=p2p_data, ts=p2p_ts, type=p2p_type)
                 )
             case MailTsNid():
                 p2p_type = "mail"
-                self.box_p2p_q.put(
+                target_q.put(
                     P2PTask(nid=p2p_nid, data=p2p_data, ts=p2p_ts, type=p2p_type)
                 )
             case BoxTsNid():
                 p2p_type = "box"
-                self.box_p2p_q.put(
+                target_q.put(
                     P2PTask(nid=p2p_nid, data=p2p_data, ts=p2p_ts, type=p2p_type)
                 )
             case _:
                 raise ValueError(f"Unknown data_td_nid type: {type(data_td_nid)}")
+
+    def skip(self, target_q: Queue[P2PTask | None]) -> None:
+        target_q.put("skip")

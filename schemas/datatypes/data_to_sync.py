@@ -18,6 +18,7 @@ class MemTsNid:
     nid: Tensor
     data: Tensor
     ts: Tensor
+    # ct: Tensor | None = None  # 留着扩展用
     is_sorted: bool = False
 
     def clone(self) -> MemTsNid:

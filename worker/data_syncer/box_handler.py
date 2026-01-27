@@ -105,7 +105,7 @@ class BoxHandler(StreamThreadBase):
         mail_combine: str,
         box_task: BoxTask,
     ) -> BoxTsNid:
-        mail_delivery_tensor = box_task.mail_delivery_tensor
+        mail_delivery_tensor = box_task.r2n_mdt
         assert mail_delivery_tensor is not None
         box = box_task.old_box
         box_plan = box_task.box_plan
@@ -141,8 +141,11 @@ class BoxHandler(StreamThreadBase):
 
     def logic(self) -> None:
         while not self.stop_ev.is_set():
-            box_task: BoxTask = self.box_task_q.get(block=True)
-            mail_delivery_tensor = box_task.mail_delivery_tensor
+            box_task = self.box_task_q.get(block=True)
+            if box_task is None:
+                self.box_p2p_q.put(None)
+                break
+            mail_delivery_tensor = box_task.r2n_mdt
             macro_bid = box_task.macro_bid
 
             # handle mail or box sync

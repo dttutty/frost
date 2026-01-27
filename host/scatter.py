@@ -111,6 +111,6 @@ class Scatter(ThreadBase):
                     plan_set = plan_set.tensorfy()
                     plan_set = plan_set.sort()
                     meta_2_scatter[i].plan_set = plan_set
-                    del meta_2_scatter[i].batch_node_state_io
+                    del meta_2_scatter[i].state
 
                 self.scatter_send(meta_2_scatter)

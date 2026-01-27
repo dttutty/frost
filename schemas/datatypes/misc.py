@@ -212,16 +212,16 @@ class Meta:
     pos_edge_id: Tensor  # 没有3倍处理,这个信息不需要传输到gpu
     pos_efeat: Tensor | None = None
 
-    gnn_mfgs_raw: list[DGLBlockMeta] | None
-    gnn_mfgs: list[list[DGLBlock]] | None = None
+    n2r_meta: list[DGLBlockMeta] | None
+    n2r_mfgs: list[list[DGLBlock]] | None = None
 
-    mdb_raw_data: DGLBlockMeta | None
-    mdt: torch.Tensor | None = None
+    r2n_meta: DGLBlockMeta | None
+    r2n_mdt: Tensor | None = None
 
-    epoch_split_iter_info: EpochSplitIterInfo
+    m_state: EpochSplitIterInfo
     nfeat: NFeatNid | None = None
     mem_n_box: MemNBox | None = None
-    batch_node_state_io: BatchNodeStateIO | None
+    state: BatchNodeStateIO | None
     n_src: int = 1
 
     plan_set: TensorPlanSet | None = None
@@ -241,15 +241,13 @@ class Meta:
 
     @cached_property
     def uniq_all(self) -> torch.Tensor | None:
-        if self.gnn_mfgs_raw is not None:
+        if self.n2r_meta is not None:
             all_nodes = set()
-            for block in self.gnn_mfgs_raw:
+            for block in self.n2r_meta:
                 all_nodes.update(block.nodes.tolist())
             uniq_all = torch.as_tensor(list(all_nodes), dtype=torch.long)
-        elif self.mdb_raw_data is not None:
-            uniq_all = torch.as_tensor(
-                np.unique(self.mdb_raw_data.nodes), dtype=torch.long
-            )
+        elif self.r2n_meta is not None:
+            uniq_all = torch.as_tensor(np.unique(self.r2n_meta.nodes), dtype=torch.long)
         else:
             uniq_all = self.uniq_root
         return uniq_all

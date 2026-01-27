@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-import torch
 from numpy.typing import NDArray
 from torch import Tensor
 
@@ -30,7 +29,7 @@ class BoxTask:
     old_box: BoxTsNid
     box_plan: TensorDyPlan
     is_last: bool
-    mail_delivery_tensor: Tensor | None
+    r2n_mdt: Tensor | None
 
 
 @dataclass(slots=True)
@@ -56,8 +55,7 @@ class SyncTask:
     box_plan: TensorDyPlan
     root_new_mem: MemTsNid
     pos_efeat: Tensor | None
-    old_x: MemNBox
-    mail_delivery_tensor: torch.Tensor | None
-    all_epoch_last_macro: bool
-    this_epoch_last_macro: bool
-    ready_event: torch.cuda.Event
+    old_mem_n_box: MemNBox
+    is_all_epoch_last_macro: bool
+    is_this_epoch_last_macro: bool
+    r2n_mdt: Tensor | None

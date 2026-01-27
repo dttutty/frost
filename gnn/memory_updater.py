@@ -9,22 +9,22 @@ import torch.nn.functional as F
 from dgl.heterograph import DGLBlock
 
 from gnn.components import TimeEncode
-from schemas.datatypes.misc import Roots
+from schemas.datatypes.misc import MemNBox
 
 
 logger = logging.getLogger(__name__)
 
 
-class MemoryUpdater(torch.nn.Module):
-    def __init__(self, time_encoder: nn.Module, rnn: nn.Module):
-        super(MemoryUpdater, self).__init__()
+class MfgMemoryUpdater(torch.nn.Module):
+    def __init__(self, time_encoder: nn.Module, rnn: nn.Module) -> None:
+        super().__init__()
         self.time_encoder = time_encoder
         self.rnn = rnn
 
     def forward(
         self,
         block: DGLBlock,
-    ):
+    ) -> tuple[DGLBlock, torch.Tensor]:
         mem: torch.Tensor = block.srcdata["mem"]
         ts: torch.Tensor = block.srcdata["ts"]
         mem_ts: torch.Tensor = block.srcdata["mem_ts"]
@@ -37,6 +37,33 @@ class MemoryUpdater(torch.nn.Module):
         up_mem = self.rnn(rnn_input, mem)
         block.srcdata["updated_mem"] = up_mem
 
+        return block, up_mem
+
+
+class NoMfgMemoryUpdater(torch.nn.Module):
+    def __init__(self, time_encoder: nn.Module, rnn: nn.Module) -> None:
+        super().__init__()
+        self.time_encoder = time_encoder
+        self.rnn = rnn
+
+    def forward(
+        self,
+        mem_n_box: MemNBox,
+        root_ts: torch.Tensor,
+    ) -> torch.Tensor:
+        mem_ts_nid = mem_n_box.mem
+        box_ts_nid = mem_n_box.box
+        mem: torch.Tensor = mem_ts_nid.data
+        ts: torch.Tensor = root_ts
+        mem_ts: torch.Tensor = mem_ts_nid.ts
+        box: torch.Tensor = box_ts_nid.data
+
+        mail = torch.squeeze(box, dim=1)  # Flatten because it has extra dimension
+
+        time_feat = self.time_encoder(ts - mem_ts)
+        rnn_input = torch.cat([mail, time_feat], dim=1)
+        up_mem = self.rnn(rnn_input, mem)
+
         return up_mem
 
 
@@ -48,15 +75,15 @@ class TransformerMemoryUpdater(nn.Module):
 
     def __init__(
         self,
-        d_mail,
-        d_mem,
-        d_time,
-        boxsize,
-        heads=2,
-        dropout=0.1,
-        att_dropout=0.1,
-    ):
-        super(TransformerMemoryUpdater, self).__init__()
+        d_mail: int,
+        d_mem: int,
+        d_time: int,
+        boxsize: int,
+        heads: int = 2,
+        dropout: float = 0.1,
+        att_dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
         self.dim_mem = d_mem
         self.dim_time = d_time
         self.boxsize = boxsize
@@ -92,7 +119,7 @@ class TransformerMemoryUpdater(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.att_dropout = nn.Dropout(att_dropout)
 
-    def forward(self, root_info: Roots):
+    def forward(self, mem_n_box: MemNBox, root_ts: torch.Tensor) -> torch.Tensor:
         """
         block: DGL MFG (Message Flow Graph)
         Requires block.srcdata to have:
@@ -101,10 +128,13 @@ class TransformerMemoryUpdater(nn.Module):
             - 'ts': Current time [N]
             - 'box_ts': Mailbox timestamps [N, mailbox_size]
         """
-        ts = root_info.ts  # [N]
-        mem = root_info.mem  # [N, dim_mem]
-        box = root_info.box  # [N, L, dim_mail]
-        box_ts = root_info.box_ts  # [N, L]
+        ts = root_ts  # [N]
+        n_roots = ts.size(0)
+        mem_ts_nid = mem_n_box.mem
+        box_ts_nid = mem_n_box.box
+        mem = mem_ts_nid.data  # [N, dim_mem]
+        box = box_ts_nid.data[n_roots:]  # [N, L, dim_mail]
+        box_ts = box_ts_nid.ts[n_roots:]  # [N, L]
 
         batch_size = mem.size(0)
 

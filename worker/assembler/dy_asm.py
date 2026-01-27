@@ -112,9 +112,9 @@ class DyAssembler(StreamThreadBase):
             else:
                 mem_n_box_full = self._merge(mem_n_box, delta)
 
-            if meta.gnn_mfgs is not None:
+            if meta.n2r_mfgs is not None:
                 self.fill_block_with_mem_mail(
-                    meta.gnn_mfgs[0], mem_n_box_full.mem, mem_n_box_full.box
+                    meta.n2r_mfgs[0], mem_n_box_full.mem, mem_n_box_full.box
                 )
             else:
                 # 这种是为了APAN哪种种没有mfg的情况

@@ -17,7 +17,7 @@ from dgl.utils.shared_mem import (
 
 from gnn import APAN, JODIE, TGAT, TGN, DyGFormer, DySAT_TGL
 from gnn.components import EdgePredictor, TimeEncode
-from gnn.memory_updater import MemoryUpdater, TransformerMemoryUpdater
+from gnn.memory_updater import MfgMemoryUpdater, TransformerMemoryUpdater
 from schemas.datatypes.cfg import GNNCFG, SampleCFG, TrainCFG
 from schemas.datatypes.env import Env
 from schemas.datatypes.misc import ModelComponents, Shared
@@ -271,7 +271,7 @@ def _init_gnn(
     match t_cfg.model_name.lower():
         case "tgn":
             assert m_cfg is not None, "TGN requires memory config"
-            memory_updater = MemoryUpdater(
+            memory_updater = MfgMemoryUpdater(
                 rnn=torch.nn.GRUCell(d_mail + m_cfg.d_time, m_cfg.d_mem),
                 time_encoder=TimeEncode(m_cfg.d_time),
             )
@@ -304,7 +304,7 @@ def _init_gnn(
 
         case "jodie":
             assert m_cfg is not None, "JODIE requires memory config"
-            memory_updater = MemoryUpdater(
+            memory_updater = MfgMemoryUpdater(
                 rnn=torch.nn.RNNCell(d_mail + m_cfg.d_time, m_cfg.d_mem),
                 time_encoder=TimeEncode(m_cfg.d_time),
             )

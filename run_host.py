@@ -12,6 +12,9 @@ import torch.distributed as dist
 from host.result_writer import ResultAggregator
 from tqdm import tqdm
 
+from config.gcn import TGN
+from gnn.with_memory.apan import APAN
+from gnn.with_memory.jodie import JODIE
 from host import MetaBatcher, Planner, Scatter
 from host.meta_batcher import MetaBundle
 from neg_sampler import NegLinkSampler
@@ -23,9 +26,9 @@ from schemas.datatypes.misc import (
     ExtFullGraph,
     Meta,
     Result,
-    SampleReturn,
 )
 from schemas.datatypes.plan import DyPlan, StPlan
+from tensor_set import TensorSet
 
 
 logger = logging.getLogger(__name__)
@@ -337,22 +340,58 @@ class Host:
         neg_dst = self.neg_sampler.sample(src, dst)
 
         # handle different model types
-        if self.sample_history > 1:
-            sample_ret = self.gnn.sample(self.ngh_sampler, src, dst, neg_dst, ts)
-        else:
-            sample_ret = self.gnn.sample(
-                self.ngh_sampler, src, dst, neg_dst, ts, self.sample_history
+        n2r_meta = r2n_meta = state = None
+        if isinstance(self.gnn, APAN):
+            from gnn.with_memory.apan import (
+                analyze_all_n_root as apan_analyze_all_n_root,
+                analyze_need as apan_analyze_need,
+                sample as apan_sample,
             )
 
-        assert isinstance(sample_ret, SampleReturn), type(sample_ret)
+            assert self.ngh_sampler is not None
+            r2n_meta = apan_sample(self.ngh_sampler, src, dst, ts)
+            all_nodes, root_nodes = apan_analyze_all_n_root(r2n_meta)
+            state = apan_analyze_need(all_nodes, root_nodes, neg_dst)
+        elif isinstance(self.gnn, JODIE):
+            from gnn.with_memory.jodie import analyze_need as jodie_analyze_need
+
+            roots = torch.cat([src, dst, neg_dst])
+            root_nodes = TensorSet(roots)
+            state = jodie_analyze_need(root_nodes)
+
+        elif isinstance(self.gnn, TGN):
+            from gnn.sample_mixin import sample
+            from gnn.with_memory.tgn import (
+                analyze_all_n_root as tgn_analyze_all_n_root,
+                analyze_need as tgn_analyze_need,
+            )
+
+            assert self.ngh_sampler is not None
+
+            n2r_meta = sample(self.ngh_sampler, src, dst, neg_dst, ts)
+            assert len(n2r_meta) == 1, "TGN only supports 1 layer currently"
+
+            all_nodes, root_nodes = tgn_analyze_all_n_root(n2r_meta[0])
+            state = tgn_analyze_need(all_nodes, src, dst)
+        else:
+            from gnn.sample_mixin import (
+                analyze_need as general_analyze_need,
+                sample as general_sample,
+            )
+
+            assert self.ngh_sampler is not None
+
+            n2r_meta = general_sample(self.ngh_sampler, src, dst, neg_dst, ts)
+            state = general_analyze_need(n2r_meta, self.sample_history)
+
         meta = Meta(
             root_nid=torch.cat([src, dst, neg_dst], dim=0),
             root_ts=ts.repeat(3),
-            gnn_mfgs_raw=sample_ret.ngh2root_mfgs_raw,
+            n2r_meta=n2r_meta,
             pos_edge_id=torch.as_tensor(edges["eid"].values, dtype=torch.long),
-            epoch_split_iter_info=epoch_split_iter_info,
-            mdb_raw_data=sample_ret.root2ngh_mfg_raw,
-            batch_node_state_io=sample_ret.batch_node_state_io,
+            m_state=epoch_split_iter_info,
+            r2n_meta=r2n_meta,
+            state=state,
             n_src=src.shape[0],
         )
 

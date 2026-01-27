@@ -15,6 +15,42 @@ from tensor_set import TensorSet
 logger = logging.getLogger(__name__)
 
 
+def analyze_all_n_root(mfg_meta: DGLBlockMeta) -> tuple[TensorSet, TensorSet]:
+    """
+    Analyzes the provided list of DGLBlockMeta to determine the maximum
+    number of source and destination nodes across the last n_history blocks.
+
+    Args:
+        mfg_meta_list (List[DGLBlockMeta]): List of DGLBlockMeta objects.
+
+    Returns:
+        Tuple[set, set]: A tuple containing the set of all   source nodes
+                        and the set of all root nodes.
+    """
+
+    nodes = mfg_meta.nodes
+    num_roots = mfg_meta.dim_out
+    all_nodes = TensorSet(nodes)
+    root_nodes = TensorSet(nodes[:num_roots])
+
+    return all_nodes, root_nodes
+
+
+def analyze_need(
+    all_nodes: TensorSet,
+    src: torch.Tensor,
+    pos_dst: torch.Tensor,
+) -> BatchNodeStateIO:
+    mem_mailbox_will_update_nodes = TensorSet(src) + TensorSet(pos_dst)
+    return BatchNodeStateIO(
+        mem_needed=all_nodes,
+        mem_updated=mem_mailbox_will_update_nodes,
+        mailbox_needed=all_nodes,
+        mailbox_updated=mem_mailbox_will_update_nodes,
+        nfeat_needed=all_nodes,
+    )
+
+
 class TGN(torch.nn.Module, SampleMixin):
     def __init__(
         self,
@@ -44,46 +80,6 @@ class TGN(torch.nn.Module, SampleMixin):
             dim_out=dim_out,
             num_head=att_h,
             dropout=dropout,
-        )
-
-    @staticmethod
-    def analyze_block(mfg_meta: DGLBlockMeta) -> tuple[TensorSet, TensorSet]:
-        """
-        Analyzes the provided list of DGLBlockMeta to determine the maximum
-        number of source and destination nodes across the last n_history blocks.
-
-        Args:
-            mfg_meta_list (List[DGLBlockMeta]): List of DGLBlockMeta objects.
-
-        Returns:
-            Tuple[set, set]: A tuple containing the set of all   source nodes
-                            and the set of all root nodes.
-        """
-
-        nodes = mfg_meta.nodes
-        num_roots = mfg_meta.dim_out
-        all_nodes = TensorSet(nodes)
-        root_nodes = TensorSet(nodes[:num_roots])
-
-        return all_nodes, root_nodes
-
-    @staticmethod
-    def analyze_dynam(
-        blockss: list[DGLBlockMeta],
-        src: torch.Tensor,
-        pos_dst: torch.Tensor,
-        neg_dst: torch.Tensor,
-    ) -> BatchNodeStateIO:
-        assert len(blockss) == 1, "TGN only supports 1 layer currently"
-
-        all_nodes, root_nodes = TGN.analyze_block(blockss[0])
-        mem_mailbox_will_update_nodes = TensorSet(src) + TensorSet(pos_dst)
-        return BatchNodeStateIO(
-            mem_needed=all_nodes,
-            mem_updated=mem_mailbox_will_update_nodes,
-            mailbox_needed=all_nodes,
-            mailbox_updated=mem_mailbox_will_update_nodes,
-            nfeat_needed=all_nodes,
         )
 
     def forward(

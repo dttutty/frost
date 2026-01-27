@@ -16,8 +16,8 @@ def set_to_tensor(s: set[int]) -> torch.Tensor:
 class BatchNodeStateIO:
     mem_needed: TensorSet
     mem_updated: TensorSet
-    mailbox_needed: TensorSet
-    mailbox_updated: TensorSet
+    mailbox_needed: TensorSet | None
+    mailbox_updated: TensorSet | None
     nfeat_needed: TensorSet
 
 
