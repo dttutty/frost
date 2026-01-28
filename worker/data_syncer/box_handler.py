@@ -211,9 +211,10 @@ class BoxHandler(StreamThreadBase):
 
             logger.debug("DataSyncer: finished p2p processing", macro_bid)
 
-            self.write_back_box(
-                box_task.box_plan.writeback,
-                box_ts_nid,
-            )
+            if box_task.box_plan.writeback is not None:
+                self.write_back_box(
+                    box_task.box_plan.writeback.data,
+                    box_ts_nid,
+                )
             logger.debug("DataSyncer: finished write back", macro_bid)
             self.h2d_sem.release()

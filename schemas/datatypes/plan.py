@@ -23,142 +23,98 @@ class BatchNodeStateIO:
 
 @dataclass(slots=True, kw_only=True)
 class PlanSet:
-    mem: DyPlan | None
-    box: DyPlan | None
-    nfeat: StPlan | None
-
-    def tensorfy(self) -> TensorPlanSet:
-        return TensorPlanSet(
-            mem=self.mem.tensorfy() if self.mem is not None else None,
-            box=self.box.tensorfy() if self.box is not None else None,
-            nfeat=self.nfeat.tensorfy() if self.nfeat is not None else None,
-        )
-
-
-@dataclass(slots=True, kw_only=True)
-class TensorPlanSet:
     """
-    PlanSet = DyPlan + StPlan
+    统一的 PlanSet，直接持有 DyPlan 和 StPlan。
     """
 
-    mem: TensorDyPlan | None = None
-    box: TensorDyPlan | None = None
-    nfeat: TensorStPlan | None = None
+    mem: DyPlan | None = None
+    box: DyPlan | None = None
+    nfeat: StPlan | None = None
 
-    def to(self, device: torch.device) -> TensorPlanSet:
-        return self.__class__(
+    def to(self, device: torch.device) -> PlanSet:
+        """
+        递归地将所有子 Plan 移动到指定设备
+        """
+        return PlanSet(
             mem=self.mem.to(device) if self.mem is not None else None,
             box=self.box.to(device) if self.box is not None else None,
             nfeat=self.nfeat.to(device) if self.nfeat is not None else None,
         )
 
-    def cuda(self) -> TensorPlanSet:
+    def cuda(self) -> PlanSet:
         return self.to(torch.device("cuda"))
-
-    def sort(self) -> TensorPlanSet:
-        return self.__class__(
-            mem=self.mem.sort() if self.mem is not None else None,
-            box=self.box.sort() if self.box is not None else None,
-            nfeat=self.nfeat.sort() if self.nfeat is not None else None,
-        )
 
 
 @dataclass(slots=True, kw_only=True)
 class DyPlan:
-    p2p: list[set[int]]
-    fetch: set[int]
+    p2p: list[TensorSet]
+    fetch: TensorSet
     rec_cts: NDArray
     send_cts: NDArray
-    writeback: set[int] | None = None
+    writeback: TensorSet | None = None
 
-    def tensorfy(self) -> TensorDyPlan:
-        return TensorDyPlan(
-            p2p=[torch.tensor(list(s)).long() for s in self.p2p],
-            fetch=torch.tensor(list(self.fetch)).long(),
-            rec_cts=self.rec_cts,
-            send_cts=self.send_cts,
-            writeback=(
-                torch.tensor(list(self.writeback)).long()
-                if self.writeback is not None
-                else None
-            ),
+    def to(self, device: torch.device) -> DyPlan:
+        """
+        递归地将内部的 TensorSet 移动到指定设备。
+        注意：这会创建新的 TensorSet 对象（因为 TensorSet 是不可变的）
+        """
+
+        # 辅助函数：快速根据 data 创建新 Set，跳过 unique/sort 检查以提速
+        def _move(ts: TensorSet) -> TensorSet:
+            # 直接操作底层 data 移动，然后 wrap 回 TensorSet
+            # 假设 TensorSet 有一个能接受 tensor 的构造器
+            # 我们利用 sort_now=False 避免重排序，因为移动设备不改变顺序
+            return TensorSet(ts.data.to(device), sort_now=False)
+
+        return DyPlan(
+            p2p=[_move(ts) for ts in self.p2p],
+            fetch=_move(self.fetch),
+            rec_cts=self.rec_cts,  # numpy array 不随 torch device 移动
+            send_cts=self.send_cts,  # numpy array 不随 torch device 移动
+            writeback=_move(self.writeback) if self.writeback is not None else None,
         )
+
+    def cuda(self) -> DyPlan:
+        return self.to(torch.device("cuda"))
+
+    @property
+    def device(self) -> torch.device:
+        return self.fetch.data.device
+
+    def sort(self) -> DyPlan:
+        """
+        TensorSet 默认保持内部有序 (sorted invariant)，
+        所以这里不需要做任何操作，直接返回 self 即可。
+        """
+        return self
 
 
 @dataclass(slots=True, kw_only=True)
 class StPlan:
-    to_cache: set[int]
-    fetch: set[int]
+    to_cache: TensorSet
+    fetch: TensorSet
 
-    def tensorfy(self) -> TensorStPlan:
-        return TensorStPlan(
-            to_cache=torch.tensor(list(self.to_cache)).long(),
-            fetch=torch.tensor(list(self.fetch)).long(),
+    def to(self, device: torch.device) -> StPlan:
+        """
+        Move internal TensorSets to the target device.
+        """
+
+        # Helper: Create new TensorSet on target device without re-sorting
+        def _move(ts: TensorSet) -> TensorSet:
+            return TensorSet(ts.data.to(device), sort_now=False)
+
+        return StPlan(
+            to_cache=_move(self.to_cache),
+            fetch=_move(self.fetch),
         )
 
-
-@dataclass(slots=True, kw_only=True)
-class TensorDyPlan:
-    p2p: list[torch.Tensor]
-    fetch: torch.Tensor
-    rec_cts: NDArray
-    send_cts: NDArray
-    writeback: torch.Tensor | None = None
-
-    def to(self, device: torch.device) -> TensorDyPlan:
-        return self.__class__(
-            p2p=[s.to(device) for s in self.p2p],
-            fetch=self.fetch.to(device),
-            rec_cts=self.rec_cts,
-            send_cts=self.send_cts,
-            writeback=(
-                self.writeback.to(device) if self.writeback is not None else None
-            ),
-        )
-
-    def cuda(self) -> TensorDyPlan:
+    def cuda(self) -> StPlan:
         return self.to(torch.device("cuda"))
 
-    def sort(self) -> TensorDyPlan:
-        new_fetch, _ = torch.sort(self.fetch)
-        new_p2p = [torch.sort(s).values for s in self.p2p]
-        if self.writeback is not None:
-            new_writeback, _ = torch.sort(self.writeback)
-        return self.__class__(
-            p2p=new_p2p,
-            fetch=new_fetch,
-            rec_cts=self.rec_cts,  # 不需要排序，直接引用
-            send_cts=self.send_cts,  # 不需要排序，直接引用
-            writeback=new_writeback,
-        )
+    def sort(self) -> StPlan:
+        return self
 
     @property
-    def device(self):
-        return self.fetch.device
-
-
-@dataclass(slots=True, kw_only=True)
-class TensorStPlan:
-    to_cache: torch.Tensor
-    fetch: torch.Tensor
-
-    def to(self, device: torch.device) -> TensorStPlan:
-        return self.__class__(
-            to_cache=self.to_cache.to(device),
-            fetch=self.fetch.to(device),
-        )
-
-    def cuda(self) -> TensorStPlan:
-        return self.to(torch.device("cuda"))
-
-    def sort(self) -> TensorStPlan:
-        new_to_cache, _ = torch.sort(self.to_cache)
-        new_fetch, _ = torch.sort(self.fetch)
-        return self.__class__(
-            to_cache=new_to_cache,
-            fetch=new_fetch,
-        )
-
-    @property
-    def device(self):
-        return self.to_cache.device
+    def device(self) -> torch.device:
+        # Access .data to get the underlying tensor's device
+        return self.to_cache.data.device

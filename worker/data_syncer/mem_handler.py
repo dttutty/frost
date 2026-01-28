@@ -141,4 +141,4 @@ class MemHandler(StreamThreadBase):
                 self.mem_p2p_q.put("nothing_to_p2p")
                 # skip p2p(), directly put None to p2p_q as sentinel
 
-            self.write_back_mem(mem_plan.writeback, mem_ts_nid)
+            self.write_back_mem(mem_plan.writeback.data, mem_ts_nid)

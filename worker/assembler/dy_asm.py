@@ -11,7 +11,7 @@ from schemas.alias import MetaWEvent
 from schemas.datatypes.mem_mail_box.box import BoxTsNid
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from schemas.datatypes.misc import MemNBox, Shared
-from schemas.datatypes.plan import TensorDyPlan
+from schemas.datatypes.plan import DyPlan
 from thread_base_with_stream import StreamThreadBase
 
 
@@ -61,8 +61,8 @@ def _try_gather_to_pinned(
 
 def prep_part_mem_n_box(
     shared: Shared,
-    mem_plan: TensorDyPlan,
-    box_plan: TensorDyPlan,
+    mem_plan: DyPlan,
+    box_plan: DyPlan,
     pin_mem_buf: DyBuf | None = None,
     pin_box_buf: DyBuf | None = None,
 ) -> MemNBox:
@@ -70,7 +70,7 @@ def prep_part_mem_n_box(
     assert mem_plan is not None
 
     # --- 处理 Memory ---
-    mem_fetch_nids = mem_plan.fetch
+    mem_fetch_nids = mem_plan.fetch.data
     mem = None
 
     # 尝试走 Pin Memory 路径
@@ -92,7 +92,7 @@ def prep_part_mem_n_box(
         ).cuda()  # 普通阻塞传输
 
     # --- 处理 Box (Mail) ---
-    mail_fetch_nids = box_plan.fetch
+    mail_fetch_nids = box_plan.fetch.data
     box = None
 
     if pin_box_buf is not None:

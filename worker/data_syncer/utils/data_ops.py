@@ -7,7 +7,7 @@ import torch
 from schemas.datatypes.mem_mail_box.box import BoxTsNid
 from schemas.datatypes.mem_mail_box.mail import MailTsNid
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
-from schemas.datatypes.plan import TensorDyPlan
+from schemas.datatypes.plan import DyPlan
 from schemas.datatypes.task import P2PTask
 
 
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def make_p2p_task(
     data_td_nid: AllType,
-    plan: TensorDyPlan,
+    plan: DyPlan,
     strategy: Literal["last", "mean", "all"],
 ) -> P2PTask:
     """
@@ -43,7 +43,7 @@ def make_p2p_task(
 
     sizes = numpy.zeros(len(p2p), dtype=int)
     for dst_gpu_id, _ in enumerate(p2p):
-        nids_to_send_tensor = p2p[dst_gpu_id]
+        nids_to_send_tensor = p2p[dst_gpu_id].data
         send_mask_for_dst = torch.isin(nid, nids_to_send_tensor)
 
         buckets_ids.append(nid[send_mask_for_dst])

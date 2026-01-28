@@ -5,7 +5,7 @@ from dgl.heterograph import DGLBlock
 
 from buffer import StBuf  # Import StBuf
 from schemas.datatypes.misc import NFeatNid
-from schemas.datatypes.plan import TensorStPlan
+from schemas.datatypes.plan import StPlan
 
 
 logger = logging.getLogger(__name__)
@@ -104,11 +104,11 @@ class StAssembler:
 
     def prepare_nfeat_cache(
         self,
-        nfeat_plan: TensorStPlan,
+        nfeat_plan: StPlan,
         pin_nfeat_buf: StBuf | None = None,  # 接收 StBuf
     ) -> NFeatNid | None:
         assert self.shared_nfeat is not None
-        to_cache, fetch = nfeat_plan.to_cache, nfeat_plan.fetch
+        to_cache, fetch = nfeat_plan.to_cache.data, nfeat_plan.fetch.data
 
         nfeat_obj = None
 

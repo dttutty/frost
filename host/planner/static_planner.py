@@ -65,49 +65,14 @@ class StaticPlanner(ThreadBase):
             need = self.in_q.get(block=True)
             logger.debug(f"StaticPlanner: received data type={type(need).__name__}")
 
-            if isinstance(need, list):
-                batch_count += 1
+            if need is None:
                 logger.debug(
-                    f"StaticPlanner: processing batch #{batch_count}, needs count={len(need)}"
+                    "StaticPlanner: received None, putting None to out_q and exiting"
                 )
+                self.out_q.put(None)
+                break
 
-                if self.pending is None:  # first batch
-                    logger.debug(
-                        f"StaticPlanner: batch #{batch_count} is first batch, initializing pending and fetchs"
-                    )
-                    self.pending = need
-                    self.fetchs = need
-                    # Log sizes for each GPU
-                    for gpu_id, needs in enumerate(need):
-                        logger.debug(
-                            f"StaticPlanner: GPU {gpu_id} initial needs size={len(needs)}"
-                        )
-                    logger.debug(
-                        f"StaticPlanner: batch #{batch_count} first batch initialized (no plan output)"
-                    )
-                    # we still need to wait because we need to know what to cache
-                else:  # not first batch
-                    logger.debug(
-                        f"StaticPlanner: batch #{batch_count} planning for avails->needs transition"
-                    )
-                    avails = self.pending
-
-                    # Log avails and needs sizes
-                    for gpu_id in range(len(avails)):
-                        logger.debug(
-                            f"StaticPlanner: GPU {gpu_id} avails={len(avails[gpu_id])}, needs={len(need[gpu_id])}"
-                        )
-
-                    plan = self._plan(avails, need)
-
-                    logger.debug(
-                        f"StaticPlanner: batch #{batch_count} plan created, putting to out_q"
-                    )
-                    self.out_q.put(plan)
-                    self.pending = need
-                    logger.debug(f"StaticPlanner: batch #{batch_count} complete")
-
-            elif need == "end_of_epoch":  # None
+            if need == "end_of_epoch":  # None
                 logger.debug("StaticPlanner: received end_of_epoch")
                 assert self.pending is not None
                 avails = self.pending
@@ -124,12 +89,48 @@ class StaticPlanner(ThreadBase):
                 logger.debug(
                     "StaticPlanner: end_of_epoch complete, pending reset to None"
                 )
-            else:
+                continue
+
+            batch_count += 1
+            logger.debug(
+                f"StaticPlanner: processing batch #{batch_count}, needs count={len(need)}"
+            )
+
+            if self.pending is None:  # first batch
                 logger.debug(
-                    "StaticPlanner: received None, putting None to out_q and exiting"
+                    f"StaticPlanner: batch #{batch_count} is first batch, initializing pending and fetchs"
                 )
-                self.out_q.put(None)
-                break
+                self.pending = need
+                self.fetchs = need
+                # Log sizes for each GPU
+                for gpu_id, needs in enumerate(need):
+                    logger.debug(
+                        f"StaticPlanner: GPU {gpu_id} initial needs size={len(needs)}"
+                    )
+                logger.debug(
+                    f"StaticPlanner: batch #{batch_count} first batch initialized (no plan output)"
+                )
+                # we still need to wait because we need to know what to cache
+            else:  # not first batch
+                logger.debug(
+                    f"StaticPlanner: batch #{batch_count} planning for avails->needs transition"
+                )
+                avails = self.pending
+
+                # Log avails and needs sizes
+                for gpu_id in range(len(avails)):
+                    logger.debug(
+                        f"StaticPlanner: GPU {gpu_id} avails={len(avails[gpu_id])}, needs={len(need[gpu_id])}"
+                    )
+
+                plan = self._plan(avails, need)
+
+                logger.debug(
+                    f"StaticPlanner: batch #{batch_count} plan created, putting to out_q"
+                )
+                self.out_q.put(plan)
+                self.pending = need
+                logger.debug(f"StaticPlanner: batch #{batch_count} complete")
 
         logger.debug(
             f"StaticPlanner: exiting logic loop, processed {batch_count} batches"

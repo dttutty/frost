@@ -6,6 +6,8 @@ import numpy as np
 import torch
 from numpy.typing import NDArray
 
+from tensor_set import TensorSet
+
 from .datatypes.misc import Meta
 from .datatypes.plan import DyPlan, PlanSet
 
@@ -21,5 +23,5 @@ FloatArr = NDArray[np.floating]
 
 MetaWEvent: TypeAlias = tuple[Meta, torch.cuda.Event]
 
-MetasDyNeed: TypeAlias = tuple[list[set[int]], list[set[int]]]
-MetasStNeed: TypeAlias = list[set[int]]
+MetasDyNeed: TypeAlias = tuple[list[TensorSet], list[TensorSet]]
+MetasStNeed: TypeAlias = list[TensorSet]

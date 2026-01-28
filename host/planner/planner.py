@@ -1,7 +1,7 @@
 import logging
 import threading
 from queue import Queue as Q
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 
@@ -9,6 +9,7 @@ from host.planner.dynamic_planner import DynamicPlanner
 from host.planner.static_planner import StaticPlanner
 from schemas.alias import MetaBundle, MetasDyNeed, MetasStNeed
 from schemas.datatypes.plan import BatchNodeStateIO, DyPlan, StPlan
+from tensor_set import TensorSet
 from thread_base import ThreadBase
 
 
@@ -199,72 +200,7 @@ class Planner(ThreadBase):
             metas = self.meta_bundle_q.get(block=True)
             logger.debug(f"Planner: received data type={type(metas).__name__}")
 
-            if isinstance(metas, list):
-                batch_count += 1
-                logger.debug(
-                    f"Planner: processing batch #{batch_count}, metas count={len(metas)}"
-                )
-                assert len(metas) == self.n_gpus
-
-                state_ios: list[BatchNodeStateIO] = []
-                for idx, meta in enumerate(metas):
-                    assert meta.state is not None
-                    state_ios.append(meta.state)
-                    logger.debug(
-                        f"Planner: batch #{batch_count}, GPU {idx} state collected"
-                    )
-
-                if self.mem_plan_in_q is not None:
-                    logger.debug(
-                        f"Planner: batch #{batch_count}, putting mem needs/updates to mem planner"
-                    )
-                    assert self.mem_plan_in_q is not None
-                    next_needs = [state_io.mem_needed for state_io in state_ios]
-                    next_updates = [state_io.mem_updated for state_io in state_ios]
-                    self.mem_plan_in_q.put((next_needs, next_updates))
-
-                if self.mail_plan_in_q is not None:
-                    logger.debug(
-                        f"Planner: batch #{batch_count}, putting mail needs/updates to mail planner"
-                    )
-                    next_needs = [state_io.mailbox_needed for state_io in state_ios]
-                    next_updates = [state_io.mailbox_updated for state_io in state_ios]
-                    self.mail_plan_in_q.put((next_needs, next_updates))
-
-                if self.nfeat_plan_in_q is not None:
-                    logger.debug(
-                        f"Planner: batch #{batch_count}, putting nfeat needs to nfeat planner"
-                    )
-                    next_needs = [state_io.nfeat_needed for state_io in state_ios]
-                    self.nfeat_plan_in_q.put(next_needs)
-
-                logger.debug(
-                    f"Planner: batch #{batch_count}, deleting state from metas"
-                )
-                for meta in metas:
-                    del meta.state  # 释放内存
-
-                logger.debug(f"Planner: batch #{batch_count}, putting metas to out_q")
-                self.out_q.put(metas)
-                logger.debug(f"Planner: batch #{batch_count} complete")
-
-            elif metas == "end_of_epoch":
-                logger.debug(
-                    "Planner: received end_of_epoch, forwarding to sub-planners"
-                )
-                if self.mem_plan_in_q is not None:
-                    logger.debug("Planner: putting end_of_epoch to mem planner")
-                    self.mem_plan_in_q.put("end_of_epoch")
-                if self.mail_plan_in_q is not None:
-                    logger.debug("Planner: putting end_of_epoch to mail planner")
-                    self.mail_plan_in_q.put("end_of_epoch")
-                if self.nfeat_plan_in_q is not None:
-                    logger.debug("Planner: putting end_of_epoch to nfeat planner")
-                    self.nfeat_plan_in_q.put("end_of_epoch")
-                logger.debug("Planner: forwarding end_of_epoch to out_q")
-                self.out_q.put("end_of_epoch")
-
-            elif metas is None:
+            if metas is None:
                 logger.debug("Planner: received None, shutting down sub-planners")
                 if self.mem_plan_in_q is not None:
                     logger.debug("Planner: putting None to mem planner")
@@ -290,5 +226,77 @@ class Planner(ThreadBase):
                     self.nfeat_planner.join()
                 logger.debug("Planner: all sub-planners joined, exiting")
                 break
+
+            if metas == "end_of_epoch":
+                logger.debug(
+                    "Planner: received end_of_epoch, forwarding to sub-planners"
+                )
+                if self.mem_plan_in_q is not None:
+                    logger.debug("Planner: putting end_of_epoch to mem planner")
+                    self.mem_plan_in_q.put("end_of_epoch")
+                if self.mail_plan_in_q is not None:
+                    logger.debug("Planner: putting end_of_epoch to mail planner")
+                    self.mail_plan_in_q.put("end_of_epoch")
+                if self.nfeat_plan_in_q is not None:
+                    logger.debug("Planner: putting end_of_epoch to nfeat planner")
+                    self.nfeat_plan_in_q.put("end_of_epoch")
+                logger.debug("Planner: forwarding end_of_epoch to out_q")
+                self.out_q.put("end_of_epoch")
+                continue
+
+            batch_count += 1
+            logger.debug(
+                f"Planner: processing batch #{batch_count}, metas count={len(metas)}"
+            )
+            assert len(metas) == self.n_gpus
+
+            state_ios: list[BatchNodeStateIO] = []
+            for idx, meta in enumerate(metas):
+                assert meta.state is not None
+                state_ios.append(meta.state)
+                logger.debug(
+                    f"Planner: batch #{batch_count}, GPU {idx} state collected"
+                )
+
+            if self.mem_plan_in_q is not None:
+                logger.debug(
+                    f"Planner: batch #{batch_count}, putting mem needs/updates to mem planner"
+                )
+                next_needs = [
+                    cast(TensorSet, state_io.mem_needed) for state_io in state_ios
+                ]
+                next_updates = [
+                    cast(TensorSet, state_io.mem_updated) for state_io in state_ios
+                ]
+                self.mem_plan_in_q.put((next_needs, next_updates))
+
+            if self.mail_plan_in_q is not None:
+                logger.debug(
+                    f"Planner: batch #{batch_count}, putting mail needs/updates to mail planner"
+                )
+                next_needs = [
+                    cast(TensorSet, state_io.mailbox_needed) for state_io in state_ios
+                ]
+                next_updates = [
+                    cast(TensorSet, state_io.mailbox_updated) for state_io in state_ios
+                ]
+                self.mail_plan_in_q.put((next_needs, next_updates))
+
+            if self.nfeat_plan_in_q is not None:
+                logger.debug(
+                    f"Planner: batch #{batch_count}, putting nfeat needs to nfeat planner"
+                )
+                next_needs = [
+                    cast(TensorSet, state_io.nfeat_needed) for state_io in state_ios
+                ]
+                self.nfeat_plan_in_q.put(next_needs)
+
+            logger.debug(f"Planner: batch #{batch_count}, deleting state from metas")
+            for meta in metas:
+                del meta.state  # 释放内存
+
+            logger.debug(f"Planner: batch #{batch_count}, putting metas to out_q")
+            self.out_q.put(metas)
+            logger.debug(f"Planner: batch #{batch_count} complete")
 
         logger.debug(f"Planner: exiting logic loop, processed {batch_count} batches")

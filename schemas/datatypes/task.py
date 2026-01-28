@@ -8,7 +8,7 @@ from torch import Tensor
 from schemas.datatypes.mem_mail_box.box import BoxTsNid
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
 
-from .plan import TensorDyPlan
+from .plan import DyPlan
 
 
 @dataclass(slots=True)
@@ -16,7 +16,7 @@ class MemTask:
     macro_bid: int
     root_new_mem: MemTsNid
     old_mem_ts_nid: MemTsNid
-    mem_plan: TensorDyPlan
+    mem_plan: DyPlan
     is_last: bool
 
 
@@ -26,7 +26,7 @@ class BoxTask:
     pos_efeat: Tensor | None
     macro_bid: int
     old_box: BoxTsNid
-    box_plan: TensorDyPlan
+    box_plan: DyPlan
     is_last: bool
     r2n_mdt: Tensor | None
 

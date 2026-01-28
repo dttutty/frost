@@ -15,7 +15,7 @@ from schemas.datatypes.mem_mail_box.box import BoxTsNid
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from tensor_set_fn import TensorSetFn
 
-from .plan import BatchNodeStateIO, PlanSet, TensorPlanSet
+from .plan import BatchNodeStateIO, PlanSet
 
 
 if TYPE_CHECKING:
@@ -39,7 +39,7 @@ class SampleReturn:
 class ForwardCtx:
     blockss: list[list[DGLBlock]] | NecessrayData
     macro_bid: int
-    plan_set: TensorPlanSet
+    plan_set: PlanSet
     mail_delivery_tensor: Tensor | None
     is_last: bool
     n_root_src_n_pos_dst: int
@@ -251,7 +251,7 @@ class Meta:
     state: BatchNodeStateIO | None
     n_src: int = 1
 
-    plan_set: TensorPlanSet | None = None
+    plan_set: PlanSet | None = None
     labels: Tensor | None = None
 
     @cached_property
@@ -299,7 +299,7 @@ class SeperateData:
 @dataclass(slots=True, kw_only=True)
 class ScatterData:
     metas: list[Meta]
-    planset: PlanSet | TensorPlanSet | None = None
+    planset: PlanSet | PlanSet | None = None
 
 
 @dataclass(slots=True, kw_only=True)

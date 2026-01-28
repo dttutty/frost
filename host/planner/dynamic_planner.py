@@ -4,9 +4,11 @@ from queue import Queue
 from typing import Literal
 
 import numpy as np
+import torch
 
 from schemas.alias import MetasDyNeed
 from schemas.datatypes.plan import DyPlan
+from tensor_set import TensorSet
 from thread_base import ThreadBase
 
 
@@ -14,141 +16,200 @@ logger = logging.getLogger(__name__)
 
 
 def handle_remaining(
-    needs: list[set[int]],
-    avails: list[set[int]],
+    needs: list[TensorSet],
+    avails: list[TensorSet],
     gpus_distance: np.ndarray,
-) -> tuple[list[set[int]], list[list[set[int]]]]:
+) -> tuple[list[TensorSet], list[list[TensorSet]]]:
     """
-    (纯 Python Set 版本)
+    (TensorSet 版本)
     计算陈旧数据的 P2P 计划和 CPU 预取。
     逻辑：距离优先的贪心匹配 (Greedy Matching by Distance)。
     Receiver-Centric
     """
     n_gpus = len(gpus_distance)
 
-    # 初始化结果容器
-    p2p_plan: list[list[set[int]]] = [
-        [set() for _ in range(n_gpus)] for _ in range(n_gpus)
+    # --- 0. 准备空 TensorSet ---
+    # 为了保证 PyTorch 运算不报错，需获取正确的 device 和 dtype
+    ref_ts = None
+    if n_gpus > 0:
+        if len(needs[0]) > 0:
+            ref_ts = needs[0]
+        elif len(avails[0]) > 0:
+            ref_ts = avails[0]
+
+    if ref_ts is not None:
+        empty_tensor = torch.tensor(
+            [], dtype=ref_ts.data.dtype, device=ref_ts.data.device
+        )
+    else:
+        empty_tensor = torch.tensor([], dtype=torch.long)  # Fallback
+
+    empty_ts = TensorSet(empty_tensor)
+
+    # --- 1. 初始化结果容器 ---
+    # p2p_plan[s][r] 表示 s 发给 r 的数据
+    p2p_plan: list[list[TensorSet]] = [
+        [empty_ts for _ in range(n_gpus)] for _ in range(n_gpus)
     ]
 
-    # 3. 核心逻辑：按距离排序的贪心匹配
-    # 我们希望优先从距离为 0 (自己), 1 (NVLink), 2 (PCIe/QPI) ... 的地方获取
+    # --- 2. 核心逻辑：按距离排序的贪心匹配 ---
     unique_distances = sorted(np.unique(gpus_distance))
 
     for dist in unique_distances:
         # 找到所有距离为 dist 的 (sender, receiver) 对
-        # np.argwhere 对于 8x8 这种小矩阵非常快
+        # results in array of shape (N, 2) -> [[s1, r1], [s2, r2], ...]
         pairs = np.argwhere(gpus_distance == dist)
 
         for s, r in pairs:
+            # 优化：如果 Receiver 已经没什么需要的了，直接跳过
+            if len(needs[r]) == 0:
+                continue
+
+            # 优化：如果 Sender 没什么可提供的，直接跳过
+            if len(avails[s]) == 0:
+                continue
+
             # 获取 Sender 拥有的
             available = avails[s]
-            # 获取 Receiver 目前还缺少的 (注意：这里是动态更新的 remaining_needs)
-            need: set[int] = needs[r]
+
+            # 获取 Receiver 目前还缺少的
+            # 注意：needs[r] 在循环过程中会不断变小
+            current_need = needs[r]
 
             # 交集：sender 有 且 receiver 缺
-            to_transfer = available & need
+            # 使用 TensorSet.__and__ (&)
+            to_transfer = available & current_need
 
-            if to_transfer:
+            if len(to_transfer) > 0:
                 # 1. 加入传输计划
-                p2p_plan[s][r].update(to_transfer)
+                # 逻辑: p2p_plan[s][r].update(to_transfer)
+                # TensorSet 写法: 必须赋值回去，因为 | 返回新对象
+                p2p_plan[s][r] = p2p_plan[s][r] | to_transfer
 
                 # 2. 关键步骤：贪心消除
-                # 既然在这个距离找到了，就不需要再去更远的地方找了 -> 从需求中移除
-                need.difference_update(to_transfer)
+                # 逻辑: need.difference_update(to_transfer)
+                # TensorSet 写法: 计算差集并**回写到列表**
+                needs[r] = current_need - to_transfer
 
-                # 3. 计数
-
+    # 返回更新后的 needs (即剩下的必须去 CPU 拿的部分) 和 P2P 计划
     return needs, p2p_plan
 
 
 def handle_update(
-    needs: list[set[int]],
-    avails: list[set[int]],
+    needs: list[TensorSet],
+    avails: list[TensorSet],
 ) -> tuple[
-    list[set[int]],  # leftovers_on_gpu
-    list[list[set[int]]],  # p2p_transfer_plan
+    list[TensorSet],  # leftovers_on_gpu
+    list[list[TensorSet]],  # p2p_transfer_plan
 ]:
     """
-    (纯 Python Set 版本 - 逻辑简化)
-    计算 P2P 传输计划：谁有(fresh)，谁需要(needed)，谁发给谁。
-    Sender-Centric
+    (TensorSet 版本)
+    计算 P2P 传输计划：Sender-Centric
     """
     n_gpus = len(needs)
 
-    # 1. 全局 Fresh 集合: 所有 GPU 目前持有的节点并集
-    # 等价于: np.any(fresh_held_mask, axis=0)
+    # --- 0. 准备工作：创建一个兼容的 Empty TensorSet ---
+    # 我们需要一个空的 TensorSet 来初始化，且 device/dtype 要匹配，
+    # 否则 PyTorch 做运算时可能会报错。
+    ref_ts = None
+    if n_gpus > 0:
+        if len(needs[0]) > 0:
+            ref_ts = needs[0]
+        elif len(avails[0]) > 0:
+            ref_ts = avails[0]
 
-    # 2. 计算 Stale Needs (缺少的节点)
-    # 逻辑: 我需要的 - 全局任何人有fresh的 = 我必须去Stale存储distance优先拿的 (Stale) +需要从CPU预取的
-    # 等价于: needed_mask & ~all_fresh_nids_mask
+    if ref_ts is not None:
+        empty_tensor = torch.tensor(
+            [], dtype=ref_ts.data.dtype, device=ref_ts.data.device
+        )
+    else:
+        # Fallback: 默认 CPU Long
+        empty_tensor = torch.tensor([], dtype=torch.long)
 
-    # 初始化结果容器
-    p2p_plan: list[list[set[int]]] = [
-        [set() for _ in range(n_gpus)] for _ in range(n_gpus)
+    empty_ts = TensorSet(empty_tensor)
+
+    # --- 1. 初始化结果容器 ---
+    # 注意：这里创建一个 n x n 的矩阵，填充 empty_ts
+    p2p_plan: list[list[TensorSet]] = [
+        [empty_ts for _ in range(n_gpus)] for _ in range(n_gpus)
     ]
-    leftovers = []
+    leftovers: list[TensorSet] = []
 
-    # 使用 numpy 数组以保持返回类型兼容性
-
-    # 3. 计算 P2P 计划 (双层循环: Sender -> Receiver)
-    # 逻辑: Sender 有的 & Receiver 需要的 = 传输内容
-    # 对于 GPU 数量 (通常 < 16) 来说，O(N^2) 的循环开销甚至小于 Numpy 的启动开销
+    # --- 2. 计算 P2P 计划 (双层循环: Sender -> Receiver) ---
     for s in range(n_gpus):
         new_update = avails[s]
 
-        # 记录 Sender 发送出去的所有东西，用于计算 leftover
-        everything_sender_sends = set()
+        # 记录 Sender (s) 发送给所有人的节点总量，用于最后算剩下的
+        everything_sender_sends = empty_ts
 
         for r in range(n_gpus):
+            # 只有当 s != r 时才发生网络传输
+            # (虽然 s==r 求交集逻辑上也成立，但在 P2P 计划里通常指跨卡传输)
+
             need = needs[r]
 
-            # 交集: S 有且 R 需要
-            # 等价于: fresh_send_mask & fresh_need_mask
+            # 交集: S 有 & R 需要
+            # 使用 TensorSet 的 __and__ (&)
             to_transfer = new_update & need
 
-            if to_transfer:
-                p2p_plan[s][r].update(to_transfer)
-                everything_sender_sends.update(to_transfer)
+            if len(to_transfer) > 0:
+                # 记录传输计划
+                # 因为只遍历一次 (s,r)，直接赋值即可
+                p2p_plan[s][r] = to_transfer
 
-                # 更新计数
+                # 累加到 total sent
+                # 使用 TensorSet 的 __or__ (|)
+                everything_sender_sends = everything_sender_sends | to_transfer
 
-        # 4. 计算 Leftovers (Sender 持有有，但没人要的)
-        # 等价于: fresh_held_mask & ~all_nids_to_send_mask
+        # --- 3. 计算 Leftovers (Sender 持有，但没人要的) ---
+        # 逻辑: 我有的 - 我送出去的
+        # 使用 TensorSet 的 __sub__ (-)
         leftover = new_update - everything_sender_sends
         leftovers.append(leftover)
 
-    return (
-        leftovers,
-        p2p_plan,
-    )
+    return leftovers, p2p_plan
 
 
 def dedup_updates(
-    updates: list[set[int]], reverse: bool = True
-) -> tuple[list[set[int]], set[int]]:
+    updates: list[TensorSet], reverse: bool = True
+) -> tuple[list[TensorSet], TensorSet]:
     """
-    (简化逻辑版)
-    对每个 GPU 持有的节点列表进行去重，确保一个节点只由一个 GPU 负责。
-    优先保留迭代顺序中靠前的 GPU 中的节点。
-
-    Args:
-        updates: List[Set[int]], 列表索引对应 rank/gpu_id
-        reverse:
-            True  -> 倒序优先 (Rank N-1 优先保留节点, Rank 0 只能捡剩下的)
-            False -> 正序优先 (Rank 0 优先保留节点)
+    使用 TensorSet 实现的去重逻辑。
     """
     n_gpus = len(updates)
-    new_updates: list[set[int]] = [set() for _ in range(n_gpus)]
+
+    # 创建一个空的 TensorSet 作为初始值
+    # 注意：确保 dtype 与你的节点 ID 类型一致（通常是 torch.long）
+    empty_tensor = torch.tensor([], dtype=torch.long)
+    # 如果是在 CUDA 上，记得 .cuda()，或者确保 updates 里的 tensor 都在同一个设备上
+    if n_gpus > 0 and updates[0].data.is_cuda:
+        empty_tensor = empty_tensor.to(updates[0].data.device)
+
+    empty_ts = TensorSet(empty_tensor)
+
+    # 初始化结果列表
+    new_updates: list[TensorSet] = [empty_ts] * n_gpus
+
     if n_gpus == 0:
-        return new_updates, set()
-    all_update: set[int] = set()
-    # seen_nodes is the set of nodes that have already been assigned to higher-priority GPUs
+        return new_updates, empty_ts
+
+    all_update = empty_ts
+
+    # 确定迭代顺序
     iterator = range(n_gpus - 1, -1, -1) if reverse else range(n_gpus)
+
     for i in iterator:
         curr_rank_update_nodes = updates[i]
+
+        # 1. 计算当前 GPU 独有的节点：(当前节点) - (已经被高优先级 GPU 抢走的节点)
+        # 利用了 TensorSet.__sub__ (-)
+        # 结果 new_updates[i] 会是一个新的 TensorSet 对象
         new_updates[i] = curr_rank_update_nodes - all_update
-        all_update.update(curr_rank_update_nodes)
+
+        # 2. 将当前节点加入到"已分配"集合中
+        # 利用了 TensorSet.__or__ (|)
+        # 注意：这里是重新赋值，因为 | 运算符返回的是一个新的 TensorSet
+        all_update = all_update | curr_rank_update_nodes
 
     return new_updates, all_update
 
@@ -182,40 +243,47 @@ class DynamicPlanner(ThreadBase):
         self.in_q = in_q
         self.out_q = out_q
         self.stop_ev = stop_ev
-        self.pending: tuple[list[set[int]], list[set[int]]] | None = None
+        self.pending: MetasDyNeed | None = None
 
     def logic(self) -> None:
         while not self.stop_ev.is_set():
             in_q_data = self.in_q.get(block=True)
-            if isinstance(in_q_data, tuple):
-                if self.pending is None:
-                    needs, _ = in_q_data
-                    self.pending = in_q_data
-                    self.fetchs_of_1 = needs
-                else:
-                    needs, updates = self.pending
-                    next_needs, _ = in_q_data
-                    plan = self._plan(needs, updates, next_needs)
-                    self.out_q.put(plan)
-                    self.pending = in_q_data
+            if in_q_data is None:
+                self.out_q.put(None)
+                break
             elif in_q_data == "end_of_epoch":
                 assert self.pending is not None
                 needs, updates = self.pending
                 # 没有下一个 batch 了，next_needs 为空
-                next_needs = [set() for _ in range(self.n_gpus)]
+                if needs and len(needs) > 0:
+                    ref_t = needs[0].data
+                    empty_tensor = torch.tensor(
+                        [], dtype=ref_t.dtype, device=ref_t.device
+                    )
+                else:
+                    empty_tensor = torch.tensor([], dtype=torch.long)  # 默认 fallback
+                empty_ts = TensorSet(empty_tensor)
+                next_needs: list[TensorSet] = [empty_ts for _ in range(self.n_gpus)]
                 plan = self._plan(needs, updates, next_needs)
                 # this time will generate a plan, but next time will not generate plan
                 self.out_q.put(plan)
                 self.pending = None
+                continue
+            if self.pending is None:
+                needs, updates = in_q_data
+                self.pending = needs, updates
+                self.fetchs_of_1 = needs
             else:
-                self.out_q.put(None)
-                break
+                needs, updates = self.pending
+                plan = self._plan(needs, updates, in_q_data[0])
+                self.out_q.put(plan)
+                self.pending = in_q_data
 
     def _plan(
         self,
-        avails_of_1: list[set[int]],
-        update_avails_of_1: list[set[int]],
-        needs_of_2: list[set[int]],
+        avails_of_1: list[TensorSet],
+        update_avails_of_1: list[TensorSet],
+        needs_of_2: list[TensorSet],
     ) -> list[DyPlan]:
         """规划内存（Memory）的P2P、CPU预取和CPU写回。"""
 
@@ -240,9 +308,20 @@ class DynamicPlanner(ThreadBase):
         )  # 这种没有新mem的节点,直接发送旧的mem就可以(由distance最近的发)
 
         plans = []
-        p2p: list[list[set[int]]] = [
-            [set() for _ in range(n_gpus)] for _ in range(n_gpus)
+        device = (
+            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        )
+        empty_tensor = torch.tensor([], dtype=torch.long, device=device)
+        empty_ts = TensorSet(empty_tensor)
+
+        # 2. 初始化 NxN 矩阵
+        # 因为 TensorSet 是不可变的，所有格子共享同一个 empty_ts 对象完全没问题
+        p2p: list[list[TensorSet]] = [
+            [empty_ts for _ in range(n_gpus)] for _ in range(n_gpus)
         ]
+        # p2p: list[list[set[int]]] = [
+        #     [set() for _ in range(n_gpus)] for _ in range(n_gpus)
+        # ]
         p2p_cts = np.zeros((n_gpus, n_gpus), dtype=np.int32)
 
         fetchs_of_1 = self.fetchs_of_1
