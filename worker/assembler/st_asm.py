@@ -107,55 +107,51 @@ class StAssembler:
         nfeat_plan: TensorStPlan,
         pin_nfeat_buf: StBuf | None = None,  # 接收 StBuf
     ) -> NFeatNid | None:
-        if self.shared_nfeat is not None:
-            to_cache, fetch = nfeat_plan.to_cache, nfeat_plan.fetch
+        assert self.shared_nfeat is not None
+        to_cache, fetch = nfeat_plan.to_cache, nfeat_plan.fetch
 
-            nfeat_obj = None
+        nfeat_obj = None
 
-            # --- Pin Memory Logic ---
-            if (
-                pin_nfeat_buf is not None
-                and fetch.numel() <= pin_nfeat_buf.data.shape[0]
-            ):
-                n = fetch.numel()
-                buf_data = pin_nfeat_buf.data[:n]
-                buf_nid = pin_nfeat_buf.nid[:n]
+        # --- Pin Memory Logic ---
+        if pin_nfeat_buf is not None and fetch.numel() <= pin_nfeat_buf.data.shape[0]:
+            n = fetch.numel()
+            buf_data = pin_nfeat_buf.data[:n]
+            buf_nid = pin_nfeat_buf.nid[:n]
 
-                # Gather Data
-                torch.index_select(self.shared_nfeat, 0, fetch, out=buf_data)
+            # Gather Data
+            torch.index_select(self.shared_nfeat, 0, fetch, out=buf_data)
 
-                # Gather NID
-                # buf_nid 是 (Max, 1), fetch 是 (N,)
-                buf_nid.copy_(fetch.view(-1, 1).to(dtype=buf_nid.dtype))
+            # Gather NID
+            # buf_nid 是 (Max, 1), fetch 是 (N,)
+            buf_nid.copy_(fetch.view(-1, 1).to(dtype=buf_nid.dtype))
 
-                # Async Transfer
-                gpu_data = buf_data.to("cuda", non_blocking=True)
-                gpu_nid = buf_nid.to("cuda", non_blocking=True).long().squeeze(1)
+            # Async Transfer
+            gpu_data = buf_data.to("cuda", non_blocking=True)
+            gpu_nid = buf_nid.to("cuda", non_blocking=True).long().squeeze(1)
 
-                nfeat_obj = NFeatNid(nid=gpu_nid, nfeat=gpu_data)
-            # ------------------------
+            nfeat_obj = NFeatNid(nid=gpu_nid, nfeat=gpu_data)
+        # ------------------------
 
-            # Fallback
-            if nfeat_obj is None:
-                nfeat_obj = NFeatNid(nid=fetch, nfeat=self.shared_nfeat[fetch])
-                nfeat_obj = nfeat_obj.cuda()
-                # 注意: 普通路径下数据在 CPU，后续如果需要 GPU 数据，
-                # fill_mfg_with_efeat_n_nfeat 或 H2D 逻辑可能需要处理 .to(cuda)
-                # 为了一致性，建议此处不上 GPU，由 H2D 统一调度，或者在这里统一上 GPU。
-                # 假设 H2D 现在的逻辑是可以处理 GPU Tensor 的。
+        # Fallback
+        if nfeat_obj is None:
+            nfeat_obj = NFeatNid(nid=fetch, nfeat=self.shared_nfeat[fetch])
+            nfeat_obj = nfeat_obj.cuda()
+            # 注意: 普通路径下数据在 CPU，后续如果需要 GPU 数据，
+            # fill_mfg_with_efeat_n_nfeat 或 H2D 逻辑可能需要处理 .to(cuda)
+            # 为了一致性，建议此处不上 GPU，由 H2D 统一调度，或者在这里统一上 GPU。
+            # 假设 H2D 现在的逻辑是可以处理 GPU Tensor 的。
 
-            if self.nfeat_delta is not None:
-                nfeat_obj = nfeat_obj.merge(self.nfeat_delta)
+        if self.nfeat_delta is not None:
+            nfeat_obj = nfeat_obj.merge(self.nfeat_delta)
 
-            nfeat_obj = nfeat_obj.sort_by_nid()
+        nfeat_obj = nfeat_obj.sort_by_nid()
 
-            if to_cache.numel() > 0:
-                self.nfeat_delta = nfeat_obj.filter_by_nid(to_cache)
-            else:
-                self.nfeat_delta = None
+        if to_cache.numel() > 0:
+            self.nfeat_delta = nfeat_obj.filter_by_nid(to_cache)
+        else:
+            self.nfeat_delta = None
 
-            return nfeat_obj
-        return None
+        return nfeat_obj
 
     def fill_mfg_with_efeat_n_nfeat(
         self,

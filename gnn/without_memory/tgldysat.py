@@ -1,4 +1,5 @@
 import logging
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -27,7 +28,7 @@ class DySAT_TGL(nn.Module):
         heads: int = 2,
         dropout: float = 0.1,
         history_len: int = 3,
-    ):
+    ) -> None:
         super().__init__()
         self.num_layers = num_layers
         self.history_len = history_len
@@ -112,4 +113,4 @@ class DySAT_TGL(nn.Module):
 
         # --- Prediction ---
 
-        return final_embedding
+        return cast(torch.Tensor, final_embedding)

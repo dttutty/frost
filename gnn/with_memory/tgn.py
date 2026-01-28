@@ -1,6 +1,7 @@
 # worker/trainer.py
 
 import logging
+from typing import cast
 
 import torch
 from dgl.heterograph import DGLBlock
@@ -86,7 +87,7 @@ class TGN(torch.nn.Module):
         mfgs: list[list[DGLBlock]],
     ) -> torch.Tensor:
         block = mfgs[0][0]
-        updated_mem: torch.Tensor = block.srcdata["updated_mem"]
+        updated_mem: torch.Tensor = cast(torch.Tensor, block.srcdata["updated_mem"])
         # fill in updated memory to blocks
         if self.dim_node > 0:
             nfeat = block.srcdata["nfeat"]
@@ -97,4 +98,4 @@ class TGN(torch.nn.Module):
         del block.srcdata["nfeat"]
         block.srcdata["h"] = h_combined
 
-        return self.encoder(block)
+        return cast(torch.Tensor, self.encoder(block))

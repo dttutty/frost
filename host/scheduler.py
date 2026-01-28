@@ -9,8 +9,8 @@ logger = logging.getLogger(__name__)
 
 
 def generate_reordered_indexes_1(
-    reorder, batch_size, num_samples, batches_assignment_0
-):
+    reorder: int, batch_size: int, num_samples: int, batches_assignment_0: np.ndarray
+) -> list[np.ndarray]:
     # train_param.batch_size = 8, reorder = 3
     # batches_assignment_0 = [0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 3 3 3 3 3 3]
     group_idx = list()
@@ -43,7 +43,9 @@ def generate_reordered_indexes_1(
     return return_val
 
 
-def generate_reordered_indexes_2(reorder, batch_size, batches_assignment_0):
+def generate_reordered_indexes_2(
+    reorder: int, batch_size: int, batches_assignment_0: np.ndarray
+) -> list[np.ndarray]:
     # random chunk shceduling
     group_indexes = []
     chunk_size = batch_size // reorder
@@ -62,11 +64,13 @@ def generate_reordered_indexes_2(reorder, batch_size, batches_assignment_0):
     return group_indexes
 
 
-def batches_assign(index, batch_size):
+def batches_assign(index: int, batch_size: int) -> int:
     return index // batch_size
 
 
-def plan_gpu_batches(num_samples, target_batch_size, ngpus=1):
+def plan_gpu_batches(
+    num_samples: int, target_batch_size: int, ngpus: int = 1
+) -> tuple[int, int]:
     """
     this is to ensure iterations number is divisible by number of gpus
     """

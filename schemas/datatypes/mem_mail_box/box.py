@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import Tensor
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 def is_sorted(t: torch.Tensor) -> bool:
-    return torch.all(torch.diff(t) >= 0).item()
+    return cast(bool, torch.all(torch.diff(t) >= 0).item())
 
 
 @dataclass(slots=True, kw_only=True)

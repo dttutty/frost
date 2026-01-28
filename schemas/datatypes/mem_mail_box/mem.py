@@ -5,11 +5,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from tensor_set import TensorSet
-
-
-def is_sorted(t: torch.Tensor) -> bool:
-    return torch.all(torch.diff(t) >= 0)
+from tensor_set_fn import TensorSetFn
 
 
 @dataclass(slots=True, kw_only=True)
@@ -29,7 +25,7 @@ class MemTsNid:
         return MemTsNid(nid=self.nid.cuda(), data=self.data.cuda(), ts=self.ts.cuda())
 
     def merge_mem(self, other: MemTsNid) -> MemTsNid:
-        assert TensorSet.intersection(self.nid, other.nid).numel() == 0, (
+        assert TensorSetFn.intersection(self.nid, other.nid).numel() == 0, (
             "NID overlap between MemTsNid instances."
         )
         return MemTsNid(

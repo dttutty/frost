@@ -1,4 +1,5 @@
 import logging
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -221,7 +222,7 @@ class DyGFormer(nn.Module):
 
     def forward(
         self, block: DGLBlock, nfeat: torch.Tensor, efeat: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             block: 包含 (Src + Dst) 历史采样的 TemporalGraphBlock
@@ -279,4 +280,8 @@ class DyGFormer(nn.Module):
 
         # 6. Score
         score = self.score_fc(F.relu(src_emb + dst_emb))
-        return score, src_emb, dst_emb
+        return (
+            cast(torch.Tensor, score),
+            cast(torch.Tensor, src_emb),
+            cast(torch.Tensor, dst_emb),
+        )

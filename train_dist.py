@@ -45,10 +45,6 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-logger.debug("这是调试信息 - 只有 dev 模式能看到")
-logger.info("这是普通信息 - 谁都能看到")
-logger.error("这是错误 - 谁都能看到")
-
 start = time.time()
 
 

@@ -1,4 +1,5 @@
 import logging
+from typing import cast
 
 import dgl
 import dgl.function as fn
@@ -92,7 +93,7 @@ class StructuralGATLayer(nn.Module):
         block.edata["a"] = attn
         block.update_all(fn.u_mul_e("z", "a", "m"), fn.sum("m", "ft"))
 
-        rst = block.dstdata["ft"].reshape(-1, self.dim_out)
+        rst = cast(torch.Tensor, block.dstdata["ft"]).reshape(-1, self.dim_out)
         rst = self.dropout(rst)
         return rst
 
@@ -155,13 +156,13 @@ class TemporalAttentionLayer(nn.Module):
         # Output: [Batch, T, D]
         # We assume causal masking isn't strictly necessary if 'x' represents a fixed past window,
         # but DySAT often uses a mask. For simplicity in batch processing, standard self-attention is used.
-        out = self.transformer_encoder(x)
+        out = cast(torch.Tensor, self.transformer_encoder(x))
 
         # DySAT Strategy: typically we take the embedding at the *last* time step
         # as the representation for the link prediction at t+1.
         last_out = out[:, -1, :]  # [Batch, D]
 
-        return self.w_out(last_out)
+        return cast(torch.Tensor, self.w_out(last_out))
 
 
 class DySAT(nn.Module):

@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 
 
 class TensorSet:
+    data: torch.Tensor
     """
     A Set-like wrapper for 1D PyTorch Tensors supporting operators.
     """

@@ -74,9 +74,9 @@ def calculate_gnn_graph_size(batch_size: int, fanouts: list[int]) -> tuple[int, 
         # 这一层的源节点数 (Src Nodes) = 这一层的边数 (在无重叠假设下)
         src_nodes = edges_count
 
-        print(f"Layer {layer_idx} (Fanout {fanout}):")
-        print(f"  - Edges: {current_layer_nodes:,} * {fanout} = {edges_count:,}")
-        print(f"  - Input Nodes needed: {src_nodes:,}")
+        # print(f"Layer {layer_idx} (Fanout {fanout}):")
+        # print(f"  - Edges: {current_layer_nodes:,} * {fanout} = {edges_count:,}")
+        # print(f"  - Input Nodes needed: {src_nodes:,}")
 
         # 更新下一轮的目标节点
         current_layer_nodes = src_nodes
@@ -85,12 +85,12 @@ def calculate_gnn_graph_size(batch_size: int, fanouts: list[int]) -> tuple[int, 
     # 最底层的 src_nodes 就是最终需要加载特征的节点数
     final_input_nodes = current_layer_nodes
 
-    print("-" * 30)
-    print(f"【总结 (Batch Size={batch_size}, Config={fanouts})】")
-    print(f"1. 最大输入节点数 (Input Nodes): {final_input_nodes:,}")
-    print("   (需要加载 Feature 的节点数量)")
-    print(f"2. 最大总边数 (Total Edges):     {total_edges:,}")
-    print("   (MFG 图中的总边数)")
+    # print("-" * 30)
+    # print(f"【总结 (Batch Size={batch_size}, Config={fanouts})】")
+    # print(f"1. 最大输入节点数 (Input Nodes): {final_input_nodes:,}")
+    # print("   (需要加载 Feature 的节点数量)")
+    # print(f"2. 最大总边数 (Total Edges):     {total_edges:,}")
+    # print("   (MFG 图中的总边数)")
 
     return final_input_nodes, total_edges
 

@@ -29,8 +29,8 @@ class BoxHandler(StreamThreadBase):
         self,
         buf: Buffers,
         shared_box: torch.Tensor,
-        in_q: Q[BoxTask],
-        out_q: Q[P2PTask | None],
+        box_task_q: Q[BoxTask],
+        box_p2p_q: Q[P2PTask | Literal["nothing_to_p2p"]],
         shared_box_ts: torch.Tensor,
         h2d_sem: threading.Semaphore,
         stop_ev: threading.Event,
@@ -42,8 +42,8 @@ class BoxHandler(StreamThreadBase):
         self.shared_box = shared_box
         self.shared_box_ts = shared_box_ts
         self.h2d_sem = h2d_sem
-        self.box_task_q = in_q
-        self.box_p2p_q = out_q
+        self.box_task_q = box_task_q
+        self.box_p2p_q = box_p2p_q
         self.stop_ev = stop_ev
         self.mail_combine = mail_combine
         self.merge_src = merge_src
@@ -83,7 +83,7 @@ class BoxHandler(StreamThreadBase):
 
     def write_back_box(
         self,
-        writeback: torch.Tensor,
+        writeback: torch.Tensor | None,
         box_ts_nid: BoxTsNid,
     ) -> None:
         # [Bugfix] 应该是 or None 才 return, 之前是 not None 就 return
@@ -176,9 +176,7 @@ class BoxHandler(StreamThreadBase):
     def logic(self) -> None:
         while not self.stop_ev.is_set():
             box_task = self.box_task_q.get(block=True)
-            if box_task is None:
-                self.box_p2p_q.put(None)
-                break
+
             macro_bid = box_task.macro_bid
 
             # handle mail or box sync
@@ -202,7 +200,8 @@ class BoxHandler(StreamThreadBase):
             if box_task.is_last is not None:
                 self.box_p2p_q.put(p2p_task)
             else:
-                self.box_p2p_q.put("skip")
+                assert p2p_task is None
+                self.box_p2p_q.put("nothing_to_p2p")
 
             logger.debug("DataSyncer: finished p2p processing", macro_bid)
 

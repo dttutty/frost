@@ -176,7 +176,6 @@ class DyAssembler(StreamThreadBase):
                 self.out_q.put(None, block=True)
                 break
             elif in_data == "end_of_epoch":
-                delta, delta_ready_event = self.delta_q.get(block=True)
                 self.out_q.put("end_of_epoch", block=True)
                 continue
             meta, meta_ready_event = in_data

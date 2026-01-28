@@ -92,35 +92,58 @@ class H2D(StreamThreadBase):
 
     @torch.no_grad()
     def logic(self) -> None:
+        batch_count = 0
+        logger.debug("H2D: starting logic loop")
+
         while not self.stop_ev.is_set():
-            logger.debug("H2D: acquired semaphore, starting H2D operation")
+            logger.debug("H2D: waiting for meta from in_q")
 
             meta = self.in_q.get(block=True)
+            logger.debug(f"H2D: received meta type: {type(meta).__name__}")
+
             if meta is None:
+                logger.debug("H2D: received None, putting to out_q and exiting")
                 self.out_q.put(None, block=True)
                 break
             elif meta == "end_of_epoch":
+                logger.debug("H2D: received end_of_epoch, forwarding to out_q")
                 self.out_q.put("end_of_epoch", block=True)
                 continue
+
+            batch_count += 1
+            logger.debug(f"H2D: processing batch #{batch_count}")
+
             # move pos_efeat to gpu
             if self.efeat is not None:
+                logger.debug(
+                    f"H2D: transferring pos_efeat, size={meta.pos_edge_id.numel()}"
+                )
                 if (
                     self.buf.pos_efeat_h2d is not None
                     and meta.pos_edge_id.numel() <= self.buf.pos_efeat_h2d.shape[0]
                 ):
                     n = meta.pos_edge_id.numel()
+                    logger.debug(f"H2D: using pinned buffer for pos_efeat, n={n}")
                     buf_view = self.buf.pos_efeat_h2d[:n]
                     torch.index_select(self.efeat, 0, meta.pos_edge_id, out=buf_view)
                     meta.pos_efeat = buf_view.to("cuda", non_blocking=True)
                 else:
+                    logger.debug("H2D: direct cuda transfer for pos_efeat")
                     meta.pos_efeat = self.efeat[meta.pos_edge_id].cuda()
 
             # make mfg from raw data
             if meta.n2r_meta is not None:
+                logger.debug(
+                    f"H2D: building MFGs, num_blocks={len(meta.n2r_meta)}, history={self.history}"
+                )
                 meta.n2r_mfgs = collate_and_build_graph(meta.n2r_meta, self.history)
+                logger.debug(f"H2D: MFGs built, num_groups={len(meta.n2r_mfgs)}")
 
             # init x
             n_pos_edges = meta.pos_edge.shape[0]
+            logger.debug(
+                f"H2D: creating labels, n_pos={n_pos_edges}, n_neg_per_pos={self.n_neg}"
+            )
             meta.labels = torch.cat(
                 [
                     torch.ones(n_pos_edges, device="cuda"),
@@ -130,20 +153,28 @@ class H2D(StreamThreadBase):
 
             # move plan to gpu
             if meta.plan_set is not None:
+                logger.debug("H2D: processing plan_set")
                 if meta.plan_set.mem is not None and meta.plan_set.box is None:
                     meta.plan_set.box = meta.plan_set.mem
                 meta.plan_set = meta.plan_set
 
             # move nfeat and efeat to gpu
             if self.nfeat is not None or self.efeat is not None:
+                logger.debug("H2D: processing nfeat/efeat")
                 # prepare if has n_feat
                 if meta.plan_set is not None and meta.plan_set.nfeat is not None:
+                    logger.debug("H2D: preparing nfeat cache")
                     meta.nfeat = self.st_asm.prepare_nfeat_cache(
-                        nfeat_plan=meta.plan_set.nfeat, pin_nfeat_buf=self.buf.nfeat_h2d
+                        nfeat_plan=meta.plan_set.nfeat,
+                        pin_nfeat_buf=self.buf.nfeat_h2d,
+                    )
+                    logger.debug(
+                        f"H2D: nfeat prepared, shape={meta.nfeat.shape if meta.nfeat is not None else None}"
                     )
 
                 # can run no matter has nfeat or not
                 if meta.n2r_mfgs is not None:
+                    logger.debug("H2D: filling MFGs with features")
                     meta.n2r_mfgs = self.st_asm.fill_mfg_with_efeat_n_nfeat(
                         gnn_mfgs=meta.n2r_mfgs,
                         nfeat=meta.nfeat,
@@ -152,15 +183,18 @@ class H2D(StreamThreadBase):
 
                 # mfg version do not need nfeat output
                 if meta.n2r_mfgs is not None:
+                    logger.debug("H2D: deleting nfeat (MFG version)")
                     del meta.nfeat  # mfg版本不需要nfeat输出
 
             # move mem and box to gpu
             if self.shared is not None:
+                logger.debug("H2D: acquiring h2d_sem for mem/box transfer")
                 assert self.buf.mem_h2d is not None
                 assert self.buf.box_h2d is not None
                 assert self.h2d_sem is not None
                 self.h2d_sem.acquire()
                 self.h2d_sem.acquire()
+                logger.debug("H2D: preparing mem and box")
                 assert meta.plan_set is not None
                 assert meta.plan_set.mem is not None
                 assert meta.plan_set.box is not None
@@ -171,23 +205,35 @@ class H2D(StreamThreadBase):
                     pin_mem_buf=self.buf.mem_h2d,
                     pin_box_buf=self.buf.box_h2d,
                 )
+                logger.debug("H2D: mem and box prepared")
+
             if meta.plan_set is not None:
                 if meta.plan_set.mem is not None and meta.plan_set.box is None:
                     meta.plan_set.box = meta.plan_set.mem
                 # 使用 non_blocking 即可，无需 buffer
+                logger.debug("H2D: transferring plan_set to cuda")
                 meta.plan_set = meta.plan_set.cuda()
 
             # even there is no next batch, we still need plan_set for writeback
             if self.merge_src:
+                logger.debug("H2D: deduplicating first layer src nodes")
                 assert meta.n2r_mfgs is not None
                 meta.n2r_mfgs[0] = _deduplicate_first_layer_src(meta.n2r_mfgs[0])
+                logger.debug("H2D: deduplication complete")
 
             # move gnn_mfgs to gpu
             if meta.n2r_mfgs is not None:
+                logger.debug(
+                    f"H2D: transferring {len(meta.n2r_mfgs)} MFG groups to GPU"
+                )
                 for blocks in meta.n2r_mfgs:
                     for block in blocks:
                         block = block.to("cuda:0")
+                logger.debug("H2D: all MFGs on GPU")
 
             ready_event: torch.cuda.Event = torch.cuda.Event()
             ready_event.record(torch.cuda.current_stream())
+            logger.debug(f"H2D: batch #{batch_count} complete, putting to out_q")
             self.out_q.put((meta, ready_event), block=True)
+
+        logger.debug(f"H2D: exiting, processed {batch_count} batches")

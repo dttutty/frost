@@ -1,4 +1,5 @@
 import logging
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -93,4 +94,4 @@ class APAN(nn.Module):
 
         embedding = self.gnn_norm(block.srcdata["updated_mem"])
 
-        return embedding
+        return cast(torch.Tensor, embedding)

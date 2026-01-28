@@ -1,3 +1,5 @@
+from typing import cast
+
 import torch
 
 
@@ -11,7 +13,7 @@ class TensorSetFn:
     def unique(t: torch.Tensor, sorted: bool = True) -> torch.Tensor:
         # Equivalent to set(t)
         # return_inverse and return_counts can be useful for advanced stats
-        return torch.unique(t, sorted=sorted)
+        return cast(torch.Tensor, torch.unique(t, sorted=sorted))
 
     @staticmethod
     def intersection(t1: torch.Tensor, t2: torch.Tensor) -> torch.Tensor:
@@ -25,7 +27,7 @@ class TensorSetFn:
     def union(t1: torch.Tensor, t2: torch.Tensor) -> torch.Tensor:
         # Equivalent to t1 | t2
         # Concatenate and then find unique elements
-        return torch.unique(torch.cat((t1, t2)))
+        return cast(torch.Tensor, torch.unique(torch.cat((t1, t2))))
 
     @staticmethod
     def difference(t1: torch.Tensor, t2: torch.Tensor) -> torch.Tensor:
@@ -42,27 +44,28 @@ class TensorSetFn:
         # Method 2: (A-B) concat (B-A) -> usually faster as it avoids large sorts
         diff1 = t1[~torch.isin(t1, t2, assume_unique=True)]
         diff2 = t2[~torch.isin(t2, t1, assume_unique=True)]
-        return torch.cat((diff1, diff2))
+        return cast(torch.Tensor, torch.cat((diff1, diff2)))
 
 
-# --- Usage Example ---
+if __name__ == "__main__":
+    # --- Usage Example ---
 
-# Create large random data
-device = "cuda" if torch.cuda.is_available() else "cpu"
-a = torch.randint(0, 100, (20,), device=device)
-b = torch.randint(0, 100, (20,), device=device)
+    # Create large random data
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    a = torch.randint(0, 100, (20,), device=device)
+    b = torch.randint(0, 100, (20,), device=device)
 
-# Ensure they are unique first to simulate "set" behavior
-set_a = torch.unique(a)
-set_b = torch.unique(b)
+    # Ensure they are unique first to simulate "set" behavior
+    set_a = torch.unique(a)
+    set_b = torch.unique(b)
 
-print(f"Set A: {set_a}")
-print(f"Set B: {set_b}")
+    print(f"Set A: {set_a}")
+    print(f"Set B: {set_b}")
 
-# Intersection
-inter = TensorSetFn.intersection(set_a, set_b)
-print(f"Intersection: {inter}")
+    # Intersection
+    inter = TensorSetFn.intersection(set_a, set_b)
+    print(f"Intersection: {inter}")
 
-# Difference
-diff = TensorSetFn.difference(set_a, set_b)
-print(f"Difference (A - B): {diff}")
+    # Difference
+    diff = TensorSetFn.difference(set_a, set_b)
+    print(f"Difference (A - B): {diff}")

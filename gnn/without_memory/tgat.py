@@ -1,5 +1,7 @@
 import logging
+from typing import cast
 
+import torch
 import torch.nn as nn
 from dgl.heterograph import DGLBlock
 
@@ -23,7 +25,7 @@ class TGAT(nn.Module):
         num_layers: int = 2,
         heads: int = 2,
         dropout: float = 0.1,
-    ):
+    ) -> None:
         super().__init__()
         self.num_layers = num_layers
         self.dim_hid = dim_hid
@@ -57,7 +59,7 @@ class TGAT(nn.Module):
     def forward(
         self,
         mfgs: list[list[DGLBlock]],
-    ):
+    ) -> torch.Tensor:
         """
         mfgs: List of Message Flow Graphs (Blocks).
               Length must equal num_layers.
@@ -90,4 +92,4 @@ class TGAT(nn.Module):
             # It becomes the input for the *source* nodes of the next layer
             # (if we follow standard DGL block pipelining where block[i+1] srcs are subset of block[i] dsts)
 
-        return h
+        return cast(torch.Tensor, h)

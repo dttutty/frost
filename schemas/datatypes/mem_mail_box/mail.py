@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from dgl.heterograph import DGLBlock
 from torch import Tensor
 
 from .box import BoxTsNid
-
-
-def is_sorted(t: torch.Tensor) -> bool:
-    return torch.all(torch.diff(t) >= 0)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -278,5 +275,7 @@ class MailTsNid:
             nid=torch.cat([nid, new_nids], dim=0),
             data=torch.cat([mail, new_mail_data], dim=0),
             ts=torch.cat([ts, new_ts], dim=0),
-            ct=None if ct is None else torch.cat([ct, new_ct], dim=0),
+            ct=None
+            if ct is None
+            else cast(torch.Tensor, torch.cat([ct, new_ct], dim=0)),
         )

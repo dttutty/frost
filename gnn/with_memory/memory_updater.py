@@ -2,6 +2,7 @@
 
 
 import logging
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -25,10 +26,10 @@ class MfgMemoryUpdater(torch.nn.Module):
         self,
         block: DGLBlock,
     ) -> tuple[DGLBlock, torch.Tensor]:
-        mem: torch.Tensor = block.srcdata["mem"]
-        ts: torch.Tensor = block.srcdata["ts"]
-        mem_ts: torch.Tensor = block.srcdata["mem_ts"]
-        box: torch.Tensor = block.srcdata["box"]
+        mem: torch.Tensor = cast(torch.Tensor, block.srcdata["mem"])
+        ts: torch.Tensor = cast(torch.Tensor, block.srcdata["ts"])
+        mem_ts: torch.Tensor = cast(torch.Tensor, block.srcdata["mem_ts"])
+        box: torch.Tensor = cast(torch.Tensor, block.srcdata["box"])
 
         mail = torch.squeeze(box, dim=1)  # Flatten because it has extra dimension
 

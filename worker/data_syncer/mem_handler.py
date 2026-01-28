@@ -1,7 +1,7 @@
 import logging
 import threading
 from queue import Queue as Q
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 import torch
 
@@ -28,8 +28,8 @@ class MemHandler(StreamThreadBase):
         self,
         buf: Buffers,
         shared_mem: torch.Tensor,
-        in_q: Q[MemTask | None],
-        out_q: Q[P2PTask | None],
+        mem_task_q: Q[MemTask],
+        mem_p2p_q: Q[P2PTask | Literal["nothing_to_p2p"]],
         shared_mem_ts: torch.Tensor,
         h2d_sem: threading.Semaphore,
         stop_ev: threading.Event,
@@ -39,8 +39,8 @@ class MemHandler(StreamThreadBase):
         self.shared_mem = shared_mem
         self.shared_mem_ts = shared_mem_ts
         self.h2d_sem = h2d_sem
-        self.mem_task_q = in_q
-        self.mem_p2p_q = out_q
+        self.mem_task_q = mem_task_q
+        self.mem_p2p_q = mem_p2p_q
         self.stop_ev = stop_ev
 
     def _write_back_via_pinned(
@@ -120,9 +120,7 @@ class MemHandler(StreamThreadBase):
     def logic(self) -> None:
         while self.stop_ev.is_set() is False:
             mem_task = self.mem_task_q.get(block=True)
-            if mem_task is None:
-                self.mem_p2p_q.put(None)
-                break
+
             mem_plan = mem_task.mem_plan
             root_new_mem = mem_task.root_new_mem.keep_last()
             mem_ts_nid = merge_with_priority(root_new_mem, mem_task.old_mem_ts_nid)
@@ -134,7 +132,7 @@ class MemHandler(StreamThreadBase):
                 )
                 self.mem_p2p_q.put(p2p_task)
             else:
-                self.mem_p2p_q.put("skip")
+                self.mem_p2p_q.put("nothing_to_p2p")
                 # skip p2p(), directly put None to p2p_q as sentinel
 
             self.write_back_mem(mem_plan.writeback, mem_ts_nid)

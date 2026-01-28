@@ -1,4 +1,5 @@
 import logging
+from typing import cast
 
 import dgl
 import dgl.function as fn
@@ -195,13 +196,15 @@ class TransfomerAttentionLayer(torch.nn.Module):
             b.srcdata["v"] = torch.cat([dst_dummy, V], dim=0)
             b.update_all(dgl.function.copy_u("v", "m"), dgl.function.sum("m", "h"))
 
+        rst: torch.Tensor
         if self.dim_node != 0:
-            rst = torch.cat([b.dstdata["h"], dst_h], dim=1)
+            dst_h_from_graph = cast(torch.Tensor, b.dstdata["h"])
+            rst = cast(torch.Tensor, torch.cat([dst_h_from_graph, dst_h], dim=1))
         else:
-            rst = b.dstdata["h"]
+            rst = cast(torch.Tensor, b.dstdata["h"])
         rst = self.w_out(rst)
         rst = torch.nn.functional.relu(self.dropout(rst))
-        return self.layer_norm(rst)
+        return cast(torch.Tensor, self.layer_norm(rst))
 
 
 class NodeClassificationHeader(torch.nn.Module):
@@ -214,7 +217,7 @@ class NodeClassificationHeader(torch.nn.Module):
         x = self.fc1(x)
         x = torch.nn.functional.relu(x)
         x = self.fc2(x)
-        return x
+        return cast(torch.Tensor, x)
 
 
 def _cat_optional(
@@ -276,8 +279,10 @@ class TemporalGraphAttentionLayer(nn.Module):
             return torch.zeros((b.num_dst_nodes(), self.dim_out), device=b.device)
 
         # 1. Prepare Features
-        dst_h = b.srcdata["h"][: b.num_dst_nodes()]  # Target nodes
-        src_h = b.srcdata["h"][b.num_dst_nodes() :]  # Neighbor nodes
+        dst_h = cast(torch.Tensor, b.srcdata["h"])[: b.num_dst_nodes()]  # Target nodes
+        src_h = cast(torch.Tensor, b.srcdata["h"])[
+            b.num_dst_nodes() :
+        ]  # Neighbor nodes
 
         # Time Encoding
         if self.time_enc is not None:
@@ -306,7 +311,7 @@ class TemporalGraphAttentionLayer(nn.Module):
 
         # Correct logic per TGN implementation:
         # Use b.srcdata['h'] directly mapped to edges
-        all_src_h = b.srcdata["h"]
+        all_src_h = cast(torch.Tensor, b.srcdata["h"])
         src_indices = b.edges()[0]  # Indices in b.srcdata
         dst_indices = b.edges()[1]  # Indices in b.dstdata (0 to num_dst)
 
@@ -341,7 +346,7 @@ class TemporalGraphAttentionLayer(nn.Module):
         b.edata["v"] = V_weighted
         b.update_all(fn.copy_e("v", "m"), fn.sum("m", "h_agg"))
 
-        aggregated_h = b.dstdata["h_agg"]
+        aggregated_h = cast(torch.Tensor, b.dstdata["h_agg"])
 
         # 4. Residual + Output Project
         # TGN logic: Linear(cat(h_old, h_agg))
@@ -349,7 +354,7 @@ class TemporalGraphAttentionLayer(nn.Module):
         out = F.relu(self.dropout(out))
         out = self.layer_norm(out)
 
-        return out
+        return cast(torch.Tensor, out)
 
 
 class IdentityNormLayer(torch.nn.Module):
@@ -358,4 +363,4 @@ class IdentityNormLayer(torch.nn.Module):
         self.norm = torch.nn.LayerNorm(d_hid)
 
     def forward(self, b: DGLBlock) -> torch.Tensor:
-        return self.norm(b.srcdata["h"])
+        return cast(torch.Tensor, self.norm(b.srcdata["h"]))
