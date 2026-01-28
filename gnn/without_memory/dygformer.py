@@ -3,9 +3,8 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dgl.heterograph import DGLBlock
 from torch.nn.utils.rnn import pad_sequence
-
-from gnn.sample_mixin import SampleMixin
 
 from ..components import TimeEncode
 
@@ -14,13 +13,15 @@ logger = logging.getLogger(__name__)
 
 
 class NeighborCooccurrenceEncoder(nn.Module):
-    def __init__(self, dim_out):
-        super(NeighborCooccurrenceEncoder, self).__init__()
+    def __init__(self, dim_out: int) -> None:
+        super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(1, dim_out), nn.ReLU(), nn.Linear(dim_out, dim_out)
         )
 
-    def forward(self, src_nid, dst_nid):
+    def forward(
+        self, src_nid: torch.Tensor, dst_nid: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         计算 Src 和 Dst 历史序列中邻居的共现次数并编码。
         src_nid: [Batch, Seq_Len]
@@ -45,7 +46,7 @@ class NeighborCooccurrenceEncoder(nn.Module):
 
 
 class DyGFormerAttention(nn.Module):
-    def __init__(self, dim, num_heads, dropout):
+    def __init__(self, dim: int, num_heads: int, dropout: float) -> None:
         super(DyGFormerAttention, self).__init__()
         self.multi_head_attention = nn.MultiheadAttention(
             embed_dim=dim, num_heads=num_heads, dropout=dropout, batch_first=True
@@ -60,7 +61,7 @@ class DyGFormerAttention(nn.Module):
             nn.Linear(4 * dim, dim),
         )
 
-    def forward(self, src):
+    def forward(self, src: torch.Tensor) -> torch.Tensor:
         # Pre-Norm Architecture usually more stable
         src2 = self.norm1(src)
         src2, _ = self.multi_head_attention(src2, src2, src2)
@@ -72,19 +73,19 @@ class DyGFormerAttention(nn.Module):
         return src
 
 
-class DyGFormer(nn.Module, SampleMixin):
+class DyGFormer(nn.Module):
     def __init__(
         self,
-        dim_node,
-        dim_edge,
-        dim_time=100,
-        seq_len=10,  # 历史序列长度 (即采样器的 num_neighbors)
-        patch_size=1,
-        channel_dim=50,
-        num_layers=2,
-        heads=2,
-        dropout=0.1,
-    ):
+        dim_node: int,
+        dim_edge: int,
+        dim_time: int = 100,
+        seq_len: int = 10,  # 历史序列长度 (即采样器的 num_neighbors)
+        patch_size: int = 1,
+        channel_dim: int = 50,
+        num_layers: int = 2,
+        heads: int = 2,
+        dropout: float = 0.1,
+    ) -> None:
         super(DyGFormer, self).__init__()
         self.seq_len = seq_len
         self.patch_size = patch_size
@@ -119,7 +120,9 @@ class DyGFormer(nn.Module, SampleMixin):
         self.score_fc = nn.Linear(dim_node, 1)
 
     @staticmethod
-    def collate_block_to_sequence(block, feat_manager, seq_len):
+    def collate_block_to_sequence(
+        block: DGLBlock, nfeat: torch.Tensor, efeat: torch.Tensor, seq_len: int
+    ) -> tuple[dict, dict]:
         """
         核心适配器：将 Sampler 的 Block (稀疏 COO) 转换为 Transformer 的 Sequence (稠密 Tensor)。
         不修改 C++ 代码，利用 PyTorch 操作在 Python 端高效完成。
@@ -176,9 +179,9 @@ class DyGFormer(nn.Module, SampleMixin):
 
             # 截断或补齐到固定 seq_len
             B, L = padded.shape
-            if L > seq_len:
+            if seq_len < L:
                 padded = padded[:, :seq_len]
-            elif L < seq_len:
+            elif seq_len > L:
                 pad_size = seq_len - L
                 padded = F.pad(padded, (0, pad_size))
             return padded
@@ -189,8 +192,8 @@ class DyGFormer(nn.Module, SampleMixin):
 
         # 5. 获取原始特征
         # 假设 feat_manager 支持通过 ID 索引特征
-        dense_nfeat = feat_manager.nfeat[dense_nids]
-        dense_efeat = feat_manager.efeat[dense_eids]
+        dense_nfeat = nfeat[dense_nids]
+        dense_efeat = efeat[dense_eids]
 
         # 6. 拆分 Src 和 Dst
         # 假设 Block 中前一半是 Src Roots，后一半是 Dst Roots
@@ -209,14 +212,16 @@ class DyGFormer(nn.Module, SampleMixin):
 
         return src_seq, dst_seq
 
-    def get_patches(self, x):
+    def get_patches(self, x: torch.Tensor) -> torch.Tensor:
         """[B, L, D] -> [B, Num_Patches, Patch_Size*D]"""
         B, L, D = x.shape
         x = x.reshape(B, self.num_patches, self.patch_size, D)
         x = x.reshape(B, self.num_patches, -1)
         return x
 
-    def forward(self, block, feat_manager):
+    def forward(
+        self, block: DGLBlock, nfeat: torch.Tensor, efeat: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             block: 包含 (Src + Dst) 历史采样的 TemporalGraphBlock
@@ -224,7 +229,7 @@ class DyGFormer(nn.Module, SampleMixin):
         """
         # 1. 适配器：Block -> Dense Sequence
         src_seq, dst_seq = self.collate_block_to_sequence(
-            block, feat_manager, self.seq_len
+            block, nfeat, efeat, self.seq_len
         )
 
         # 2. 共现计算
@@ -232,7 +237,9 @@ class DyGFormer(nn.Module, SampleMixin):
         src_co, dst_co = self.co_occ_enc(src_seq["nid"], dst_seq["nid"])
 
         # 3. 处理每个分支 (Patches & Projection)
-        def process_branch(seq, co_occ):
+        def process_branch(
+            seq: dict[str, torch.Tensor], co_occ: torch.Tensor
+        ) -> torch.Tensor:
             # Patching & Projection
             p_node = self.proj_node(self.get_patches(seq["feat_n"]))
             p_edge = self.proj_edge(self.get_patches(seq["feat_e"]))

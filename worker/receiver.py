@@ -25,7 +25,7 @@ class Receiver(StreamThreadBase):
         result_q: Q[Result | None],
         stop_ev: threading.Event,
     ) -> None:
-        super().__init__(name="receiver")
+        super().__init__(name="receiver", stop_ev=stop_ev)
         self.env: Env = env
         self.gloo = gloo
         self.out_q = out_q

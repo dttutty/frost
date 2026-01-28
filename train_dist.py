@@ -17,7 +17,7 @@ from dgl.utils.shared_mem import (
 
 from gnn import APAN, JODIE, TGAT, TGN, DyGFormer, DySAT_TGL
 from gnn.components import EdgePredictor, TimeEncode
-from gnn.memory_updater import MfgMemoryUpdater, TransformerMemoryUpdater
+from gnn.with_memory.memory_updater import MfgMemoryUpdater, TransformerMemoryUpdater
 from schemas.datatypes.cfg import GNNCFG, MemoryCFG, SampleCFG, TrainCFG
 from schemas.datatypes.env import Env
 from schemas.datatypes.misc import ModelComponents, Shared
@@ -269,7 +269,7 @@ def _init_gnn(
     d_mail = 0
     if m_cfg is not None:
         d_mail = 2 * m_cfg.d_mem + t_cfg.edim
-    match t_cfg.model_name.lower():
+    match t_cfg.model.lower():
         case "tgn":
             assert m_cfg is not None, "TGN requires memory config"
             memory_updater = MfgMemoryUpdater(
@@ -355,7 +355,7 @@ def _init_gnn(
             )
 
         case _:
-            raise ValueError(f"Unknown model: {t_cfg.model_name}")
+            raise ValueError(f"Unknown model: {t_cfg.model}")
 
     return ModelComponents(
         memory_updater=memory_updater,

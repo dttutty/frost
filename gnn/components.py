@@ -79,7 +79,7 @@ class TransfomerAttentionLayer(torch.nn.Module):
         dim_out: int,
         combined: bool = False,
     ) -> None:
-        super(TransfomerAttentionLayer, self).__init__()
+        super().__init__()
         self.num_head = att_h
         self.dim_node = dim_node
         self.dim_edge = dim_edge

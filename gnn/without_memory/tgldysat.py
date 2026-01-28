@@ -2,15 +2,15 @@ import logging
 
 import torch
 import torch.nn as nn
+from dgl.heterograph import DGLBlock
 
 from gnn.components import EdgePredictor, TemporalGraphAttentionLayer
-from gnn.sample_mixin import SampleMixin
 
 
 logger = logging.getLogger(__name__)
 
 
-class DySAT_TGL(nn.Module, SampleMixin):
+class DySAT_TGL(nn.Module):
     """
     GCRN: Graph Convolutional Recurrent Network.
     Structure: [GAT -> GAT] (per snapshot) -> RNN (aggregate history)
@@ -19,16 +19,16 @@ class DySAT_TGL(nn.Module, SampleMixin):
 
     def __init__(
         self,
-        dim_node,
-        dim_edge,
-        dim_time=0,
-        dim_hid=100,
-        num_layers=2,
-        heads=2,
-        dropout=0.1,
-        history_len=3,
+        dim_node: int,
+        dim_edge: int,
+        dim_time: int = 0,
+        dim_hid: int = 100,
+        num_layers: int = 2,
+        heads: int = 2,
+        dropout: float = 0.1,
+        history_len: int = 3,
     ):
-        super(DySAT_TGL, self).__init__()
+        super().__init__()
         self.num_layers = num_layers
         self.history_len = history_len
         self.dim_hid = dim_hid
@@ -67,7 +67,7 @@ class DySAT_TGL(nn.Module, SampleMixin):
         # --- 3. Predictor ---
         self.edge_predictor = EdgePredictor(dim_hid)
 
-    def forward(self, mfgs, neg_samples=1):
+    def forward(self, mfgs: list[list[DGLBlock]], neg_samples: int = 1) -> torch.Tensor:
         """
         mfgs: List of List of Blocks.
         Structure: mfgs[layer_idx][history_idx]

@@ -1,9 +1,8 @@
 import logging
+import os
 import threading
 from queue import Queue as Q
-from typing import (
-    Literal,  # 必须导入这个
-)
+from typing import Literal  # 必须导入这个
 
 import torch
 import torch.distributed as dist
@@ -73,7 +72,7 @@ class Worker:
         self.model: GNN | MemoryBaseGNN | DDP
         self.full_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q()
 
-        self.h2d_sem: threading.BoundedSemaphore = threading.BoundedSemaphore(0)
+        self.h2d_sem: threading.Semaphore = threading.Semaphore(0)
         self.destination_q_for_h2d: Q[MetaWEvent | None | Literal["end_of_epoch"]]
 
         self.buffers: Buffers = _init_all_pin_mem(
@@ -177,7 +176,6 @@ class Worker:
         if self.s_cfg.history > 1:
             find_unused_parameters = True
 
-        find_unused_parameters = True
         self.model = DDP(
             self.model,
             process_group=self.nccl,

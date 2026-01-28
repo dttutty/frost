@@ -5,7 +5,7 @@ from typing import Literal, TypeVar
 
 import torch
 
-from buffer import Buffers
+from buffer import Buffers, DyBuf
 from schemas.datatypes.mem_mail_box.box import BoxTsNid
 from schemas.datatypes.mem_mail_box.mail import MailTsNid
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
@@ -48,24 +48,69 @@ class BoxHandler(StreamThreadBase):
         self.mail_combine = mail_combine
         self.merge_src = merge_src
 
+    def _write_back_via_pinned(
+        self,
+        valid_nid_gpu: torch.Tensor,
+        valid_data_gpu: torch.Tensor,
+        valid_ts_gpu: torch.Tensor,
+        pinned_buf: DyBuf,
+    ) -> None:
+        """D2H Pinned Memory Optimization"""
+        n = valid_nid_gpu.numel()
+        if n > pinned_buf.data.shape[0]:
+            # Fallback
+            valid_nid = valid_nid_gpu.cpu().long()
+            self.shared_box[valid_nid] = valid_data_gpu.cpu()
+            self.shared_box_ts[valid_nid] = valid_ts_gpu.cpu()
+            return
+
+        buf_data = pinned_buf.data[:n]
+        buf_nid = pinned_buf.nid[:n]
+        buf_ts = pinned_buf.ts[:n]
+
+        # Async D2H
+        valid_data_gpu.to(buf_data, non_blocking=True)
+        valid_ts_gpu.to(buf_ts.squeeze(1), non_blocking=True)
+        valid_nid_gpu.to(dtype=buf_nid.dtype).to(buf_nid.squeeze(1), non_blocking=True)
+
+        # Sync
+        torch.cuda.current_stream().synchronize()
+
+        # Copy to Shared
+        idx = buf_nid.view(-1).long()
+        self.shared_box[idx] = buf_data
+        self.shared_box_ts[idx] = buf_ts.view(-1)
+
     def write_back_box(
         self,
         writeback: torch.Tensor,
         box_ts_nid: BoxTsNid,
     ) -> None:
-        if box_ts_nid is not None and writeback is not None:
+        # [Bugfix] 应该是 or None 才 return, 之前是 not None 就 return
+        if box_ts_nid is None or writeback is None:
             return
+
+        # 1. Move writeback to GPU for mask calculation
+        if writeback.device.type != "cuda":
+            writeback = writeback.cuda()
+
+        # 2. Filter on GPU
         mask = torch.isin(box_ts_nid.nid, writeback)
-        write_back_box = BoxTsNid(
-            nid=box_ts_nid.nid[mask],
-            data=box_ts_nid.data[mask],
-            ts=box_ts_nid.ts[mask],
-        )
 
-        id = write_back_box.nid.cpu().long()
+        valid_nid_gpu = box_ts_nid.nid[mask]
+        valid_data_gpu = box_ts_nid.data[mask]
+        valid_ts_gpu = box_ts_nid.ts[mask]
 
-        self.shared_box[id] = write_back_box.data.cpu()
-        self.shared_box_ts[id] = write_back_box.ts.cpu()
+        # 3. Use Pinned Memory D2H
+        if self.buf.box_d2h is not None:
+            self._write_back_via_pinned(
+                valid_nid_gpu, valid_data_gpu, valid_ts_gpu, self.buf.box_d2h
+            )
+        else:
+            # Fallback
+            id = valid_nid_gpu.cpu().long()
+            self.shared_box[id] = valid_data_gpu.cpu()
+            self.shared_box_ts[id] = valid_ts_gpu.cpu()
 
     def handle_small_box(
         self,

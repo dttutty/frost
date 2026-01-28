@@ -79,7 +79,7 @@ class Scatter(ThreadBase):
             dst=self.host_rank,  # Host 发送的占位数据
         )
         data_0_result = gathered_list[0]
-        assert data_0_result is not None, "Worker 返回的 Result 不能为 None
+        assert data_0_result is not None, "Worker 返回的 Result 不能为 None"
         # 丢掉 Host 自己的槽位（最后一个），只返回 workers 的结果
         return data_0_result
 

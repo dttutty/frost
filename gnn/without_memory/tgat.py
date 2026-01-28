@@ -1,10 +1,7 @@
 import logging
-from typing import List
 
 import torch.nn as nn
 from dgl.heterograph import DGLBlock
-
-from gnn.sample_mixin import SampleMixin
 
 from ..components import TemporalGraphAttentionLayer
 
@@ -12,22 +9,22 @@ from ..components import TemporalGraphAttentionLayer
 logger = logging.getLogger(__name__)
 
 
-class TGAT(nn.Module, SampleMixin):
+class TGAT(nn.Module):
     """
     TGAT Model (Multi-layer).
     """
 
     def __init__(
         self,
-        dim_node,
-        dim_edge,
-        dim_time=100,
-        dim_hid=100,
-        num_layers=2,
-        heads=2,
-        dropout=0.1,
+        dim_node: int,
+        dim_edge: int,
+        dim_time: int = 100,
+        dim_hid: int = 100,
+        num_layers: int = 2,
+        heads: int = 2,
+        dropout: float = 0.1,
     ):
-        super(TGAT, self).__init__()
+        super().__init__()
         self.num_layers = num_layers
         self.dim_hid = dim_hid
         self.layers = nn.ModuleList()
@@ -59,7 +56,7 @@ class TGAT(nn.Module, SampleMixin):
 
     def forward(
         self,
-        mfgs: List[List[DGLBlock]],
+        mfgs: list[list[DGLBlock]],
     ):
         """
         mfgs: List of Message Flow Graphs (Blocks).

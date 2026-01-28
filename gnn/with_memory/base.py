@@ -5,13 +5,13 @@ import torch
 import torch.nn as nn
 
 from gnn.components import EdgePredictor
-from gnn.memory_updater import (
+from gnn.with_memory.apan import APAN
+from gnn.with_memory.jodie import JODIE
+from gnn.with_memory.memory_updater import (
     MfgMemoryUpdater,
     NoMfgMemoryUpdater,
     TransformerMemoryUpdater,
 )
-from gnn.with_memory.apan import APAN
-from gnn.with_memory.jodie import JODIE
 from gnn.with_memory.tgn import TGN
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from schemas.datatypes.misc import Meta
@@ -25,7 +25,9 @@ class MemoryBaseGNN(nn.Module):
     def __init__(
         self,
         gnn: TGN | JODIE | APAN,
-        memory_updater: TransformerMemoryUpdater | MfgMemoryUpdater | NoMfgMemoryUpdater,
+        memory_updater: TransformerMemoryUpdater
+        | MfgMemoryUpdater
+        | NoMfgMemoryUpdater,
         mem_task_q: Queue[tuple[MemTask, torch.cuda.Event] | None],
         box_task_q: Queue[tuple[BoxTask, torch.cuda.Event] | None],
         header: EdgePredictor,

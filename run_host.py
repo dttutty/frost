@@ -11,21 +11,16 @@ import torch
 import torch.distributed as dist
 from tqdm import tqdm
 
-from config.gcn import TGN
 from gnn.with_memory.apan import APAN
 from gnn.with_memory.jodie import JODIE
+from gnn.with_memory.tgn import TGN
 from host import MetaBatcher, Planner, Scatter
 from host.meta_batcher import MetaBundle
 from neg_sampler import NegLinkSampler
 from sampler_core import ParallelSampler
 from schemas.datatypes.cfg import Config, SampleCFG
 from schemas.datatypes.env import Env
-from schemas.datatypes.misc import (
-    EpochSplitIterInfo,
-    ExtFullGraph,
-    Meta,
-    Result,
-)
+from schemas.datatypes.misc import EpochSplitIterInfo, ExtFullGraph, Meta, Result
 from schemas.datatypes.plan import DyPlan, StPlan
 from tensor_set import TensorSet
 
@@ -62,7 +57,7 @@ class Host:
         self.stop_ev = threading.Event()
         self.sample_support_node = cfg.s.sample_support_node
         self.sample_support_for_neg_dst = cfg.s.sample_support_for_neg_dst
-        self.model_name = cfg.t.model_name
+        self.model_name = cfg.t.model
 
         self.meta_in_q: Q[Meta | None | Literal["end_of_epoch"]] = Q()
         self.meta_bundle_q: Q[MetaBundle | None | Literal["end_of_epoch"]] = Q()
@@ -114,7 +109,7 @@ class Host:
             group=gloo,
             stop_ev=self.stop_ev,
         )
-
+        self.curr_epoch = 0
         self.best_ap_epoch = {
             "val_ap": 0.0,
             "val_auc": 0.0,
@@ -354,11 +349,11 @@ class Host:
             state = jodie_analyze_need(root_nodes)
 
         elif isinstance(self.gnn, TGN):
-            from gnn.sample_mixin import sample
             from gnn.with_memory.tgn import (
                 analyze_all_n_root as tgn_analyze_all_n_root,
                 analyze_need as tgn_analyze_need,
             )
+            from host.sample import sample
 
             assert self.ngh_sampler is not None
 
@@ -368,7 +363,7 @@ class Host:
             all_nodes, root_nodes = tgn_analyze_all_n_root(n2r_meta[0])
             state = tgn_analyze_need(all_nodes, src, dst)
         else:
-            from gnn.sample_mixin import (
+            from host.sample import (
                 analyze_need as general_analyze_need,
                 sample as general_sample,
             )

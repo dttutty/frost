@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import torch
@@ -11,17 +11,21 @@ from numpy.typing import NDArray
 from torch import Tensor
 
 from gnn.components import EdgePredictor
-from gnn.memory_updater import (
-    MfgMemoryUpdater,
-    NoMfgMemoryUpdater,
-    TransformerMemoryUpdater,
-)
 from schemas.datatypes.mem_mail_box.box import BoxTsNid
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from tensor_set_fn import TensorSetFn
 
-from ..alias import IntArr
 from .plan import BatchNodeStateIO, PlanSet, TensorPlanSet
+
+
+if TYPE_CHECKING:
+    from gnn.with_memory.memory_updater import (
+        MfgMemoryUpdater,
+        NoMfgMemoryUpdater,
+        TransformerMemoryUpdater,
+    )
+
+    from ..alias import IntArr
 
 
 @dataclass(slots=True, kw_only=True)

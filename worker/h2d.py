@@ -138,7 +138,7 @@ class H2D(StreamThreadBase):
             if self.nfeat is not None or self.efeat is not None:
                 # prepare if has n_feat
                 if meta.plan_set is not None and meta.plan_set.nfeat is not None:
-                    meta.nfeat = self.st_asm.prepare_nfeat_cache(``
+                    meta.nfeat = self.st_asm.prepare_nfeat_cache(
                         nfeat_plan=meta.plan_set.nfeat, pin_nfeat_buf=self.buf.nfeat_h2d
                     )
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Literal
@@ -43,8 +42,9 @@ class Env:
         world_size = dist.get_world_size()
         local_rank = dist.get_rank()
         if local_rank != world_size - 1:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank)
-            torch.cuda.set_device(0)
+            # os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank)
+            # torch.cuda.set_device(0)
+            torch.cuda.set_device(local_rank)
 
         return cls(
             local_rank=local_rank,

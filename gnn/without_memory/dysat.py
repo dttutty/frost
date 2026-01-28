@@ -1,5 +1,4 @@
 import logging
-from typing import List
 
 import dgl
 import dgl.function as fn
@@ -7,8 +6,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from dgl.heterograph import DGLBlock
-
-from gnn.sample_mixin import SampleMixin
 
 from ..components import EdgePredictor
 
@@ -22,8 +19,15 @@ class StructuralGATLayer(nn.Module):
     Operates on a single static snapshot graph.
     """
 
-    def __init__(self, dim_in, dim_out, num_heads=2, dropout=0.1, att_dropout=0.1):
-        super(StructuralGATLayer, self).__init__()
+    def __init__(
+        self,
+        dim_in: int,
+        dim_out: int,
+        num_heads: int = 2,
+        dropout: float = 0.1,
+        att_dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
         self.dim_in = dim_in
         self.dim_out = dim_out
         self.num_heads = num_heads
@@ -40,11 +44,11 @@ class StructuralGATLayer(nn.Module):
 
         self.reset_parameters()
 
-    def reset_parameters(self):
+    def reset_parameters(self) -> None:
         nn.init.xavier_uniform_(self.w.weight)
         nn.init.xavier_uniform_(self.attn_vec)
 
-    def forward(self, block):
+    def forward(self, block: DGLBlock) -> torch.Tensor:
         """
         b: DGL Block (Snapshot)
         """
@@ -99,8 +103,15 @@ class TemporalAttentionLayer(nn.Module):
     Aggregates representations across different time snapshots.
     """
 
-    def __init__(self, dim_in, dim_out, num_heads=2, dropout=0.1, max_len=10):
-        super(TemporalAttentionLayer, self).__init__()
+    def __init__(
+        self,
+        dim_in: int,
+        dim_out: int,
+        num_heads: int = 2,
+        dropout: float = 0.1,
+        max_len: int = 10,
+    ) -> None:
+        super().__init__()
         self.dim_in = dim_in
         self.dim_out = dim_out
         self.num_heads = num_heads
@@ -129,7 +140,7 @@ class TemporalAttentionLayer(nn.Module):
 
         self.w_out = nn.Linear(dim_in, dim_out)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: [Batch, History_Len, Dim]
         """
@@ -153,22 +164,22 @@ class TemporalAttentionLayer(nn.Module):
         return self.w_out(last_out)
 
 
-class DySAT(nn.Module, SampleMixin):
+class DySAT(nn.Module):
     """
     DySAT: Structural GAT + Temporal Self-Attention.
     """
 
     def __init__(
         self,
-        dim_node,
-        dim_edge,  # Not used in standard DySAT (structural only), kept for compatibility
-        dim_hid=100,
-        num_layers=2,
-        heads=2,
-        dropout=0.1,
-        history_len=3,
-    ):
-        super(DySAT, self).__init__()
+        dim_node: int,
+        dim_edge: int,  # Not used in standard DySAT (structural only), kept for compatibility
+        dim_hid: int = 100,
+        num_layers: int = 2,
+        heads: int = 2,
+        dropout: float = 0.1,
+        history_len: int = 3,
+    ) -> None:
+        super().__init__()
         self.num_layers = num_layers
         self.history_len = history_len
         self.dim_hid = dim_hid
@@ -207,8 +218,8 @@ class DySAT(nn.Module, SampleMixin):
 
     def forward(
         self,
-        mfgs: List[List[DGLBlock]],
-    ):
+        mfgs: list[list[DGLBlock]],
+    ) -> torch.Tensor:
         """
         mfgs: List of List of Blocks.
         Structure: mfgs[layer_idx][snapshot_idx]

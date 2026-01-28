@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from dgl.heterograph import DGLBlock
 
-from gnn.sample_mixin import extract_raw_data
+from host.sample import extract_raw_data
 from sampler_core import ParallelSampler
 from schemas.datatypes.misc import DGLBlockMeta
 from schemas.datatypes.plan import BatchNodeStateIO

@@ -30,7 +30,7 @@ class GNNCFG:
 
 @dataclass(slots=True, kw_only=True)
 class TrainCFG:
-    model_name: Literal["APAN", "JODIE", "TGN"] = "TGN"
+    model: Literal["APAN", "JODIE", "TGN"] = "TGN"
     patience: int = 50
     epoch: int = 10
     batch_size: int = 600

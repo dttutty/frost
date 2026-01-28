@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
 
 from tensor_set_fn import TensorSetFn
 
-from .mail import MailTsNid
+
+if TYPE_CHECKING:
+    from .mail import MailTsNid
 
 
 def is_sorted(t: torch.Tensor) -> bool:
