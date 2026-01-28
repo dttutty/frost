@@ -1,16 +1,19 @@
 import logging
 import threading
 from queue import Queue as Q
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 import torch
 
-from schemas.datatypes.data_to_sync import BoxTsNid, MailTsNid, MemTsNid
+from buffer import Buffers
+from schemas.datatypes.mem_mail_box.box import BoxTsNid
+from schemas.datatypes.mem_mail_box.mail import MailTsNid
+from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from schemas.datatypes.task import BoxTask, P2PTask
 from thread_base_with_stream import StreamThreadBase
 
+from .utils.data_ops import make_p2p_task
 from .utils.interaction_ops import generate_interaction_mails
-from .utils.p2p import P2PHandler
 
 
 AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
@@ -24,24 +27,24 @@ logger = logging.getLogger(__name__)
 class BoxHandler(StreamThreadBase):
     def __init__(
         self,
+        buf: Buffers,
         shared_box: torch.Tensor,
-        box_task_q: Q[BoxTask],
-        box_p2p_q: Q[P2PTask | None],
+        in_q: Q[BoxTask],
+        out_q: Q[P2PTask | None],
         shared_box_ts: torch.Tensor,
         h2d_sem: threading.Semaphore,
         stop_ev: threading.Event,
-        p2p_handler: P2PHandler,
-        mail_combine: str,
+        mail_combine: Literal["last", "mean", "all"],
         merge_src: bool,
     ) -> None:
-        super().__init__(name="box_handler")
+        super().__init__(name="box_handler", stop_ev=stop_ev)
+        self.buf = buf
         self.shared_box = shared_box
         self.shared_box_ts = shared_box_ts
         self.h2d_sem = h2d_sem
-        self.box_task_q = box_task_q
-        self.box_p2p_q = box_p2p_q
+        self.box_task_q = in_q
+        self.box_p2p_q = out_q
         self.stop_ev = stop_ev
-        self.p2p_handler = p2p_handler
         self.mail_combine = mail_combine
         self.merge_src = merge_src
 
@@ -67,77 +70,63 @@ class BoxHandler(StreamThreadBase):
     def handle_small_box(
         self,
         new_mail: MailTsNid,
-        mail_combine: str,
+        mail_combine: Literal["last", "mean", "all"],
         box_task: BoxTask,
-    ) -> BoxTsNid:
+    ) -> tuple[P2PTask, BoxTsNid]:
         box = box_task.old_box
         box_plan = box_task.box_plan
-        is_last = box_task.is_last
         macro_bid = box_task.macro_bid
         # handle mail sync
         old_mail = box.to_mail()
 
         if mail_combine == "last":
-            new_mail.keep_latest()
+            new_mail.keep_last()
         else:
             assert mail_combine == "mean"
             new_mail.keep_mean()
         new_mail = new_mail.merge_with_priority(old_mail)
         logger.debug("DataSyncer: merged new mail with old mail", macro_bid)
 
-        if is_last is not None:
-            self.p2p_handler.p2p(
-                new_mail,
-                box_plan.p2p,
-                box_plan.rec_cts,
-                box_plan.send_cts,
-                self.mail_combine,
-            )
-        else:
-            pass  # this case is handler by mem_handler, mem_handler will put None to p2p_q
+        p2p_task = make_p2p_task(
+            data_td_nid=new_mail,
+            plan=box_plan,
+            strategy=mail_combine,
+        )
 
         box_ts_nid = new_mail.to_box()
-        return box_ts_nid
+        return p2p_task, box_ts_nid
 
     def handle_large_box(
         self,
         new_mail: MailTsNid,
-        mail_combine: str,
+        mail_combine: Literal["last", "mean", "all"],
         box_task: BoxTask,
-    ) -> BoxTsNid:
+    ) -> tuple[P2PTask, BoxTsNid]:
         mail_delivery_tensor = box_task.r2n_mdt
         assert mail_delivery_tensor is not None
         box = box_task.old_box
         box_plan = box_task.box_plan
-        is_last = box_task.is_last
         # handle box sync
-        # if deliver_to is 'neighbors', deliver to neighbors using deliver()
         assert not self.merge_src, (
             "you are wasting mailbox slots, please make sure boxsize <= n_gpus when merge_src==True"
         )
         delivered_mails = new_mail.deliver(mail_delivery_tensor, include_self=True)
         new_mail = delivered_mails
-        mail_combine = self.mail_combine
 
         if mail_combine == "last":
-            new_mail.keep_latest()
+            new_mail.keep_last()
             box_ts_nid = box.merge_1_mail(new_mail)
         elif mail_combine == "mean":
             new_mail.keep_mean()
             box_ts_nid = box.merge_1_mail(new_mail)
         elif mail_combine == "all":
             box_ts_nid = box.merge_n_mail(new_mail)
-        if is_last is not None:
-            self.p2p_handler.p2p(
-                box_ts_nid,
-                box_plan.p2p,
-                box_plan.rec_cts,
-                box_plan.send_cts,
-                "latest",
-            )
-        else:
-            pass  # this case is handler by mem_handler, mem_handler will put None to p2p_q
-        return box_ts_nid
+        p2p_task = make_p2p_task(
+            data_td_nid=box_ts_nid,
+            plan=box_plan,
+            strategy="last",
+        )
+        return p2p_task, box_ts_nid
 
     def logic(self) -> None:
         while not self.stop_ev.is_set():
@@ -145,7 +134,6 @@ class BoxHandler(StreamThreadBase):
             if box_task is None:
                 self.box_p2p_q.put(None)
                 break
-            mail_delivery_tensor = box_task.r2n_mdt
             macro_bid = box_task.macro_bid
 
             # handle mail or box sync
@@ -155,12 +143,21 @@ class BoxHandler(StreamThreadBase):
                 box_task.root_new_mem_orig,
                 box_task.pos_efeat,
             )
-            mail_combine = self.mail_combine
             logger.debug("DataSyncer: start p2p for mail/box", macro_bid)
-            if mail_delivery_tensor is None:
-                box_ts_nid = self.handle_small_box(new_mail, mail_combine, box_task)
+            if box_task.r2n_mdt is None:
+                # r2n_mdt是用来发送mail到别的box的，如果没有,说明不用发送
+                p2p_task, box_ts_nid = self.handle_small_box(
+                    new_mail, self.mail_combine, box_task
+                )
             else:
-                box_ts_nid = self.handle_large_box(new_mail, mail_combine, box_task)
+                p2p_task, box_ts_nid = self.handle_large_box(
+                    new_mail, self.mail_combine, box_task
+                )
+
+            if box_task.is_last is not None:
+                self.box_p2p_q.put(p2p_task)
+            else:
+                self.box_p2p_q.put("skip")
 
             logger.debug("DataSyncer: finished p2p processing", macro_bid)
 

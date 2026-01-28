@@ -3,7 +3,9 @@ from typing import TypeVar
 
 import torch
 
-from schemas.datatypes.data_to_sync import BoxTsNid, MailTsNid, MemTsNid
+from schemas.datatypes.mem_mail_box.box import BoxTsNid
+from schemas.datatypes.mem_mail_box.mail import MailTsNid
+from schemas.datatypes.mem_mail_box.mem import MemTsNid
 
 
 AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
@@ -13,9 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 def generate_interaction_mails(
-    root_new_mem_orig: MemTsNid, edge_feats=None
+    root_new_mem_orig: MemTsNid, edge_feats: torch.Tensor | None = None
 ) -> MailTsNid:
     """
+    这里mem必须和edge一一对应
     Args:
         root_new_mem_orig: MemTsNid 对象 (包含 2N 个节点)
                            前 N 个是 Src，后 N 个是 Dst。

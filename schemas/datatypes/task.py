@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 from numpy.typing import NDArray
 from torch import Tensor
 
-from schemas.datatypes.misc import MemNBox
+from schemas.datatypes.mem_mail_box.box import BoxTsNid
+from schemas.datatypes.mem_mail_box.mem import MemTsNid
 
-from .data_to_sync import BoxTsNid, MemTsNid
 from .plan import TensorDyPlan
 
 
@@ -34,28 +33,11 @@ class BoxTask:
 
 @dataclass(slots=True)
 class P2PTask:
-    nid: GatherElement
-    data: GatherElement
-    ts: GatherElement
-    type: Literal["mem", "box", "mail"]
-
-
-@dataclass(slots=True)
-class GatherElement:
-    recv: Tensor
-    send: Tensor
-    out_splits: NDArray
-    in_splits: NDArray
-
-
-@dataclass(slots=True, kw_only=True)
-class SyncTask:
-    macro_bid: int
-    mem_plan: TensorDyPlan
-    box_plan: TensorDyPlan
-    root_new_mem: MemTsNid
-    pos_efeat: Tensor | None
-    old_mem_n_box: MemNBox
-    is_all_epoch_last_macro: bool
-    is_this_epoch_last_macro: bool
-    r2n_mdt: Tensor | None
+    nid2send: Tensor
+    nid2recv: Tensor
+    data2send: Tensor
+    data2recv: Tensor
+    ts2send: Tensor
+    ts2recv: Tensor
+    rec_cts: NDArray
+    send_cts: NDArray

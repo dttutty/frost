@@ -10,7 +10,7 @@ memory:
   - type: <'node', we only support node memory now>
     d_time: <an integer, the dimension of the time embedding>
     deliver_to: <'self' that delivers the mails only to involved nodes or 'neighbors' that deliver the mails to neighbors>
-    mail_combine: <'last' that use the latest latest mail as the input to the memory updater>
+    mail_combine: <'last' that use the last last mail as the input to the memory updater>
     memory_update: <'gru' or 'rnn'>
     boxsize: <an integer, the size of the mailbox for each node>
     combine_node_feature: <False or True that specifies whether to combine node features (with the updated memory) as the input to the GNN.

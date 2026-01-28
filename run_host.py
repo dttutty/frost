@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
-from host.result_writer import ResultAggregator
 from tqdm import tqdm
 
 from config.gcn import TGN
@@ -113,11 +112,6 @@ class Host:
             env=env,
             result_q=self.result_q,
             group=gloo,
-            stop_ev=self.stop_ev,
-        )
-        self.result_aggr = ResultAggregator(
-            n_gpu=env.n_gpu,
-            in_q=self.result_q,
             stop_ev=self.stop_ev,
         )
 
@@ -403,6 +397,5 @@ class Host:
         if self.planner is not None:
             self.planner.join()
         self.scatter.join()
-        self.result_aggr.join()
         end = time.time()
         logger.debug(f"Elapsed time: {end - self.start_time:.2f} seconds")

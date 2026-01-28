@@ -11,10 +11,16 @@ from numpy.typing import NDArray
 from torch import Tensor
 
 from gnn.components import EdgePredictor
-from tensor_set import TensorSet
+from gnn.memory_updater import (
+    MfgMemoryUpdater,
+    NoMfgMemoryUpdater,
+    TransformerMemoryUpdater,
+)
+from schemas.datatypes.mem_mail_box.box import BoxTsNid
+from schemas.datatypes.mem_mail_box.mem import MemTsNid
+from tensor_set_fn import TensorSetFn
 
 from ..alias import IntArr
-from .data_to_sync import BoxTsNid, MemTsNid
 from .plan import BatchNodeStateIO, PlanSet, TensorPlanSet
 
 
@@ -96,7 +102,9 @@ class EdgeFeat:
 
 @dataclass(slots=True, kw_only=True)
 class ModelComponents:
-    memory_updater: torch.nn.Module | None
+    memory_updater: (
+        MfgMemoryUpdater | NoMfgMemoryUpdater | TransformerMemoryUpdater | None
+    )
     gnn: torch.nn.Module
     header: EdgePredictor | None
 
@@ -123,7 +131,7 @@ class NFeatNid:
         return self
 
     def merge(self, other: NFeatNid) -> NFeatNid:
-        assert TensorSet.intersection(self.nid, other.nid).numel() == 0, (
+        assert TensorSetFn.intersection(self.nid, other.nid).numel() == 0, (
             "NID overlap between RootX instances."
         )
         self.nid = torch.cat((self.nid, other.nid), dim=0)
@@ -145,27 +153,14 @@ class NFeatNid:
         nfeat = self.nfeat[mask]
         return self.__class__(nid=nid, nfeat=nfeat)
 
-
-def unzip_and_align(mem_n_box: MemNBox, delta_x: MemNBox, root_nid: torch.Tensor) -> X:
-    if delta_x.mem is not None:
-        delta_x = delta_x.sort_mem_and_mail()
-        pos = torch.searchsorted(delta_x.mem.nid, root_nid)
-        delta_x.mem.ts = delta_x.mem.ts[pos]
-        delta_x.mem.data = delta_x.mem.data[pos]
-    if delta_x.box is not None:
-        delta_x.box = delta_x.box[pos]
-    if delta_x.box_ts is not None:
-        delta_x.box_ts = delta_x.box_ts[pos]
-
-    delta_x.is_zipped = False
-    return delta_x
+    def cuda(self) -> NFeatNid:
+        return NFeatNid(nid=self.nid.cuda(), nfeat=self.nfeat.cuda())
 
 
 @dataclass(slots=True, kw_only=True)
 class MemNBox:
     mem: MemTsNid
     box: BoxTsNid
-    is_unzipped: bool = False
 
     @cached_property
     def is_mem_mail_sorted(self) -> bool:
@@ -184,6 +179,33 @@ class MemNBox:
             self.box = self.box.sort_by_nid()
 
         return self
+
+    def retain_and_align_to_root(self, root_nid: torch.Tensor) -> MemNBox:
+        self = self.sort_mem_and_mail()
+        pos = torch.searchsorted(self.mem.nid, root_nid)
+        new_mem_ts_nid = MemTsNid(
+            nid=root_nid, ts=self.mem.ts[pos], data=self.mem.data[pos]
+        )
+        pos = torch.searchsorted(self.box.nid, root_nid)
+        new_box_ts_nid = BoxTsNid(
+            nid=root_nid, ts=self.box.ts[pos], data=self.box.data[pos]
+        )
+
+        uniq_ngh_nid = TensorSetFn.difference(self.box.nid, root_nid)
+        uniq_ngh_nid_pos = torch.searchsorted(self.box.nid, uniq_ngh_nid)
+        ngh_box_ts_nid = BoxTsNid(
+            nid=uniq_ngh_nid,
+            ts=self.box.ts[uniq_ngh_nid_pos],
+            data=self.box.data[uniq_ngh_nid_pos],
+        )
+
+        combined_box = BoxTsNid(
+            nid=torch.cat((new_box_ts_nid.nid, ngh_box_ts_nid.nid)),
+            ts=torch.cat((new_box_ts_nid.ts, ngh_box_ts_nid.ts)),
+            data=torch.cat((new_box_ts_nid.data, ngh_box_ts_nid.data)),
+        )
+
+        return self.__class__(mem=new_mem_ts_nid, box=combined_box)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -221,6 +243,7 @@ class Meta:
     m_state: EpochSplitIterInfo
     nfeat: NFeatNid | None = None
     mem_n_box: MemNBox | None = None
+    root_mem_n_box: SeperateData | None = None
     state: BatchNodeStateIO | None
     n_src: int = 1
 
@@ -260,6 +283,13 @@ class Meta:
         d.pop("uniq_all", None)
         d.pop("batch_node_state_io", None)
         return d
+
+
+@dataclass(slots=True, kw_only=True)
+class SeperateData:
+    root_mem: MemTsNid
+    root_mail: MemNBox
+    ngh_mail: BoxTsNid | None = None
 
 
 @dataclass(slots=True, kw_only=True)

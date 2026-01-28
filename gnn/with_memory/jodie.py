@@ -4,7 +4,7 @@ import math
 import torch
 import torch.nn as nn
 
-from schemas.datatypes.data_to_sync import MemTsNid
+from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from schemas.datatypes.plan import BatchNodeStateIO
 from tensor_set import TensorSet
 

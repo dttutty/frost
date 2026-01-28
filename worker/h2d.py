@@ -8,6 +8,7 @@ import torch
 from dgl.heterograph import DGLBlock
 
 # In utils.py
+from buffer import Buffers
 from schemas.datatypes.misc import DGLBlockMeta, Meta, Shared
 from thread_base_with_stream import StreamThreadBase
 from utils import _deduplicate_first_layer_src
@@ -63,6 +64,7 @@ def collate_and_build_graph(
 class H2D(StreamThreadBase):
     def __init__(
         self,
+        buf: Buffers,
         nfeat: torch.Tensor | None,
         efeat: torch.Tensor | None,
         shared: Shared | None,
@@ -74,7 +76,8 @@ class H2D(StreamThreadBase):
         history: int = 1,
         n_neg: int = 1,
     ) -> None:
-        super().__init__(name="h2d")
+        super().__init__(name="h2d", stop_ev=stop_ev)
+        self.buf = buf
         self.nfeat = nfeat
         self.efeat = efeat
         self.shared = shared
@@ -101,7 +104,16 @@ class H2D(StreamThreadBase):
                 continue
             # move pos_efeat to gpu
             if self.efeat is not None:
-                meta.pos_efeat = self.efeat[meta.pos_edge_id].cuda()
+                if (
+                    self.buf.pos_efeat_h2d is not None
+                    and meta.pos_edge_id.numel() <= self.buf.pos_efeat_h2d.shape[0]
+                ):
+                    n = meta.pos_edge_id.numel()
+                    buf_view = self.buf.pos_efeat_h2d[:n]
+                    torch.index_select(self.efeat, 0, meta.pos_edge_id, out=buf_view)
+                    meta.pos_efeat = buf_view.to("cuda", non_blocking=True)
+                else:
+                    meta.pos_efeat = self.efeat[meta.pos_edge_id].cuda()
 
             # make mfg from raw data
             if meta.n2r_meta is not None:
@@ -120,20 +132,22 @@ class H2D(StreamThreadBase):
             if meta.plan_set is not None:
                 if meta.plan_set.mem is not None and meta.plan_set.box is None:
                     meta.plan_set.box = meta.plan_set.mem
-                meta.plan_set = meta.plan_set.cuda()
+                meta.plan_set = meta.plan_set
 
             # move nfeat and efeat to gpu
             if self.nfeat is not None or self.efeat is not None:
                 # prepare if has n_feat
                 if meta.plan_set is not None and meta.plan_set.nfeat is not None:
-                    meta.nfeat = self.st_asm.prepare_nfeat_cache(
-                        nfeat_plan=meta.plan_set.nfeat,
+                    meta.nfeat = self.st_asm.prepare_nfeat_cache(``
+                        nfeat_plan=meta.plan_set.nfeat, pin_nfeat_buf=self.buf.nfeat_h2d
                     )
 
                 # can run no matter has nfeat or not
                 if meta.n2r_mfgs is not None:
                     meta.n2r_mfgs = self.st_asm.fill_mfg_with_efeat_n_nfeat(
-                        gnn_mfgs=meta.n2r_mfgs, nfeat=meta.nfeat
+                        gnn_mfgs=meta.n2r_mfgs,
+                        nfeat=meta.nfeat,
+                        pin_efeat_buf=self.buf.efeat_h2d,
                     )
 
                 # mfg version do not need nfeat output
@@ -142,6 +156,8 @@ class H2D(StreamThreadBase):
 
             # move mem and box to gpu
             if self.shared is not None:
+                assert self.buf.mem_h2d is not None
+                assert self.buf.box_h2d is not None
                 assert self.h2d_sem is not None
                 self.h2d_sem.acquire()
                 self.h2d_sem.acquire()
@@ -149,8 +165,17 @@ class H2D(StreamThreadBase):
                 assert meta.plan_set.mem is not None
                 assert meta.plan_set.box is not None
                 meta.mem_n_box = prep_part_mem_n_box(
-                    self.shared, meta.plan_set.mem, meta.plan_set.box
+                    self.shared,
+                    meta.plan_set.mem,
+                    meta.plan_set.box,
+                    pin_mem_buf=self.buf.mem_h2d,
+                    pin_box_buf=self.buf.box_h2d,
                 )
+            if meta.plan_set is not None:
+                if meta.plan_set.mem is not None and meta.plan_set.box is None:
+                    meta.plan_set.box = meta.plan_set.mem
+                # 使用 non_blocking 即可，无需 buffer
+                meta.plan_set = meta.plan_set.cuda()
 
             # even there is no next batch, we still need plan_set for writeback
             if self.merge_src:

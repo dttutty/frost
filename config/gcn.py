@@ -298,7 +298,7 @@ class TGN(nn.Module):
         with torch.no_grad():
             self.memory[unique_update_nodes] = new_node_memory
 
-            # Find the latest timestamp for each node involved in this update batch
+            # Find the last timestamp for each node involved in this update batch
             # This is a simplification; assumes batch timestamps can update last_update_ts
             # A more precise way might involve iterating or using scatter_max
             max_ts_map = {}

@@ -1,8 +1,9 @@
 import logging
-import os
 import threading
 from queue import Queue as Q
-from typing import Literal
+from typing import (
+    Literal,  # 必须导入这个
+)
 
 import torch
 import torch.distributed as dist
@@ -11,16 +12,22 @@ from torchmetrics import MetricCollection
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
 
+from buffer import Buffers, _init_all_pin_mem
+from gnn.with_memory.apan import APAN
 from gnn.with_memory.base import MemoryBaseGNN
+from gnn.with_memory.jodie import JODIE
+from gnn.with_memory.tgn import TGN
 from gnn.without_memory.base import GNN
 from schemas.alias import MetaWEvent
 from schemas.datatypes.cfg import MemoryCFG, SampleCFG, TrainCFG
-from schemas.datatypes.data_to_sync import BoxTsNid, MemTsNid
 from schemas.datatypes.env import Env
+from schemas.datatypes.mem_mail_box.box import BoxTsNid
+from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from schemas.datatypes.misc import MemNBox, Meta, ModelComponents, Result, Shared
-from schemas.datatypes.task import P2PTask, SyncTask
+from schemas.datatypes.task import BoxTask, MemTask, P2PTask
 from worker.assembler.dy_asm import DyAssembler
-from worker.data_syncer.data_syncer import DataSyncer
+from worker.data_syncer.box_handler import BoxHandler
+from worker.data_syncer.mem_handler import MemHandler
 from worker.h2d import H2D
 from worker.receiver import Receiver as Receiver
 
@@ -36,8 +43,6 @@ logger = logging.getLogger(__name__)
 
 
 class Worker:
-    data_syncer: DataSyncer | None
-
     def __init__(
         self,
         s_cfg: SampleCFG,
@@ -71,40 +76,61 @@ class Worker:
         self.h2d_sem: threading.BoundedSemaphore = threading.BoundedSemaphore(0)
         self.destination_q_for_h2d: Q[MetaWEvent | None | Literal["end_of_epoch"]]
 
+        self.buffers: Buffers = _init_all_pin_mem(
+            shared=shared,
+            shared_nfeat=nfeat,
+            shared_efeat=efeat,
+            batch_size=t_cfg.batch_size,
+            fanout=s_cfg.neighbor,
+            n_neg=self.n_neg,
+        )
+
         if self.shared is not None:
             assert m_cfg is not None
             self.delta_q: Q[tuple[MemNBox | None, torch.cuda.Event]] = Q()
-            self.mem_p2p_q: Q[P2PTask] = Q()
-            self.box_p2p_q: Q[P2PTask] = Q()
+            self.mem_task_q: Q[MemTask | None] = Q()
+            self.box_task_q: Q[BoxTask | None] = Q()
+            self.mem_p2p_q: Q[P2PTask | None] = Q()
+            self.box_p2p_q: Q[P2PTask | None] = Q()
             self.xpart_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q()
-            self.sync_q: Q[SyncTask] = Q()
             assert shared is not None, "Shared memory must be provided if memory exists"
             destination_q_for_h2d = self.xpart_q
 
-            self.data_syncer = DataSyncer(
-                mail_combine=m_cfg.mail_combine,
-                merge_src=t_cfg.merge_src,
-                n_gpu=env.n_gpu,
-                shared=shared,
-                h2d_sem=self.h2d_sem,
-                sync_q=self.sync_q,
-                stop_ev=self.stop_ev,
-                mem_p2p_q=self.mem_p2p_q,
-                box_p2p_q=self.box_p2p_q,
-            )
             self.assembler = DyAssembler(
                 in_q=self.xpart_q,
                 delta_q=self.delta_q,
                 out_q=self.full_q,
                 stop_ev=self.stop_ev,
             )
-            self.data_syncer.start()
+            self.mem_handler = MemHandler(
+                buf=self.buffers,
+                shared_mem=shared.mem,
+                shared_mem_ts=shared.mem_ts,
+                in_q=self.mem_task_q,
+                out_q=self.mem_p2p_q,
+                h2d_sem=self.h2d_sem,
+                stop_ev=self.stop_ev,
+            )
+            self.mem_handler.start()
+            self.box_handler = BoxHandler(
+                buf=self.buffers,
+                shared_box=shared.box,
+                shared_box_ts=shared.box_ts,
+                in_q=self.box_task_q,
+                out_q=self.box_p2p_q,
+                h2d_sem=self.h2d_sem,
+                stop_ev=self.stop_ev,
+                mail_combine=m_cfg.mail_combine,
+                merge_src=t_cfg.merge_src,
+            )
+            self.box_handler.start()
+
             self.assembler.start()  # 启动 Assembler 组装线程
         else:
             destination_q_for_h2d = self.full_q
-            self.data_syncer = None
 
         self.h2d = H2D(
+            buf=self.buffers,
             nfeat=nfeat,
             efeat=efeat,
             shared=shared,
@@ -126,13 +152,15 @@ class Worker:
         )
 
         if self.shared is not None:
+            assert isinstance(components.gnn, TGN | JODIE | APAN)
             assert components.memory_updater is not None
             assert components.header is not None
             self.gnn = components.gnn
             self.model = MemoryBaseGNN(
                 gnn=components.gnn,
                 memory_updater=components.memory_updater,
-                sync_q=self.sync_q,
+                mem_task_q=self.mem_task_q,
+                box_task_q=self.box_task_q,
                 header=components.header,
             )
         else:
@@ -229,48 +257,39 @@ class Worker:
         self.optimizer.step()
         self.train_loss_tracker.update(loss)
 
-    def _exec_p2p(
-        self, p2p_task: P2PTask, type: Literal["mem", "box"]
-    ) -> MemTsNid | BoxTsNid:
-        nid, data, ts, type = p2p_task.nid, p2p_task.data, p2p_task.ts, p2p_task.type
-        recv_nid, send_nid, out_splits, in_splits = (
-            nid.recv,
-            nid.send,
-            nid.out_splits,
-            nid.in_splits,
-        )
-        recv_data, send_x = data.recv, data.send
-        recv_ts, send_ts = ts.recv, ts.send
-
-        dist.all_to_all_single(
-            output=recv_nid,
-            input=send_nid,
-            output_split_sizes=out_splits,
-            input_split_sizes=in_splits,
-            group=self.nccl,
-        )
-        dist.all_to_all_single(
-            output=recv_data,
-            input=send_x,
-            output_split_sizes=out_splits,
-            input_split_sizes=in_splits,
-            group=self.nccl,
-        )
-        dist.all_to_all_single(
-            output=recv_ts,
-            input=send_ts,
-            output_split_sizes=out_splits,
-            input_split_sizes=in_splits,
-            group=self.nccl,
-        )
-
-        if type == "mem":
-            return MemTsNid(nid=recv_nid, data=recv_data, ts=recv_ts)
-        elif type == "box":
-            return BoxTsNid(nid=recv_nid, data=recv_data, ts=recv_ts)
-
     @torch.no_grad()
     def handle_p2p_q(self) -> None:
+        # only support 1-d mem and 2-d box p2p now
+        # if you need to sync mail, convert it to box  first
+        def _exec_p2p(
+            p2p_task: P2PTask, type: Literal["mem", "box"]
+        ) -> MemTsNid | BoxTsNid:
+            iters = [
+                (p2p_task.nid2recv, p2p_task.nid2send),
+                (p2p_task.data2recv, p2p_task.data2send),
+                (p2p_task.ts2recv, p2p_task.ts2send),
+            ]
+            for recv_tensor, send_tensor in iters:
+                dist.all_to_all_single(
+                    output=recv_tensor,
+                    input=send_tensor,
+                    output_split_sizes=p2p_task.rec_cts,
+                    input_split_sizes=p2p_task.send_cts,
+                    group=self.nccl,
+                )
+            cls: type[MemTsNid] | type[BoxTsNid]
+            match type:
+                case "mem":
+                    cls = MemTsNid
+                case "box":
+                    cls = BoxTsNid
+                case _:
+                    # Handle unknown type
+                    raise ValueError(f"Unknown type: {type}")
+            return cls(
+                nid=p2p_task.nid2recv, data=p2p_task.data2recv, ts=p2p_task.ts2recv
+            )
+
         delta_mem = None
         delta_box = None
 
@@ -280,24 +299,23 @@ class Worker:
         if mem_p2p_q is None:
             box_p2p_q = self.box_p2p_q.get(block=True)
             assert box_p2p_q is None
-            delta_x = None
             return
         if mem_p2p_q == "skip":
             box_p2p_q = self.box_p2p_q.get(block=True)
             assert box_p2p_q == "skip"
             self.delta_q.put("skip")
         else:
-            delta_mem = self._exec_p2p(mem_p2p_q, "mem")
+            delta_mem = _exec_p2p(mem_p2p_q, "mem")
+            assert isinstance(delta_mem, MemTsNid)
             box_p2p_q = self.box_p2p_q.get(block=True)
             assert box_p2p_q is not None
-            delta_box = self._exec_p2p(box_p2p_q, "box")
-            delta_x = MemNBox(mem=delta_mem, box=delta_box)
+            delta_box = _exec_p2p(box_p2p_q, "box")
+            assert isinstance(delta_box, BoxTsNid)
+
+            delta = MemNBox(mem=delta_mem, box=delta_box)
             ready_event: torch.cuda.Event = torch.cuda.Event()
             ready_event.record(torch.cuda.current_stream())
-            self.delta_q.put((delta_x, ready_event))
-            self.logger.debug(
-                f"DataSyncer: rank {self.env.local_rank} put DeltaX into DeltaX_q"
-            )
+            self.delta_q.put((delta, ready_event))
 
     @torch.no_grad()
     def eval(self, meta: Meta) -> None:
@@ -358,8 +376,10 @@ class Worker:
     def cleanup(self) -> None:
         self.h2d.join()
         self.receiver.join()
-        if self.data_syncer is not None:
-            self.data_syncer.join()
+        if self.mem_handler:
+            self.mem_handler.join()
+        if self.box_handler:
+            self.box_handler.join()
         self.assembler.join()
         dist.barrier()
         dist.destroy_process_group()

@@ -45,7 +45,7 @@ def dgl_blocks_to_tensor_dicts(blocks: list[DGLBlock]) -> list[dict]:
 
 def tensor_dicts_to_dgl_blocks(
     tensor_dicts: list[dict],
-    device="cpu",
+    device: torch.device = torch.device("cpu"),
 ) -> list[DGLBlock]:
     """Reconstructs a list of DGL blocks from a list of tensor dictionaries."""
     blocks = []
@@ -140,34 +140,26 @@ def load_graph(d: str) -> tuple[ExtFullGraph, pd.DataFrame, int, int]:
     src = df["src"].to_numpy()
     dst = df["dst"].to_numpy()
     n_nodes_infer_from_df = max(src.max(), dst.max()) + 1
-    n_nodes_infer_from_g = g["indptr"].shape[0] - 1
+    n_nodes_infer_from_g = g.indptr.shape[0] - 1
     assert n_nodes_infer_from_g == n_nodes_infer_from_df
     n_edges = df.shape[0]
     return g, df, n_nodes_infer_from_g, n_edges
 
 
 def parse_config(f: str) -> Config:
-    conf = yaml.safe_load(open(f))
+    with open(f) as stream:
+        conf = yaml.safe_load(stream)
 
     cfg_s = conf.get("sampling")
-    if cfg_s is None:
-        sample_param = None
-    else:
-        sample_param = SampleCFG(**cfg_s[0])
-
     cfg_m = conf.get("memory")
-    if cfg_m is None:
-        memory_param = None
-    else:
-        memory_param = MemoryCFG(**cfg_m[0])
-
+    sample_param = SampleCFG(**cfg_s[0])
+    memory_param = MemoryCFG(**cfg_m[0]) if cfg_m is not None else None
     gnn_conf = GNNCFG(**conf["gnn"][0])
     train_conf = TrainCFG(**conf["train"][0])
 
     logger.info(
         f"Parsed config: {sample_param}, {memory_param}, {gnn_conf}, {train_conf}"
     )
-
     cfg = Config(s=sample_param, m=memory_param, g=gnn_conf, t=train_conf)
     cfg.t.batch_size = int(cfg.t.batch_size)
     return cfg
@@ -230,7 +222,7 @@ def _mail_delivery_tensor(
     return tensor
 
 
-def get_global_edges_directly(mfg_meta):
+def get_global_edges_directly(mfg_meta: DGLBlockMeta) -> torch.Tensor:
     """
     直接从 mfg_meta 获取全局 ID 的边 (Src -> Dst)
     无需构建 DGLBlock
@@ -256,13 +248,14 @@ def get_global_edges_directly(mfg_meta):
     return torch.stack([global_src, global_dst], dim=0)
 
 
-def node_to_dgl_blocks(root_nodes, ts) -> list[list[DGLBlock]]:
-    blocks = list()
+def node_to_dgl_blocks(root_nodes: torch.Tensor, ts: torch.Tensor) -> list[DGLBlock]:
+    blocks = []
     block = dgl.create_block(
         ([], []), num_src_nodes=root_nodes.shape[0], num_dst_nodes=root_nodes.shape[0]
     )
     block.srcdata["ID"] = root_nodes
     block.srcdata["ts"] = ts
+    blocks.append([block])
     return blocks
 
 
@@ -273,7 +266,7 @@ def blocks_to_cuda(blockss: list[list[DGLBlock]]) -> list[list[DGLBlock]]:
     return blockss
 
 
-def _deduplicate_first_layer_src(blockss_0):
+def _deduplicate_first_layer_src(blockss_0: list[DGLBlock]) -> list[DGLBlock]:
     """
     Deduplicates source nodes in the first block layer based on (timestamp, ID).
     This function modifies the blocks in blocks_on_gpu_0 in place.

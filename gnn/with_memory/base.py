@@ -13,9 +13,9 @@ from gnn.memory_updater import (
 from gnn.with_memory.apan import APAN
 from gnn.with_memory.jodie import JODIE
 from gnn.with_memory.tgn import TGN
-from schemas.datatypes.data_to_sync import MemTsNid
+from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from schemas.datatypes.misc import Meta
-from schemas.datatypes.task import SyncTask
+from schemas.datatypes.task import BoxTask, MemTask
 
 
 logger = logging.getLogger(__name__)
@@ -25,14 +25,16 @@ class MemoryBaseGNN(nn.Module):
     def __init__(
         self,
         gnn: TGN | JODIE | APAN,
-        memory_updater: TransformerMemoryUpdater | MfgMemoryUpdater,
-        sync_q: Queue[tuple[SyncTask, torch.cuda.Event] | None],
+        memory_updater: TransformerMemoryUpdater | MfgMemoryUpdater | NoMfgMemoryUpdater,
+        mem_task_q: Queue[tuple[MemTask, torch.cuda.Event] | None],
+        box_task_q: Queue[tuple[BoxTask, torch.cuda.Event] | None],
         header: EdgePredictor,
     ) -> None:
         super().__init__()
         self.gnn = gnn
         self.memory_updater = memory_updater
-        self.sync_q = sync_q
+        self.mem_task_q = mem_task_q
+        self.box_task_q = box_task_q
         self.header = header
 
     def forward(self, meta: Meta) -> torch.Tensor:
@@ -91,17 +93,29 @@ class MemoryBaseGNN(nn.Module):
 
         m_state = meta.m_state
         plan_set = meta.plan_set
-        assert plan_set
+        assert plan_set is not None
         assert plan_set.box is not None
         assert plan_set.mem is not None
-        sync_task = SyncTask(
+
+        root_new_mem_orig = root_new_mem.clone()  # 这里的ts是交互发生的时间
+
+        # handle mem sync
+        mem_task = MemTask(
             macro_bid=m_state.cur_macro_of_epoch,
-            mem_plan=plan_set.mem,
-            box_plan=plan_set.box,
             root_new_mem=root_new_mem,
-            pos_efeat=meta.pos_efeat,
-            old_mem_n_box=meta.mem_n_box,
-            is_all_epoch_last_macro=m_state.is_last_macro_of_all_epoch,
-            is_this_epoch_last_macro=m_state.is_last_macro_of_epoch,
+            old_mem_ts_nid=meta.mem_n_box.mem,
+            mem_plan=plan_set.mem,
+            is_last=m_state.is_last_macro_of_epoch,
         )
-        self.sync_q.put((sync_task, ready_event))
+        self.mem_task_q.put((mem_task, ready_event))
+
+        box_task = BoxTask(
+            macro_bid=m_state.cur_macro_of_epoch,
+            root_new_mem_orig=root_new_mem_orig,
+            pos_efeat=meta.pos_efeat,
+            old_box=meta.mem_n_box.box,
+            box_plan=plan_set.box,
+            is_last=m_state.is_last_macro_of_epoch,
+            r2n_mdt=meta.r2n_mdt,
+        )
+        self.box_task_q.put((box_task, ready_event))

@@ -13,9 +13,11 @@ class StreamThreadBase(threading.Thread):
     def __init__(
         self,
         name: str,
-    ):
+        stop_ev: threading.Event,
+    ) -> None:
         super().__init__(daemon=False, name=name)
         self.stream: torch.cuda.Stream = torch.cuda.Stream()
+        self.stop_ev = stop_ev
 
     def logic(self) -> None:
         pass
@@ -28,7 +30,7 @@ class StreamThreadBase(threading.Thread):
         except Exception:
             cls_name = self.__class__.__name__
             thread_name = threading.current_thread().name
-            rank = "Unknown"
+            rank: str | int = "Unknown"
             try:
                 if dist.is_available() and dist.is_initialized():
                     rank = dist.get_rank()

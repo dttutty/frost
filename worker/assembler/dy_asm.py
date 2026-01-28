@@ -6,8 +6,10 @@ from typing import Literal
 import torch
 from dgl.heterograph import DGLBlock
 
+from buffer import DyBuf
 from schemas.alias import MetaWEvent
-from schemas.datatypes.data_to_sync import BoxTsNid, MemTsNid
+from schemas.datatypes.mem_mail_box.box import BoxTsNid
+from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from schemas.datatypes.misc import MemNBox, Shared
 from schemas.datatypes.plan import TensorDyPlan
 from thread_base_with_stream import StreamThreadBase
@@ -16,27 +18,103 @@ from thread_base_with_stream import StreamThreadBase
 logger = logging.getLogger(__name__)
 
 
+def _try_gather_to_pinned(
+    src_data: torch.Tensor,
+    src_ts: torch.Tensor,
+    indices: torch.Tensor,
+    pinned_buf: DyBuf,
+    target_cls: type[MemTsNid] | type[BoxTsNid],
+) -> MemTsNid | BoxTsNid | None:  # 返回 None 表示 Buffer 不够大，需要 fallback
+    n = indices.numel()
+    # [关键修复] 检查 Buffer 容量是否足够
+    if n > pinned_buf.data.shape[0]:
+        # Log a warning if needed, or just silently fallback
+        return None
+
+    # 1. 确定 Pinned Buffer 的有效区域视图
+    buf_data_view = pinned_buf.data[:n]
+    buf_ts_view = pinned_buf.ts[:n]
+    buf_nid_view = pinned_buf.nid[:n]
+
+    # 2. Gather Data (CPU -> Pinned CPU)
+    torch.index_select(src_data, 0, indices, out=buf_data_view)
+
+    # Handle Timestamp dimensions
+    if src_ts.dim() == 1 and buf_ts_view.dim() == 2:
+        torch.index_select(src_ts.unsqueeze(1), 0, indices, out=buf_ts_view)
+    else:
+        torch.index_select(src_ts, 0, indices, out=buf_ts_view)
+
+    # Fill NID
+    if indices.dim() == 1 and buf_nid_view.dim() == 2:
+        buf_nid_view.copy_(indices.view(-1, 1))
+    else:
+        buf_nid_view.copy_(indices)
+
+    # 3. Async Copy (Pinned CPU -> GPU)
+    return target_cls(
+        nid=indices.to("cuda", non_blocking=True),
+        data=buf_data_view.to("cuda", non_blocking=True),
+        ts=buf_ts_view.to("cuda", non_blocking=True),
+    )
+
+
 def prep_part_mem_n_box(
-    shared: Shared, mem_plan: TensorDyPlan, box_plan: TensorDyPlan
+    shared: Shared,
+    mem_plan: TensorDyPlan,
+    box_plan: TensorDyPlan,
+    pin_mem_buf: DyBuf | None = None,
+    pin_box_buf: DyBuf | None = None,
 ) -> MemNBox:
-    # this is compatible with no mfg and mfg case
-    # pre move part data to gpu, avoid h2d in assembler
     assert shared is not None
     assert mem_plan is not None
+
+    # --- 处理 Memory ---
     mem_fetch_nids = mem_plan.fetch
-    mem = MemTsNid(
-        nid=mem_fetch_nids,
-        data=shared.mem[mem_fetch_nids],
-        ts=shared.mem_ts[mem_fetch_nids],
-    ).cuda()
+    mem = None
+
+    # 尝试走 Pin Memory 路径
+    if pin_mem_buf is not None:
+        mem = _try_gather_to_pinned(
+            src_data=shared.mem,
+            src_ts=shared.mem_ts,
+            indices=mem_fetch_nids,
+            pinned_buf=pin_mem_buf,
+            target_cls=MemTsNid,
+        )
+
+    # 如果没开启 Buffer 或者 Buffer 不够大 (返回 None)，走普通路径
+    if mem is None:
+        mem = MemTsNid(
+            nid=mem_fetch_nids,
+            data=shared.mem[mem_fetch_nids],
+            ts=shared.mem_ts[mem_fetch_nids],
+        ).cuda()  # 普通阻塞传输
+
+    # --- 处理 Box (Mail) ---
     mail_fetch_nids = box_plan.fetch
-    box = BoxTsNid(
-        nid=mail_fetch_nids,
-        data=shared.box[mail_fetch_nids],
-        ts=shared.box_ts[mail_fetch_nids],
-    ).cuda()
-    mem_n_box = MemNBox(mem=mem, box=box)
-    return mem_n_box
+    box = None
+
+    if pin_box_buf is not None:
+        box = _try_gather_to_pinned(
+            src_data=shared.box,
+            src_ts=shared.box_ts,
+            indices=mail_fetch_nids,
+            pinned_buf=pin_box_buf,
+            target_cls=BoxTsNid,
+        )
+
+    if box is None:
+        box = BoxTsNid(
+            nid=mail_fetch_nids,
+            data=shared.box[mail_fetch_nids],
+            ts=shared.box_ts[mail_fetch_nids],
+        ).cuda()
+
+    assert isinstance(mem, MemTsNid)
+    assert isinstance(box, BoxTsNid)
+
+    return MemNBox(mem=mem, box=box)
 
 
 class DyAssembler(StreamThreadBase):
@@ -52,7 +130,7 @@ class DyAssembler(StreamThreadBase):
         stop_ev: threading.Event,
         has_reverse_mdt: bool = False,
     ) -> None:
-        super().__init__(name="dy_assembler")
+        super().__init__(name="dy_assembler", stop_ev=stop_ev)
         self.in_q = in_q
         self.delta_q = delta_q
         self.out_q = out_q
@@ -118,7 +196,7 @@ class DyAssembler(StreamThreadBase):
                 )
             else:
                 # 这种是为了APAN哪种种没有mfg的情况
-                meta.mem_n_box = mem_n_box_full.unzip_and_align(meta.root_nid)
+                meta.mem_n_box = mem_n_box_full.retain_and_align_to_root(meta.root_nid)
             # 3) 把结果交给主线程（主线程取时再 wait_stream）
             ready_event: torch.cuda.Event = torch.cuda.Event()
             ready_event.record(torch.cuda.current_stream())

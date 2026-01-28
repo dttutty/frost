@@ -5,7 +5,7 @@ import os
 import random
 import socket
 import time
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 import torch
@@ -18,11 +18,14 @@ from dgl.utils.shared_mem import (
 from gnn import APAN, JODIE, TGAT, TGN, DyGFormer, DySAT_TGL
 from gnn.components import EdgePredictor, TimeEncode
 from gnn.memory_updater import MfgMemoryUpdater, TransformerMemoryUpdater
-from schemas.datatypes.cfg import GNNCFG, SampleCFG, TrainCFG
+from schemas.datatypes.cfg import GNNCFG, MemoryCFG, SampleCFG, TrainCFG
 from schemas.datatypes.env import Env
 from schemas.datatypes.misc import ModelComponents, Shared
 from utils import load_feat, load_graph, parse_config
 
+
+# 定义一个泛型变量 T
+T = TypeVar("T")
 
 # 建议做法 通过环境变量控制
 # 在终端运行: export APP_ENV=dev && python main.py  -> 会显示所有日志
@@ -71,7 +74,7 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def broadcast_data(data=None, src=0) -> Any:
+def broadcast_data(data: Any = None, src: int = 0) -> Any:  # noqa: ANN401
     payload = [data]
     dist.broadcast_object_list(payload, src=src)
     return payload[0]
@@ -131,7 +134,9 @@ def main() -> None:
     all_ranks = list(range(0, env.world_size))
     logger.debug(f"Rank {env.local_rank}: Creating worker NCCL groups...")
     gloo = dist.new_group(ranks=all_ranks, backend="gloo")
+    assert gloo is not None, "Failed to create gloo process group"
     nccl = dist.new_group(ranks=worker_ranks, backend="nccl")
+    assert nccl is not None, "Failed to create nccl process group"
     if args.seed is not None:
         set_seed(args.seed)
 
@@ -185,7 +190,6 @@ def main() -> None:
     if cfg.s.sample_support_node:
         assert cfg.s.layer == len(cfg.s.neighbor)
 
-    n_epoch = cfg.t.epoch
     # initialize shared memory for memory and mailbox
     shared = None
     if cfg.m is not None:
@@ -202,7 +206,6 @@ def main() -> None:
             F32,
         )
         box_ts = csm("mail_ts", [n_nodes, cfg.m.boxsize], F32)
-        box_next_pos = csm("mail_next_pos", [n_nodes], torch.int32)
     dist.barrier()
 
     if env.local_rank != 0 and cfg.m is not None:
@@ -214,7 +217,6 @@ def main() -> None:
             F32,
         )
         box_ts = gsm("mail_ts", [n_nodes, cfg.m.boxsize], F32)
-        box_next_pos = gsm("mail_next_pos", [n_nodes], torch.int32)
     shared = None
     if cfg.m is not None:
         shared = Shared(
@@ -222,11 +224,10 @@ def main() -> None:
             mem_ts=mem_ts,
             box=box,
             box_ts=box_ts,
-            box_next_pos=box_next_pos,
         )
 
     dist.barrier()
-    model_components = _init_gnn(cfg.t, cfg.m, cfg.g, cfg.s)
+    model_components = _init_gnn(cfg.t, cfg.s, cfg.g, cfg.m)
 
     if env.is_host:
         from run_host import Host
@@ -258,9 +259,9 @@ def main() -> None:
 
 def _init_gnn(
     t_cfg: TrainCFG,
-    m_cfg: TrainCFG | None = None,
-    g_cfg: GNNCFG | None = None,
-    s_cfg: SampleCFG | None = None,
+    s_cfg: SampleCFG,
+    g_cfg: GNNCFG,
+    m_cfg: MemoryCFG | None = None,
 ) -> ModelComponents:
     memory_updater = None
     gnn = None
@@ -275,6 +276,7 @@ def _init_gnn(
                 rnn=torch.nn.GRUCell(d_mail + m_cfg.d_time, m_cfg.d_mem),
                 time_encoder=TimeEncode(m_cfg.d_time),
             )
+            assert g_cfg.d_out is not None, "TGN requires gnn.d_out to be set"
             gnn = TGN(
                 dim_node=t_cfg.ndim,
                 dim_edge=t_cfg.edim,
@@ -286,6 +288,7 @@ def _init_gnn(
 
         case "apan":
             assert m_cfg is not None, "APAN requires memory config"
+            assert m_cfg.att_h is not None, "APAN requires gnn.d_out to be set"
 
             memory_updater = TransformerMemoryUpdater(
                 d_mail=d_mail,
@@ -316,6 +319,8 @@ def _init_gnn(
             header = EdgePredictor(m_cfg.d_mem, neg_samples=1)
 
         case "tgat":
+            assert g_cfg.d_out is not None, "TGAT requires gnn.d_out to be set"
+            assert g_cfg.att_h is not None, "TGAT requires gnn.att_h to be set"
             gnn = TGAT(
                 dim_node=t_cfg.ndim,
                 dim_edge=t_cfg.edim,
@@ -328,12 +333,15 @@ def _init_gnn(
             header = EdgePredictor(g_cfg.d_out, neg_samples=1)
 
         case "dysat":
+            assert g_cfg.d_out is not None, "DySAT requires gnn.d_out to be set"
+            assert g_cfg.att_h is not None, "DySAT requires gnn.att_h to be set"
+
             gnn = DySAT_TGL(
                 dim_node=t_cfg.ndim,
                 dim_edge=t_cfg.edim,
                 dim_time=g_cfg.d_time,
                 dim_hid=g_cfg.d_out,
-                num_layers=cfg.s.layer,
+                num_layers=s_cfg.layer,
                 heads=g_cfg.att_h,
                 dropout=t_cfg.dropout,
                 history_len=s_cfg.history,
