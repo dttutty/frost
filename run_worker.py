@@ -11,7 +11,10 @@ from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
 
 from buffer import Buffers, _init_all_pin_mem
+from gnn.with_memory.apan import APAN
 from gnn.with_memory.base import MemoryBaseGNN
+from gnn.with_memory.jodie import JODIE
+from gnn.with_memory.tgn import TGN
 from gnn.without_memory.base import GNN
 from schemas.alias import MetaWEvent
 from schemas.datatypes.cfg import MemoryCFG, SampleCFG, TrainCFG
@@ -85,9 +88,9 @@ class Worker:
         if self.shared is not None:
             logger.debug("Worker: initializing with shared memory components")
             assert m_cfg is not None
-            self.delta_q: Q[tuple[MemNBox | None, torch.cuda.Event]] = Q()
-            self.mem_task_q: Q[MemTask] = Q()
-            self.box_task_q: Q[BoxTask] = Q()
+            self.delta_q: Q[tuple[MemNBox, torch.cuda.Event] | Literal["nothing"]] = Q()
+            self.mem_task_q: Q[tuple[MemTask, torch.cuda.Event] | None] = Q()
+            self.box_task_q: Q[tuple[BoxTask, torch.cuda.Event] | None] = Q()
             self.mem_p2p_q: Q[P2PTask | Literal["nothing_to_p2p"]] = Q()
             self.box_p2p_q: Q[P2PTask | Literal["nothing_to_p2p"]] = Q()
             self.xpart_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q()
@@ -98,7 +101,7 @@ class Worker:
             self.assembler = DyAssembler(
                 in_q=self.xpart_q,
                 delta_q=self.delta_q,
-                out_q=self.full_q,
+                full_q=self.full_q,
                 stop_ev=self.stop_ev,
             )
             logger.debug("Worker: starting MemHandler")
@@ -131,6 +134,7 @@ class Worker:
         else:
             logger.debug("Worker: no shared memory, using direct queue")
             destination_q_for_h2d = self.full_q
+            # there is no thread for handling xpart_q, just put to full_q directly
 
         logger.debug("Worker: starting H2D thread")
         self.h2d = H2D(
@@ -157,11 +161,25 @@ class Worker:
         )
 
         if self.shared is not None:
-            logger.debug("Worker: building model with memory")
-            # ...existing code...
+            assert isinstance(components.gnn, TGN | JODIE | APAN)
+            assert components.memory_updater is not None
+            assert components.header is not None
+            self.gnn = components.gnn
+            self.model = MemoryBaseGNN(
+                gnn=components.gnn,
+                memory_updater=components.memory_updater,
+                mem_task_q=self.mem_task_q,
+                box_task_q=self.box_task_q,
+                header=components.header,
+            )
         else:
-            logger.debug("Worker: building model without memory")
-            # ...existing code...
+            assert components.header is not None
+            self.gnn = components.gnn
+
+            self.model = GNN(
+                gnn=components.gnn,
+                header=components.header,
+            )
 
         logger.debug("Worker: moving model to GPU and wrapping with DDP")
         self.model = self.model.cuda()
@@ -204,8 +222,6 @@ class Worker:
                 ),
             }
         ).cuda()
-        self.h2d.start()  # 启动 H2D 预取线程
-        self.receiver.start()  # 启动 Receiver 接收线程
         self.local_best_auc = 0.0
         logger.debug("Worker: initialization complete")
 
@@ -303,28 +319,23 @@ class Worker:
         # 1. 强制先处理 Mem 任务 (Deterministic Order: Mem -> Box)
         # 注意：如果某个 microbatch 不需要 mem p2p，DataSyncer 必须 put(None) 作为哨兵
         logger.debug("Worker: getting mem P2P task")
-        mem_p2p_q = self.mem_p2p_q.get(block=True)
-        if mem_p2p_q is None:
-            logger.debug("Worker: mem P2P task is None, getting box task")
-            box_p2p_q = self.box_p2p_q.get(block=True)
-            assert box_p2p_q is None
-            logger.debug("Worker: both P2P tasks are None, returning")
-            return
-        if mem_p2p_q == "nothing_to_sync":
+        mem_p2p = self.mem_p2p_q.get(block=True)
+
+        if mem_p2p == "nothing_to_p2p":
             logger.debug("Worker: skipping mem P2P")
-            box_p2p_q = self.box_p2p_q.get(block=True)
-            assert box_p2p_q == "nothing_to_sync"
+            box_p2p = self.box_p2p_q.get(block=True)
+            assert box_p2p == "nothing_to_p2p"
             logger.debug("Worker: skipping box P2P, putting skip to delta_q")
             self.delta_q.put("nothing")
         else:
             logger.debug("Worker: executing mem P2P")
-            delta_mem = _exec_p2p(mem_p2p_q, "mem")
+            delta_mem = _exec_p2p(mem_p2p, "mem")
             assert isinstance(delta_mem, MemTsNid)
             logger.debug("Worker: getting box P2P task")
-            box_p2p_q = self.box_p2p_q.get(block=True)
-            assert box_p2p_q is not None
+            box_p2p = self.box_p2p_q.get(block=True)
+            assert box_p2p != "nothing_to_p2p"
             logger.debug("Worker: executing box P2P")
-            delta_box = _exec_p2p(box_p2p_q, "box")
+            delta_box = _exec_p2p(box_p2p, "box")
             assert isinstance(delta_box, BoxTsNid)
 
             delta = MemNBox(mem=delta_mem, box=delta_box)
@@ -356,7 +367,18 @@ class Worker:
             logger.debug("Worker: updating test metrics")
             self.test_metrics.update(preds=y_pred, target=meta.labels)
 
-    def run(self) -> None:
+    def start_all_threads(self) -> None:
+        logger.debug("Worker: starting all threads")
+        self.h2d.start()
+        self.receiver.start()
+        if self.shared is not None:
+            self.mem_handler.start()
+            self.box_handler.start()
+            self.assembler.start()
+        logger.debug("Worker: all threads started")
+
+    def start(self) -> None:
+        self.start_all_threads()
         logger.debug("Worker: starting main run loop")
         self.logger.info("Worker: Starting H2D thread...")
         logger.debug("Worker: releasing semaphores for H2D startup")
@@ -366,9 +388,7 @@ class Worker:
         self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
         if self.shared is not None:
             logger.debug("Worker: initializing delta_q with None event")
-            ready_event: torch.cuda.Event = torch.cuda.Event()
-            ready_event.record(torch.cuda.current_stream())
-            self.delta_q.put((None, ready_event))
+            self.delta_q.put("nothing")
 
         batch_count = 0
         while self.stop_ev.is_set() is False:

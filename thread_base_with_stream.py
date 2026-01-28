@@ -22,7 +22,7 @@ class StreamThreadBase(threading.Thread):
     def logic(self) -> None:
         pass
 
-    def run(self) -> None:
+    def start(self) -> None:
         try:
             with torch.cuda.stream(self.stream):
                 self.logic()

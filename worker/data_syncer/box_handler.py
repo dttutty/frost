@@ -29,7 +29,7 @@ class BoxHandler(StreamThreadBase):
         self,
         buf: Buffers,
         shared_box: torch.Tensor,
-        box_task_q: Q[BoxTask],
+        box_task_q: Q[tuple[BoxTask, torch.cuda.Event] | None],
         box_p2p_q: Q[P2PTask | Literal["nothing_to_p2p"]],
         shared_box_ts: torch.Tensor,
         h2d_sem: threading.Semaphore,
@@ -175,7 +175,13 @@ class BoxHandler(StreamThreadBase):
 
     def logic(self) -> None:
         while not self.stop_ev.is_set():
-            box_task = self.box_task_q.get(block=True)
+            box_task_tuple = self.box_task_q.get(block=True)
+            if box_task_tuple is None:
+                logger.debug("BoxHandler: received sentinel, exiting logic loop")
+                break
+
+            box_task, ready_event = box_task_tuple
+            torch.cuda.current_stream().wait_event(ready_event)
 
             macro_bid = box_task.macro_bid
 

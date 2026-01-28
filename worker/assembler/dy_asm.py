@@ -125,15 +125,15 @@ class DyAssembler(StreamThreadBase):
     def __init__(
         self,
         in_q: Q[MetaWEvent | None | Literal["end_of_epoch"]],
-        delta_q: Q[tuple[MemNBox | None, torch.cuda.Event]],
-        out_q: Q[MetaWEvent | None | Literal["end_of_epoch"]],
+        delta_q: Q[tuple[MemNBox, torch.cuda.Event] | Literal["nothing"]],
+        full_q: Q[MetaWEvent | None | Literal["end_of_epoch"]],
         stop_ev: threading.Event,
         has_reverse_mdt: bool = False,
     ) -> None:
         super().__init__(name="dy_assembler", stop_ev=stop_ev)
         self.in_q = in_q
         self.delta_q = delta_q
-        self.out_q = out_q
+        self.full_q = full_q
         self.has_reverse_mdt = has_reverse_mdt
         self.stop_ev = stop_ev
 
@@ -173,20 +173,21 @@ class DyAssembler(StreamThreadBase):
         while not self.stop_ev.is_set():
             in_data = self.in_q.get(block=True)
             if in_data is None:
-                self.out_q.put(None, block=True)
+                self.full_q.put(None, block=True)
                 break
             elif in_data == "end_of_epoch":
-                self.out_q.put("end_of_epoch", block=True)
+                self.full_q.put("end_of_epoch", block=True)
                 continue
             meta, meta_ready_event = in_data
             mem_n_box = meta.mem_n_box
             assert mem_n_box is not None
             torch.cuda.current_stream().wait_event(meta_ready_event)
-            delta, delta_ready_event = self.delta_q.get(block=True)
-            torch.cuda.current_stream().wait_event(delta_ready_event)
-            if delta is None:
+            delta_tuple = self.delta_q.get(block=True)
+            if delta_tuple == "nothing":
                 mem_n_box_full = mem_n_box
             else:
+                delta, delta_ready_event = delta_tuple
+                torch.cuda.current_stream().wait_event(delta_ready_event)
                 mem_n_box_full = self._merge(mem_n_box, delta)
 
             if meta.n2r_mfgs is not None:
@@ -199,4 +200,4 @@ class DyAssembler(StreamThreadBase):
             # 3) 把结果交给主线程（主线程取时再 wait_stream）
             ready_event: torch.cuda.Event = torch.cuda.Event()
             ready_event.record(torch.cuda.current_stream())
-            self.out_q.put((meta, ready_event), block=True)
+            self.full_q.put((meta, ready_event), block=True)

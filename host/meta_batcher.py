@@ -20,21 +20,53 @@ class MetaBatcher(ThreadBase):
         stop_ev: threading.Event,
     ) -> None:
         super().__init__(name="meta_batcher", stop_ev=stop_ev)
+        logger.debug(f"MetaBatcher: initializing with n_gpu={n_gpu}")
         self.n_gpu = n_gpu
         self.in_q = in_q
         self.out_q = out_q
         self.stop_ev = stop_ev
 
     def logic(self) -> None:
+        batch_count = 0
+        logger.debug("MetaBatcher: starting logic loop")
+
         while not self.stop_ev.is_set():
+            logger.debug(
+                f"MetaBatcher: starting new batch collection, target size={self.n_gpu}"
+            )
             meta_list: list[Meta] = []
+
             while len(meta_list) < self.n_gpu:
+                logger.debug(
+                    f"MetaBatcher: waiting for meta from in_q, current collected={len(meta_list)}/{self.n_gpu}"
+                )
                 meta = self.in_q.get(block=True)
+
                 if meta is None:
+                    logger.debug(
+                        "MetaBatcher: received None, putting to out_q and exiting"
+                    )
                     self.out_q.put(None)
                     break
                 elif meta == "end_of_epoch":
+                    logger.debug("MetaBatcher: received end_of_epoch, putting to out_q")
                     self.out_q.put("end_of_epoch")
                 else:
+                    logger.debug(
+                        f"MetaBatcher: collected meta object, now have {len(meta_list) + 1}/{self.n_gpu}"
+                    )
                     meta_list.append(meta)
-            self.out_q.put(meta_list)
+
+            if len(meta_list) == self.n_gpu:
+                batch_count += 1
+                logger.debug(
+                    f"MetaBatcher: batch #{batch_count} complete with {len(meta_list)} metas, putting to out_q"
+                )
+                self.out_q.put(meta_list)
+                logger.debug(
+                    f"MetaBatcher: batch #{batch_count} put to out_q successfully"
+                )
+
+        logger.debug(
+            f"MetaBatcher: exiting logic loop, processed {batch_count} batches"
+        )

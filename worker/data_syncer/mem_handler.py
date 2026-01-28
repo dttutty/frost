@@ -28,7 +28,7 @@ class MemHandler(StreamThreadBase):
         self,
         buf: Buffers,
         shared_mem: torch.Tensor,
-        mem_task_q: Q[MemTask],
+        mem_task_q: Q[tuple[MemTask, torch.cuda.Event] | None],
         mem_p2p_q: Q[P2PTask | Literal["nothing_to_p2p"]],
         shared_mem_ts: torch.Tensor,
         h2d_sem: threading.Semaphore,
@@ -119,7 +119,13 @@ class MemHandler(StreamThreadBase):
 
     def logic(self) -> None:
         while self.stop_ev.is_set() is False:
-            mem_task = self.mem_task_q.get(block=True)
+            mem_task_tuple = self.mem_task_q.get(block=True)
+            if mem_task_tuple is None:
+                logger.debug("MemHandler: received sentinel, exiting logic loop")
+                break
+
+            mem_task, ready_event = mem_task_tuple
+            torch.cuda.current_stream().wait_event(ready_event)
 
             mem_plan = mem_task.mem_plan
             root_new_mem = mem_task.root_new_mem.keep_last()

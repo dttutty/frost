@@ -84,6 +84,9 @@ class TensorSet:
     def __getitem__(self, idx: int) -> torch.Tensor:
         return self.data[idx]
 
+    def numel(self) -> int:
+        return self.data.numel()
+
 
 # 使用示例
 if __name__ == "__main__":

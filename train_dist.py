@@ -231,7 +231,7 @@ def main() -> None:
         logger.debug("Host: Initializing host process...")
 
         host = Host(cfg, graph, df, env, start, gloo, model_components.gnn)
-        host.run()
+        host.start()
     else:
         from run_worker import Worker
 
@@ -250,7 +250,7 @@ def main() -> None:
             components=model_components,
             m_cfg=cfg.m,
         )
-        worker.run()
+        worker.start()
 
 
 def _init_gnn(
