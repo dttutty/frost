@@ -115,18 +115,18 @@ class TransfomerAttentionLayer(torch.nn.Module):
         self.w_out = torch.nn.Linear(dim_node + dim_out, dim_out)
 
     def forward(self, b: DGLBlock) -> torch.Tensor:
+        dev = b.srcdata["h"].device if "h" in b.srcdata else b.device
+
         assert self.dim_time + self.dim_node + self.dim_edge > 0
         if b.num_edges() == 0:
-            return torch.zeros(
-                (b.num_dst_nodes(), self.dim_out), device=torch.device("cuda:0")
-            )
+            return torch.zeros((b.num_dst_nodes(), self.dim_out), device=dev)
         if self.dim_time > 0:
             time_feat = self.time_enc(b.edata["dt"])
             zero_time_feat = self.time_enc(
                 torch.zeros(
                     b.num_dst_nodes(),
                     dtype=torch.float32,
-                    device=torch.device("cuda:0"),
+                    device=dev,
                 )
             )
         dst_h = b.srcdata["h"][: b.num_dst_nodes()]  # DST位于srcdata['h']的前半部分
@@ -137,15 +137,9 @@ class TransfomerAttentionLayer(torch.nn.Module):
         # dst: 0, 1
         # src: 2, 3, 4
         if self.combined:
-            Q = torch.zeros(
-                (b.num_edges(), self.dim_out), device=torch.device("cuda:0")
-            )
-            K = torch.zeros(
-                (b.num_edges(), self.dim_out), device=torch.device("cuda:0")
-            )
-            V = torch.zeros(
-                (b.num_edges(), self.dim_out), device=torch.device("cuda:0")
-            )
+            Q = torch.zeros((b.num_edges(), self.dim_out), device=dev)
+            K = torch.zeros((b.num_edges(), self.dim_out), device=dev)
+            V = torch.zeros((b.num_edges(), self.dim_out), device=dev)
             if self.dim_node > 0:
                 Q += self.w_q_n(dst_h)[dst_indices]
                 K += self.w_k_n(src_h)[src_indices]
@@ -172,9 +166,7 @@ class TransfomerAttentionLayer(torch.nn.Module):
             Q = (
                 self.w_q(torch.cat(q_input, dim=1))[dst_indices]
                 if len(q_input) > 0
-                else torch.ones(
-                    (b.num_edges(), self.dim_out), device=torch.device("cuda:0")
-                )
+                else torch.ones((b.num_edges(), self.dim_out), device=dev)
             )
             K = self.w_k(torch.cat(kv_input, dim=1))
             V = self.w_v(torch.cat(kv_input, dim=1))
@@ -190,9 +182,7 @@ class TransfomerAttentionLayer(torch.nn.Module):
             b.edata["v"] = V
             b.update_all(dgl.function.copy_e("v", "m"), dgl.function.sum("m", "h"))
         else:
-            dst_dummy = torch.zeros(
-                (b.num_dst_nodes(), V.shape[1]), device=torch.device("cuda:0")
-            )
+            dst_dummy = torch.zeros((b.num_dst_nodes(), V.shape[1]), device=dev)
             b.srcdata["v"] = torch.cat([dst_dummy, V], dim=0)
             b.update_all(dgl.function.copy_u("v", "m"), dgl.function.sum("m", "h"))
 

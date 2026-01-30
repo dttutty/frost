@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Temporal-GNN multi-stage pipeline with controllable batch staleness.
 
@@ -49,7 +48,7 @@ from collections import defaultdict
 from contextlib import closing
 from dataclasses import dataclass
 from multiprocessing.synchronize import Event as MEvent
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -83,8 +82,8 @@ RING_SIZE_DEFAULT = 2
 class MicroSpec:
     bid: int
     mid: int  # 0..world_size-1 (also equals device index in this toy setup)
-    node_ids: List[int]
-    aux: Dict[str, Any]
+    node_ids: list[int]
+    aux: dict[str, Any]
 
 
 @dataclass
@@ -93,7 +92,7 @@ class MicroOnGPU:
     mid: int
     device: int
     features_dev: torch.Tensor  # (MICRO_SIZE, FEAT_DIM)
-    node_ids: List[int]
+    node_ids: list[int]
 
 
 @dataclass
@@ -101,12 +100,12 @@ class GradSignal:
     bid: int
     mid: int
     device: int
-    new_memory_DyX: Dict[int, Any]
+    new_memory_DyX: dict[int, Any]
 
 
 @dataclass
 class RootNodesWithTs:
-    src: List[int]
+    src: list[int]
     dst: list[int]
     time: list[float]
 
@@ -114,7 +113,7 @@ class RootNodesWithTs:
 @dataclass
 class BatchSpec:
     bid: int
-    micros: List[MicroSpec]
+    micros: list[MicroSpec]
 
 
 # Sentinel for queues
@@ -164,7 +163,7 @@ def wait_until_can_start(
 
 def sample_nodes_for_micro(
     bid: int, mid: int, src_meta, dst_meta, ts_meta, train_edge_end, val_edge_end
-) -> List[int]:
+) -> list[int]:
     # Deterministic-ish sample for visibility
     src_shm_name, src_shape, src_dtype = src_meta
     src_shm = shared_memory.SharedMemory(name=src_shm_name)
@@ -202,13 +201,13 @@ def sample_nodes_for_micro(
     return root_nodes_with_ts
 
 
-def load_features_pinned(micro: MicroSpec, use_cuda: bool) -> "torch.Tensor":
+def load_features_pinned(micro: MicroSpec, use_cuda: bool) -> torch.Tensor:
     # Simulate feature IO by generating random tensor in pinned memory
     x = torch.randn(MICRO_SIZE, FEAT_DIM, pin_memory=use_cuda)
     return x
 
 
-def detach_to_cpu(DyX: Dict[int, Any]) -> Dict[int, Any]:
+def detach_to_cpu(DyX: dict[int, Any]) -> dict[int, Any]:
     # Ensure CPU-serializable content
     out = {}
     for k, v in DyX.items():
@@ -244,7 +243,7 @@ def sampler_proc(
         # If you want strict freshest-memory-aware sampling, uncomment this line:
         # wait_until_can_start(who, bid, committed_bid, S, cond)
         t0 = time.time()
-        micros: List[MicroSpec] = []
+        micros: list[MicroSpec] = []
         for mid in range(world_size):
             root_nodes_with_ts = sample_nodes_for_micro(
                 bid, mid, src_meta, dst_meta, ts_meta, train_edge_end, val_edge_end
@@ -259,7 +258,7 @@ def sampler_proc(
     log(who, "done")
 
 
-def cp1_proc(q01: mp.Queue, q12_devs: List[mp.Queue], stop_ev: MEvent, world_size: int):
+def cp1_proc(q01: mp.Queue, q12_devs: list[mp.Queue], stop_ev: MEvent, world_size: int):
     who = "CP1"
     while True:
         item = q01.get()
@@ -303,7 +302,7 @@ def h2d_feeder_proc(
             time.sleep(t_h2d)
         if use_cuda:
             with torch.cuda.stream(h2d_stream):
-                feats_dev = feats_pin.to(dev, non_blocking=True)
+                feats_dev = feats_pin.to(dev, non_blocking=False)
             h2d_stream.synchronize()
         else:
             feats_dev = feats_pin  # CPU fallback
@@ -332,8 +331,8 @@ class TinyModel(nn.Module):
 
 
 def compute_loss_and_memory(
-    out: "torch.Tensor", node_ids: List[int]
-) -> Tuple["torch.Tensor", Dict[int, Any]]:
+    out: torch.Tensor, node_ids: list[int]
+) -> tuple[torch.Tensor, dict[int, Any]]:
     # Dummy supervised loss: drive outputs to 0
     target = torch.zeros_like(out)
     loss = torch.nn.functional.mse_loss(out, target)
@@ -452,9 +451,9 @@ def nullcontext():
     yield
 
 
-def merge_memory_DyXs(DyX_dict: Dict[int, Dict[int, Any]]) -> Dict[int, Any]:
+def merge_memory_DyXs(DyX_dict: dict[int, dict[int, Any]]) -> dict[int, Any]:
     # DyX_dict: mid -> {nid -> vec}
-    merged: Dict[int, Any] = {}
+    merged: dict[int, Any] = {}
     # simple last-writer-wins merge by mid order
     for mid in sorted(DyX_dict.keys()):
         merged.update(DyX_dict[mid])
@@ -471,7 +470,7 @@ def cp3_proc(
     out_dir: str,
 ):
     who = "CP3"
-    inbox: Dict[int, Dict[int, Any]] = defaultdict(dict)  # bid -> mid -> DyX
+    inbox: dict[int, dict[int, Any]] = defaultdict(dict)  # bid -> mid -> DyX
     done_signals = 0
     outp = pathlib.Path(out_dir)
     outp.mkdir(parents=True, exist_ok=True)
@@ -601,7 +600,7 @@ def main():
     ring_devs = [mp.Queue(maxsize=args.ring_size) for _ in range(ws)]
     q23 = mp.Queue(maxsize=64)
 
-    procs: List[mp.Process] = []
+    procs: list[mp.Process] = []
 
     # P0
     procs.append(

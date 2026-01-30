@@ -8,13 +8,19 @@ from torch import Tensor
 from tensor_set_fn import TensorSetFn
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class MemTsNid:
     nid: Tensor
     data: Tensor
     ts: Tensor
-    # ct: Tensor | None = None  # 留着扩展用
+    ct: Tensor | None = None  # 留着扩展用
     is_sorted: bool = False
+
+    def __repr__(self) -> str:
+        return (
+            f"MemTsNid(nid={self.nid.shape}, data={self.data.shape}, "
+            f"ts={self.ts.shape}, is_sorted={self.is_sorted})"
+        )
 
     def clone(self) -> MemTsNid:
         return MemTsNid(
@@ -47,3 +53,8 @@ class MemTsNid:
 
         keep_last(self)
         return self
+
+    def to(self, device: torch.device) -> MemTsNid:
+        return MemTsNid(
+            nid=self.nid.to(device), data=self.data.to(device), ts=self.ts.to(device)
+        )

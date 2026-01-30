@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Literal
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class Config:
     g: GNNCFG
     t: TrainCFG
@@ -15,7 +15,7 @@ class Config:
         return asdict(self)
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class GNNCFG:
     arch: Literal["identity", "attn"] = "identity"
     layer: int = 1
@@ -28,7 +28,7 @@ class GNNCFG:
     combine: Literal["rnn"] | None = None
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class TrainCFG:
     model: Literal["APAN", "JODIE", "TGN"] = "TGN"
     patience: int = 50
@@ -42,7 +42,7 @@ class TrainCFG:
     edim: int = 0  # will later be set by train_dist.py
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class SampleCFG:
     strategy: Literal["recent", "uniform"] = "recent"
     layer: int = 1
@@ -56,7 +56,7 @@ class SampleCFG:
     num_thread: int = 32  # valid if history > 1
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class MemoryCFG:
     d_time: int = 0  # time dim
     d_mem: int = 128  # memory dim

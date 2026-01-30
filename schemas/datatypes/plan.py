@@ -8,11 +8,7 @@ from numpy.typing import NDArray
 from tensor_set import TensorSet
 
 
-def set_to_tensor(s: set[int]) -> torch.Tensor:
-    return torch.tensor(list(s)).long()
-
-
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class BatchNodeStateIO:
     mem_needed: TensorSet
     mem_updated: TensorSet
@@ -20,8 +16,17 @@ class BatchNodeStateIO:
     mailbox_updated: TensorSet | None
     nfeat_needed: TensorSet
 
+    def __repr__(self) -> str:
+        return (
+            f"BatchNodeStateIO(mem_needed={self.mem_needed.data.shape}, "
+            f"mem_updated={self.mem_updated.data.shape}, "
+            f"mailbox_needed={self.mailbox_needed.data.shape if self.mailbox_needed is not None else None}, "
+            f"mailbox_updated={self.mailbox_updated.data.shape if self.mailbox_updated is not None else None}, "
+            f"nfeat_needed={self.nfeat_needed.data.shape})"
+        )
 
-@dataclass(slots=True, kw_only=True)
+
+@dataclass(kw_only=True)
 class PlanSet:
     """
     统一的 PlanSet，直接持有 DyPlan 和 StPlan。
@@ -31,21 +36,29 @@ class PlanSet:
     box: DyPlan | None = None
     nfeat: StPlan | None = None
 
-    def to(self, device: torch.device) -> PlanSet:
+    def __repr__(self) -> str:
+        return f"PlanSet(mem={self.mem}, box={self.box}, nfeat={self.nfeat})"
+
+    def to(self, device: torch.device, non_blocking: bool = False) -> PlanSet:
         """
-        递归地将所有子 Plan 移动到指定设备
+        递归地将所有子 Plan 移动到指定设备。
+        增加了 non_blocking 参数以支持异步传输。
         """
         return PlanSet(
-            mem=self.mem.to(device) if self.mem is not None else None,
-            box=self.box.to(device) if self.box is not None else None,
-            nfeat=self.nfeat.to(device) if self.nfeat is not None else None,
+            # 假设你的 DyPlan/StPlan 的 .to() 方法也能接收 non_blocking 参数
+            mem=self.mem.to(device, non_blocking=non_blocking)
+            if self.mem is not None
+            else None,
+            box=self.box.to(device, non_blocking=non_blocking)
+            if self.box is not None
+            else None,
+            nfeat=self.nfeat.to(device, non_blocking=non_blocking)
+            if self.nfeat is not None
+            else None,
         )
 
-    def cuda(self) -> PlanSet:
-        return self.to(torch.device("cuda"))
 
-
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class DyPlan:
     p2p: list[TensorSet]
     fetch: TensorSet
@@ -53,7 +66,16 @@ class DyPlan:
     send_cts: NDArray
     writeback: TensorSet | None = None
 
-    def to(self, device: torch.device) -> DyPlan:
+    def __repr__(self) -> str:
+        return (
+            f"DyPlan(p2p={[ts.data.shape for ts in self.p2p]}, "
+            f"fetch={self.fetch.data.shape}, "
+            f"rec_cts={self.rec_cts.shape}, "
+            f"send_cts={self.send_cts.shape}, "
+            f"writeback={self.writeback.data.shape if self.writeback is not None else None})"
+        )
+
+    def to(self, device: torch.device, non_blocking: bool = False) -> DyPlan:
         """
         递归地将内部的 TensorSet 移动到指定设备。
         注意：这会创建新的 TensorSet 对象（因为 TensorSet 是不可变的）
@@ -68,14 +90,11 @@ class DyPlan:
 
         return DyPlan(
             p2p=[_move(ts) for ts in self.p2p],
-            fetch=_move(self.fetch),
+            fetch=self.fetch,  # fetch should not be moved to cuda
             rec_cts=self.rec_cts,  # numpy array 不随 torch device 移动
             send_cts=self.send_cts,  # numpy array 不随 torch device 移动
             writeback=_move(self.writeback) if self.writeback is not None else None,
         )
-
-    def cuda(self) -> DyPlan:
-        return self.to(torch.device("cuda"))
 
     @property
     def device(self) -> torch.device:
@@ -89,12 +108,18 @@ class DyPlan:
         return self
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class StPlan:
     to_cache: TensorSet
     fetch: TensorSet
 
-    def to(self, device: torch.device) -> StPlan:
+    def __repr__(self) -> str:
+        return (
+            f"StPlan(to_cache={self.to_cache.data.shape}, "
+            f"fetch={self.fetch.data.shape})"
+        )
+
+    def to(self, device: torch.device, non_blocking: bool = False) -> StPlan:
         """
         Move internal TensorSets to the target device.
         """
@@ -105,11 +130,8 @@ class StPlan:
 
         return StPlan(
             to_cache=_move(self.to_cache),
-            fetch=_move(self.fetch),
+            fetch=self.fetch,  # fetch should not be moved to cuda
         )
-
-    def cuda(self) -> StPlan:
-        return self.to(torch.device("cuda"))
 
     def sort(self) -> StPlan:
         return self

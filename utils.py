@@ -259,10 +259,21 @@ def node_to_dgl_blocks(root_nodes: torch.Tensor, ts: torch.Tensor) -> list[DGLBl
     return blocks
 
 
-def blocks_to_cuda(blockss: list[list[DGLBlock]]) -> list[list[DGLBlock]]:
+def blocks_to_device(
+    blockss: list[list[DGLBlock]], device: torch.device
+) -> list[list[DGLBlock]]:
+    """
+    将嵌套的 DGLBlock 列表移动到指定设备。
+    注意：必须使用索引赋值，否则列表内容不会改变。
+    """
     for blocks in blockss:
-        for block in blocks:
-            block = block.to("cuda:0")
+        # 必须用 enumerate 获取索引，才能修改列表本身
+        for i, block in enumerate(blocks):
+            # 1. 使用传入的 device，而不是写死
+            # 2. 必须赋值回 blocks[i]
+            # 3. 加上 non_blocking=False 以实现异步传输加速
+            blocks[i] = block.to(device, non_blocking=False)
+
     return blockss
 
 

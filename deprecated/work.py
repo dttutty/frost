@@ -90,7 +90,7 @@ class AsyncStallCoordinator:
             target=self._sync_loop, name=f"AsyncStallSync_r{rank}", daemon=False
         )
 
-    def start(self) -> None:
+    def run(self) -> None:
         self._sync_thread.start()
 
     def stop(self) -> None:

@@ -150,9 +150,12 @@ def merge_with_priority(
         b_ct_filtered = low_priority_data.ct[mask_keep_B]
         new_ct = torch.cat([high_priority_data.ct, b_ct_filtered], dim=0)
 
-    return type(high_priority_data)(
+    ret = type(high_priority_data)(
         nid=torch.cat([high_priority_data.nid, b_nid_filtered], dim=0),
         data=torch.cat([high_priority_data.data, b_mem_filtered], dim=0),
         ts=torch.cat([high_priority_data.ts, b_ts_filtered], dim=0),
         ct=new_ct,
     )
+    ret = ret.sort_by_nid()
+
+    return ret

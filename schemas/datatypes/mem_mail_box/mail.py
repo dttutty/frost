@@ -10,13 +10,19 @@ from torch import Tensor
 from .box import BoxTsNid
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class MailTsNid:
     nid: Tensor
     data: Tensor
 
     ts: Tensor
     ct: Tensor | None = None
+
+    def __repr__(self) -> str:
+        return (
+            f"MailTsNid(nid={self.nid.shape}, data={self.data.shape}, "
+            f"ts={self.ts.shape()})"
+        )
 
     def cuda(self) -> MailTsNid:
         return MailTsNid(
@@ -279,3 +285,12 @@ class MailTsNid:
             if ct is None
             else cast(torch.Tensor, torch.cat([ct, new_ct], dim=0)),
         )
+
+    def sort_by_nid(self) -> MailTsNid:
+        sorted_indices = torch.argsort(self.nid)
+        self.nid = self.nid[sorted_indices]
+        self.data = self.data[sorted_indices]
+        self.ts = self.ts[sorted_indices]
+        if self.ct is not None:
+            self.ct = self.ct[sorted_indices]
+        return self

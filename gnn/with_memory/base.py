@@ -1,5 +1,6 @@
 import logging
 from queue import Queue
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -40,28 +41,57 @@ class MemoryBaseGNN(nn.Module):
         self.header = header
 
     def forward(self, meta: Meta) -> torch.Tensor:
+        torch.cuda.synchronize()
         self.update_and_sync_memory(meta=meta)
+        torch.cuda.synchronize()
         if isinstance(self.gnn, TGN):
+            torch.cuda.synchronize()
             h = self.gnn(mfgs=meta.n2r_mfgs)
+            torch.cuda.synchronize()
         else:
+            torch.cuda.synchronize()
             assert meta.mem_n_box is not None
             h = self.gnn(
                 mem_n_box=meta.mem_n_box.mem,
                 nfeat=meta.nfeat,
                 ts=meta.root_ts,
             )
-        return self.header(h)
+
+            torch.cuda.synchronize()
+        return cast(torch.Tensor, self.header(h))
 
     @torch.no_grad()
     def update_and_sync_memory(self, meta: Meta) -> None:
-        assert meta.mem_n_box is not None
         n_root_src_n_pos_dst = meta.n_src * 2
+        assert meta.mem_n_box is not None
         if meta.n2r_mfgs is not None:
             assert isinstance(self.memory_updater, MfgMemoryUpdater)
             # only support 1-layer gnn for memory update
             # only support 1-history window for memory update
             assert len(meta.n2r_mfgs) == 1 and len(meta.n2r_mfgs[0]) == 1
             block = meta.n2r_mfgs[0][0]
+
+            # if block is not None:
+            #     mem = block.srcdata["mem"]
+            #     mem_ts = block.srcdata["mem_ts"]
+            #     nid = block.srcdata["ID"]
+
+            # 可能不跟root_ts一一对应
+
+            # root_old_mem = MemTsNid(
+            #     ts=mem_ts,
+            #     data=mem,
+            #     nid=nid,
+            # )
+            # root_old_mail = MailTsNid(
+            #     ts=block.srcdata["box_ts"],
+            #     data=block.srcdata["box"],
+            #     nid=nid,
+            # )
+            # root_old_box = root_old_mail.to_box()
+
+            root_old_mem = meta.mem_n_box.mem
+            root_old_box = meta.mem_n_box.box
             if block is not None:
                 block, updated_mem = self.memory_updater(block)
                 ts = block.srcdata["ts"]
@@ -76,10 +106,12 @@ class MemoryBaseGNN(nn.Module):
                 )
 
         else:
+            assert meta.mem_n_box is not None
             assert isinstance(
                 self.memory_updater, (TransformerMemoryUpdater, NoMfgMemoryUpdater)
             )
-            assert meta.mem_n_box.is_unzipped
+            root_old_mem = meta.mem_n_box.mem
+            root_old_box = meta.mem_n_box.box
             mem_n_box = meta.mem_n_box
             updated_mem = self.memory_updater(
                 mem_n_box=mem_n_box, root_ts=meta.root_ts.repeat_interleave(3)
@@ -105,7 +137,7 @@ class MemoryBaseGNN(nn.Module):
         mem_task = MemTask(
             macro_bid=m_state.cur_macro_of_epoch,
             root_new_mem=root_new_mem,
-            old_mem_ts_nid=meta.mem_n_box.mem,
+            old_mem_ts_nid=root_old_mem,
             mem_plan=plan_set.mem,
             is_last=m_state.is_last_macro_of_epoch,
         )
@@ -115,7 +147,7 @@ class MemoryBaseGNN(nn.Module):
             macro_bid=m_state.cur_macro_of_epoch,
             root_new_mem_orig=root_new_mem_orig,
             pos_efeat=meta.pos_efeat,
-            old_box=meta.mem_n_box.box,
+            old_box=root_old_box,
             box_plan=plan_set.box,
             is_last=m_state.is_last_macro_of_epoch,
             r2n_mdt=meta.r2n_mdt,

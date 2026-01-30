@@ -169,10 +169,8 @@ class Scatter(ThreadBase):
                     logger.debug(
                         f"Scatter: tensorifying and sorting plan_set for GPU {i}"
                     )
-                    plan_set = plan_set.tensorfy()
-                    plan_set = plan_set.sort()
                     meta_2_scatter[i].plan_set = plan_set
-                    del meta_2_scatter[i].state
+                    meta_2_scatter[i].state = None  # 清理 state，节省传输开销
 
                 logger.debug(f"Scatter: scattering batch #{batch_count} to workers")
                 self.scatter_send(meta_2_scatter)

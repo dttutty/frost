@@ -24,7 +24,7 @@ class ThreadBase(threading.Thread):
     def logic(self) -> None:
         pass
 
-    def start(self) -> None:
+    def run(self) -> None:
         try:
             self.logic()
         except Exception:

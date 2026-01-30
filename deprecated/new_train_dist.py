@@ -86,8 +86,8 @@ def evaluate(model, loader, device):
     model.eval()
     total, correct = 0, 0
     for x, y in loader:
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
+        x = x.to(device, non_blocking=False)
+        y = y.to(device, non_blocking=False)
         logits = model(x)
         pred = logits.argmax(dim=1)
         correct += (pred == y).sum().item()
@@ -154,8 +154,8 @@ def train_one_epoch(model, edge_enumerator, sampler, opt, scaler, device, epoch,
         uniq_nodes_feat = load_feat(uniq_nodes)
         uniq_edges_feat = load_feat(uniq_edges)
 
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
+        x = x.to(device, non_blocking=False)
+        y = y.to(device, non_blocking=False)
 
         with torch.cuda.amp.autocast(enabled=args.amp):
             logits = model(x)

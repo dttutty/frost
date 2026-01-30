@@ -10,12 +10,14 @@ from torchmetrics import MetricCollection
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
 
-from buffer import Buffers, _init_all_pin_mem
+from buffer import Buffers, init_all_pin_mem
 from gnn.with_memory.apan import APAN
 from gnn.with_memory.base import MemoryBaseGNN
 from gnn.with_memory.jodie import JODIE
 from gnn.with_memory.tgn import TGN
 from gnn.without_memory.base import GNN
+from p2p_syncer.box_handler import BoxHandler
+from p2p_syncer.mem_handler import MemHandler
 from schemas.alias import MetaWEvent
 from schemas.datatypes.cfg import MemoryCFG, SampleCFG, TrainCFG
 from schemas.datatypes.env import Env
@@ -24,20 +26,11 @@ from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from schemas.datatypes.misc import MemNBox, Meta, ModelComponents, Result, Shared
 from schemas.datatypes.task import BoxTask, MemTask, P2PTask
 from worker.assembler.dy_asm import DyAssembler
-from worker.data_syncer.box_handler import BoxHandler
-from worker.data_syncer.mem_handler import MemHandler
 from worker.h2d import H2D
 from worker.receiver import Receiver as Receiver
 
 
 logger = logging.getLogger(__name__)
-
-
-# def tensorfy(self, plan_set: ThreePlan):
-#     for plan in [plan_set.mem_plan, plan_set.mail_plan, plan_set.feat_plan]:
-#         if plan is not None:
-#             plan.rec_cts = torch.tensor(plan.rec_cts, dtype=torch.long)
-#             plan.send_cts = torch.tensor(plan.send_cts, dtype=torch.long)
 
 
 class Worker:
@@ -63,20 +56,23 @@ class Worker:
 
         self.shared = shared
         self.total_epoch = t_cfg.epoch
-        self.meta_q: Q[Meta | None | Literal["end_of_epoch"]] = Q()
+        self.meta_q: Q[Meta | None | Literal["end_of_epoch"]] = Q(maxsize=2)
         self.stop_ev = threading.Event()
         self.nccl = nccl
         self.curr_epoch = 0
         self.logger: logging.Logger = logger
         self.fetch_factor = 1
         self.model: GNN | MemoryBaseGNN | DDP
-        self.full_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q()
+        self.full_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q(maxsize=2)
+        self.device = torch.device(f"cuda:{env.local_rank}")
 
         self.h2d_sem: threading.Semaphore = threading.Semaphore(0)
-        self.destination_q_for_h2d: Q[MetaWEvent | None | Literal["end_of_epoch"]]
+        self.destination_q_for_h2d: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q(
+            maxsize=2
+        )
 
         logger.debug("Worker: initializing buffers")
-        self.buffers: Buffers = _init_all_pin_mem(
+        self.buffers: Buffers = init_all_pin_mem(
             shared=shared,
             shared_nfeat=nfeat,
             shared_efeat=efeat,
@@ -88,21 +84,24 @@ class Worker:
         if self.shared is not None:
             logger.debug("Worker: initializing with shared memory components")
             assert m_cfg is not None
-            self.delta_q: Q[tuple[MemNBox, torch.cuda.Event] | Literal["nothing"]] = Q()
-            self.mem_task_q: Q[tuple[MemTask, torch.cuda.Event] | None] = Q()
-            self.box_task_q: Q[tuple[BoxTask, torch.cuda.Event] | None] = Q()
-            self.mem_p2p_q: Q[P2PTask | Literal["nothing_to_p2p"]] = Q()
-            self.box_p2p_q: Q[P2PTask | Literal["nothing_to_p2p"]] = Q()
-            self.xpart_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q()
+            self.delta_q: Q[tuple[MemNBox, torch.cuda.Event] | Literal["nothing"]] = Q(
+                maxsize=2
+            )
+            self.mem_task_q: Q[tuple[MemTask, torch.cuda.Event] | None] = Q(maxsize=2)
+            self.box_task_q: Q[tuple[BoxTask, torch.cuda.Event] | None] = Q(maxsize=2)
+            self.mem_p2p_q: Q[P2PTask | Literal["nothing_to_p2p"]] = Q(maxsize=2)
+            self.box_p2p_q: Q[P2PTask | Literal["nothing_to_p2p"]] = Q(maxsize=2)
+            self.xpart_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q(maxsize=2)
             assert shared is not None, "Shared memory must be provided if memory exists"
             destination_q_for_h2d = self.xpart_q
 
             logger.debug("Worker: starting DyAssembler")
-            self.assembler = DyAssembler(
+            self.dy_asm = DyAssembler(
                 in_q=self.xpart_q,
                 delta_q=self.delta_q,
                 full_q=self.full_q,
                 stop_ev=self.stop_ev,
+                device=self.device,
             )
             logger.debug("Worker: starting MemHandler")
             self.mem_handler = MemHandler(
@@ -113,8 +112,8 @@ class Worker:
                 mem_p2p_q=self.mem_p2p_q,
                 h2d_sem=self.h2d_sem,
                 stop_ev=self.stop_ev,
+                device=self.device,
             )
-            self.mem_handler.start()
             logger.debug("Worker: starting BoxHandler")
             self.box_handler = BoxHandler(
                 buf=self.buffers,
@@ -126,10 +125,9 @@ class Worker:
                 stop_ev=self.stop_ev,
                 mail_combine=m_cfg.mail_combine,
                 merge_src=t_cfg.merge_src,
+                device=self.device,
             )
-            self.box_handler.start()
 
-            self.assembler.start()  # 启动 Assembler 组装线程
             logger.debug("Worker: all memory handlers started")
         else:
             logger.debug("Worker: no shared memory, using direct queue")
@@ -142,6 +140,9 @@ class Worker:
             nfeat=nfeat,
             efeat=efeat,
             shared=shared,
+            device=self.device,
+            history=s_cfg.history,
+            n_neg=self.n_neg,
             merge_src=t_cfg.merge_src,
             in_q=self.meta_q,
             out_q=destination_q_for_h2d,
@@ -186,7 +187,7 @@ class Worker:
         find_unused_parameters = False
         if self.s_cfg.history > 1:
             find_unused_parameters = True
-
+        find_unused_parameters = True
         self.model = DDP(
             self.model,
             process_group=self.nccl,
@@ -374,13 +375,13 @@ class Worker:
         if self.shared is not None:
             self.mem_handler.start()
             self.box_handler.start()
-            self.assembler.start()
+            self.dy_asm.start()
         logger.debug("Worker: all threads started")
 
-    def start(self) -> None:
+    def run(self) -> None:
         self.start_all_threads()
         logger.debug("Worker: starting main run loop")
-        self.logger.info("Worker: Starting H2D thread...")
+        self.logger.debug("Worker: Starting H2D thread...")
         logger.debug("Worker: releasing semaphores for H2D startup")
         self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
         self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
@@ -399,7 +400,7 @@ class Worker:
                 batch_count += 1
                 logger.debug(f"Worker: processing batch #{batch_count}")
                 meta, ready_event = full
-                torch.cuda.current_stream().wait_stream(ready_event)
+                torch.cuda.current_stream().wait_event(ready_event)
                 m_info = meta.m_state
                 logger.debug(f"Worker: batch #{batch_count} split={m_info.split}")
                 if m_info.split == "train":  # if training
@@ -448,7 +449,7 @@ class Worker:
         if self.box_handler:
             self.box_handler.join()
             logger.debug("Worker: BoxHandler thread joined")
-        self.assembler.join()
+        self.dy_asm.join()
         logger.debug("Worker: Assembler thread joined")
         dist.barrier()
         dist.destroy_process_group()
@@ -482,8 +483,8 @@ class Worker:
         model.load_state_dict(state, strict=True)
 
         # 如果每rank只可见1张GPU，这里用0没问题；否则用local_rank
-        torch.cuda.set_device(0)
-        model = model.to("cuda:0")
+
+        model = model.to(self.device)
 
         # wrap 成 DDP
         self.model = DDP(model, device_ids=[0])

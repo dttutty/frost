@@ -65,19 +65,22 @@ class Host:
         self.sample_support_for_neg_dst = cfg.s.sample_support_for_neg_dst
         self.model_name = cfg.t.model
 
-        self.meta_in_q: Q[Meta | None | Literal["end_of_epoch"]] = Q(maxsize=10)
-        self.meta_bundle_q: Q[MetaBundle | None | Literal["end_of_epoch"]] = Q()
-        self.send_q: Q[MetaBundle | None | Literal["end_of_epoch"]] = Q()
+        self.meta_in_q: Q[Meta | None | Literal["end_of_epoch"]] = Q(maxsize=2)
+        self.meta_bundle_q: Q[MetaBundle | None | Literal["end_of_epoch"]] = Q(
+            maxsize=1
+        )
+        self.scatter_q: Q[MetaBundle | None | Literal["end_of_epoch"]] = Q(maxsize=1)
+        self.curr_mini_of_epoch = 0
 
         self.mem_plan_out_q: Q[list[DyPlan] | None] | None = None
         self.mail_plan_out_q: Q[list[DyPlan] | None] | None = None
         self.nfeat_plan_out_q: Q[list[StPlan] | None] | None = None
         self.planner: Planner | None = None
         if self.has_mem:
-            self.mem_plan_out_q = Q()
-            self.mail_plan_out_q = Q()
+            self.mem_plan_out_q = Q(maxsize=1)
+            self.mail_plan_out_q = Q(maxsize=1)
         if self.has_nfeat:
-            self.nfeat_plan_out_q = Q()
+            self.nfeat_plan_out_q = Q(maxsize=1)
 
         if self.has_nfeat or self.has_mem:
             logger.debug("Host: initializing MetaBatcher and Planner")
@@ -91,7 +94,7 @@ class Host:
             self.planner = Planner(
                 gpu_topo=gpu_topo,
                 in_q=self.meta_bundle_q,
-                out_q=self.send_q,
+                out_q=self.scatter_q,
                 mem_plan_out_q=self.mem_plan_out_q,
                 mail_plan_out_q=self.mail_plan_out_q,
                 nfeat_plan_out_q=self.nfeat_plan_out_q,
@@ -102,7 +105,7 @@ class Host:
             self.meta_batcher = MetaBatcher(
                 n_gpu=env.n_gpu,
                 in_q=self.meta_in_q,
-                out_q=self.send_q,
+                out_q=self.scatter_q,
                 stop_ev=self.stop_ev,
             )
 
@@ -110,7 +113,7 @@ class Host:
         self.result_q: Q[Result] = Q()
         self.scatter = Scatter(
             n_gpu=env.n_gpu,
-            in_q=self.send_q,
+            in_q=self.scatter_q,
             mem_plan_out_q=self.mem_plan_out_q,
             mail_plan_out_q=self.mail_plan_out_q,
             nfeat_plan_out_q=self.nfeat_plan_out_q,
@@ -290,10 +293,11 @@ class Host:
         self.scatter.start()
         logger.debug("Host: all threads started")
 
-    def start(self) -> None:
+    def run(self) -> None:
         """
         公共的训练入口方法
         """
+        self.start_all_threads()
         logger.debug(f"Host: starting training for {self.total_epoch} epochs")
         for e in range(self.total_epoch):
             logger.debug(f"Host: starting epoch {e}")

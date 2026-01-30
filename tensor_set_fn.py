@@ -45,27 +45,3 @@ class TensorSetFn:
         diff1 = t1[~torch.isin(t1, t2, assume_unique=True)]
         diff2 = t2[~torch.isin(t2, t1, assume_unique=True)]
         return cast(torch.Tensor, torch.cat((diff1, diff2)))
-
-
-if __name__ == "__main__":
-    # --- Usage Example ---
-
-    # Create large random data
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    a = torch.randint(0, 100, (20,), device=device)
-    b = torch.randint(0, 100, (20,), device=device)
-
-    # Ensure they are unique first to simulate "set" behavior
-    set_a = torch.unique(a)
-    set_b = torch.unique(b)
-
-    print(f"Set A: {set_a}")
-    print(f"Set B: {set_b}")
-
-    # Intersection
-    inter = TensorSetFn.intersection(set_a, set_b)
-    print(f"Intersection: {inter}")
-
-    # Difference
-    diff = TensorSetFn.difference(set_a, set_b)
-    print(f"Difference (A - B): {diff}")

@@ -319,9 +319,7 @@ class DynamicPlanner(ThreadBase):
         p2p: list[list[TensorSet]] = [
             [empty_ts for _ in range(n_gpus)] for _ in range(n_gpus)
         ]
-        # p2p: list[list[set[int]]] = [
-        #     [set() for _ in range(n_gpus)] for _ in range(n_gpus)
-        # ]
+
         p2p_cts = np.zeros((n_gpus, n_gpus), dtype=np.int32)
 
         fetchs_of_1 = self.fetchs_of_1

@@ -20,6 +20,7 @@ def make_p2p_task(
     data_td_nid: AllType,
     plan: DyPlan,
     strategy: Literal["last", "mean", "all"],
+    device: torch.device,
 ) -> P2PTask:
     """
     这一步之前,必须确保data_td_nid里面的数据全部是unique的
@@ -28,7 +29,6 @@ def make_p2p_task(
     如果是mailbox,需要所有节点的mailbox
     如果是feat,需要所有节点的feat
     """
-    device = "cuda"
     p2p = plan.p2p
     rec_cts = plan.rec_cts
     send_cts = plan.send_cts
@@ -45,7 +45,12 @@ def make_p2p_task(
     for dst_gpu_id, _ in enumerate(p2p):
         nids_to_send_tensor = p2p[dst_gpu_id].data
         send_mask_for_dst = torch.isin(nid, nids_to_send_tensor)
-
+        matched_count = send_mask_for_dst.sum().item()
+        expected_count = nids_to_send_tensor.numel()
+        assert matched_count == expected_count, (
+            f"make_p2p_task: GPU {dst_gpu_id} expected to send {expected_count} nodes, "
+            f"but found {matched_count} in data (total {nid.numel()})."
+        )
         buckets_ids.append(nid[send_mask_for_dst])
         buckets_data.append(data[send_mask_for_dst])
         buckets_ts.append(ts[send_mask_for_dst])
@@ -59,7 +64,7 @@ def make_p2p_task(
     recv_data = torch.empty(total_recv, x_dim, dtype=data.dtype, device=device)
     recv_ts = torch.empty(total_recv, dtype=ts.dtype, device=device)
 
-    assert sizes == send_cts
+    assert numpy.array_equal(sizes, send_cts)
 
     return P2PTask(
         nid2send=send_nid,

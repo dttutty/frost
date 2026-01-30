@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from ..alias import IntArr
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class SampleReturn:
     ngh2root_mfgs_raw: list[DGLBlockMeta] | None
     root2ngh_mfg_raw: DGLBlockMeta | None
@@ -45,7 +45,7 @@ class ForwardCtx:
     n_root_src_n_pos_dst: int
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class NecessrayData:
     nfeat: NFeatNid | None
     mem_n_box: MemNBox | None
@@ -78,7 +78,7 @@ class ExtFullGraph:
         )
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class ScatterResult:
     m_id: int
     total_sample_time: float | None = None
@@ -86,7 +86,7 @@ class ScatterResult:
     auc: list[float] | None = None
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class NodeFeat:
     id: Tensor
     data: Tensor
@@ -95,7 +95,7 @@ class NodeFeat:
         return NodeFeat(id=self.id.cuda(), data=self.data.cuda())
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class EdgeFeat:
     id: Tensor
     data: Tensor
@@ -104,7 +104,7 @@ class EdgeFeat:
         return EdgeFeat(id=self.id.cuda(), data=self.data.cuda())
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class ModelComponents:
     memory_updater: (
         MfgMemoryUpdater | NoMfgMemoryUpdater | TransformerMemoryUpdater | None
@@ -113,7 +113,7 @@ class ModelComponents:
     header: EdgePredictor | None
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class NFeatNid:
     nid: torch.Tensor
     nfeat: torch.Tensor
@@ -161,7 +161,7 @@ class NFeatNid:
         return NFeatNid(nid=self.nid.cuda(), nfeat=self.nfeat.cuda())
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class MemNBox:
     mem: MemTsNid
     box: BoxTsNid
@@ -212,15 +212,7 @@ class MemNBox:
         return self.__class__(mem=new_mem_ts_nid, box=combined_box)
 
 
-@dataclass(slots=True, kw_only=True)
-class MetaList:
-    queue: list[Meta]
-
-    def __len__(self) -> int:
-        return len(self.queue)
-
-
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class Result:
     train_loss: float
     val_loss: float
@@ -230,7 +222,7 @@ class Result:
     test_ap: float
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class Meta:
     root_nid: Tensor
     root_ts: Tensor  # 没有3倍处理,这个信息不需要传输到gpu
@@ -289,20 +281,20 @@ class Meta:
         return d
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class SeperateData:
     root_mem: MemTsNid
     root_mail: MemNBox
     ngh_mail: BoxTsNid | None = None
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class ScatterData:
     metas: list[Meta]
     planset: PlanSet | PlanSet | None = None
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class EpochSplitIterInfo:
     cur_epoch: int
     n_epoch: int
@@ -335,7 +327,7 @@ class EpochSplitIterInfo:
         )
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class Shared:
     """一个专门存放所有共享内存张量的数据类"""
 

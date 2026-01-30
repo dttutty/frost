@@ -6,20 +6,20 @@ from schemas.datatypes.misc import Shared
 from worker.receiver import Receiver as Receiver
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class DyBuf:
     data: torch.Tensor
     nid: torch.Tensor
     ts: torch.Tensor
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class StBuf:
     data: torch.Tensor
     nid: torch.Tensor
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class Buffers:
     pos_efeat_h2d: None | torch.Tensor
     nfeat_h2d: None | StBuf
@@ -47,8 +47,8 @@ def calculate_gnn_graph_size(batch_size: int, fanouts: list[int]) -> tuple[int, 
     total_edges = 0
     input_nodes = 0
 
-    print(f"--- 计算详情 (Batch Size = {batch_size}) ---")
-    print(f"Output Layer (Seed Nodes): {batch_size:,}")
+    # print(f"--- 计算详情 (Batch Size = {batch_size}) ---")
+    # print(f"Output Layer (Seed Nodes): {batch_size:,}")
 
     # 通常采样是从 Output 往 Input 倒推的
     # fanouts[-1] 是连接 Output 的那一层
@@ -95,7 +95,7 @@ def calculate_gnn_graph_size(batch_size: int, fanouts: list[int]) -> tuple[int, 
     return final_input_nodes, total_edges
 
 
-def _init_all_pin_mem(
+def init_all_pin_mem(
     shared: Shared | None,
     shared_nfeat: torch.Tensor | None,
     shared_efeat: torch.Tensor | None,
@@ -120,7 +120,7 @@ def _init_all_pin_mem(
     if shared_nfeat is not None:
         nfeat_h2d = _init_st_buf(
             dim=shared_nfeat.shape[1],
-            max_num=int(final_input_nodes * 0.5),
+            max_num=int(final_input_nodes * 0.2),
             dtype=shared_nfeat.dtype,
         )
     if shared_efeat is not None:
@@ -136,25 +136,26 @@ def _init_all_pin_mem(
         )
     if shared is not None:
         shared_mem_dim = shared.mem.shape[1]
-        mem_h2d = _init_dy_buf(
+        mem_h2d = _init_mem_buf(
             dim=shared_mem_dim,
-            max_num=int(final_input_nodes * 0.5),
+            max_num=int(final_input_nodes * 0.2),
             dtype=shared.mem.dtype,
         )
-        mem_d2h = _init_dy_buf(
+        mem_d2h = _init_mem_buf(
             dim=shared_mem_dim,
-            max_num=int(final_input_nodes * 0.5),
+            max_num=int(final_input_nodes * 0.2),
             dtype=shared.mem.dtype,
         )
-        shared_box_shape_tuple = shared.box.shape[1], shared.box.shape[2]
-        box_h2d = _init_dy_buf(
+        shared_box_shape_tuple = (shared.box.shape[1], shared.box.shape[2])
+
+        box_h2d = _init_box_buf(
             dim=shared_box_shape_tuple,
-            max_num=int(final_input_nodes * 0.5),
+            max_num=int(final_input_nodes * 0.2),
             dtype=shared.box.dtype,
         )
-        box_d2h = _init_dy_buf(
+        box_d2h = _init_box_buf(
             dim=shared_box_shape_tuple,
-            max_num=int(final_input_nodes * 0.5),
+            max_num=int(final_input_nodes * 0.2),
             dtype=shared.box.dtype,
         )
     buffers = Buffers(
@@ -196,7 +197,7 @@ def _init_st_buf(
         dtype=dtype,
         pin_memory=True,  # Pinned memory for faster  transfer
     )
-    shape_for_nid = (max_num, 1)
+    shape_for_nid = max_num
     pin_for_nid = torch.empty(
         shape_for_nid,
         dtype=dtype,
@@ -206,28 +207,51 @@ def _init_st_buf(
     return StBuf(data=pin_for_data, nid=pin_for_nid)
 
 
-def _init_dy_buf(
-    dim: int | tuple[int, int],
+def _init_mem_buf(
+    dim: int,
     max_num: int,
     dtype: torch.dtype,
 ) -> DyBuf:
-    shape_for_data = (max_num, dim) if isinstance(dim, int) else (max_num, *dim)
-
     pin_for_data = torch.empty(
-        shape_for_data,
+        (max_num, dim),
         dtype=dtype,
         pin_memory=True,  # Pinned memory for faster  transfer
     )
-    shape_for_nid = (max_num, 1)
     pin_for_nid = torch.empty(
-        shape_for_nid,
+        max_num,
         dtype=dtype,
         pin_memory=True,  # Pinned memory for faster  transfer
     )
-    shape_for_ts = (max_num, 1) if isinstance(dim, int) else (max_num, dim[1])
 
     pin_for_ts = torch.empty(
-        shape_for_ts,
+        max_num,
+        dtype=dtype,
+        pin_memory=True,  # Pinned memory for faster  transfer
+    )
+    return DyBuf(data=pin_for_data, nid=pin_for_nid, ts=pin_for_ts)
+
+
+def _init_box_buf(
+    dim: tuple[int, int],
+    max_num: int,
+    dtype: torch.dtype,
+) -> DyBuf:
+    pin_for_data = torch.empty(
+        (max_num, *dim),
+        dtype=dtype,
+        pin_memory=True,  # Pinned memory for faster  transfer
+    )
+
+    pin_for_nid = torch.empty(
+        max_num,
+        dtype=dtype,
+        pin_memory=True,  # Pinned memory for faster  transfer
+    )
+
+    boxsize = dim[0]
+
+    pin_for_ts = torch.empty(
+        (max_num, boxsize),
         dtype=dtype,
         pin_memory=True,  # Pinned memory for faster  transfer
     )

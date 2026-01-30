@@ -5,8 +5,8 @@ from typing import Literal, cast
 
 import numpy as np
 
-from host.planner.dynamic_planner import DynamicPlanner
-from host.planner.static_planner import StaticPlanner
+from p2p_planner.dy_planner import DynamicPlanner
+from p2p_planner.st_planner import StaticPlanner
 from schemas.alias import MetaBundle, MetasDyNeed, MetasStNeed
 from schemas.datatypes.plan import BatchNodeStateIO, DyPlan, StPlan
 from tensor_set import TensorSet
@@ -131,6 +131,7 @@ class Planner(ThreadBase):
         Args:
             gpus_groups: GPU 拓扑结构, 用于计算距离。
         """
+        super().__init__(name="planner", stop_ev=stop_ev)
         logger.debug(f"Planner: initializing with gpu_topo={gpu_topo}")
         # 1. 存储静态配置 (解决痛点 1 和 4)
         self.gpus_distance = find_all_gpu_distances_list(gpu_topo)
@@ -190,6 +191,10 @@ class Planner(ThreadBase):
 
         self.stop_ev = stop_ev
         logger.debug("Planner: initialization complete")
+
+        self.mem_planner.start() if mem_plan_out_q else None
+        self.mail_planner.start() if mail_plan_out_q else None
+        self.nfeat_planner.start() if nfeat_plan_out_q else None
 
     def logic(self) -> None:
         batch_count = 0

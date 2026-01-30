@@ -17,7 +17,7 @@ def is_sorted(t: torch.Tensor) -> bool:
     return cast(bool, torch.all(torch.diff(t) >= 0).item())
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(kw_only=True)
 class BoxTsNid:
     nid: Tensor
     data: Tensor
@@ -26,6 +26,12 @@ class BoxTsNid:
     # if next_pos is None, then this BoxTsNid is actually a MailTsNid
     ct: Tensor | None = None  # 如果mean的话(每次只能累计一个mail)
     is_sorted: bool = False
+
+    def __repr__(self) -> str:
+        return (
+            f"BoxTsNid(nid={self.nid.shape}, data={self.data.shape}, "
+            f"ts={self.ts.shape}, is_sorted={self.is_sorted})"
+        )
 
     def cuda(self) -> BoxTsNid:
         return BoxTsNid(
@@ -59,6 +65,8 @@ class BoxTsNid:
         return self
 
     def to_mail(self) -> MailTsNid:
+        from .mail import MailTsNid
+
         assert self.next_pos is None, "next_pos must be None for mail"
         return MailTsNid(
             nid=self.nid,
@@ -71,10 +79,14 @@ class BoxTsNid:
         assert TensorSetFn.intersection(self.nid, other.nid).numel() == 0, (
             "NID overlap between BoxTsNid instances."
         )
+        if self.data.dim() == 3 and other.data.dim() == 2:
+            other_data = other.data.unsqueeze(1)
+        if self.ts.dim() == 2 and other.ts.dim() == 1:
+            other_ts = other.ts.unsqueeze(1)
         self = BoxTsNid(
             nid=torch.cat((self.nid, other.nid), dim=0),
-            data=torch.cat((self.data, other.data), dim=0),
-            ts=torch.cat((self.ts, other.ts), dim=0),
+            data=torch.cat((self.data, other_data), dim=0),
+            ts=torch.cat((self.ts, other_ts), dim=0),
             next_pos=None,
         )
         return self
@@ -88,3 +100,12 @@ class BoxTsNid:
             self.next_pos = self.next_pos[sorted_indices]
         self.is_sorted = True
         return self
+
+    def to(self, device: torch.device) -> BoxTsNid:
+        return BoxTsNid(
+            nid=self.nid.to(device),
+            data=self.data.to(device),
+            ts=self.ts.to(device),
+            next_pos=self.next_pos.to(device) if self.next_pos is not None else None,
+            ct=self.ct.to(device) if self.ct is not None else None,
+        )

@@ -13,7 +13,7 @@ from sampler_core import ParallelSampler
 from tqdm import tqdm
 
 from deprecated.comm import Distributor
-from host.planner.dynamic_planner import (
+from p2p_planner.dy_planner import (
     compute_whats_need_by_gpu,
 )
 from neg_sampler import NegLinkSampler, create_sampler

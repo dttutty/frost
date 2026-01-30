@@ -6,9 +6,11 @@ from queue import Queue
 from typing import Literal
 
 import numpy as np
+import torch
 
 from schemas.alias import MetasStNeed
 from schemas.datatypes.plan import StPlan
+from tensor_set import TensorSet
 from thread_base import ThreadBase
 
 
@@ -42,8 +44,15 @@ class StaticPlanner(ThreadBase):
         self.in_q = in_q
         self.out_q = out_q
         self.stop_ev = stop_ev
-        self.pending: list[set[int]] | None = None
-        self.fetchs: list[set[int]] = [set() for _ in range(self.n_gpus)]
+        self.pending: list[TensorSet] | None = None
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # 将原来的 list[set[int]] 改为 list[TensorSet]
+        self.fetch: list[TensorSet] = [
+            TensorSet(torch.tensor([], dtype=torch.long, device=device))
+            for _ in range(self.n_gpus)
+        ]
         logger.debug("StaticPlanner: initialization complete")
 
     def run(self) -> None:
@@ -77,7 +86,12 @@ class StaticPlanner(ThreadBase):
                 assert self.pending is not None
                 avails = self.pending
                 # 没有下一个 batch 了，next_needs 为空
-                next_needs: list[set[int]] = [set() for _ in range(self.n_gpus)]
+                next_needs: list[TensorSet] = [
+                    TensorSet(
+                        torch.tensor([], dtype=torch.long, device=torch.device("cpu"))
+                    )
+                    for _ in range(self.n_gpus)
+                ]
                 logger.debug(
                     "StaticPlanner: planning final batch with empty next_needs"
                 )
@@ -138,15 +152,22 @@ class StaticPlanner(ThreadBase):
 
     def _plan(
         self,
-        avails_of_1: list[set[int]],
-        needs_of_2: list[set[int]],
+        avails_of_1: list[TensorSet],
+        needs_of_2: list[TensorSet],
     ) -> list[StPlan]:
         """规划内存（Memory）的P2P、CPU预取和CPU写回。"""
         logger.debug("StaticPlanner: _plan called")
 
         n_gpus = self.n_gpus
         # fetchs_of_2 need to be filled
-        fetchs_of_2: list[set[int]] = [set() for _ in range(n_gpus)]
+
+        device = torch.device("cpu")
+
+        # 将原来的 list[set[int]] 改为 list[TensorSet]
+        fetchs_of_2: list[TensorSet] = [
+            TensorSet(torch.tensor([], dtype=torch.long, device=device))
+            for _ in range(n_gpus)
+        ]
         plans_of_1 = []
 
         total_to_cache = 0
