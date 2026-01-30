@@ -10,7 +10,6 @@ from dgl.heterograph import DGLBlock
 from numpy.typing import NDArray
 from torch import Tensor
 
-from gnn.components import EdgePredictor
 from schemas.datatypes.mem_mail_box.box import BoxTsNid
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from tensor_set_fn import TensorSetFn
@@ -19,6 +18,7 @@ from .plan import BatchNodeStateIO, PlanSet
 
 
 if TYPE_CHECKING:
+    from gnn.components import EdgePredictor
     from gnn.with_memory.memory_updater import (
         MfgMemoryUpdater,
         NoMfgMemoryUpdater,

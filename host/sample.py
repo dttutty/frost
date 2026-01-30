@@ -14,20 +14,49 @@ logger = logging.getLogger(__name__)
 
 
 def extract_raw_data(ret: list) -> list[DGLBlockMeta]:
-    # 用简单的字典或者 NamedTuple 存储纯数据
     mfg_meta_list = []
-    for tgb in ret:
-        # 1. 提取 Numpy 数据并转为 CPU Tensor
-        # 此时不要去 GPU，也不要创建 DGLBlock
+    for i, tgb in enumerate(ret):
+        # 1. 强制转为 int64 (long)，避免 int32/int64 混用带来的隐患
+        # 注意：copy=False 尽可能不复制内存，但 .long() 可能会触发复制
+        nodes = torch.from_numpy(tgb.nodes()).long()
+        ts = torch.from_numpy(tgb.ts()).double()  # 时间戳建议转 double 或 float
+        eid = torch.from_numpy(tgb.eid()).long()
+        dts = torch.from_numpy(tgb.dts()).double()
+        col = torch.from_numpy(tgb.col()).long()
+        row = torch.from_numpy(tgb.row()).long()
+
+        dim_in = tgb.dim_in()
+        dim_out = tgb.dim_out()
+
+        # === [关键调试检查] ===
+        # 检查1: 节点数量必须至少包含所有的种子节点 (dim_out)
+        # 如果这个断言触发，说明 C++ Sampler 丢了孤立点！
+        assert nodes.numel() >= dim_out, (
+            f"Batch {i} Error: tgb.nodes() count ({nodes.numel()}) < dim_out ({dim_out}). "
+            "Sampler seems to have dropped isolated seed nodes!"
+        )
+
+        # 检查2: 确保所有 row/col 的索引都在 nodes 范围内
+        # 这是一个耗时检查，确定没问题后可以注释掉
+        if __debug__:
+            max_idx = nodes.numel()
+            if row.numel() > 0:
+                assert row.max() < max_idx, (
+                    f"Row index {row.max()} OOB for nodes size {max_idx}"
+                )
+                assert col.max() < max_idx, (
+                    f"Col index {col.max()} OOB for nodes size {max_idx}"
+                )
+
         mfg_meta: DGLBlockMeta = DGLBlockMeta(
-            nodes=torch.from_numpy(tgb.nodes()),
-            ts=torch.from_numpy(tgb.ts()),
-            eid=torch.from_numpy(tgb.eid()),
-            dts=torch.from_numpy(tgb.dts()),
-            col=torch.from_numpy(tgb.col()),
-            row=torch.from_numpy(tgb.row()),
-            dim_in=tgb.dim_in(),
-            dim_out=tgb.dim_out(),
+            nodes=nodes,
+            ts=ts,
+            eid=eid,
+            dts=dts,
+            col=col,
+            row=row,
+            dim_in=dim_in,
+            dim_out=dim_out,
         )
         mfg_meta_list.append(mfg_meta)
     return mfg_meta_list

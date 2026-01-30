@@ -298,7 +298,7 @@ class Planner(ThreadBase):
 
             logger.debug(f"Planner: batch #{batch_count}, deleting state from metas")
             for meta in metas:
-                del meta.state  # 释放内存
+                meta.state = None  # 释放内存
 
             logger.debug(f"Planner: batch #{batch_count}, putting metas to out_q")
             self.out_q.put(metas)

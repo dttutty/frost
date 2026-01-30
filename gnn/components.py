@@ -33,7 +33,7 @@ class TimeEncode(nn.Module):
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         # t shape: [batch_size] -> [batch_size, 1]
-        output = torch.cos(self.w(t.reshape((-1, 1))))
+        output = torch.cos(self.w(t.reshape((-1, 1)).float()))
         return output
 
 

@@ -27,6 +27,44 @@ def _try_gather_to_pinned(
     target_cls: type[MemTsNid] | type[BoxTsNid],
     device: torch.device,
 ) -> MemTsNid | BoxTsNid | None:  # 返回 None 表示 Buffer 不够大，需要 fallback
+    import torch.distributed as dist
+
+    try:
+        # 1. 强制同步，确保之前的 Kernel 跑完
+        torch.cuda.synchronize()
+
+        # 2. 检查索引是否越界
+        # 注意：如果 indices 在 GPU 上，转 CPU 可能会慢一点，但为了 Debug 值得
+        if indices.numel() > 0:
+            indices_cpu = indices.detach().cpu()
+            max_idx = indices_cpu.max().item()
+            min_idx = indices_cpu.min().item()
+            src_limit = src_data.shape[0]
+
+            print(f"[Rank {dist.get_rank()} DY_ASM] Gather Check:")
+            print(f"  Indices Device: {indices.device}, Shape: {indices.shape}")
+            print(f"  SrcData Device: {src_data.device}, Shape: {src_data.shape}")
+            print(f"  Index Range: [{min_idx}, {max_idx}]")
+            print(f"  Src Limit: {src_limit}")
+
+            if max_idx >= src_limit:
+                print("  [CRITICAL] Index OUT OF BOUNDS Detected!")
+                print(f"  [CRITICAL] Found {max_idx} >= {src_limit}")
+                # 打印出具体的非法索引
+                invalid_indices = indices_cpu[indices_cpu >= src_limit]
+                print(f"  [CRITICAL] Invalid indices sample: {invalid_indices[:10]}")
+
+            if min_idx < 0:
+                print(f"  [CRITICAL] Negative Index Detected! {min_idx}")
+
+        torch.cuda.synchronize()
+
+    except Exception as e:
+        print(f"[Rank {dist.get_rank()} DY_ASM ERROR] {e}")
+        import traceback
+
+        traceback.print_exc()
+
     n = indices.numel()
     logger.debug(
         f"DyAsm: _try_gather_to_pinned called, indices size={n}, buffer capacity={pinned_buf.data.shape[0]}"
