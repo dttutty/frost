@@ -86,7 +86,8 @@ def run_training_step(
         )
     else:
         prev_cpu_to_gpu_thread = curr_cpu_to_gpu_thread
-    data_ready_event.wait()
+    torch.cuda.current_stream().wait_event(data_ready_event)
+
     return prev_cpu_to_gpu_thread, tot_loss, prev_mailbox_mem_updater
 
 

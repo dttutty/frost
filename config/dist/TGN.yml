@@ -14,16 +14,16 @@ memory:
     cell: 'gru'
     boxsize: 1
     combine_node_feature: True
-    d_mem: 100
+    d_mem: 128
 gnn:
   - arch: 'attn'
     layer: 1
     att_h: 2
     d_time: 100
-    d_hid: 100
+    d_hid: 128
 train:
-  - epoch: 3
-    batch_size: 200 # local batch_size
+  - epoch: 50
+    batch_size: 4000 # local batch_size
     lr: 0.0001
     dropout: 0.2
     reorder: 8

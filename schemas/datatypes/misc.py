@@ -14,7 +14,7 @@ from schemas.datatypes.mem_mail_box.box import BoxTsNid
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from tensor_set_fn import TensorSetFn
 
-from .plan import BatchNodeStateIO, PlanSet
+from .plan import BatchNodeStateIO, PackedPlanSet, PlanSet
 
 
 if TYPE_CHECKING:
@@ -214,26 +214,28 @@ class MemNBox:
 
 @dataclass(kw_only=True)
 class Result:
+    test_auc: float
+    test_ap: float
     train_loss: float
     val_loss: float
     val_auc: float
     val_ap: float
-    test_auc: float
-    test_ap: float
 
 
 @dataclass(kw_only=True)
 class Meta:
-    root_nid: Tensor
-    root_ts: Tensor  # 没有3倍处理,这个信息不需要传输到gpu
+    root_nid: Tensor | None
+    root_ts: Tensor | None  # 没有3倍处理,这个信息不需要传输到gpu
 
     pos_edge_id: Tensor  # 没有3倍处理,这个信息不需要传输到gpu
     pos_efeat: Tensor | None = None
 
     n2r_meta: list[DGLBlockMeta] | None
+    n2r_meta_packed: PackedDGLBlockMeta | None = None
     n2r_mfgs: list[list[DGLBlock]] | None = None
 
     r2n_meta: DGLBlockMeta | None
+    r2n_meta_packed: PackedDGLBlockMeta | None = None
     r2n_mdt: Tensor | None = None
 
     m_state: EpochSplitIterInfo
@@ -241,9 +243,13 @@ class Meta:
     mem_n_box: MemNBox | None = None
     root_mem_n_box: SeperateData | None = None
     state: BatchNodeStateIO | None
-    n_src: int = 1
+    n_src: int | None
+
+    shm_lens: dict[str, int] | None = None
+    batch_idx: int = 0
 
     plan_set: PlanSet | None = None
+    packed_plan_set: PackedPlanSet | None = None
     labels: Tensor | None = None
 
     @cached_property
@@ -279,6 +285,9 @@ class Meta:
         d.pop("uniq_all", None)
         d.pop("batch_node_state_io", None)
         return d
+
+
+# misc.py
 
 
 @dataclass(kw_only=True)
@@ -355,3 +364,128 @@ class DGLBlockMeta:
     row: torch.Tensor
     dim_in: int
     dim_out: int
+
+    @staticmethod
+    def pack_list(blocks: list[DGLBlockMeta]) -> PackedDGLBlockMeta:
+        if not blocks:
+            empty = torch.tensor([], dtype=torch.long)
+            # 处理空情况，sections 用空 numpy 数组
+            return PackedDGLBlockMeta(
+                nodes_cat=empty,
+                ts_cat=empty,
+                eid_cat=empty,
+                dts_cat=empty,
+                col_cat=empty,
+                row_cat=empty,
+                node_sections=np.array([], dtype=np.int64),
+                edge_sections=np.array([], dtype=np.int64),
+                dims=np.array([], dtype=np.int64),
+            )
+
+        # 1. 收集所有 Tensor
+        # 既然是为了 Gloo 优化，确保这里 cat 的时候产生的是 CPU Tensor
+        # 如果原始 blocks 里的 tensor 已经是 CPU pinned memory，cat 之后最好再 pin 一下
+
+        nodes_cat = torch.cat([b.nodes for b in blocks])
+        ts_cat = torch.cat([b.ts for b in blocks])
+
+        eid_cat = torch.cat([b.eid for b in blocks])
+        dts_cat = torch.cat([b.dts for b in blocks])
+        col_cat = torch.cat([b.col for b in blocks])
+        row_cat = torch.cat([b.row for b in blocks])
+
+        # 2. 收集切分长度 (Sections)
+        node_sections = np.array([b.nodes.shape[0] for b in blocks], dtype=np.int64)
+        edge_sections = np.array([b.eid.shape[0] for b in blocks], dtype=np.int64)
+        # 3. 收集标量属性
+        dims = np.array([[b.dim_in, b.dim_out] for b in blocks], dtype=np.int64)
+        for i, b in enumerate(blocks):
+            assert b.dts.shape[0] == b.eid.shape[0], (
+                f"Block {i} Data Mismatch: dts len {b.dts.shape[0]} != eid len {b.eid.shape[0]}. "
+                "dts implies Edge Attribute, so lengths must match!"
+            )
+
+        # 4. 返回 Packed 对象 (关键：Gloo 发送这个对象会非常快)
+        return PackedDGLBlockMeta(
+            nodes_cat=nodes_cat,
+            ts_cat=ts_cat,
+            eid_cat=eid_cat,
+            dts_cat=dts_cat,
+            col_cat=col_cat,
+            row_cat=row_cat,
+            node_sections=node_sections,
+            edge_sections=edge_sections,
+            dims=dims,
+        )
+
+
+@dataclass(kw_only=True)
+class PackedDGLBlockMeta:
+    # --- 修改点 4: 允许为 None ---
+    nodes_cat: torch.Tensor | None
+    ts_cat: torch.Tensor | None
+
+    eid_cat: torch.Tensor | None
+    dts_cat: torch.Tensor | None
+    col_cat: torch.Tensor | None
+    row_cat: torch.Tensor | None
+
+    # 元数据通常很小，可以直接走网络，不需要 None (也不需要存 SHM)
+    node_sections: np.ndarray | None
+    edge_sections: np.ndarray | None
+    dims: np.ndarray | None
+
+    @staticmethod
+    def unpack_from_tensors(
+        nodes_cat: torch.Tensor,
+        ts_cat: torch.Tensor,
+        eid_cat: torch.Tensor,
+        dts_cat: torch.Tensor,
+        col_cat: torch.Tensor,
+        row_cat: torch.Tensor,
+        # 新增输入
+        t_node_sec: torch.Tensor,
+        t_edge_sec: torch.Tensor,
+        t_dims: torch.Tensor,
+    ) -> list[DGLBlockMeta]:
+        # 将 Tensor 转回 Numpy 以复用原有逻辑 (split 需要 list/int)
+        node_sections = t_node_sec.cpu().numpy()
+        edge_sections = t_edge_sec.cpu().numpy()
+        dims = t_dims.view(-1, 2).cpu().numpy()
+
+        # 复用你原有的逻辑，只是不需要 self.node_sections 了，直接用传进来的
+        nodes_splits = node_sections.tolist()
+        edge_splits = edge_sections.tolist()
+
+        nodes_list = nodes_cat.split(nodes_splits)
+        ts_list = ts_cat.split(nodes_splits)
+        eid_list = eid_cat.split(edge_splits)
+        dts_list = dts_cat.split(edge_splits)
+        col_list = col_cat.split(edge_splits)
+        row_list = row_cat.split(edge_splits)
+
+        res = []
+        for i in range(len(node_sections)):
+            res.append(
+                DGLBlockMeta(
+                    nodes=nodes_list[i],
+                    ts=ts_list[i],
+                    eid=eid_list[i],
+                    dts=dts_list[i],
+                    col=col_list[i],
+                    row=row_list[i],
+                    dim_in=int(dims[i, 0]),
+                    dim_out=int(dims[i, 1]),
+                )
+            )
+        return res
+
+    def pack_metadata_to_tensor(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """将 numpy 元数据转换为 tensor 以便写入 SHM"""
+        # 注意：使用 int64 以防溢出，且与 LongTensor 兼容
+        t_node_sec = torch.from_numpy(self.node_sections).long()
+        t_edge_sec = torch.from_numpy(self.edge_sections).long()
+        t_dims = torch.from_numpy(self.dims).long().view(-1)
+        return t_node_sec, t_edge_sec, t_dims
