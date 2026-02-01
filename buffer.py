@@ -120,42 +120,42 @@ def init_all_pin_mem(
     if shared_nfeat is not None:
         nfeat_h2d = _init_st_buf(
             dim=shared_nfeat.shape[1],
-            max_num=int(final_input_nodes * 0.2),
+            max_num=int(final_input_nodes * 0.3),
             dtype=shared_nfeat.dtype,
         )
     if shared_efeat is not None:
         pos_efeat_h2d = _init_buf(
             dim=shared_efeat.shape[1],
-            max_num=total_pos_edge,
+            max_num=int(total_pos_edge * 2),
             dtype=shared_efeat.dtype,
         )
         efeat_h2d = _init_buf(
             dim=shared_efeat.shape[1],
-            max_num=total_gnn_edges,
+            max_num=int(total_gnn_edges * 2),
             dtype=shared_efeat.dtype,
         )
     if shared is not None:
         shared_mem_dim = shared.mem.shape[1]
         mem_h2d = _init_mem_buf(
             dim=shared_mem_dim,
-            max_num=int(final_input_nodes * 0.2),
+            max_num=int(final_input_nodes * 0.3),
             dtype=shared.mem.dtype,
         )
         mem_d2h = _init_mem_buf(
             dim=shared_mem_dim,
-            max_num=int(final_input_nodes * 0.2),
+            max_num=int(final_input_nodes * 0.1),
             dtype=shared.mem.dtype,
         )
         shared_box_shape_tuple = (shared.box.shape[1], shared.box.shape[2])
 
         box_h2d = _init_box_buf(
             dim=shared_box_shape_tuple,
-            max_num=int(final_input_nodes * 0.2),
+            max_num=int(final_input_nodes * 0.3),
             dtype=shared.box.dtype,
         )
         box_d2h = _init_box_buf(
             dim=shared_box_shape_tuple,
-            max_num=int(final_input_nodes * 0.2),
+            max_num=int(final_input_nodes * 0.1),
             dtype=shared.box.dtype,
         )
     buffers = Buffers(

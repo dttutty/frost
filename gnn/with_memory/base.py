@@ -41,15 +41,11 @@ class MemoryBaseGNN(nn.Module):
         self.header = header
 
     def forward(self, meta: Meta) -> torch.Tensor:
-        torch.cuda.synchronize()
         self.update_and_sync_memory(meta=meta)
-        torch.cuda.synchronize()
         if isinstance(self.gnn, TGN):
-            torch.cuda.synchronize()
             h = self.gnn(mfgs=meta.n2r_mfgs)
-            torch.cuda.synchronize()
+
         else:
-            torch.cuda.synchronize()
             assert meta.mem_n_box is not None
             h = self.gnn(
                 mem_n_box=meta.mem_n_box.mem,
@@ -57,10 +53,8 @@ class MemoryBaseGNN(nn.Module):
                 ts=meta.root_ts,
             )
 
-            torch.cuda.synchronize()
         return cast(torch.Tensor, self.header(h))
 
-    @torch.no_grad()
     def update_and_sync_memory(self, meta: Meta) -> None:
         n_root_src_n_pos_dst = meta.n_src * 2
         assert meta.mem_n_box is not None
@@ -140,16 +134,19 @@ class MemoryBaseGNN(nn.Module):
             old_mem_ts_nid=root_old_mem,
             mem_plan=plan_set.mem,
             is_last=m_state.is_last_macro_of_epoch,
+            meta=meta,
         )
         self.mem_task_q.put((mem_task, ready_event))
 
         box_task = BoxTask(
             macro_bid=m_state.cur_macro_of_epoch,
             root_new_mem_orig=root_new_mem_orig,
+            root_nid=meta.root_nid[:n_root_src_n_pos_dst],
             pos_efeat=meta.pos_efeat,
             old_box=root_old_box,
             box_plan=plan_set.box,
             is_last=m_state.is_last_macro_of_epoch,
             r2n_mdt=meta.r2n_mdt,
+            meta=meta,
         )
         self.box_task_q.put((box_task, ready_event))

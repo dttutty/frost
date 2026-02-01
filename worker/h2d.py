@@ -4,12 +4,22 @@ from queue import Queue as Q
 from typing import Literal
 
 import dgl
+import numpy as np
 import torch
 from dgl.heterograph import DGLBlock
 
 # In utils.py
 from buffer import Buffers
-from schemas.datatypes.misc import DGLBlockMeta, Meta, Shared
+from schemas.datatypes.misc import (
+    DGLBlockMeta,
+    EpochSplitIterInfo,
+    Meta,
+    PackedDGLBlockMeta,
+    Shared,
+)
+from schemas.datatypes.plan import PackedDyPlan, PackedStPlan, PlanSet
+from schemas.shm_layout import ShmKeys
+from shm_manager import DoubleBufferedSHM
 from thread_base_with_stream import StreamThreadBase
 from utils import _deduplicate_first_layer_src
 from worker.assembler.dy_asm import prep_part_mem_n_box
@@ -17,6 +27,225 @@ from worker.assembler.st_asm import StAssembler
 
 
 logger = logging.getLogger(__name__)
+
+
+def rebuild_meta_full_from_shm(mgr: DoubleBufferedSHM, manifest: torch.Tensor) -> Meta:
+    """
+    完全从 SHM 重建 Meta 对象。
+    manifest: Shape [MANIFEST_SIZE], 包含 batch_idx 和各字段长度
+    """
+    batch_idx = int(manifest[ShmKeys.BATCH_IDX].item())
+
+    # Helper: 根据 Key 读取 Tensor
+    def read(key_enum: int) -> torch.Tensor | None:
+        length = int(manifest[key_enum].item())
+        if length > 0:
+            # [Fix] 必须先转 int，否则 str(Enum) 会返回 "ShmKeys.ROOT_NID" 导致 Key 找不到
+            # 错误写法: return mgr.read(batch_idx, str(key_enum), length)
+
+            # 正确写法:
+            return mgr.read(batch_idx, str(int(key_enum)), length).clone()
+
+        return None
+
+    def read_or_empty(key_enum: int) -> torch.Tensor:
+        t = read(key_enum)
+        if t is None:
+            return torch.empty(0, dtype=torch.long)
+        return t
+
+    # 1. Basic
+    root_nid = read(ShmKeys.ROOT_NID)
+    root_ts = read(ShmKeys.ROOT_TS)
+    pos_edge_id = read(ShmKeys.POS_EDGE_ID)
+    assert pos_edge_id is not None
+    n_src = int(pos_edge_id.numel())
+    ms_cur_epoch = int(manifest[ShmKeys.MS_CUR_EPOCH].item())
+    ms_n_epoch = int(manifest[ShmKeys.MS_N_EPOCH].item())
+
+    m_state = None
+    if ms_n_epoch > 0:
+        split_map_rev = {0: "train", 1: "val", 2: "test"}
+        split_val = int(manifest[ShmKeys.MS_SPLIT_TYPE].item())
+        split_str: Literal["train", "val", "test"] = split_map_rev.get(
+            split_val, "train"
+        )
+
+        m_state = EpochSplitIterInfo(
+            cur_epoch=ms_cur_epoch,
+            n_epoch=ms_n_epoch,
+            cur_macro_of_split=int(manifest[ShmKeys.MS_CUR_MACRO_SPLIT].item()),
+            n_macro_of_split=int(manifest[ShmKeys.MS_N_MACRO_SPLIT].item()),
+            cur_macro_of_epoch=int(manifest[ShmKeys.MS_CUR_MACRO_EPOCH].item()),
+            split=split_str,
+        )
+
+    # 2. Rebuild N2R
+    n2r_meta = None
+
+    # 检查是否有 N2R 数据
+    if manifest[ShmKeys.N2R_NODES] > 0:
+        # 读出所有数据块
+        nodes_cat = read(ShmKeys.N2R_NODES)
+        ts_cat = read(ShmKeys.N2R_TS)
+        eid_cat = read(ShmKeys.N2R_EID)
+        dts_cat = read(ShmKeys.N2R_DTS)
+        col_cat = read(ShmKeys.N2R_COL)
+        row_cat = read(ShmKeys.N2R_ROW)
+
+        # 读出元数据 Tensor
+        t_node_sec = read(ShmKeys.N2R_NODE_SECTIONS)
+        t_edge_sec = read(ShmKeys.N2R_EDGE_SECTIONS)
+        t_dims = read(ShmKeys.N2R_DIMS)
+
+        # 静态方法解包 (需要你在 misc.py 实现 unpack_from_tensors)
+        n2r_meta = PackedDGLBlockMeta.unpack_from_tensors(
+            nodes_cat,
+            ts_cat,
+            eid_cat,
+            dts_cat,
+            col_cat,
+            row_cat,
+            t_node_sec,
+            t_edge_sec,
+            t_dims,
+        )
+
+    # --- 3. Rebuild R2N (Temporal Neighbors) ---
+    r2n_meta = None
+    r2n_mdt = None
+    if manifest[ShmKeys.R2N_NODES] > 0:
+        nodes_cat = read(ShmKeys.R2N_NODES)
+        ts_cat = read(ShmKeys.R2N_TS)
+        eid_cat = read(ShmKeys.R2N_EID)
+        dts_cat = read(ShmKeys.R2N_DTS)
+        col_cat = read(ShmKeys.R2N_COL)
+        row_cat = read(ShmKeys.R2N_ROW)
+
+        t_node_sec = read(ShmKeys.R2N_NODE_SECTIONS)
+        t_edge_sec = read(ShmKeys.R2N_EDGE_SECTIONS)
+        t_dims = read(ShmKeys.R2N_DIMS)
+
+        r2n_mdt = read(ShmKeys.R2N_MDT)
+
+        if nodes_cat is not None:
+            unpacked = PackedDGLBlockMeta.unpack_from_tensors(
+                nodes_cat,
+                ts_cat,
+                eid_cat,
+                dts_cat,
+                col_cat,
+                row_cat,
+                t_node_sec,
+                t_edge_sec,
+                t_dims,
+            )
+            if unpacked:
+                r2n_meta = unpacked[0]  # r2n 通常只有一个 block
+
+    # --- 4. Rebuild PlanSet ---
+    mem_plan = None
+    box_plan = None
+    nfeat_plan = None
+
+    # Helper: 读取 Plan 元数据
+    # ... 在 read_plan_meta 函数中 ...
+
+    def read_plan_meta(
+        k_sizes: int, k_rec: int, k_send: int
+    ) -> tuple[list[int], torch.Tensor | None, torch.Tensor | None]:
+        t_sizes = read(k_sizes)
+        t_rec = read(k_rec)
+        t_send = read(k_send)
+
+        # 1. 恢复 sizes (List[int])
+        # 如果 t_sizes 为空，说明没有 P2P 任务
+        sizes = t_sizes.tolist() if t_sizes is not None else []
+
+        # 2. 恢复计数器 (Numpy Array)
+        # 直接转 numpy，因为 scatter 已经强制转为 int64 了，这里很安全
+        rec = t_rec.numpy() if t_rec is not None else None
+        send = t_send.numpy() if t_send is not None else None
+
+        # [安全检查]
+        # 如果有 sizes (意味着有任务) 但 send 为 None (意味着传输彻底丢了)，
+        # 此时如果不处理，后面一定会崩。
+        # 既然我们修复了 scatter，理论上不应发生。但为了防止 crash，我们可以补全。
+        if len(sizes) > 0 and send is None:
+            logger.warning(
+                f"[H2D Fix] Batch {batch_idx}: P2P sizes={sizes} but send_cts is None. Filling with zeros."
+            )
+            send = np.zeros(len(sizes), dtype=np.int64)
+
+        # 如果 send 存在但 sizes 没了
+        if send is not None and len(sizes) == 0:
+            sizes = [0] * len(send)
+
+        return sizes, rec, send
+
+    # A. Mem Plan
+    if manifest[ShmKeys.MEM_REC_CTS] > 0 or manifest[ShmKeys.MEM_P2P_SIZES] > 0:
+        p2p_sizes, rec_cts, send_cts = read_plan_meta(
+            ShmKeys.MEM_P2P_SIZES, ShmKeys.MEM_REC_CTS, ShmKeys.MEM_SEND_CTS
+        )
+        packed_mem = PackedDyPlan(
+            p2p_data=read_or_empty(ShmKeys.MEM_P2P),
+            p2p_sizes=p2p_sizes,
+            fetch_data=read_or_empty(ShmKeys.MEM_FETCH),
+            writeback_data=read_or_empty(ShmKeys.MEM_WB),
+            rec_cts=rec_cts,
+            send_cts=send_cts,
+        )
+        mem_plan = packed_mem.unpack()
+
+    # B. Box Plan
+    if manifest[ShmKeys.BOX_REC_CTS] > 0 or manifest[ShmKeys.BOX_P2P_SIZES] > 0:
+        p2p_sizes, rec_cts, send_cts = read_plan_meta(
+            ShmKeys.BOX_P2P_SIZES, ShmKeys.BOX_REC_CTS, ShmKeys.BOX_SEND_CTS
+        )
+        packed_box = PackedDyPlan(
+            p2p_data=read_or_empty(ShmKeys.BOX_P2P),
+            p2p_sizes=p2p_sizes,
+            fetch_data=read_or_empty(ShmKeys.BOX_FETCH),
+            writeback_data=read_or_empty(ShmKeys.BOX_WB),
+            rec_cts=rec_cts,
+            send_cts=send_cts,
+        )
+        box_plan = packed_box.unpack()
+
+    # C. Nfeat Plan
+    if manifest[ShmKeys.NFEAT_FETCH] > 0 or manifest[ShmKeys.NFEAT_CACHE] > 0:
+        packed_nfeat = PackedStPlan(
+            to_cache_data=read_or_empty(ShmKeys.NFEAT_CACHE),
+            fetch_data=read_or_empty(ShmKeys.NFEAT_FETCH),
+        )
+        nfeat_plan = packed_nfeat.unpack()
+
+    plan_set = PlanSet(mem=mem_plan, box=box_plan, nfeat=nfeat_plan)
+
+    # 4. 组装最终 Meta
+    # --- 5. Assemble Meta ---
+    # 注意：m_state 等轻量级元数据目前没有包含在 Manifest 中
+    # 如果它们对 H2D 很重要，建议也加到 ShmKeys 中。
+    # 这里假设 Worker 可以通过 batch_idx 推断或者暂时不需要它们。
+    # 为了兼容现有 H2D 逻辑，我们可能需要创建一个 Dummy m_state 或从某处获取。
+    # 暂时设为 None，下游逻辑需做判空处理。
+
+    meta = Meta(
+        n_src=n_src,
+        root_nid=root_nid,
+        root_ts=root_ts,
+        pos_edge_id=pos_edge_id,
+        n2r_meta=n2r_meta,
+        r2n_meta=r2n_meta,
+        r2n_mdt=r2n_mdt,
+        plan_set=plan_set,
+        batch_idx=batch_idx,
+        state=None,  # State is not needed for H2D
+        m_state=m_state,  # Warning: logic might rely on m_state.cur_macro_of_epoch for logging
+        shm_lens={},  # Legacy field, empty now
+    )
+    return meta
 
 
 @torch.no_grad()
@@ -44,7 +273,7 @@ def collate_and_build_graph(
         block.dstdata["ID"] = all_nodes[:num_roots]
         block.srcdata["ts"] = mfg_meta.ts
         block.dstdata["ts"] = mfg_meta.ts[:num_roots]
-        block.edata["dt"] = mfg_meta.dts[num_roots:]
+        block.edata["dt"] = mfg_meta.dts
         block.edata["ID"] = mfg_meta.eid
         # 3. 统一上 GPU (由 Worker 决定何时上 GPU)
         blocks.append(block)
@@ -60,15 +289,19 @@ def collate_and_build_graph(
     return grouped_blocks
 
 
+# h2d.py
+
+
 class H2D(StreamThreadBase):
     def __init__(
         self,
+        shm_manager: DoubleBufferedSHM,
         buf: Buffers,
         nfeat: torch.Tensor | None,
         efeat: torch.Tensor | None,
         shared: Shared | None,
         merge_src: bool,
-        in_q: Q[Meta | None | Literal["end_of_epoch"]],
+        in_q: Q[tuple[Meta, torch.cuda.Event] | None | Literal["end_of_epoch"]],
         out_q: Q[tuple[Meta, torch.cuda.Event] | None | Literal["end_of_epoch"]],
         stop_ev: threading.Event,
         h2d_sem: threading.Semaphore | None,
@@ -89,6 +322,7 @@ class H2D(StreamThreadBase):
         self.in_q = in_q
         self.out_q = out_q
         self.stop_ev = stop_ev
+        self.shm_mgr = shm_manager
         self.h2d_sem = h2d_sem
         self.history = history
         self.n_neg = n_neg  # TODO: make it configurable
@@ -122,103 +356,25 @@ class H2D(StreamThreadBase):
                 f"H2D: waiting for meta from in_q (queue size: {self.in_q.qsize()})"
             )
 
-            meta = self.in_q.get(block=True)
-            logger.debug(f"H2D: received meta type: {type(meta).__name__}")
+            meta_data = self.in_q.get(block=True)
+            logger.debug(f"H2D: received meta type: {type(meta_data).__name__}")
 
-            if meta is None:
+            if meta_data is None:
                 logger.debug("H2D: received None, putting to out_q and exiting")
                 self.out_q.put(None, block=True)
                 logger.debug(f"H2D: Processed {batch_count} batches before exit")
                 break
-            elif meta == "end_of_epoch":
+            elif meta_data == "end_of_epoch":
                 logger.debug("H2D: received end_of_epoch, forwarding to out_q")
                 self.out_q.put("end_of_epoch", block=True)
                 continue
 
-            batch_count += 1
-            logger.debug(
-                f"H2D: processing batch #{batch_count}, macro_bid={meta.m_state.cur_macro_of_epoch}"
-            )
-
-            if meta.plan_set is not None:
-                if meta.plan_set.mem is not None and meta.plan_set.box is None:
-                    logger.debug(
-                        f"H2D: batch #{batch_count}, copying mem plan to box (final check)"
-                    )
-                    meta.plan_set.box = meta.plan_set.mem
-                # 使用 non_blocking 即可，无需 buffer
-                logger.debug(
-                    f"H2D: batch #{batch_count}, transferring plan_set to cuda"
-                )
-                meta.plan_set = meta.plan_set.to(self.device, non_blocking=False)
-                logger.debug(f"H2D: batch #{batch_count}, plan_set on GPU")
-
-            # move pos_efeat to gpu
-            if self.efeat is not None:
-                logger.debug(
-                    f"H2D: batch #{batch_count}, transferring pos_efeat, size={meta.pos_edge_id.numel()}"
-                )
-                if (
-                    self.buf.pos_efeat_h2d is not None
-                    and meta.pos_edge_id.numel() <= self.buf.pos_efeat_h2d.shape[0]
-                ):
-                    n = meta.pos_edge_id.numel()
-                    logger.debug(
-                        f"H2D: batch #{batch_count}, using pinned buffer for pos_efeat, n={n}, buffer capacity={self.buf.pos_efeat_h2d.shape[0]}"
-                    )
-                    buf_view = self.buf.pos_efeat_h2d[:n]
-                    if __debug__:
-                        # 1. 检查索引是否为空，防止 buf_view 的尺寸冲突警告
-                        assert meta.pos_edge_id.numel() > 0, "pos_edge_id is empty"
-
-                        # 2. 核心检查：索引是否越界 (关键！)
-                        # 确保所有索引都在 [0, efeat.size(0)) 范围内
-                        max_idx = meta.pos_edge_id.max().item()
-                        min_idx = meta.pos_edge_id.min().item()
-                        assert max_idx < self.efeat.size(0), (
-                            f"Edge index {max_idx} out of bounds for efeat size {self.efeat.size(0)}"
-                        )
-                        assert min_idx >= 0, f"Negative edge index {min_idx} detected"
-
-                        # 3. 检查设备一致性
-                        assert self.efeat.device == meta.pos_edge_id.device, (
-                            "Device mismatch between efeat and indices"
-                        )
-                    torch.index_select(self.efeat, 0, meta.pos_edge_id, out=buf_view)
-                    meta.pos_efeat = buf_view.to(self.device, non_blocking=False)
-                    logger.debug(
-                        f"H2D: batch #{batch_count}, pos_efeat transferred via pinned buffer"
-                    )
-                else:
-                    logger.debug(
-                        f"H2D: batch #{batch_count}, direct cuda transfer for pos_efeat (buffer insufficient or disabled)"
-                    )
-                    meta.pos_efeat = self.efeat[meta.pos_edge_id].to(
-                        self.device, non_blocking=False
-                    )
-            else:
-                logger.debug(
-                    f"H2D: batch #{batch_count}, no efeat available, skipping pos_efeat transfer"
-                )
-
-            # make mfg from raw data
-            if meta.n2r_meta is not None:
-                logger.debug(
-                    f"H2D: batch #{batch_count}, building MFGs, num_blocks={len(meta.n2r_meta)}, history={self.history}"
-                )
-                meta.n2r_mfgs = collate_and_build_graph(meta.n2r_meta, self.history)
-                logger.debug(
-                    f"H2D: batch #{batch_count}, MFGs built, num_groups={len(meta.n2r_mfgs)}"
-                )
-                # Log details about each group
-                for idx, group in enumerate(meta.n2r_mfgs):
-                    logger.debug(
-                        f"H2D: batch #{batch_count}, MFG group {idx} has {len(group)} blocks"
-                    )
-            else:
-                logger.debug(
-                    f"H2D: batch #{batch_count}, no n2r_meta, skipping MFG construction"
-                )
+            # if isinstance(manifest, torch.Tensor):
+            #     logger.info(
+            #         f"H2D: Received Manifest[0] (BatchIdx) = {manifest[0].item()}"
+            #     )
+            meta, event = meta_data
+            torch.cuda.current_stream().wait_event(event)
 
             eids: list[list[torch.Tensor]] = []
             if meta.n2r_mfgs is not None:
@@ -226,12 +382,7 @@ class H2D(StreamThreadBase):
                     f"H2D: batch #{batch_count}, transferring {len(meta.n2r_mfgs)} MFG groups to GPU"
                 )
                 for group_idx, blocks in enumerate(meta.n2r_mfgs):
-                    eid: list[torch.Tensor] = [
-                        torch.empty((block.num_edges(),), dtype=torch.long)
-                        for block in blocks
-                    ]
-                    for block_idx, block in enumerate(blocks):
-                        eid[block_idx] = block.edata["ID"]
+                    eid = [block.edata["ID"] for block in blocks]
                     eids.append(eid)
                     logger.debug(
                         f"H2D: batch #{batch_count}, MFG group {group_idx} transferred to GPU"
@@ -247,7 +398,7 @@ class H2D(StreamThreadBase):
                 )
                 for group_idx, blocks in enumerate(meta.n2r_mfgs):
                     for block_idx, block in enumerate(blocks):
-                        blocks[block_idx] = block.to(self.device, non_blocking=False)
+                        blocks[block_idx] = block.to(self.device, non_blocking=True)
                     logger.debug(
                         f"H2D: batch #{batch_count}, MFG group {group_idx} transferred to GPU"
                     )
@@ -266,16 +417,22 @@ class H2D(StreamThreadBase):
                 logger.debug(f"H2D: batch #{batch_count}, MFGs filled with features")
 
             # init x
-            n_pos_edges = meta.pos_edge.shape[0]
+            n_pos_edges = 0
+            if meta.pos_edge_id is not None:
+                n_pos_edges = meta.pos_edge_id.numel()
             logger.debug(
                 f"H2D: batch #{batch_count}, creating labels, n_pos={n_pos_edges}, n_neg_per_pos={self.n_neg}, total={n_pos_edges * (1 + self.n_neg)}"
             )
-            meta.labels = torch.cat(
-                [
-                    torch.ones(n_pos_edges, device=self.device),
-                    torch.zeros(n_pos_edges * self.n_neg, device=self.device),
-                ],
-            )
+            if n_pos_edges > 0:
+                meta.labels = torch.cat(
+                    [
+                        torch.ones(n_pos_edges, device=self.device),
+                        torch.zeros(n_pos_edges * self.n_neg, device=self.device),
+                    ],
+                )
+            else:
+                # 即使为空，也要创建正确的空 Tensor 以防下游报错
+                meta.labels = torch.empty(0, device=self.device)
             logger.debug(
                 f"H2D: batch #{batch_count}, labels created, shape={meta.labels.shape}"
             )
@@ -344,20 +501,29 @@ class H2D(StreamThreadBase):
                 logger.debug(
                     f"H2D: batch #{batch_count}, acquiring h2d_sem for mem/box transfer (2 permits)"
                 )
-                assert self.buf.mem_h2d is not None
-                assert self.buf.box_h2d is not None
-                assert self.h2d_sem is not None
+                # assert self.buf.mem_h2d is not None
+                # assert self.buf.box_h2d is not None
+                # assert self.h2d_sem is not None
+
+                if meta.plan_set is not None and meta.plan_set.mem is not None:
+                    # [Fix 2] 关键修复：必须在调用 prep 之前处理 box 为 None 的情况！
+                    # 原来的逻辑写得太晚了，导致传进 prep 的 box 是 None
+                    if meta.plan_set.box is None:
+                        logger.debug(
+                            f"H2D: batch #{batch_count}, box plan is None, reusing mem plan"
+                        )
+                        meta.plan_set.box = meta.plan_set.mem
                 self.h2d_sem.acquire()
                 self.h2d_sem.acquire()
                 logger.debug(
                     f"H2D: batch #{batch_count}, h2d_sem acquired, preparing mem and box"
                 )
-                assert meta.plan_set is not None
-                assert meta.plan_set.mem is not None
-                assert meta.plan_set.box is not None
-                logger.debug(
-                    f"H2D: batch #{batch_count}, mem plan fetch size={meta.plan_set.mem.fetch.data.numel()}, box plan fetch size={meta.plan_set.box.fetch.data.numel()}"
-                )
+                # assert meta.plan_set is not None
+                # assert meta.plan_set.mem is not None
+                # assert meta.plan_set.box is not None
+                # logger.debug(
+                #     f"H2D: batch #{batch_count}, mem plan fetch size={meta.plan_set.mem.fetch.data.numel()}, box plan fetch size={meta.plan_set.box.fetch.data.numel()}"
+                # )
                 meta.mem_n_box = prep_part_mem_n_box(
                     self.shared,
                     meta.plan_set.mem,
@@ -373,19 +539,6 @@ class H2D(StreamThreadBase):
                 logger.debug(
                     f"H2D: batch #{batch_count}, no shared memory, skipping mem/box transfer"
                 )
-
-            if meta.plan_set is not None:
-                if meta.plan_set.mem is not None and meta.plan_set.box is None:
-                    logger.debug(
-                        f"H2D: batch #{batch_count}, copying mem plan to box (final check)"
-                    )
-                    meta.plan_set.box = meta.plan_set.mem
-                # 使用 non_blocking 即可，无需 buffer
-                logger.debug(
-                    f"H2D: batch #{batch_count}, transferring plan_set to cuda"
-                )
-                meta.plan_set = meta.plan_set.to(self.device, non_blocking=False)
-                logger.debug(f"H2D: batch #{batch_count}, plan_set on GPU")
 
             # even there is no next batch, we still need plan_set for writeback
             if self.merge_src:

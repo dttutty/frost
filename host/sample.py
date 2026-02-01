@@ -21,12 +21,21 @@ def extract_raw_data(ret: list) -> list[DGLBlockMeta]:
         nodes = torch.from_numpy(tgb.nodes()).long()
         ts = torch.from_numpy(tgb.ts()).double()  # 时间戳建议转 double 或 float
         eid = torch.from_numpy(tgb.eid()).long()
-        dts = torch.from_numpy(tgb.dts()).double()
+        raw_dts = torch.from_numpy(tgb.dts()).double()
         col = torch.from_numpy(tgb.col()).long()
         row = torch.from_numpy(tgb.row()).long()
 
         dim_in = tgb.dim_in()
         dim_out = tgb.dim_out()
+
+        dts = raw_dts[dim_out:]
+
+        # 调试断言：确保切片后的长度等于边数
+        if __debug__:
+            assert dts.shape[0] == eid.shape[0], (
+                f"Mismatch! dts sliced len {dts.shape[0]} != eid len {eid.shape[0]}. "
+                f"Total dts: {raw_dts.shape[0]}, dim_out: {dim_out}"
+            )
 
         # === [关键调试检查] ===
         # 检查1: 节点数量必须至少包含所有的种子节点 (dim_out)

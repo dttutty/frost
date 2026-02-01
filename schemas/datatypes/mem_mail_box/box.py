@@ -79,10 +79,9 @@ class BoxTsNid:
         assert TensorSetFn.intersection(self.nid, other.nid).numel() == 0, (
             "NID overlap between BoxTsNid instances."
         )
-        if self.data.dim() == 3 and other.data.dim() == 2:
-            other_data = other.data.unsqueeze(1)
-        if self.ts.dim() == 2 and other.ts.dim() == 1:
-            other_ts = other.ts.unsqueeze(1)
+        other_data = other.data
+        other_ts = other.ts
+
         self = BoxTsNid(
             nid=torch.cat((self.nid, other.nid), dim=0),
             data=torch.cat((self.data, other_data), dim=0),
