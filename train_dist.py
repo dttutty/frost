@@ -313,6 +313,8 @@ assert gloo is not None, "Failed to create gloo process group"
 if __debug__:
     logger.debug(f"Rank {env.local_rank}: GLOO group created successfully")
 nccl = dist.new_group(ranks=worker_ranks, backend="nccl")
+nccl_p2p = dist.new_group(ranks=worker_ranks, backend="nccl")
+
 assert nccl is not None, "Failed to create nccl process group"
 if __debug__:
     logger.debug(f"Rank {env.local_rank}: NCCL group created successfully")
@@ -550,6 +552,7 @@ else:
         efeat=efeat,
         env=env,
         nccl=nccl,
+        nccl_p2p=nccl_p2p,
         gloo=gloo,
         components=model_components,
         m_cfg=cfg.m,

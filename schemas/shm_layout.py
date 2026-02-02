@@ -36,7 +36,7 @@ def get_shm_layout_config(
     max_input_nodes, total_edges_per_snapshot = calculate_gnn_graph_size(
         batch_size, fanouts
     )
-    SAFETY_MARGIN = 2.0
+    SAFETY_MARGIN = 3
     MAX_EDGES = int(total_edges_per_snapshot * history * SAFETY_MARGIN)
     MAX_NODES = int((total_edges_per_snapshot + batch_size) * history * SAFETY_MARGIN)
 

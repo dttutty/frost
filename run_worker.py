@@ -1,7 +1,8 @@
 import logging
 import threading
+import time
 from queue import Queue as Q
-from typing import Literal  # 必须导入这个
+from typing import Any, Literal  # 必须导入这个
 
 import torch
 import torch.distributed as dist
@@ -25,7 +26,7 @@ from schemas.datatypes.cfg import MemoryCFG, SampleCFG, TrainCFG
 from schemas.datatypes.env import Env
 from schemas.datatypes.mem_mail_box.box import BoxTsNid
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
-from schemas.datatypes.misc import MemNBox, Meta, ModelComponents, Result, Shared
+from schemas.datatypes.misc import Meta, ModelComponents, Result, Shared
 from schemas.datatypes.task import BoxTask, MemTask, P2PTask
 from shm_manager import DoubleBufferedSHM
 from worker.assembler.dy_asm import DyAssembler
@@ -49,6 +50,7 @@ class Worker:
         efeat: None | torch.Tensor,
         env: Env,
         nccl: dist.ProcessGroup,
+        nccl_p2p: dist.ProcessGroup,
         gloo: dist.ProcessGroup,
         components: ModelComponents,
         shm_manager: DoubleBufferedSHM,
@@ -63,24 +65,28 @@ class Worker:
 
         self.shared = shared
         self.total_epoch = t_cfg.epoch
-        self.meta_q: Q[Meta | None | Literal["end_of_epoch"]] = Q(maxsize=3)
+        self.meta_q: Q[Meta | None | Literal["end_of_epoch"]] = Q(maxsize=1)
         self.rebuilder_q: Q[Meta | None | Literal["end_of_epoch"]] = Q(maxsize=4)
         self.graph_builder_q: Q[
             tuple[Meta, torch.cuda.Event] | None | Literal["end_of_epoch"]
         ] = Q(maxsize=4)
         self.stop_ev = threading.Event()
         self.nccl = nccl
+        self.nccl_p2p = nccl_p2p
         self.curr_epoch = 0
         self.logger: logging.Logger = logger
         self.fetch_factor = 1
         self.model: GNN | MemoryBaseGNN | DDP
-        self.full_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q(maxsize=1)
+        self.full_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q(maxsize=2)
         self.device = torch.device(f"cuda:{env.local_rank}")
-
+        self.comm_stream = torch.cuda.Stream(device=self.device)
         self.h2d_sem: threading.Semaphore = threading.Semaphore(0)
         self.destination_q_for_h2d: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q(
-            maxsize=1
+            maxsize=2
         )
+
+        self.train_start2start_ms = MeanMetric(process_group=self.nccl).cuda()
+        self._last_train_start_t: float | None = None
 
         if __debug__:
             logger.debug("Worker: initializing buffers")
@@ -97,8 +103,8 @@ class Worker:
             if __debug__:
                 logger.debug("Worker: initializing with shared memory components")
             assert m_cfg is not None
-            self.delta_q: Q[tuple[MemNBox, torch.cuda.Event] | Literal["nothing"]] = Q(
-                maxsize=2
+            self.delta_q: Q[tuple[P2PTask, P2PTask, list[Any]] | Literal["nothing"]] = (
+                Q(maxsize=2)
             )
             self.mem_task_q: Q[tuple[MemTask, torch.cuda.Event] | None] = Q(maxsize=2)
             self.box_task_q: Q[tuple[BoxTask, torch.cuda.Event] | None] = Q(maxsize=2)
@@ -126,7 +132,7 @@ class Worker:
 
             self.mem_writer_q: Q[
                 tuple[torch.Tensor | None, MemTsNid, torch.cuda.Event]
-            ] = Q(maxsize=16)
+            ] = Q(maxsize=2)
             self.mem_handler = MemHandler(
                 h2d_sem=self.h2d_sem,
                 mem_task_q=self.mem_task_q,
@@ -149,7 +155,7 @@ class Worker:
 
             self.box_writer_q: Q[
                 tuple[torch.Tensor | None, BoxTsNid, torch.cuda.Event]
-            ] = Q(maxsize=16)
+            ] = Q(maxsize=2)
             self.box_handler = BoxHandler(
                 h2d_sem=self.h2d_sem,
                 box_task_q=self.box_task_q,
@@ -213,7 +219,7 @@ class Worker:
             h2d_sem=self.h2d_sem,
         )
 
-        self.result_q: Q[Result | None] = Q()
+        self.result_q: Q[Result | None] = Q(maxsize=2)
 
         if __debug__:
             logger.debug("Worker: starting Receiver thread")
@@ -293,6 +299,9 @@ class Worker:
             logger.debug("Worker: initialization complete")
 
     def on_train_epoch_end(self) -> Result | None:
+        avg_s2s = self.train_start2start_ms.compute().item()
+        self.train_start2start_ms.reset()
+        print(f"Average train start->start (ms): {avg_s2s:.2f}")
         if __debug__:
             logger.debug(f"Worker: epoch {self.curr_epoch} ending, computing metrics")
         # 3. 只有在 Epoch 结束时，才做一次全局同步，计算精准的平均 Loss 记入日志
@@ -320,6 +329,7 @@ class Worker:
             test_auc=test_results["test_auc"].item(),
             test_ap=test_results["test_ap"].item(),
         )
+        self._last_train_start_t = None
         if __debug__:
             logger.debug(f"Worker: epoch {self.curr_epoch} results computed")
         if dist.get_rank() == 0:
@@ -348,13 +358,12 @@ class Worker:
         if self.shared is not None:
             if __debug__:
                 logger.debug("Worker: handling P2P queue")
-            self.handle_p2p_q()
+            with torch.cuda.stream(self.comm_stream):
+                self.handle_p2p_q()
         loss.backward()
 
         self.optimizer.step()
         self.train_loss_tracker.update(loss)
-        if __debug__:
-            logger.debug("Worker: training step complete")
 
     @torch.no_grad()
     def handle_p2p_q(self) -> None:
@@ -395,37 +404,45 @@ class Worker:
             (box_p2p.ts2recv, box_p2p.ts2send, box_p2p.rec_cts, box_p2p.send_cts),
         ]
 
+        # if torch.equal(mem_p2p.nid2recv, box_p2p.nid2recv) == False:
+        #     print("Error: Mem P2P NIDs and Box P2P NIDs to send do not match.")
+        #     print("Mem NIDs to send:", mem_p2p.nid2send)
+        #     print("Box NIDs to send:", box_p2p.nid2send)
+        #     raise ValueError("Mismatched NIDs in P2P send buffers.")
+
         # 3. 执行所有通信
         if __debug__:
             logger.debug(f"Worker: executing merged P2P batch ({len(p2p_ops)} ops)")
 
+        works = []
         for i, (recv_t, send_t, rec_cts, send_cts) in enumerate(p2p_ops):
-            dist.all_to_all_single(
+            work = dist.all_to_all_single(
                 output=recv_t,
                 input=send_t,
                 output_split_sizes=rec_cts,
                 input_split_sizes=send_cts,
-                group=self.nccl,
-                # async_op=True # 如果是较新版本的 PyTorch 且需要重叠计算，可以开启，但这里通常不需要
+                group=self.nccl_p2p,
+                async_op=True,  # 如果是较新版本的 PyTorch 且需要重叠计算，可以开启，但这里通常不需要
             )
+            works.append(work)
 
-        # 4. 组装结果
-        delta_mem = MemTsNid(
-            nid=mem_p2p.nid2recv, data=mem_p2p.data2recv, ts=mem_p2p.ts2recv
-        )
-        delta_box = BoxTsNid(
-            nid=box_p2p.nid2recv, data=box_p2p.data2recv, ts=box_p2p.ts2recv
-        )
+        # # 4. 组装结果
+        # delta_mem = MemTsNid(
+        #     nid=mem_p2p.nid2recv, data=mem_p2p.data2recv, ts=mem_p2p.ts2recv
+        # )
+        # delta_box = BoxTsNid(
+        #     nid=box_p2p.nid2recv, data=box_p2p.data2recv, ts=box_p2p.ts2recv
+        # )
 
-        delta = MemNBox(mem=delta_mem, box=delta_box)
+        # delta = MemNBox(mem=delta_mem, box=delta_box)
 
-        # 5. 记录 Event 并发送
-        ready_event: torch.cuda.Event = torch.cuda.Event()
-        ready_event.record(torch.cuda.current_stream())
+        # # 5. 记录 Event 并发送
+        # ready_event: torch.cuda.Event = torch.cuda.Event()
+        # ready_event.record(torch.cuda.current_stream())
 
-        if __debug__:
-            logger.debug("Worker: putting merged delta to delta_q")
-        self.delta_q.put((delta, ready_event))
+        # if __debug__:
+        #     logger.debug("Worker: putting merged delta to delta_q")
+        self.delta_q.put((mem_p2p, box_p2p, works))
 
     @torch.no_grad()
     def eval(self, meta: Meta) -> None:
@@ -436,7 +453,8 @@ class Worker:
 
         logits = self.model(meta)
         if self.shared is not None:
-            self.handle_p2p_q()
+            with torch.cuda.stream(self.comm_stream):
+                self.handle_p2p_q()
 
         y_pred = logits.sigmoid().squeeze(-1)
 
@@ -507,8 +525,17 @@ class Worker:
                 if __debug__:
                     logger.debug(f"Worker: batch #{batch_count} split={m_info.split}")
                 if m_info.split == "train":  # if training
+                    now = time.perf_counter()
+                    if self._last_train_start_t is not None:
+                        interval_ms = (now - self._last_train_start_t) * 1000.0
+                        self.train_start2start_ms.update(
+                            torch.tensor(interval_ms, device=self.device)
+                        )
+                    self._last_train_start_t = now
+                    # ----------------------------------------------------------
                     self.train(meta)
                 elif m_info.split in ["val", "test"]:  # if evaluating
+                    self._last_train_start_t = None
                     self.eval(meta)
                 if __debug__:
                     logger.debug(f"Worker: batch #{batch_count} complete")

@@ -126,12 +126,12 @@ def init_all_pin_mem(
     if shared_efeat is not None:
         pos_efeat_h2d = _init_buf(
             dim=shared_efeat.shape[1],
-            max_num=int(total_pos_edge * 2),
+            max_num=int(total_pos_edge * 3),
             dtype=shared_efeat.dtype,
         )
         efeat_h2d = _init_buf(
             dim=shared_efeat.shape[1],
-            max_num=int(total_gnn_edges * 2),
+            max_num=int(total_gnn_edges * 3),
             dtype=shared_efeat.dtype,
         )
     if shared is not None:

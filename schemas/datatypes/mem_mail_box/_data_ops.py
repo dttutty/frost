@@ -4,7 +4,10 @@ import logging
 from typing import TypeVar
 
 import torch
-from torch_scatter import scatter_sum
+from torch_scatter import (
+    scatter_max,  # 新增
+    scatter_sum,
+)
 
 from .box import BoxTsNid
 from .mail import MailTsNid
@@ -17,145 +20,142 @@ logger = logging.getLogger(__name__)
 
 
 def compute_last_indices(nid: torch.Tensor, ts: torch.Tensor) -> torch.Tensor:
-    """
-    通用逻辑：计算去重后应当保留的索引。
-    策略：按 nid 分组，保留 ts 最大的那一行。
-    返回：indices_to_keep
-    """
     if nid.numel() == 0:
         return torch.tensor([], dtype=torch.long, device=nid.device)
 
-    # 1. 双重排序 (Sort by TS desc -> Stable sort by NID)
-    perm_ts = torch.argsort(ts, descending=True)
-    # stable=True 保证相同 NID 内部，TS 大的排在前面
-    perm_nid = torch.argsort(nid[perm_ts], stable=True)
-
-    final_perm = perm_ts[perm_nid]
-    sorted_nid = nid[final_perm]
-
-    # 2. 构造掩码 (Keep first of each group)
-    mask = torch.empty(sorted_nid.shape[0], dtype=torch.bool, device=nid.device)
-    mask[0] = True
-    mask[1:] = sorted_nid[1:] != sorted_nid[:-1]
-
-    # 3. 返回保留的索引
-    return final_perm[mask]
+    unique_nids, compact_idx = torch.unique(nid, return_inverse=True)
+    M = unique_nids.numel()
+    _, argmax = scatter_max(ts, compact_idx, dim=0, dim_size=M)
+    return argmax
 
 
-def keep_last(data: Mem_or_Mail) -> None:
+def keep_last(data: Mem_or_Mail) -> Mem_or_Mail:
     assert data.ts is not None, "TS must be provided for keep_last"
     indices = compute_last_indices(data.nid, data.ts)
 
-    # 2. 切片更新自己特有的字段
-    if indices.numel() < data.nid.numel():  # 只有确实有重复才更新，微小优化
+    if indices.numel() < data.nid.numel():
         data.nid = data.nid[indices]
-        data.data = data.data[indices]  # MemTsNid 特有的字段
+        data.data = data.data[indices]
         data.ts = data.ts[indices]
 
-        if data.ct is not None:
-            data.ct = data.ct[indices]  # MailTsNid 特有的字段
+    # compute_last_indices 依赖 unique 的组顺序（默认按 nid 排序）
+    data.is_sorted = True
+    data.is_unique = True
+    return data
 
 
-def keep_mean(data: Mem_or_Mail) -> None:
+def keep_mean(data: Mem_or_Mail) -> Mem_or_Mail:
     """
-    聚合策略：对于重复的 nid，计算 data 和 ts 的加权均值。
-    同时：
-    1. 维护 ct (计数)：如果是首次合并，默认原权重为1；如果有旧权重，则累加。
-    2. 维护 ts：计算加权平均时间 (Weighted Mean Time)。
-    实现：原地修改。
+    无 ct 版本：
+    - 对重复 nid：对 data、ts 做普通均值（权重恒为 1）
+    - 原地修改
     """
     assert data.ts is not None, "TS must be provided for keep_mean"
-
     if data.nid.numel() == 0:
-        return
+        data.is_sorted = True
+        data.is_unique = True
+        return data
 
-    # 1. ID 映射 (Mapping)
     unique_nids, compact_idx = torch.unique(data.nid, return_inverse=True)
-    M = unique_nids.size(0)
+    M = unique_nids.numel()
 
-    # 2. 处理权重 (Weights)
-    if data.ct is None:
-        weights = torch.ones_like(data.ts, dtype=torch.float32)
-    else:
-        weights = data.ct.float()
+    # 每组计数
+    ones = torch.ones_like(data.ts, dtype=torch.float32)
+    ct = scatter_sum(ones, compact_idx, dim=0, dim_size=M)  # [M]
 
-    # 3. 聚合计数 (Sum Weights) -> 分母
-    # [M]
-    new_ct = scatter_sum(weights, compact_idx, dim=0, dim_size=M)
+    # data 求和（建议转 float32 更稳）
+    sum_data = scatter_sum(data.data.to(torch.float32), compact_idx, dim=0, dim_size=M)
 
-    # 4. 聚合数据 (Weighted Sum Data) -> 分子 1
-    if data.ct is not None:
-        weighted_data = data.data * weights.unsqueeze(-1)
-    else:
-        weighted_data = data.data
+    # ts 求和
+    sum_ts = scatter_sum(data.ts.to(torch.float32), compact_idx, dim=0, dim_size=M)
 
-    sum_data = scatter_sum(weighted_data, compact_idx, dim=0, dim_size=M)
+    new_data = sum_data / ct.unsqueeze(-1)
+    new_ts = sum_ts / ct
 
-    # 5. 聚合时间 (Weighted Sum TS) -> 分子 2  <--- 修改重点在这里
-    # 时间也要乘权重 (例如：5条消息在 t=10, 1条消息在 t=20，均值应偏向 10)
-    weighted_ts = data.ts * weights
-    sum_ts = scatter_sum(weighted_ts, compact_idx, dim=0, dim_size=M)
-
-    # 6. 计算均值 (Divide)
-    # 注意: new_ct 至少为 1，除法安全
-    new_data = sum_data / new_ct.unsqueeze(-1)
-    new_ts = sum_ts / new_ct  # [M] / [M] -> [M]
-
-    # 7. 更新自身
     data.nid = unique_nids
-    data.data = new_data
-    data.ts = new_ts
-    data.ct = new_ct.long()
+    data.data = new_data.to(
+        dtype=data.data.dtype
+    )  # 如你想强制输出 float32，可删掉这一行 cast
+    data.ts = new_ts.to(dtype=data.ts.dtype)
+
+    data.is_sorted = True
+    data.is_unique = True
+    return data
+
+
+def _ensure_sorted_unique_nid(x: Mem_or_Mail) -> Mem_or_Mail:
+    """
+    确保 x.nid 升序且去重（无 ct 版本）。
+    注意：这里是就地修改 x（和你当前风格一致）。
+    """
+    if not getattr(x, "is_sorted", False):
+        x = x.sort_by_nid()
+
+    if not getattr(x, "is_unique", False):
+        if x.nid.numel() <= 1:
+            x.is_unique = True
+            return x
+
+        keep = torch.empty(x.nid.shape[0], dtype=torch.bool, device=x.nid.device)
+        keep[0] = True
+        keep[1:] = x.nid[1:] != x.nid[:-1]
+
+        if keep.sum().item() != x.nid.numel():
+            x.nid = x.nid[keep]
+            x.data = x.data[keep]
+            if x.ts is not None:
+                x.ts = x.ts[keep]
+
+        x.is_unique = True
+
+    return x
+
+
+def _mask_not_in_sorted_unique(
+    high_nid_sorted_unique: torch.Tensor, low_nid: torch.Tensor
+) -> torch.Tensor:
+    pos = torch.searchsorted(high_nid_sorted_unique, low_nid)
+    in_range = pos < high_nid_sorted_unique.numel()
+    hit = torch.zeros_like(in_range, dtype=torch.bool)
+    hit[in_range] = high_nid_sorted_unique[pos[in_range]] == low_nid[in_range]
+    return ~hit
 
 
 def merge_with_priority(
     high_priority_data: Mem_or_Mail, low_priority_data: Mem_or_Mail
 ) -> Mem_or_Mail:
     """
-    合并 low_priority_data 和 high_priority_data。
-    规则：优先保留 high_priority_data 的数据。如果 nid 在 high_priority_data 中存在，则忽略 high_priority_data 中的对应行。
+    无 ct 版本（且双方都保证 ts 存在）：
+    - 优先保留 high；low 中 nid 若出现在 high 中则丢弃
     """
-    # 1. 判空处理：如果 B 是空的，直接返回 A
     if low_priority_data.nid.numel() == 0:
         return type(high_priority_data)(
             nid=high_priority_data.nid,
             data=high_priority_data.data,
             ts=high_priority_data.ts,
+            is_sorted=high_priority_data.is_sorted,
+            is_unique=high_priority_data.is_unique,
         )
-    # 如果 A 是空的，直接返回 B
     if high_priority_data.nid.numel() == 0:
         return type(low_priority_data)(
             nid=low_priority_data.nid,
             data=low_priority_data.data,
             ts=low_priority_data.ts,
+            is_sorted=low_priority_data.is_sorted,
+            is_unique=low_priority_data.is_unique,
         )
 
-    # -------------------------------------------------------
-    # 核心逻辑: 使用 torch.isin 找出 B 中冲突的节点
-    # -------------------------------------------------------
-    # mask 为 True 的位置表示：B 中的这个 nid 也在 A 中出现了
-    # (注意：self.nid 不需要去重，isin 会自动处理)
-    mask_in_high = torch.isin(low_priority_data.nid, high_priority_data.nid)
+    # 关键前提：high 必须 sorted+unique（就地处理/或返回新对象取决于你的实现）
+    high = _ensure_sorted_unique_nid(high_priority_data)
 
-    # 我们只保留那些 mask 为 False (即不在 A 中) 的数据
-    mask_keep_B = ~mask_in_high
+    # low 不需要排序，直接 membership test
+    mask_keep_low = _mask_not_in_sorted_unique(high.nid, low_priority_data.nid)
 
-    # 2. 对 B 进行过滤
-    b_nid_filtered = low_priority_data.nid[mask_keep_B]
-    b_mem_filtered = low_priority_data.data[mask_keep_B]
-    b_ts_filtered = low_priority_data.ts[mask_keep_B]
-
-    new_ct = None
-    if high_priority_data.ct is not None and low_priority_data.ct is not None:
-        b_ct_filtered = low_priority_data.ct[mask_keep_B]
-        new_ct = torch.cat([high_priority_data.ct, b_ct_filtered], dim=0)
-
-    ret = type(high_priority_data)(
-        nid=torch.cat([high_priority_data.nid, b_nid_filtered], dim=0),
-        data=torch.cat([high_priority_data.data, b_mem_filtered], dim=0),
-        ts=torch.cat([high_priority_data.ts, b_ts_filtered], dim=0),
-        ct=new_ct,
+    ret = type(high)(
+        nid=torch.cat([high.nid, low_priority_data.nid[mask_keep_low]], dim=0),
+        data=torch.cat([high.data, low_priority_data.data[mask_keep_low]], dim=0),
+        ts=torch.cat([high.ts, low_priority_data.ts[mask_keep_low]], dim=0),
+        is_sorted=False,
+        is_unique=False,
     )
-    ret = ret.sort_by_nid()
-
-    return ret
+    return ret.sort_by_nid()

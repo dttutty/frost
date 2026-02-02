@@ -28,7 +28,7 @@ class MemHandler(StreamThreadBase):
         mem_p2p_q: Q[tuple[P2PTask, torch.cuda.Event] | Literal["nothing_to_p2p"]],
         stop_ev: threading.Event,
         device: torch.device,
-        mem_writer_q: Q[tuple[torch.Tensor | None, MemTsNid, torch.cuda.Event]],
+        mem_writer_q: Q[tuple[torch.Tensor | None, MemTsNid, torch.cuda.Event] | None],
         h2d_sem: threading.Semaphore,
     ) -> None:
         super().__init__(name="mem_handler", stop_ev=stop_ev)
@@ -51,54 +51,28 @@ class MemHandler(StreamThreadBase):
             logger.debug("MemHandler: Starting logic loop")
 
         while self.stop_ev.is_set() is False:
-            if __debug__:
-                logger.debug(
-                    f"MemHandler: Waiting for mem_task from queue (queue size: {self.mem_task_q.qsize()})"
-                )
             mem_task_tuple = self.mem_task_q.get(block=True)
 
             if mem_task_tuple is None:
-                if __debug__:
-                    logger.debug("MemHandler: received sentinel, exiting logic loop")
-                if __debug__:
-                    logger.debug(
-                        f"MemHandler: Processed {batch_count} memory tasks before exit"
-                    )
                 self.mem_writer_q.put(None)  # Sentinel for MemWriter
                 break
 
             batch_count += 1
             mem_task, ready_event = mem_task_tuple
-            if __debug__:
-                logger.debug(
-                    f"MemHandler: Batch #{batch_count}, macro_bid={mem_task.macro_bid}, waiting for ready_event"
-                )
+
             torch.cuda.current_stream().wait_event(ready_event)
 
             mem_plan = mem_task.mem_plan
-            if __debug__:
-                logger.debug(
-                    f"MemHandler: Batch #{batch_count}, keeping last from root_new_mem, size={mem_task.root_new_mem.nid.numel()}"
-                )
-            root_new_mem = mem_task.root_new_mem.keep_last()
-            if __debug__:
-                logger.debug(
-                    f"MemHandler: Batch #{batch_count}, after keep_last, size={root_new_mem.nid.numel()}"
-                )
 
-            if __debug__:
-                logger.debug(
-                    f"MemHandler: Batch #{batch_count}, merging root_new_mem with old_mem, old_mem size={mem_task.old_mem_ts_nid.nid.numel()}"
-                )
+            root_new_mem = mem_task.root_new_mem.keep_last()
+
             mem_ts_nid = merge_with_priority(root_new_mem, mem_task.old_mem_ts_nid)
             if __debug__:
                 logger.debug(
                     f"MemHandler: Batch #{batch_count}, after merge, mem_ts_nid size={mem_ts_nid.nid.numel()}"
                 )
 
-            if mem_task.is_last is not None:
-                if __debug__:
-                    logger.debug(f"MemHandler: Batch #{batch_count}, creating P2P task")
+            if mem_task.is_last is False:
                 p2p_task = make_p2p_task(
                     data_td_nid=mem_ts_nid,
                     plan=mem_plan,

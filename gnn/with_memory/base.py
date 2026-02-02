@@ -39,9 +39,21 @@ class MemoryBaseGNN(nn.Module):
         self.mem_task_q = mem_task_q
         self.box_task_q = box_task_q
         self.header = header
+        self.updater_stream = torch.cuda.Stream()
+        self.box_prep_stream = torch.cuda.Stream()
+        self.mu_ready_event = torch.cuda.Event(
+            enable_timing=False, blocking=False, interprocess=False
+        )
+        self.box_ready_event = torch.cuda.Event(
+            enable_timing=False, blocking=False, interprocess=False
+        )
+        self.mem_ready_event = torch.cuda.Event(
+            enable_timing=False, blocking=False, interprocess=False
+        )
 
     def forward(self, meta: Meta) -> torch.Tensor:
-        self.update_and_sync_memory(meta=meta)
+        mu_ready = self.update_and_sync_memory(meta=meta)
+        torch.cuda.current_stream().wait_event(mu_ready)
         if isinstance(self.gnn, TGN):
             h = self.gnn(mfgs=meta.n2r_mfgs)
 
@@ -55,7 +67,7 @@ class MemoryBaseGNN(nn.Module):
 
         return cast(torch.Tensor, self.header(h))
 
-    def update_and_sync_memory(self, meta: Meta) -> None:
+    def update_and_sync_memory(self, meta: Meta) -> torch.cuda.Event:
         n_root_src_n_pos_dst = meta.n_src * 2
         assert meta.mem_n_box is not None
         if meta.n2r_mfgs is not None:
@@ -87,9 +99,11 @@ class MemoryBaseGNN(nn.Module):
             root_old_mem = meta.mem_n_box.mem
             root_old_box = meta.mem_n_box.box
             if block is not None:
-                block, updated_mem = self.memory_updater(block)
-                ts = block.srcdata["ts"]
-                nid = block.srcdata["ID"]
+                with torch.cuda.stream(self.updater_stream):
+                    block, updated_mem, ts, nid = self.memory_updater(block)
+                    self.mu_ready_event.record(
+                        torch.cuda.current_stream()
+                    )  # updater_stream
 
                 # 可能不跟root_ts一一对应
 
@@ -107,17 +121,18 @@ class MemoryBaseGNN(nn.Module):
             root_old_mem = meta.mem_n_box.mem
             root_old_box = meta.mem_n_box.box
             mem_n_box = meta.mem_n_box
-            updated_mem = self.memory_updater(
-                mem_n_box=mem_n_box, root_ts=meta.root_ts.repeat_interleave(3)
-            )
+            with torch.cuda.stream(self.updater_stream):
+                updated_mem = self.memory_updater(
+                    mem_n_box=mem_n_box, root_ts=meta.root_ts.repeat_interleave(3)
+                )
             root_new_mem = MemTsNid(
                 ts=meta.root_ts.repeat_interleave(2),
                 data=updated_mem[:n_root_src_n_pos_dst],
                 nid=meta.root_nid[:n_root_src_n_pos_dst],
             )
 
-        ready_event: torch.cuda.Event = torch.cuda.Event()
-        ready_event.record(torch.cuda.current_stream())
+        with torch.cuda.stream(self.updater_stream):
+            self.mem_ready_event.record(torch.cuda.current_stream())
 
         m_state = meta.m_state
         plan_set = meta.plan_set
@@ -125,7 +140,10 @@ class MemoryBaseGNN(nn.Module):
         assert plan_set.box is not None
         assert plan_set.mem is not None
 
-        root_new_mem_orig = root_new_mem.clone()  # 这里的ts是交互发生的时间
+        with torch.cuda.stream(self.box_prep_stream):
+            torch.cuda.current_stream().wait_event(self.mu_ready_event)
+            root_new_mem_orig = root_new_mem.clone()  # 这里的ts是交互发生的时间
+            self.box_ready_event.record(torch.cuda.current_stream())
 
         # handle mem sync
         mem_task = MemTask(
@@ -136,7 +154,7 @@ class MemoryBaseGNN(nn.Module):
             is_last=m_state.is_last_macro_of_epoch,
             meta=meta,
         )
-        self.mem_task_q.put((mem_task, ready_event))
+        self.mem_task_q.put((mem_task, self.mem_ready_event))
 
         box_task = BoxTask(
             macro_bid=m_state.cur_macro_of_epoch,
@@ -149,4 +167,6 @@ class MemoryBaseGNN(nn.Module):
             r2n_mdt=meta.r2n_mdt,
             meta=meta,
         )
-        self.box_task_q.put((box_task, ready_event))
+        self.box_task_q.put((box_task, self.box_ready_event))
+
+        return self.mu_ready_event

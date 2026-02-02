@@ -70,11 +70,11 @@ class Host:
         self.sample_support_for_neg_dst = cfg.s.sample_support_for_neg_dst
         self.model_name = cfg.t.model
 
-        self.meta_in_q: Q[Meta | None | Literal["end_of_epoch"]] = Q(maxsize=8)
+        self.meta_in_q: Q[Meta | None | Literal["end_of_epoch"]] = Q(maxsize=200)
         self.meta_bundle_q: Q[MetaBundle | None | Literal["end_of_epoch"]] = Q(
-            maxsize=4
+            maxsize=50
         )
-        self.scatter_q: Q[MetaBundle | None | Literal["end_of_epoch"]] = Q(maxsize=4)
+        self.scatter_q: Q[MetaBundle | None | Literal["end_of_epoch"]] = Q(maxsize=50)
         self.curr_mini_of_epoch = 0
 
         self.mem_plan_out_q: Q[list[DyPlan] | None] | None = None

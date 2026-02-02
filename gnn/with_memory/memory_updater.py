@@ -25,11 +25,12 @@ class MfgMemoryUpdater(torch.nn.Module):
     def forward(
         self,
         block: DGLBlock,
-    ) -> tuple[DGLBlock, torch.Tensor]:
+    ) -> tuple[DGLBlock, torch.Tensor, torch.Tensor, torch.Tensor]:
         mem: torch.Tensor = cast(torch.Tensor, block.srcdata["mem"])
         ts: torch.Tensor = cast(torch.Tensor, block.srcdata["ts"])
         mem_ts: torch.Tensor = cast(torch.Tensor, block.srcdata["mem_ts"])
         box: torch.Tensor = cast(torch.Tensor, block.srcdata["box"])
+        nid: torch.Tensor = cast(torch.Tensor, block.srcdata["ID"])
 
         mail = torch.squeeze(box, dim=1)  # Flatten because it has extra dimension
 
@@ -38,7 +39,7 @@ class MfgMemoryUpdater(torch.nn.Module):
         up_mem = self.rnn(rnn_input, mem)
         block.srcdata["updated_mem"] = up_mem
 
-        return block, up_mem
+        return block, up_mem.detach(), ts.detach(), nid.detach()
 
 
 class NoMfgMemoryUpdater(torch.nn.Module):

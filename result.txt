@@ -1,0 +1,6 @@
+Host processing test split: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████| 48/48 [00:01<00:00, 33.71it/s]
+INFO - [Epoch 50] Train Loss: 0.3763 | Val Loss: 0.4704 | Val AUC: 0.8404 | Val AP: 0.8161 | Test AUC: 0.8260 | Test AP: 0.8032
+INFO - Best Val AP: 0.8185 @ Epoch 48 | Corresponding Test AP: 0.8276 | Corresponding Test AUC: 0.8517
+Elapsed time: 712.53 seconds
+
+

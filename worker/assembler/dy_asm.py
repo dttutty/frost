@@ -2,7 +2,7 @@ import logging
 import threading
 import time
 from queue import Queue as Q
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from dgl.heterograph import DGLBlock
@@ -13,6 +13,7 @@ from schemas.datatypes.mem_mail_box.box import BoxTsNid
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from schemas.datatypes.misc import MemNBox, Shared
 from schemas.datatypes.plan import DyPlan
+from schemas.datatypes.task import P2PTask
 from thread_base_with_stream import StreamThreadBase
 
 
@@ -177,7 +178,6 @@ def prep_part_mem_n_box(
 
     assert isinstance(mem, MemTsNid)
     assert isinstance(box, BoxTsNid)
-
     if __debug__:
         logger.debug(
             f"DyAsm: prep_part_mem_n_box complete, mem size={mem.nid.numel()}, box size={box.nid.numel()}"
@@ -194,7 +194,7 @@ class DyAssembler(StreamThreadBase):
     def __init__(
         self,
         in_q: Q[MetaWEvent | None | Literal["end_of_epoch"]],
-        delta_q: Q[tuple[MemNBox, torch.cuda.Event] | Literal["nothing"]],
+        delta_q: Q[tuple[P2PTask, P2PTask, list[Any]] | Literal["nothing"]],
         full_q: Q[MetaWEvent | None | Literal["end_of_epoch"]],
         stop_ev: threading.Event,
         device: torch.device,
@@ -213,24 +213,24 @@ class DyAssembler(StreamThreadBase):
         self.device = device
         self.stop_ev = stop_ev
         self.boxsize = boxsize
+        self._ready_event = torch.cuda.Event(
+            enable_timing=False, blocking=False, interprocess=False
+        )
         if __debug__:
             logger.debug("DyAsm: DyAssembler initialized")
 
     def fill_block_with_mem_box(
         self, gnn_mfgs_0: list[DGLBlock], mem: MemTsNid, box: BoxTsNid
     ) -> None:
+        assert torch.equal(mem.nid, box.nid)
         if __debug__:
             logger.debug(
                 f"DyAsm: fill_block_with_mem_mail called, num_blocks={len(gnn_mfgs_0)}, mem size={mem.nid.numel()}, box size={box.nid.numel()}"
             )
         for idx, block in enumerate(gnn_mfgs_0):
-            mem.sort_by_nid()
-            box.sort_by_nid()
             assert mem.is_sorted  # make sure mem.id is sorted
             assert box.is_sorted  # make sure box.id is sorted
-            assert torch.equal(mem.nid, box.nid), (
-                "MemTsNid and BoxTsNid must have the same NIDs."
-            )
+
             global_nid: torch.Tensor = block.srcdata["ID"]
             permute_nidx = torch.searchsorted(mem.nid, global_nid)
 
@@ -254,17 +254,9 @@ class DyAssembler(StreamThreadBase):
         mem_n_box: MemNBox,
         delta: MemNBox,
     ) -> MemNBox:
-        if __debug__:
-            logger.debug(
-                f"DyAsm: _merge called, base mem size={mem_n_box.mem.nid.numel()}, delta mem size={delta.mem.nid.numel()}"
-            )
-        mem = mem_n_box.mem.merge_mem(delta.mem)
-        box = mem_n_box.box.merge_box(delta.box)
+        mem = mem_n_box.mem.merge_mem(delta.mem, is_overlap=True)
+        box = mem_n_box.box.merge_box(delta.box, is_overlap=True)
 
-        if __debug__:
-            logger.debug(
-                f"DyAsm: Sorting merged data, merged mem size={mem.nid.numel()}, merged box size={box.nid.numel()}"
-            )
         mem = mem.sort_by_nid()
         box = box.sort_by_nid()
 
@@ -315,12 +307,20 @@ class DyAssembler(StreamThreadBase):
             batch_count += 1
             meta, meta_ready_event = in_data
             mem_n_box = meta.mem_n_box
+            torch.cuda.current_stream().wait_event(meta_ready_event)
+            # mem = mem_n_box.mem
+            # box = mem_n_box.box
+            # if torch.equal(mem.nid, box.nid) == False:
+            #     print("Meta Error: MemTsNid and BoxTsNid NIDs do not match.")
+            #     print("Meta Mem NIDs:", mem.nid)
+            #     print("Meta Box NIDs:", box.nid)
+            #     raise ValueError("Meta NID mismatch between MemTsNid and BoxTsNid.")
+
             assert mem_n_box is not None
             if __debug__:
                 logger.debug(
                     f"DyAsm: Batch #{batch_count}, waiting for meta_ready_event"
                 )
-            torch.cuda.current_stream().wait_event(meta_ready_event)
 
             if __debug__:
                 logger.debug(
@@ -333,16 +333,37 @@ class DyAssembler(StreamThreadBase):
                     logger.debug(
                         f"DyAsm: Batch #{batch_count}, no delta update, using base mem_n_box"
                     )
+                mem_n_box.mem = mem_n_box.mem.sort_by_nid()
+                mem_n_box.box = mem_n_box.box.sort_by_nid()
                 mem_n_box_full = mem_n_box
             else:
-                delta, delta_ready_event = delta_tuple
-                if __debug__:
-                    logger.debug(
-                        f"DyAsm: Batch #{batch_count}, received delta, waiting for delta_ready_event"
-                    )
-                torch.cuda.current_stream().wait_event(delta_ready_event)
+                mem_p2p, box_p2p, works = delta_tuple
+                for work in works:
+                    work.wait()
+
+                delta_mem = MemTsNid(
+                    nid=mem_p2p.nid2recv, data=mem_p2p.data2recv, ts=mem_p2p.ts2recv
+                )
+                delta_mem = delta_mem.sort_by_nid()
+                delta_box = BoxTsNid(
+                    nid=box_p2p.nid2recv, data=box_p2p.data2recv, ts=box_p2p.ts2recv
+                )
+                delta_box = delta_box.sort_by_nid()
+
+                delta = MemNBox(mem=delta_mem, box=delta_box)
+                # delta, delta_ready_event = delta_tuple
+
+                # torch.cuda.current_stream().wait_event(delta_ready_event)
                 if __debug__:
                     logger.debug(f"DyAsm: Batch #{batch_count}, merging base and delta")
+
+                # if torch.equal(delta.mem.nid, delta.box.nid) == False:
+                #     print("Delta  Error: MemTsNid and BoxTsNid NIDs do not match.")
+                #     print(delta.mem.nid)
+                #     print(delta.box.nid)
+                #     raise ValueError(
+                #         "Delta NID mismatch between MemTsNid and BoxTsNid."
+                #     )
                 mem_n_box_full = self._merge(mem_n_box, delta)
 
             # if self.boxsize == 1:
@@ -366,15 +387,14 @@ class DyAssembler(StreamThreadBase):
                 meta.mem_n_box = mem_n_box_full.retain_and_align_to_root(meta.root_nid)
 
             # 3) 把结果交给主线程（主线程取时再 wait_stream）
-            ready_event: torch.cuda.Event = torch.cuda.Event()
-            ready_event.record(torch.cuda.current_stream())
+            self._ready_event.record(torch.cuda.current_stream())
 
             batch_time = time.time() - batch_start
             if __debug__:
                 logger.debug(
                     f"DyAsm: Batch #{batch_count} complete, total time={batch_time:.4f}s, putting to full_q"
                 )
-            self.full_q.put((meta, ready_event), block=True)
+            self.full_q.put((meta, self._ready_event), block=True)
 
         if __debug__:
             logger.debug(

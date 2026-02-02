@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import cast
 
 import torch
 from dgl.heterograph import DGLBlock
@@ -14,22 +13,28 @@ from .box import BoxTsNid
 class MailTsNid:
     nid: Tensor
     data: Tensor
-
     ts: Tensor
-    ct: Tensor | None = None
+    is_sorted: bool = False
+    is_unique: bool = False
 
     def __repr__(self) -> str:
         return (
             f"MailTsNid(nid={self.nid.shape}, data={self.data.shape}, "
-            f"ts={self.ts.shape()})"
+            f"ts={self.ts.shape}, is_sorted={self.is_sorted}, is_unique={self.is_unique})"
         )
+
+    def _ensure_sorted_unique_nid(self) -> MailTsNid:
+        from ._data_ops import _ensure_sorted_unique_nid
+
+        return _ensure_sorted_unique_nid(self)
 
     def cuda(self) -> MailTsNid:
         return MailTsNid(
             nid=self.nid.cuda(),
             data=self.data.cuda(),
             ts=self.ts.cuda(),
-            ct=self.ct.cuda() if self.ct is not None else None,
+            is_sorted=self.is_sorted,
+            is_unique=self.is_unique,
         )
 
     def to_box(self) -> BoxTsNid:
@@ -37,12 +42,9 @@ class MailTsNid:
             nid=self.nid,
             data=self.data.unsqueeze(1),
             ts=self.ts.unsqueeze(1),
-            ct=self.ct,
-            next_pos=None,
+            is_sorted=self.is_sorted,
+            is_unique=self.is_unique,
         )
-
-    def keep_last_after_gather(self) -> MailTsNid:
-        return self
 
     def merge_with_priority(self, other: MailTsNid) -> MailTsNid:
         from ._data_ops import merge_with_priority
@@ -52,14 +54,14 @@ class MailTsNid:
     def keep_last(self) -> MailTsNid:
         from ._data_ops import keep_last
 
-        keep_last(self)
-        return self
+        ret = keep_last(self)
+        return ret
 
     def keep_mean(self) -> MailTsNid:
         from ._data_ops import keep_mean
 
-        keep_mean(self)
-        return self
+        ret = keep_mean(self)
+        return ret
 
     def deliver(
         self, delivery: torch.Tensor | DGLBlock, include_self: bool = False
@@ -74,7 +76,7 @@ class MailTsNid:
             raise TypeError(f"Unsupported delivery type: {type(delivery)}")
 
     def _deliver_tensor(
-        self, mail_delivery_tensor: Tensor, include_self: bool = False
+        self, mail_delivery_tensor: Tensor, include_self: bool = True
     ) -> MailTsNid:
         """
         执行多对多 (Many-to-Many) 的消息分发 Join。
@@ -84,8 +86,6 @@ class MailTsNid:
                                   Row 0: Src NID (发送者), Row 1: Dst NID (接收者)
             include_self:         是否保留原有的邮件（即发送给"自己"）。
         """
-        # 如果你确实不支持 ct，可以保留这个 assert
-        # assert self.ct is None
 
         # ======================
         # 特殊情况：空输入
@@ -102,11 +102,8 @@ class MailTsNid:
                 device=self.data.device,
             )
             empty_ts = torch.empty(0, dtype=self.ts.dtype, device=self.ts.device)
-            empty_ct = None
-            if self.ct is not None:
-                empty_ct = torch.empty(0, dtype=self.ct.dtype, device=self.ct.device)
 
-            return MailTsNid(nid=empty_nid, data=empty_mail, ts=empty_ts, ct=empty_ct)
+            return MailTsNid(nid=empty_nid, data=empty_mail, ts=empty_ts)
 
         # ======================
         # 主逻辑：按 edge 循环
@@ -117,7 +114,6 @@ class MailTsNid:
         new_nids_list = []
         new_mail_list = []
         new_ts_list = []
-        new_ct_list = [] if self.ct is not None else None
 
         # 一条条 edge 处理
         for src, dst in zip(src_nodes, dst_nodes):
@@ -128,8 +124,6 @@ class MailTsNid:
             # 取出这些邮件
             mails_for_src = self.data[mask]  # [K, mail_dim]
             ts_for_src = self.ts[mask]  # [K]
-            if self.ct is not None:
-                ct_for_src = self.ct[mask]  # [K]
 
             k = mails_for_src.size(0)
 
@@ -138,8 +132,6 @@ class MailTsNid:
             new_nids_list.append(dst.expand(k))
             new_mail_list.append(mails_for_src)
             new_ts_list.append(ts_for_src)
-            if new_ct_list is not None:
-                new_ct_list.append(ct_for_src)
 
         # ======================
         # 没有任何匹配到的邮件
@@ -156,11 +148,14 @@ class MailTsNid:
                 device=self.data.device,
             )
             empty_ts = torch.empty(0, dtype=self.ts.dtype, device=self.ts.device)
-            empty_ct = None
-            if self.ct is not None:
-                empty_ct = torch.empty(0, dtype=self.ct.dtype, device=self.ct.device)
 
-            return MailTsNid(nid=empty_nid, data=empty_mail, ts=empty_ts, ct=empty_ct)
+            return MailTsNid(
+                nid=empty_nid,
+                data=empty_mail,
+                ts=empty_ts,
+                is_sorted=False,
+                is_unique=False,
+            )
 
         # ======================
         # 把所有 edge 收集的结果拼在一起
@@ -168,25 +163,29 @@ class MailTsNid:
         new_nids = torch.cat(new_nids_list, dim=0)
         new_mail_data = torch.cat(new_mail_list, dim=0)
         new_ts = torch.cat(new_ts_list, dim=0)
-        new_ct = None
-        if new_ct_list is not None:
-            new_ct = torch.cat(new_ct_list, dim=0)
 
         # ======================
         # 是否保留原有 self
         # ======================
         if not include_self:
-            return MailTsNid(new_nids, new_mail_data, new_ts, new_ct)
+            return MailTsNid(
+                nid=new_nids,
+                data=new_mail_data,
+                ts=new_ts,
+                is_sorted=False,
+                is_unique=False,
+            )
 
         return MailTsNid(
             nid=torch.cat([self.nid, new_nids], dim=0),
             data=torch.cat([self.data, new_mail_data], dim=0),
             ts=torch.cat([self.ts, new_ts], dim=0),
-            ct=None if self.ct is None else torch.cat([self.ct, new_ct], dim=0),
+            is_sorted=False,
+            is_unique=False,
         )
 
     def _deliver_block(
-        self, mail_delivery_block: DGLBlock, include_self: bool = False
+        self, mail_delivery_block: DGLBlock, include_self: bool = True
     ) -> MailTsNid:
         """
         使用 DGL Block 做多对多消息投递。
@@ -202,7 +201,6 @@ class MailTsNid:
         nid = self.nid
         mail = self.data
         ts = self.ts
-        ct = self.ct
 
         # ======================
         # 取出 Block 中的所有边的 global src/dst
@@ -217,7 +215,6 @@ class MailTsNid:
         new_nids_list = []
         new_mail_list = []
         new_ts_list = []
-        new_ct_list = [] if ct is not None else None
 
         # ======================
         # 按边循环：src -> dst
@@ -238,9 +235,6 @@ class MailTsNid:
             new_mail_list.append(mails_for_s)
             new_ts_list.append(ts_for_s)
 
-            if new_ct_list is not None:
-                new_ct_list.append(ct[mask])
-
         # ======================
         # 如果没有任何匹配到 src
         # ======================
@@ -251,14 +245,12 @@ class MailTsNid:
                 empty_nid = nid.new_empty((0,))
                 empty_mail = mail.new_empty((0, mail.size(1)))
                 empty_ts = ts.new_empty((0,))
-                empty_ct = None
-                if ct is not None:
-                    empty_ct = ct.new_empty((0,))
                 return MailTsNid(
                     nid=empty_nid,
                     data=empty_mail,
                     ts=empty_ts,
-                    ct=empty_ct,
+                    is_sorted=False,
+                    is_unique=False,
                 )
 
         # ======================
@@ -267,30 +259,33 @@ class MailTsNid:
         new_nids = torch.cat(new_nids_list, dim=0)
         new_mail_data = torch.cat(new_mail_list, dim=0)
         new_ts = torch.cat(new_ts_list, dim=0)
-        new_ct = None
-        if new_ct_list is not None:
-            new_ct = torch.cat(new_ct_list, dim=0)
 
         # ======================
         # 是否保留原邮件
         # ======================
         if not include_self:
-            return MailTsNid(nid=new_nids, data=new_mail_data, ts=new_ts, ct=new_ct)
+            return MailTsNid(
+                nid=new_nids,
+                data=new_mail_data,
+                ts=new_ts,
+                is_sorted=False,
+                is_unique=False,
+            )
 
         return MailTsNid(
             nid=torch.cat([nid, new_nids], dim=0),
             data=torch.cat([mail, new_mail_data], dim=0),
             ts=torch.cat([ts, new_ts], dim=0),
-            ct=None
-            if ct is None
-            else cast(torch.Tensor, torch.cat([ct, new_ct], dim=0)),
+            is_sorted=False,
+            is_unique=False,
         )
 
     def sort_by_nid(self) -> MailTsNid:
+        if self.is_sorted:
+            return self
         sorted_indices = torch.argsort(self.nid)
         self.nid = self.nid[sorted_indices]
         self.data = self.data[sorted_indices]
         self.ts = self.ts[sorted_indices]
-        if self.ct is not None:
-            self.ct = self.ct[sorted_indices]
+        self.is_sorted = True
         return self
