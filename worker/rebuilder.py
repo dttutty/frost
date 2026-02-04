@@ -302,38 +302,19 @@ class Rebuilder(StreamThreadBase):
         self.stop_ev = stop_ev
         self.shm_mgr = shm_manager
 
-        logger.debug("Rebuilder: shared memory enabled")
-
-        logger.debug("Rebuilder: Initialized")
-
     @torch.no_grad()
     def logic(self) -> None:
-        batch_count = 0
-        logger.debug("Rebuilder: starting logic loop")
-
         while not self.stop_ev.is_set():
-            logger.debug(
-                f"Rebuilder: waiting for meta from in_q (queue size: {self.in_q.qsize()})"
-            )
-
             manifest = self.in_q.get(block=True)
-            logger.debug(f"Rebuilder: received meta type: {type(manifest).__name__}")
 
             if manifest is None:
-                logger.debug("Rebuilder: received None, putting to out_q and exiting")
                 self.out_q.put(None, block=True)
-                logger.debug(f"Rebuilder: Processed {batch_count} batches before exit")
                 self.out_q.put(None, block=True)
                 break
             elif manifest == "end_of_epoch":
-                logger.debug("Rebuilder: received end_of_epoch, forwarding to out_q")
                 self.out_q.put("end_of_epoch", block=True)
                 continue
 
-            # if isinstance(manifest, torch.Tensor):
-            #     logger.info(
-            #         f"Rebuilder: Received Manifest[0] (BatchIdx) = {manifest[0].item()}"
-            #     )
             assert isinstance(manifest, torch.Tensor)
             meta = rebuild_meta_full_from_shm(self.shm_mgr, manifest)
 

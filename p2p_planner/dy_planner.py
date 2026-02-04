@@ -15,86 +15,6 @@ from thread_base import ThreadBase
 logger = logging.getLogger(__name__)
 
 
-def handle_remaining(
-    needs: list[TensorSet],
-    avails: list[TensorSet],
-    gpus_distance: np.ndarray,
-) -> tuple[list[TensorSet], list[list[TensorSet]]]:
-    """
-    (TensorSet 版本)
-    计算陈旧数据的 P2P 计划和 CPU 预取。
-    逻辑：距离优先的贪心匹配 (Greedy Matching by Distance)。
-    Receiver-Centric
-    """
-    n_gpus = len(gpus_distance)
-
-    # --- 0. 准备空 TensorSet ---
-    # 为了保证 PyTorch 运算不报错，需获取正确的 device 和 dtype
-    ref_ts = None
-    if n_gpus > 0:
-        if len(needs[0]) > 0:
-            ref_ts = needs[0]
-        elif len(avails[0]) > 0:
-            ref_ts = avails[0]
-
-    if ref_ts is not None:
-        empty_tensor = torch.tensor(
-            [], dtype=ref_ts.data.dtype, device=ref_ts.data.device
-        )
-    else:
-        empty_tensor = torch.tensor([], dtype=torch.long)  # Fallback
-
-    empty_ts = TensorSet(empty_tensor)
-
-    # --- 1. 初始化结果容器 ---
-    # p2p_plan[s][r] 表示 s 发给 r 的数据
-    p2p_plan: list[list[TensorSet]] = [
-        [empty_ts for _ in range(n_gpus)] for _ in range(n_gpus)
-    ]
-
-    # --- 2. 核心逻辑：按距离排序的贪心匹配 ---
-    unique_distances = sorted(np.unique(gpus_distance))
-
-    for dist in unique_distances:
-        # 找到所有距离为 dist 的 (sender, receiver) 对
-        # results in array of shape (N, 2) -> [[s1, r1], [s2, r2], ...]
-        pairs = np.argwhere(gpus_distance == dist)
-
-        for s, r in pairs:
-            # 优化：如果 Receiver 已经没什么需要的了，直接跳过
-            if len(needs[r]) == 0:
-                continue
-
-            # 优化：如果 Sender 没什么可提供的，直接跳过
-            if len(avails[s]) == 0:
-                continue
-
-            # 获取 Sender 拥有的
-            available = avails[s]
-
-            # 获取 Receiver 目前还缺少的
-            # 注意：needs[r] 在循环过程中会不断变小
-            current_need = needs[r]
-
-            # 交集：sender 有 且 receiver 缺
-            # 使用 TensorSet.__and__ (&)
-            to_transfer = available & current_need
-
-            if len(to_transfer) > 0:
-                # 1. 加入传输计划
-                # 逻辑: p2p_plan[s][r].update(to_transfer)
-                # TensorSet 写法: 必须赋值回去，因为 | 返回新对象
-                p2p_plan[s][r] = p2p_plan[s][r] | to_transfer
-
-                # 2. 关键步骤：贪心消除
-                # 逻辑: need.difference_update(to_transfer)
-                # TensorSet 写法: 计算差集并**回写到列表**
-                needs[r] = current_need - to_transfer
-
-    # 返回更新后的 needs (即剩下的必须去 CPU 拿的部分) 和 P2P 计划
-    return needs, p2p_plan
-
-
 def handle_update(
     needs: list[TensorSet],
     avails: list[TensorSet],
@@ -298,14 +218,14 @@ class DynamicPlanner(ThreadBase):
 
         # 1. 预处理：确定每个 GPU 实际持有的 "Stale" 数据
         # 如果提供了 fresh 集合，必须从持有列表中排除它们（因为 fresh 优先用于 fresh plan）
-        avails_of_1 = [avail - all_update_avails_of_1 for avail in avails_of_1]
+        # avails_of_1 = [avail - all_update_avails_of_1 for avail in avails_of_1]
         needs_of_2 = [need - all_update_avails_of_1 for need in needs_of_2]
 
-        needs_of_2, stale_p2p_1to2 = handle_remaining(
-            needs_of_2,  # <-- 从 self 读取
-            avails_of_1,
-            self.gpus_distance,
-        )  # 这种没有新mem的节点,直接发送旧的mem就可以(由distance最近的发)
+        # needs_of_2, stale_p2p_1to2 = handle_remaining(
+        #     needs_of_2,  # <-- 从 self 读取
+        #     avails_of_1,
+        #     self.gpus_distance,
+        # )  # 这种没有新mem的节点,直接发送旧的mem就可以(由distance最近的发)
 
         plans = []
         device = (
@@ -327,12 +247,12 @@ class DynamicPlanner(ThreadBase):
 
         for src in range(n_gpus):
             for dst in range(n_gpus):
-                if __debug__:
-                    intersection = fresh_p2p_1to2[src][dst] & stale_p2p_1to2[src][dst]
-                    assert len(intersection) == 0, (
-                        "Fresh and Stale P2P sets should be disjoint."
-                    )
-                p2p[src][dst] = fresh_p2p_1to2[src][dst] | stale_p2p_1to2[src][dst]
+                # if __debug__:
+                #     intersection = fresh_p2p_1to2[src][dst]
+                #     assert len(intersection) == 0, (
+                #         "Fresh and Stale P2P sets should be disjoint."
+                #     )
+                p2p[src][dst] = fresh_p2p_1to2[src][dst]
                 p2p_cts[src, dst] = len(p2p[src][dst])
 
         for src in range(n_gpus):

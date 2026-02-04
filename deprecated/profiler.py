@@ -41,49 +41,29 @@ class Profiler:
         for key, value in time_stats.items():
             if key in self.times:
                 self.times[key] += value
-            else:
-                logger.debug(f"Warning: Timing metric '{key}' not defined in Profiler.")
 
     def increase_count(self, count_stats: dict):
         """Accumulate count stats from a dictionary."""
         for key, value in count_stats.items():
             if key in self.counts:
                 self.counts[key] += value
-            else:
-                logger.debug(f"Warning: Count metric '{key}' not defined in Profiler.")
 
     def report(self):
         """Print a formatted final report of all collected statistics."""
         batch_count = self.counts["batch_count"]
         if batch_count == 0:
-            logger.debug("Profiler Report: No data collected (0 batches).")
             return
 
-        logger.debug("\n" + "=" * 80)
-        logger.debug(" " * 28 + "PROFILING FINAL REPORT")
-        logger.debug("=" * 80)
-        logger.debug(f"Total Batches Processed: {batch_count}\n")
-
         # --- Timing Statistics Report ---
-        logger.debug("--- Timing Statistics ---")
-        logger.debug(f"{'Metric':<50} | {'Total (s)':>12} | {'Avg/Batch (ms)':>15}")
-        logger.debug("-" * 80)
         # Sort items by key to ensure consistent order
         for name, total_time in sorted(self.times.items()):
             avg_time_ms = (total_time / batch_count) * 1000
-            logger.debug(f"{name:<50} | {total_time:>12.4f} | {avg_time_ms:>15.4f}")
 
-        logger.debug("\n" + "--- Count Statistics ---")
-        logger.debug(f"{'Metric':<50} | {'Total Count':>12} | {'Avg/Batch':>15}")
-        logger.debug("-" * 80)
         # Sort items by key to ensure consistent order
         for name, total_count in sorted(self.counts.items()):
             if name == "batch_count":
                 continue  # Don't report batch_count in the table
             avg_count = total_count / batch_count
-            logger.debug(f"{name:<50} | {total_count:>12d} | {avg_count:>15.2f}")
-
-        logger.debug("=" * 80)
 
     def reset_counts(self):
         """Reset only the count statistics."""

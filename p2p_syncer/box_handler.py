@@ -9,6 +9,7 @@ from schemas.datatypes.mem_mail_box.box import BoxTsNid
 from schemas.datatypes.mem_mail_box.mail import MailTsNid
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from schemas.datatypes.task import BoxTask, P2PTask
+from schemas.protocol.misc import CudaEventLike
 from thread_base_with_stream import StreamThreadBase
 
 from .utils.interaction_ops import generate_interaction_mails
@@ -25,13 +26,13 @@ logger = logging.getLogger(__name__)
 class BoxHandler(StreamThreadBase):
     def __init__(
         self,
-        box_task_q: Q[tuple[BoxTask, torch.cuda.Event] | None],
-        box_p2p_q: Q[tuple[P2PTask, torch.cuda.Event] | Literal["nothing_to_p2p"]],
+        box_task_q: Q[tuple[BoxTask, CudaEventLike] | None],
+        box_p2p_q: Q[tuple[P2PTask, CudaEventLike] | Literal["nothing_to_p2p"]],
         stop_ev: threading.Event,
         mail_combine: Literal["last", "mean", "all"],
         merge_src: bool,
         device: torch.device,
-        box_writer_q: Q[tuple[torch.Tensor | None, BoxTsNid, torch.cuda.Event] | None],
+        box_writer_q: Q[tuple[torch.Tensor | None, BoxTsNid, CudaEventLike] | None],
         h2d_sem: threading.Semaphore,
     ) -> None:
         super().__init__(name="box_handler", stop_ev=stop_ev)
@@ -64,7 +65,7 @@ class BoxHandler(StreamThreadBase):
 
             new_mail.keep_mean()
 
-        new_mail = new_mail.merge_with_priority(old_mail)
+        # new_mail = new_mail.merge_with_priority(old_mail)
 
         box_ts_nid = new_mail.to_box()
 
@@ -100,54 +101,30 @@ class BoxHandler(StreamThreadBase):
         # new_mail = delivered_mails
 
         # if mail_combine == "last":
-        #     if __debug__:
-        #         logger.debug("BoxHandler: Keeping last mail and merging with box")
         #     new_mail.keep_last()
         #     # box_ts_nid = box.merge_1_mail(new_mail)
         # elif mail_combine == "mean":
-        #     if __debug__:
-        #         logger.debug("BoxHandler: Keeping mean mail and merging with box")
         #     new_mail.keep_mean()
         #     # box_ts_nid = box.merge_1_mail(new_mail)
         # elif mail_combine == "all":
-        #     if __debug__:
-        #         logger.debug("BoxHandler: Merging all mails with box")
         #     # box_ts_nid = box.merge_n_mail(new_mail)
 
-        # if __debug__:
-        #     logger.debug(f"BoxHandler: Merged box size={box_ts_nid.nid.numel()}")
-        # if __debug__:
-        #     logger.debug("BoxHandler: Creating P2P task for large box")
         # p2p_task = make_p2p_task(
         #     data_td_nid=box_ts_nid,
         #     plan=box_plan,
         #     strategy="last",
         #     device=self.device,
         # )
-        # if __debug__:
-        #     logger.debug("BoxHandler: handle_large_box complete")
         # return p2p_task, box_ts_nid
 
     @torch.no_grad()
     def logic(self) -> None:
         batch_count = 0
-        if __debug__:
-            logger.debug("BoxHandler: Starting logic loop")
 
         while not self.stop_ev.is_set():
-            if __debug__:
-                logger.debug(
-                    f"BoxHandler: Waiting for box_task from queue (queue size: {self.box_task_q.qsize()})"
-                )
             box_task_tuple = self.box_task_q.get(block=True)
 
             if box_task_tuple is None:
-                if __debug__:
-                    logger.debug("BoxHandler: received sentinel, exiting logic loop")
-                if __debug__:
-                    logger.debug(
-                        f"BoxHandler: Processed {batch_count} box tasks before exit"
-                    )
                 self.box_writer_q.put(None)  # Sentinel for BoxWriter
                 break
 
@@ -176,15 +153,16 @@ class BoxHandler(StreamThreadBase):
                 )
 
             if box_task.is_last is False:
-                ready_event: torch.cuda.Event = torch.cuda.Event()
+                ready_event: CudaEventLike = torch.cuda.Event()
                 ready_event.record(torch.cuda.current_stream())
+                # torch.cuda.current_stream().synchronize()
                 self.box_p2p_q.put((p2p_task, ready_event))
             else:
                 assert p2p_task is None
 
                 self.box_p2p_q.put("nothing_to_p2p")
 
-            ready_event: torch.cuda.Event = torch.cuda.Event()
+            ready_event: CudaEventLike = torch.cuda.Event()
             ready_event.record(torch.cuda.current_stream())
             if box_task.box_plan.writeback is not None:
                 assert box_ts_nid is not None

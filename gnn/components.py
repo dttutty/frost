@@ -222,6 +222,160 @@ def _cat_optional(
     return torch.cat(parts, dim=dim) if len(parts) > 1 else x
 
 
+class EnhancedTemporalGraphAttentionLayer(nn.Module):
+    """
+    Enhanced TGN Layer with Feature Mixing MLP and Transformer-style FFN.
+    Increases complexity for better expressivity and higher computation load.
+    """
+
+    def __init__(
+        self,
+        dim_node: int,
+        dim_edge: int,
+        dim_time: int = 0,
+        dim_out: int = 100,
+        num_head: int = 2,
+        dropout: float = 0.2,
+        ffn_expansion: int = 4,  # 新增: FFN 扩展倍数，默认 4 倍
+    ) -> None:
+        super().__init__()
+        self.num_head = num_head
+        self.dim_out = dim_out
+
+        assert dim_out % num_head == 0
+        self.head_dim = dim_out // num_head
+
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm1 = nn.LayerNorm(dim_out)
+        self.layer_norm2 = nn.LayerNorm(dim_out)  # 新增: 为 FFN 增加一个 LN
+
+        self.time_enc: TimeEncode | None = None
+        if dim_time > 0:
+            # 假设 TimeEncode 是你自定义的模块
+            self.time_enc = TimeEncode(dim_time)
+
+        # --- 复杂度提升 1: 输入特征深度融合 (Feature Mixer) ---
+        # 原来是直接 Linear，现在改为 MLP，增加深度
+        dim_input_kv = dim_node + dim_edge + dim_time
+        self.kv_mixer = nn.Sequential(
+            nn.Linear(dim_input_kv, dim_input_kv),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim_input_kv, dim_input_kv),
+        )
+
+        # Q: Source Node Features + Time (0)
+        self.w_q = nn.Linear(dim_node + dim_time, dim_out)
+
+        # K, V: 现在的输入维度不变，但经过了 kv_mixer 处理
+        self.w_k = nn.Linear(dim_input_kv, dim_out)
+        self.w_v = nn.Linear(dim_input_kv, dim_out)
+
+        # 聚合后的投影层
+        self.w_agg = nn.Linear(dim_node + dim_out, dim_out)
+
+        # --- 复杂度提升 2: Feed-Forward Network (FFN) ---
+        # 标准 Transformer 结构: dim -> 4*dim -> dim
+        self.ffn = nn.Sequential(
+            nn.Linear(dim_out, dim_out * ffn_expansion),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim_out * ffn_expansion, dim_out),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, b: DGLBlock) -> torch.Tensor:
+        """
+        b: DGL Block (MFG)
+        """
+        if b.num_edges() == 0:
+            return torch.zeros((b.num_dst_nodes(), self.dim_out), device=b.device)
+
+        # 1. Prepare Features
+        dst_h = cast(torch.Tensor, b.srcdata["h"])[: b.num_dst_nodes()]  # Target
+        # src_h (neighbors) logic handled via edge mapping below
+
+        # Time Encoding
+        if self.time_enc is not None:
+            time_feat = self.time_enc(b.edata["dt"])
+            zero_time_feat = self.time_enc(
+                torch.zeros(b.num_dst_nodes(), device=b.device)
+            )
+        else:
+            time_feat = None
+            zero_time_feat = None
+
+        # 2. Compute Q (Target Nodes)
+        Q = self.w_q(_cat_optional(dst_h, zero_time_feat, dim=1))
+
+        # 3. Compute K, V (Neighbors + Edges) -- 增加计算量
+        all_src_h = cast(torch.Tensor, b.srcdata["h"])
+        src_indices = b.edges()[0]
+        dst_indices = b.edges()[1]
+
+        neighbor_h_on_edge = all_src_h[src_indices]
+
+        # 原始输入拼接
+        raw_kv_input = _cat_optional(
+            neighbor_h_on_edge, b.edata.get("efeat"), time_feat, dim=1
+        )
+
+        # [增强] 通过 MLP 混合特征，增加非线性
+        mixed_kv_input = self.kv_mixer(raw_kv_input)
+
+        K = self.w_k(mixed_kv_input)
+        V = self.w_v(mixed_kv_input)
+
+        # Q expansion
+        Q_on_edge = Q[dst_indices]
+
+        # 4. Multi-head Attention
+        Q_reshaped = Q_on_edge.reshape(-1, self.num_head, self.head_dim)
+        K_reshaped = K.reshape(-1, self.num_head, self.head_dim)
+        V_reshaped = V.reshape(-1, self.num_head, self.head_dim)
+
+        # Scaled Dot-Product Attention (除以 sqrt(d_k) 有助于训练稳定性)
+        att_score = torch.sum(Q_reshaped * K_reshaped, dim=2) / (self.head_dim**0.5)
+        # TGN 原版用的是 LeakyReLU，Transformer 常用 Softmax 前不加激活
+        # 这里保留你的 LeakyReLU 逻辑
+        att_score = F.leaky_relu(att_score, negative_slope=0.2)
+
+        # Edge Softmax
+        att_score = dgl.ops.edge_softmax(b, att_score)
+        att_score = self.dropout(att_score)
+
+        # Aggregate V
+        V_weighted = V_reshaped * att_score.unsqueeze(-1)
+        V_weighted = V_weighted.reshape(-1, self.dim_out)
+
+        b.edata["v"] = V_weighted
+        b.update_all(fn.copy_e("v", "m"), fn.sum("m", "h_agg"))
+
+        aggregated_h = cast(torch.Tensor, b.dstdata["h_agg"])
+
+        # 5. [增强] Residual + Norm + FFN (Transformer Block Logic)
+
+        # Step A: Aggregation Fusion (Add & Norm 1)
+        # 将原始特征 dst_h 与聚合特征 aggregated_h 融合
+        # TGN 逻辑通常是 cat -> linear
+        h_fusion = self.w_agg(torch.cat([dst_h, aggregated_h], dim=1))
+        h_fusion = self.dropout(h_fusion)
+
+        # 残差连接 (假设 dim_node == dim_out，或者你需要额外的 project)
+        # 这里我们假设 w_agg 的输出就是我们要的 hidden state
+        # 加一个 LayerNorm
+        h_norm1 = self.layer_norm1(
+            h_fusion
+        )  # 如果 dst_h 维度不同，这里不适合直接 + dst_h 做残差，直接 Norm
+
+        # Step B: Feed-Forward Network (Add & Norm 2) -- 显著增加计算量
+        # 标准 Transformer: h = Norm(h + FFN(h))
+        h_ffn = self.ffn(h_norm1)
+        out = self.layer_norm2(h_norm1 + h_ffn)  # 这里的残差连接非常重要
+
+        return cast(torch.Tensor, out)
+
+
 class TemporalGraphAttentionLayer(nn.Module):
     """
     Simplified TransfomerAttentionLayer specifically for TGN.
@@ -340,7 +494,8 @@ class TemporalGraphAttentionLayer(nn.Module):
 
         # 4. Residual + Output Project
         # TGN logic: Linear(cat(h_old, h_agg))
-        out = self.w_out(torch.cat([dst_h, aggregated_h], dim=1))
+        # out = self.w_out(torch.cat([dst_h, aggregated_h], dim=1))
+        out = self.w_out(torch.cat([aggregated_h, dst_h], dim=1))
         out = F.relu(self.dropout(out))
         out = self.layer_norm(out)
 

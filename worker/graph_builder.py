@@ -18,6 +18,7 @@ from schemas.datatypes.misc import (
     Shared,
 )
 from schemas.datatypes.plan import PackedDyPlan, PackedStPlan, PlanSet
+from schemas.protocol.misc import CudaEventLike
 from schemas.shm_layout import ShmKeys
 from shm_manager import DoubleBufferedSHM
 from thread_base_with_stream import StreamThreadBase
@@ -296,7 +297,7 @@ class GraphBuilder(StreamThreadBase):
         efeat: torch.Tensor | None,
         shared: Shared | None,
         in_q: Q[Meta | None | Literal["end_of_epoch"]],
-        out_q: Q[tuple[Meta, torch.cuda.Event] | None | Literal["end_of_epoch"]],
+        out_q: Q[tuple[Meta, CudaEventLike] | None | Literal["end_of_epoch"]],
         stop_ev: threading.Event,
         device: torch.device,
         history: int = 1,
@@ -311,40 +312,15 @@ class GraphBuilder(StreamThreadBase):
         self.stop_ev = stop_ev
         self.history = history
 
-        logger.debug(
-            f"GraphBuilder: efeat={'enabled' if efeat is not None else 'disabled'}, shape={efeat.shape if efeat is not None else None}"
-        )
-        logger.debug(
-            f"GraphBuilder: shared={'enabled' if shared is not None else 'disabled'}"
-        )
-        logger.debug(
-            f"GraphBuilder: Buffers - pos_efeat_h2d={'enabled' if buf.pos_efeat_h2d is not None else 'disabled'}, "
-            f"efeat_h2d={'enabled' if buf.efeat_h2d is not None else 'disabled'}, "
-            f"mem_h2d={'enabled' if buf.mem_h2d is not None else 'disabled'}, "
-            f"box_h2d={'enabled' if buf.box_h2d is not None else 'disabled'}"
-        )
-        logger.debug("GraphBuilder: Initialized")
-
     @torch.no_grad()
     def logic(self) -> None:
-        logger.debug("GraphBuilder: starting logic loop")
-
         while not self.stop_ev.is_set():
-            logger.debug(
-                f"GraphBuilder: waiting for meta from in_q (queue size: {self.in_q.qsize()})"
-            )
-
             meta = self.in_q.get(block=True)
-            logger.debug(f"GraphBuilder: received meta type: {type(meta).__name__}")
 
             if meta is None:
-                logger.debug(
-                    "GraphBuilder: received None, putting to out_q and exiting"
-                )
                 self.out_q.put(None, block=True)
                 break
             elif meta == "end_of_epoch":
-                logger.debug("GraphBuilder: received end_of_epoch, forwarding to out_q")
                 self.out_q.put("end_of_epoch", block=True)
                 continue
 
@@ -403,25 +379,8 @@ class GraphBuilder(StreamThreadBase):
 
             # make mfg from raw data
             if meta.n2r_meta is not None:
-                logger.debug(
-                    f"GraphBuilder: building MFGs, num_blocks={len(meta.n2r_meta)}, history={self.history}"
-                )
                 meta.n2r_mfgs = collate_and_build_graph(meta.n2r_meta, self.history)
-                logger.debug(
-                    f"GraphBuilder: MFGs built, num_groups={len(meta.n2r_mfgs)}"
-                )
-                # Log details about each group
-                for idx, group in enumerate(meta.n2r_mfgs):
-                    logger.debug(
-                        f"GraphBuilder: MFG group {idx} has {len(group)} blocks"
-                    )
-            else:
-                logger.debug("GraphBuilder: no n2r_meta, skipping MFG construction")
 
-            ready_event: torch.cuda.Event = torch.cuda.Event()
+            ready_event: CudaEventLike = torch.cuda.Event()
             ready_event.record(torch.cuda.current_stream())
-            logger.debug(
-                "GraphBuilder: batch complete, recorded ready_event, putting to out_q"
-            )
             self.out_q.put((meta, ready_event), block=True)
-            logger.debug("GraphBuilder: batch sent to out_q")

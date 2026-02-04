@@ -1,30 +1,38 @@
 sampling:
   - layer: 1
     neighbor: 
-      - 50
+      - 10
     strategy: 'recent'
     prop_time: False
     history: 1
     duration: 0
-    num_thread: 64
+    num_thread: 32
+    neg_samples: 1
+    sample_support_node: True
+    sample_support_for_neg_dst: True
 memory: 
   - d_time: 128
     deliver_to: 'self'
     mail_combine: 'last'
     cell: 'gru'
     boxsize: 1
+    att_h: 1
     combine_node_feature: True
-    d_mem: 512
+    d_mem: 128
 gnn:
   - arch: 'attn'
     layer: 1
     att_h: 2
     d_time: 128
-    d_hid: 128
+    d_out: 128
 train:
-  - epoch: 1
+  - epoch: 50
     batch_size: 4000 # local batch_size
     lr: 0.0001
     dropout: 0.2
     reorder: 8
     model: "TGN"
+    merge_src: False
+    patience: 50
+    ndim: 128 
+    edim: 128

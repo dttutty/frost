@@ -48,7 +48,7 @@ from collections import defaultdict
 from contextlib import closing
 from dataclasses import dataclass
 from multiprocessing.synchronize import Event as MEvent
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -162,7 +162,13 @@ def wait_until_can_start(
 
 
 def sample_nodes_for_micro(
-    bid: int, mid: int, src_meta, dst_meta, ts_meta, train_edge_end, val_edge_end
+    bid: int,
+    mid: int,
+    src_meta: tuple[str, tuple[int, ...], Any],
+    dst_meta: tuple[str, tuple[int, ...], Any],
+    ts_meta: tuple[str, tuple[int, ...], Any],
+    train_edge_end: int,
+    val_edge_end: int,
 ) -> list[int]:
     # Deterministic-ish sample for visibility
     src_shm_name, src_shape, src_dtype = src_meta
@@ -225,11 +231,11 @@ def detach_to_cpu(DyX: dict[int, Any]) -> dict[int, Any]:
 
 def sampler_proc(
     q01: mp.Queue,
-    src_meta,
-    dst_meta,
-    ts_meta,
-    train_edge_end,
-    val_edge_end,
+    src_meta: tuple[str, tuple[int, ...], Any],
+    dst_meta: tuple[str, tuple[int, ...], Any],
+    ts_meta: tuple[str, tuple[int, ...], Any],
+    train_edge_end: int,
+    val_edge_end: int,
     cond: mp.synchronize.Condition,
     committed_bid: int,
     S: int,
@@ -237,7 +243,7 @@ def sampler_proc(
     batches: int,
     t_sample: float,
     world_size: int,
-):
+) -> None:
     who = "P0"
     for bid in range(batches):
         # If you want strict freshest-memory-aware sampling, uncomment this line:
@@ -258,7 +264,9 @@ def sampler_proc(
     log(who, "done")
 
 
-def cp1_proc(q01: mp.Queue, q12_devs: list[mp.Queue], stop_ev: MEvent, world_size: int):
+def cp1_proc(
+    q01: mp.Queue, q12_devs: list[mp.Queue], stop_ev: MEvent, world_size: int
+) -> None:
     who = "CP1"
     while True:
         item = q01.get()
@@ -281,11 +289,11 @@ def h2d_feeder_proc(
     stop_ev: MEvent,
     t_h2d: float,
     use_cuda: bool,
-):
+) -> None:
     who = f"H2D:d{dev}"
     if use_cuda:
         torch.cuda.set_device(dev)
-        h2d_stream = torch.cuda.Stream()
+        h2d_stream = cast(torch.cuda.Stream, torch.cuda.Stream())
     else:
         h2d_stream = None
     while True:

@@ -279,7 +279,6 @@ class TGN(nn.Module):
         )
 
         if unique_update_nodes.nelement() == 0:  # Handle case with no messages/updates
-            logger.debug("Warning: No nodes to update.")
             return  # Nothing to update
 
         # --- Update memory for nodes that received messages ---
@@ -414,7 +413,6 @@ dataloader = DataLoader(
 )  # shuffle=False is crucial for time order
 
 # --- Training Loop ---
-logger.debug(f"Starting training on {DEVICE}...")
 for epoch in range(EPOCHS):
     start_epoch_time = time.time()
     model.train()
@@ -481,17 +479,10 @@ for epoch in range(EPOCHS):
 
         # Optional: Print progress
         if (batch_idx + 1) % 20 == 0:
-            logger.debug(
-                f"Epoch {epoch + 1}/{EPOCHS}, Batch {batch_idx + 1}/{len(dataloader)}, Loss: {loss.item():.4f}"
-            )
+            pass
 
     epoch_time = time.time() - start_epoch_time
     avg_loss = total_loss / len(dataloader)
-    logger.debug(
-        f"Epoch {epoch + 1} finished. Avg Loss: {avg_loss:.4f}, Time: {epoch_time:.2f}s"
-    )
-
-logger.debug("Training finished.")
 
 # --- Evaluation (Conceptual) ---
 # model.eval()

@@ -15,7 +15,9 @@ from tensor_set import TensorSet
 logger = logging.getLogger(__name__)
 
 
-def analyze_all_n_root(mfg_meta: DGLBlockMeta) -> tuple[TensorSet, TensorSet]:
+def analyze_all_n_root(
+    mfg_meta: DGLBlockMeta, n_src: int
+) -> tuple[TensorSet, TensorSet]:
     """
     Analyzes the provided list of DGLBlockMeta to determine the maximum
     number of source and destination nodes across the last n_history blocks.
@@ -29,9 +31,8 @@ def analyze_all_n_root(mfg_meta: DGLBlockMeta) -> tuple[TensorSet, TensorSet]:
     """
 
     nodes = mfg_meta.nodes
-    num_roots = mfg_meta.dim_out
     all_nodes = TensorSet(nodes)
-    root_nodes = TensorSet(nodes[:num_roots])
+    root_nodes = TensorSet(nodes[: n_src * 2])
 
     return all_nodes, root_nodes
 
@@ -87,6 +88,9 @@ class TGN(torch.nn.Module):
         mfgs: list[list[DGLBlock]],
     ) -> torch.Tensor:
         block = mfgs[0][0]
+        # show block info(datatype of each srcdata field)
+        # print(block)
+
         updated_mem: torch.Tensor = cast(torch.Tensor, block.srcdata["updated_mem"])
         # fill in updated memory to blocks
         if self.dim_node > 0:
@@ -95,7 +99,8 @@ class TGN(torch.nn.Module):
             h_combined = updated_mem + node_feat_emb
         else:
             h_combined = updated_mem
-        del block.srcdata["nfeat"]
-        block.srcdata["h"] = h_combined
+        # del block.srcdata["nfeat"]
+        # block.srcdata["h"] = h_combined
+        block.srcdata["h"] = block.srcdata["nfeat"]
 
         return cast(torch.Tensor, self.encoder(block))

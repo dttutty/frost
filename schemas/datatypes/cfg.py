@@ -30,39 +30,39 @@ class GNNCFG:
 
 @dataclass(kw_only=True)
 class TrainCFG:
-    model: Literal["APAN", "JODIE", "TGN"] = "TGN"
-    patience: int = 50
-    epoch: int = 10
-    batch_size: int = 600
-    reorder: int | None = 8
-    lr: float = 0.0001
-    dropout: float = 0.1
-    merge_src: bool = False  # add by sqp17
-    ndim: int = 0  # will later be set by train_dist.py
-    edim: int = 0  # will later be set by train_dist.py
+    model: Literal["APAN", "JODIE", "TGN"]
+    patience: int
+    epoch: int
+    batch_size: int
+    reorder: int | None
+    lr: float
+    dropout: float
+    merge_src: bool
+    ndim: int
+    edim: int
 
 
 @dataclass(kw_only=True)
 class SampleCFG:
-    strategy: Literal["recent", "uniform"] = "recent"
-    layer: int = 1
-    history: int = 1
-    neg_samples: int = 1
-    sample_support_node: bool = True
-    sample_support_for_neg_dst: bool = True
+    strategy: Literal["recent", "uniform"]
+    layer: int
+    history: int
+    neg_samples: int
+    sample_support_node: bool
+    sample_support_for_neg_dst: bool
     neighbor: list[int]
-    prop_time: bool = False
-    duration: int = 0
-    num_thread: int = 32  # valid if history > 1
+    prop_time: bool
+    duration: int
+    num_thread: int
 
 
 @dataclass(kw_only=True)
 class MemoryCFG:
-    d_time: int = 0  # time dim
-    d_mem: int = 128  # memory dim
-    deliver_to: Literal["self", "neighbors"] = "self"
-    mail_combine: Literal["mean", "last"] = "last"
-    cell: Literal["gru", "rnn", "transformer"] = "gru"
-    boxsize: int = 1
-    combine_node_feature: bool = True
-    att_h: int | None = None  # only for transformer cell
+    d_time: int
+    d_mem: int
+    deliver_to: Literal["self", "neighbors"]
+    mail_combine: Literal["mean", "last"]
+    cell: Literal["gru", "rnn", "transformer"]
+    boxsize: int
+    combine_node_feature: bool
+    att_h: int | None

@@ -24,27 +24,11 @@ class StAssembler:
         shared_efeat: torch.Tensor | None,
         device: torch.device,
     ) -> None:
-        if __debug__:
-            logger.debug(
-                f"StAsm: Initializing StAssembler, shared_nfeat={'enabled' if shared_nfeat is not None else 'disabled'}, shared_efeat={'enabled' if shared_efeat is not None else 'disabled'}"
-            )
         self.nfeat_delta = None
         self.device = device
         self.shared_nfeat = shared_nfeat
         self.shared_efeat = shared_efeat
-        if shared_nfeat is not None:
-            if __debug__:
-                logger.debug(
-                    f"StAsm: shared_nfeat shape={shared_nfeat.shape}, dtype={shared_nfeat.dtype}"
-                )
-        if shared_efeat is not None:
-            if __debug__:
-                logger.debug(
-                    f"StAsm: shared_efeat shape={shared_efeat.shape}, dtype={shared_efeat.dtype}"
-                )
         super().__init__()
-        if __debug__:
-            logger.debug("StAsm: StAssembler initialized")
 
     def fill_block_with_efeat(
         self,
@@ -53,11 +37,6 @@ class StAssembler:
         eids: list[list[torch.Tensor]],
         pin_efeat_buf: torch.Tensor | None = None,
     ) -> list[list[DGLBlock]]:
-        if __debug__:
-            logger.debug(
-                f"StAsm: fill_block_with_efeat called, num_mfg_groups={len(gnn_mfgs)}, pin_efeat_buf={'enabled' if pin_efeat_buf is not None else 'disabled'}"
-            )
-
         # 1. 收集所有 Block 的 EID (CPU) 并记录大小
         all_eids = []
         block_sizes = []
@@ -70,8 +49,6 @@ class StAssembler:
                 block_sizes.append(eid.numel())
 
         if not all_eids:
-            if __debug__:
-                logger.debug("StAsm: No edges found, returning early")
             return gnn_mfgs
 
         # 2. 拼接成一个大 Tensor (CPU) 用于 Gather
@@ -83,8 +60,6 @@ class StAssembler:
 
         if pin_efeat_buf is not None and total_edges <= pin_efeat_buf.shape[0]:
             # --- Fast Path: 使用 Pinned Memory ---
-            if __debug__:
-                logger.debug("StAsm: Using pinned memory path for efeat")
 
             # 3a. Gather: CPU Shared Mem -> CPU Pinned Buffer
             buf_view = pin_efeat_buf[:total_edges]
@@ -106,10 +81,6 @@ class StAssembler:
                 "StAsm: Pinned buffer insufficient or missing for efeat, using fallback path"
             )
             # --- Fallback: 普通路径 ---
-            if __debug__:
-                logger.debug(
-                    "StAsm: Buffer insufficient or missing, using fallback path"
-                )
             # 直接 Gather 并 .to(device)
             # 注意：如果 blocks 在 GPU，这里必须显式 to(device)
             cpu_efeat = efeat[flat_eids]
@@ -133,17 +104,11 @@ class StAssembler:
                 curr += size
                 idx += 1
 
-        if __debug__:
-            logger.debug(f"StAsm: Assigned efeat to {idx} blocks on GPU")
         return gnn_mfgs
 
     def fill_block_with_nfeat(
         self, gnn_mfgs_0: list[DGLBlock], nfeat: NFeatNid
     ) -> list[DGLBlock]:
-        if __debug__:
-            logger.debug(
-                f"StAsm: fill_block_with_nfeat called, num_blocks={len(gnn_mfgs_0)}, nfeat size={nfeat.nid.numel()}"
-            )
         assert nfeat.is_sorted  # make sure nfeat.nid is sorted
 
         for idx, block in enumerate(gnn_mfgs_0):
@@ -151,13 +116,7 @@ class StAssembler:
 
             permute_nidx = torch.searchsorted(nfeat.nid, global_nid)
             block.srcdata["nfeat"] = nfeat.nfeat[permute_nidx]  # 这里放memory
-            if __debug__:
-                logger.debug(
-                    f"StAsm: Block {idx} filled with nfeat, num_nodes={global_nid.numel()}"
-                )
 
-        if __debug__:
-            logger.debug("StAsm: All blocks filled with nfeat")
         return gnn_mfgs_0
 
     def prepare_nfeat_cache(
@@ -165,25 +124,13 @@ class StAssembler:
         nfeat_plan: StPlan,
         pin_nfeat_buf: StBuf | None = None,  # 接收 StBuf
     ) -> NFeatNid | None:
-        if __debug__:
-            logger.debug(
-                f"StAsm: prepare_nfeat_cache called, pin_nfeat_buf={'enabled' if pin_nfeat_buf is not None else 'disabled'}"
-            )
         assert self.shared_nfeat is not None
         to_cache, fetch = nfeat_plan.to_cache.data, nfeat_plan.fetch.data
-        if __debug__:
-            logger.debug(
-                f"StAsm: to_cache size={to_cache.numel()}, fetch size={fetch.numel()}"
-            )
 
         nfeat_obj = None
 
         # --- Pin Memory Logic ---
         if pin_nfeat_buf is not None and fetch.numel() <= pin_nfeat_buf.data.shape[0]:
-            if __debug__:
-                logger.debug(
-                    f"StAsm: Using pinned buffer for nfeat, fetch={fetch.numel()}, buffer capacity={pin_nfeat_buf.data.shape[0]}"
-                )
             n = fetch.numel()
             buf_data = pin_nfeat_buf.data[:n]
             buf_nid = pin_nfeat_buf.nid[:n]
@@ -209,8 +156,6 @@ class StAssembler:
                     f"Buffer size mismatch: buf_data={buf_data.size(0)}, fetch={fetch.numel()}"
                 )
             torch.index_select(self.shared_nfeat, 0, fetch, out=buf_data)
-            if __debug__:
-                logger.debug("StAsm: Gathered nfeat data to pinned buffer")
 
             # Gather NID
             # buf_nid 是 (Max, 1), fetch 是 (N,)
@@ -219,15 +164,10 @@ class StAssembler:
             # Async Transfer
             gpu_data = buf_data.to(self.device, non_blocking=True)
             gpu_nid = buf_nid.to(self.device, non_blocking=True).long()
-            if __debug__:
-                logger.debug("StAsm: Async copying nfeat to GPU")
 
             nfeat_obj = NFeatNid(nid=gpu_nid, nfeat=gpu_data)
         elif pin_nfeat_buf is not None:
-            if __debug__:
-                logger.debug(
-                    f"StAsm: Buffer insufficient for nfeat (need {fetch.numel()}, have {pin_nfeat_buf.data.shape[0]}), falling back"
-                )
+            pass
         # ------------------------
 
         # Fallback
@@ -236,46 +176,23 @@ class StAssembler:
             logger.warning(
                 "StAsm: Falling back to regular path for nfeat due to insufficient pinned buffer"
             )
-            if __debug__:
-                logger.debug("StAsm: Using regular (blocking) path for nfeat")
             nfeat_obj = NFeatNid(nid=fetch, nfeat=self.shared_nfeat[fetch])
             nfeat_obj = nfeat_obj.cuda()
-            if __debug__:
-                logger.debug("StAsm: nfeat gathered and moved to GPU via regular path")
             # 注意: 普通路径下数据在 CPU，后续如果需要 GPU 数据，
             # fill_mfg_with_efeat_n_nfeat 或 H2D 逻辑可能需要处理 .to(cuda)
             # 为了一致性，建议此处不上 GPU，由 H2D 统一调度，或者在这里统一上 GPU。
             # 假设 H2D 现在的逻辑是可以处理 GPU Tensor 的。
 
         if self.nfeat_delta is not None:
-            if __debug__:
-                logger.debug(
-                    f"StAsm: Merging with nfeat_delta, delta size={self.nfeat_delta.nid.numel()}"
-                )
-
             nfeat_obj = nfeat_obj.merge(self.nfeat_delta)
-            if __debug__:
-                logger.debug(f"StAsm: After merge, nfeat size={nfeat_obj.nid.numel()}")
 
-        if __debug__:
-            logger.debug("StAsm: Sorting nfeat by nid")
         nfeat_obj = nfeat_obj.sort_by_nid()
 
         if to_cache.numel() > 0:
-            if __debug__:
-                logger.debug(f"StAsm: Caching {to_cache.numel()} nfeat entries")
             self.nfeat_delta = nfeat_obj.filter_by_nid(to_cache)
-            if __debug__:
-                logger.debug(
-                    f"StAsm: nfeat_delta updated, size={self.nfeat_delta.nid.numel()}"
-                )
         else:
-            if __debug__:
-                logger.debug("StAsm: No caching needed, clearing nfeat_delta")
             self.nfeat_delta = None
 
-        if __debug__:
-            logger.debug("StAsm: prepare_nfeat_cache complete")
         return nfeat_obj
 
     def fill_mfg_with_nfeat(
@@ -283,23 +200,12 @@ class StAssembler:
         gnn_mfgs: list[list[DGLBlock]],
         nfeat: NFeatNid | None,
     ) -> list[list[DGLBlock]]:
-        if __debug__:
-            logger.debug(
-                f"StAsm: fill_mfg_with_nfeat called, num_mfg_groups={len(gnn_mfgs)}, nfeat is {'provided' if nfeat is not None else 'None'}"
-            )
         # 这一部分是负责nfeat重用的,不管是mfg版本还是no_mfg版本,只要有nfeat都要做
 
         if self.shared_nfeat is not None:
-            if __debug__:
-                logger.debug("StAsm: Filling blocks with nfeat")
             assert nfeat is not None
             gnn_mfgs[0] = self.fill_block_with_nfeat(gnn_mfgs[0], nfeat)
-        else:
-            if __debug__:
-                logger.debug("StAsm: shared_nfeat is None, skipping nfeat fill")
 
-        if __debug__:
-            logger.debug("StAsm: fill_mfg_with_nfeat complete")
         return gnn_mfgs
 
     def fill_mfg_with_efeat(
@@ -308,22 +214,11 @@ class StAssembler:
         eids: list[list[torch.Tensor]],
         pin_efeat_buf: torch.Tensor | None = None,  # 记得在接口这里也透传 buf
     ) -> list[list[DGLBlock]]:
-        if __debug__:
-            logger.debug(
-                f"StAsm: fill_mfg_with_efeat called, num_mfg_groups={len(gnn_mfgs)}"
-            )
         # 这一部分是负责nfeat重用的,不管是mfg版本还是no_mfg版本,只要有nfeat都要做
 
         if self.shared_efeat is not None:
-            if __debug__:
-                logger.debug("StAsm: Filling blocks with efeat")
             gnn_mfgs = self.fill_block_with_efeat(
                 gnn_mfgs, self.shared_efeat, pin_efeat_buf=pin_efeat_buf, eids=eids
             )
-        else:
-            if __debug__:
-                logger.debug("StAsm: shared_efeat is None, skipping efeat fill")
 
-        if __debug__:
-            logger.debug("StAsm: fill_mfg_with_efeat complete")
         return gnn_mfgs

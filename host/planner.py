@@ -132,15 +132,9 @@ class Planner(ThreadBase):
             gpus_groups: GPU 拓扑结构, 用于计算距离。
         """
         super().__init__(name="planner", stop_ev=stop_ev)
-        if __debug__:
-            logger.debug(f"Planner: initializing with gpu_topo={gpu_topo}")
         # 1. 存储静态配置 (解决痛点 1 和 4)
         self.gpus_distance = find_all_gpu_distances_list(gpu_topo)
         self.n_gpus = len(self.gpus_distance)
-        if __debug__:
-            logger.debug(
-                f"Planner: n_gpus={self.n_gpus}, distance_matrix shape={self.gpus_distance.shape}"
-            )
 
         # 2. 为中间结果准备占位符 (解决痛点 2)
         self.meta_bundle_q = in_q
@@ -151,8 +145,6 @@ class Planner(ThreadBase):
             None
         )
         if mem_plan_out_q:
-            if __debug__:
-                logger.debug("Planner: initializing mem planner")
             self.mem_plan_in_q = Q()
             assert mem_plan_out_q is not None
             self.mem_planner = DynamicPlanner(
@@ -167,8 +159,6 @@ class Planner(ThreadBase):
             None
         )
         if mail_plan_out_q:
-            if __debug__:
-                logger.debug("Planner: initializing mail planner")
             self.mail_plan_in_q = Q()
             assert mail_plan_out_q is not None
             self.mail_planner = DynamicPlanner(
@@ -183,8 +173,6 @@ class Planner(ThreadBase):
             None
         )
         if nfeat_plan_out_q:
-            if __debug__:
-                logger.debug("Planner: initializing nfeat planner")
             self.nfeat_plan_in_q = Q()
             assert nfeat_plan_out_q is not None
             self.nfeat_planner = StaticPlanner(
@@ -195,8 +183,6 @@ class Planner(ThreadBase):
             )
 
         self.stop_ev = stop_ev
-        if __debug__:
-            logger.debug("Planner: initialization complete")
 
         self.mem_planner.start() if mem_plan_out_q else None
         self.mail_planner.start() if mail_plan_out_q else None
@@ -204,96 +190,46 @@ class Planner(ThreadBase):
 
     def logic(self) -> None:
         batch_count = 0
-        if __debug__:
-            logger.debug("Planner: starting logic loop")
 
         while not self.stop_ev.is_set():
-            if __debug__:
-                logger.debug("Planner: waiting for metas from meta_bundle_q")
             metas = self.meta_bundle_q.get(block=True)
-            if __debug__:
-                logger.debug(f"Planner: received data type={type(metas).__name__}")
 
             if metas is None:
-                if __debug__:
-                    logger.debug("Planner: received None, shutting down sub-planners")
                 if self.mem_plan_in_q is not None:
-                    if __debug__:
-                        logger.debug("Planner: putting None to mem planner")
                     self.mem_plan_in_q.put(None)
                 if self.mail_plan_in_q is not None:
-                    if __debug__:
-                        logger.debug("Planner: putting None to mail planner")
                     self.mail_plan_in_q.put(None)
                 if self.nfeat_plan_in_q is not None:
-                    if __debug__:
-                        logger.debug("Planner: putting None to nfeat planner")
                     self.nfeat_plan_in_q.put(None)
-                if __debug__:
-                    logger.debug("Planner: putting None to out_q")
                 self.out_q.put(None)
 
-                if __debug__:
-                    logger.debug("Planner: waiting for sub-planners to join")
                 if self.mem_plan_in_q is not None:
-                    if __debug__:
-                        logger.debug("Planner: joining mem planner")
                     self.mem_planner.join()
                 if self.mail_plan_in_q is not None:
-                    if __debug__:
-                        logger.debug("Planner: joining mail planner")
                     self.mail_planner.join()
                 if self.nfeat_plan_in_q is not None:
-                    if __debug__:
-                        logger.debug("Planner: joining nfeat planner")
                     self.nfeat_planner.join()
-                if __debug__:
-                    logger.debug("Planner: all sub-planners joined, exiting")
                 break
 
             if metas == "end_of_epoch":
-                if __debug__:
-                    logger.debug(
-                        "Planner: received end_of_epoch, forwarding to sub-planners"
-                    )
                 if self.mem_plan_in_q is not None:
-                    if __debug__:
-                        logger.debug("Planner: putting end_of_epoch to mem planner")
                     self.mem_plan_in_q.put("end_of_epoch")
                 if self.mail_plan_in_q is not None:
-                    if __debug__:
-                        logger.debug("Planner: putting end_of_epoch to mail planner")
                     self.mail_plan_in_q.put("end_of_epoch")
                 if self.nfeat_plan_in_q is not None:
-                    if __debug__:
-                        logger.debug("Planner: putting end_of_epoch to nfeat planner")
                     self.nfeat_plan_in_q.put("end_of_epoch")
-                if __debug__:
-                    logger.debug("Planner: forwarding end_of_epoch to out_q")
                 self.out_q.put("end_of_epoch")
                 continue
 
             batch_count += 1
-            if __debug__:
-                logger.debug(
-                    f"Planner: processing batch #{batch_count}, metas count={len(metas)}"
-                )
             assert len(metas) == self.n_gpus
 
             state_ios: list[BatchNodeStateIO] = []
             for idx, meta in enumerate(metas):
                 assert meta.state is not None
                 state_ios.append(meta.state)
-                if __debug__:
-                    logger.debug(
-                        f"Planner: batch #{batch_count}, GPU {idx} state collected"
-                    )
 
             if self.mem_plan_in_q is not None:
-                if __debug__:
-                    logger.debug(
-                        f"Planner: batch #{batch_count}, putting mem needs/updates to mem planner"
-                    )
                 next_needs = [
                     cast(TensorSet, state_io.mem_needed) for state_io in state_ios
                 ]
@@ -303,10 +239,6 @@ class Planner(ThreadBase):
                 self.mem_plan_in_q.put((next_needs, next_updates))
 
             if self.mail_plan_in_q is not None:
-                if __debug__:
-                    logger.debug(
-                        f"Planner: batch #{batch_count}, putting mail needs/updates to mail planner"
-                    )
                 next_needs = [
                     cast(TensorSet, state_io.mailbox_needed) for state_io in state_ios
                 ]
@@ -316,29 +248,12 @@ class Planner(ThreadBase):
                 self.mail_plan_in_q.put((next_needs, next_updates))
 
             if self.nfeat_plan_in_q is not None:
-                if __debug__:
-                    logger.debug(
-                        f"Planner: batch #{batch_count}, putting nfeat needs to nfeat planner"
-                    )
                 next_needs = [
                     cast(TensorSet, state_io.nfeat_needed) for state_io in state_ios
                 ]
                 self.nfeat_plan_in_q.put(next_needs)
 
-            if __debug__:
-                logger.debug(
-                    f"Planner: batch #{batch_count}, deleting state from metas"
-                )
             # for meta in metas:
             #     meta.state = None  # 释放内存
 
-            if __debug__:
-                logger.debug(f"Planner: batch #{batch_count}, putting metas to out_q")
             self.out_q.put(metas)
-            if __debug__:
-                logger.debug(f"Planner: batch #{batch_count} complete")
-
-        if __debug__:
-            logger.debug(
-                f"Planner: exiting logic loop, processed {batch_count} batches"
-            )

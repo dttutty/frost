@@ -29,14 +29,8 @@ def _try_gather_to_pinned(
     device: torch.device,
 ) -> MemTsNid | BoxTsNid | None:  # 返回 None 表示 Buffer 不够大，需要 fallback
     n = indices.numel()
-    if __debug__:
-        logger.debug(
-            f"DyAsm: _try_gather_to_pinned called, indices size={n}, buffer capacity={pinned_buf.data.shape[0]}"
-        )
 
     if n == 0:
-        if __debug__:
-            logger.debug("DyAsm: indices is empty, returning empty object")
         # 利用 pinned_buf 切出一个 0 大小的 view，这样能保留正确的 feature 维度和 dtype
         return target_cls(
             nid=indices.to(device, non_blocking=True),
@@ -46,10 +40,6 @@ def _try_gather_to_pinned(
 
     # [关键修复] 检查 Buffer 容量是否足够
     if n > pinned_buf.data.shape[0]:
-        if __debug__:
-            logger.warning(
-                f"DyAsm: Buffer insufficient (need {n}, have {pinned_buf.data.shape[0]}), falling back to regular gather"
-            )
         return None
 
     # 1. 确定 Pinned Buffer 的有效区域视图
@@ -71,10 +61,6 @@ def _try_gather_to_pinned(
             f"Buffer size mismatch: buf_data={buf_data_view.size(0)}, indices={indices.numel()}"
         )
     # 2. Gather Data (CPU -> Pinned CPU)
-    if __debug__:
-        logger.debug(
-            f"DyAsm: Gathering data to pinned buffer, data shape={src_data.shape}, ts shape={src_ts.shape}"
-        )
     torch.index_select(src_data, 0, indices, out=buf_data_view)
 
     # Handle Timestamp dimensions
@@ -89,8 +75,6 @@ def _try_gather_to_pinned(
     buf_nid_view.copy_(indices)
 
     # 3. Async Copy (Pinned CPU -> GPU)
-    if __debug__:
-        logger.debug(f"DyAsm: Async copying to GPU, target_cls={target_cls.__name__}")
 
     return target_cls(
         nid=indices.to(device, non_blocking=True),
@@ -107,20 +91,12 @@ def prep_part_mem_n_box(
     pin_mem_buf: DyBuf | None = None,
     pin_box_buf: DyBuf | None = None,
 ) -> MemNBox:
-    if __debug__:
-        logger.debug(
-            f"DyAsm: prep_part_mem_n_box called, mem_plan fetch size={len(mem_plan.fetch.data)}, box_plan fetch size={len(box_plan.fetch.data)}"
-        )
     assert shared is not None
     assert mem_plan is not None
 
     # --- 处理 Memory ---
     mem_fetch_nids = mem_plan.fetch.data
     mem = None
-    if __debug__:
-        logger.debug(
-            f"DyAsm: Processing memory, fetch_nids count={mem_fetch_nids.numel()}, using pinned_buf={pin_mem_buf is not None}"
-        )
 
     # 尝试走 Pin Memory 路径
     if pin_mem_buf is not None:
@@ -133,13 +109,10 @@ def prep_part_mem_n_box(
             device=device,
         )
         if mem is not None:
-            if __debug__:
-                logger.debug("DyAsm: Memory gathered via pinned buffer successfully")
+            pass
 
     # 如果没开启 Buffer 或者 Buffer 不够大 (返回 None)，走普通路径
     if mem is None:
-        if __debug__:
-            logger.debug("DyAsm: Memory gathering via regular (blocking) path")
         mem = MemTsNid(
             nid=mem_fetch_nids,
             data=shared.mem[mem_fetch_nids],
@@ -149,10 +122,6 @@ def prep_part_mem_n_box(
     # --- 处理 Box (Mail) ---
     mail_fetch_nids = box_plan.fetch.data
     box = None
-    if __debug__:
-        logger.debug(
-            f"DyAsm: Processing mailbox, fetch_nids count={mail_fetch_nids.numel()}, using pinned_buf={pin_box_buf is not None}"
-        )
 
     if pin_box_buf is not None:
         box = _try_gather_to_pinned(
@@ -164,12 +133,9 @@ def prep_part_mem_n_box(
             device=device,
         )
         if box is not None:
-            if __debug__:
-                logger.debug("DyAsm: Mailbox gathered via pinned buffer successfully")
+            pass
 
     if box is None:
-        if __debug__:
-            logger.debug("DyAsm: Mailbox gathering via regular (blocking) path")
         box = BoxTsNid(
             nid=mail_fetch_nids,
             data=shared.box[mail_fetch_nids],
@@ -178,10 +144,6 @@ def prep_part_mem_n_box(
 
     assert isinstance(mem, MemTsNid)
     assert isinstance(box, BoxTsNid)
-    if __debug__:
-        logger.debug(
-            f"DyAsm: prep_part_mem_n_box complete, mem size={mem.nid.numel()}, box size={box.nid.numel()}"
-        )
 
     return MemNBox(mem=mem, box=box)
 
@@ -202,10 +164,6 @@ class DyAssembler(StreamThreadBase):
         boxsize: int = 1,
     ) -> None:
         super().__init__(name="dy_assembler", stop_ev=stop_ev)
-        if __debug__:
-            logger.debug(
-                f"DyAsm: Initializing DyAssembler, has_reverse_mdt={has_reverse_mdt}"
-            )
         self.in_q = in_q
         self.delta_q = delta_q
         self.full_q = full_q
@@ -216,38 +174,80 @@ class DyAssembler(StreamThreadBase):
         self._ready_event = torch.cuda.Event(
             enable_timing=False, blocking=False, interprocess=False
         )
-        if __debug__:
-            logger.debug("DyAsm: DyAssembler initialized")
 
     def fill_block_with_mem_box(
         self, gnn_mfgs_0: list[DGLBlock], mem: MemTsNid, box: BoxTsNid
     ) -> None:
-        assert torch.equal(mem.nid, box.nid)
-        if __debug__:
-            logger.debug(
-                f"DyAsm: fill_block_with_mem_mail called, num_blocks={len(gnn_mfgs_0)}, mem size={mem.nid.numel()}, box size={box.nid.numel()}"
-            )
+        # assert torch.equal(mem.nid, box.nid)
+
         for idx, block in enumerate(gnn_mfgs_0):
-            assert mem.is_sorted  # make sure mem.id is sorted
-            assert box.is_sorted  # make sure box.id is sorted
+            # 1. 确保有序
+            if not getattr(mem, "is_sorted", False):
+                mem = mem.sort_by_nid()
+            if not getattr(box, "is_sorted", False):
+                box = box.sort_by_nid()
 
             global_nid: torch.Tensor = block.srcdata["ID"]
+
+            # --- 核心查找逻辑 ---
+
+            # 查找插入位置
             permute_nidx = torch.searchsorted(mem.nid, global_nid)
 
-            if __debug__:
-                logger.debug(
-                    f"DyAsm: Filling block {idx}, global_nid count={global_nid.numel()}"
+            # 防止 searchsorted 返回 len(mem.nid) 导致的越界
+            max_idx = mem.nid.numel() - 1
+
+            # 异常情况 1: mem 为空但图需要节点
+            if max_idx < 0:
+                if global_nid.numel() > 0:
+                    err_msg = f"DyAsm CRITICAL: Block {idx} requires {global_nid.numel()} nodes, but mem_n_box is EMPTY!"
+                    logger.error(err_msg)
+                    raise RuntimeError(err_msg)
+                continue
+
+            # Clamp 是为了让下一步的“验证”能够执行，而不是为了混过去
+            permute_nidx_clamped = permute_nidx.clamp(max=max_idx)
+
+            # 验证：找到的位置上的 ID 是否真的等于我们要找的 ID
+            # mask_found[i] == True 表示 global_nid[i] 存在于 mem.nid 中
+            mask_found = mem.nid[permute_nidx_clamped] == global_nid
+
+            # --- [修改点] 显式暴露错误 ---
+            if not mask_found.all():
+                # 提取缺失的节点 ID 用于调试
+                missing_mask = ~mask_found
+                missing_ids = global_nid[missing_mask]
+                missing_count = missing_ids.numel()
+
+                # 取前 10 个缺失的 ID 作为样本
+                examples = missing_ids[:10].cpu().tolist()
+
+                error_msg = (
+                    f"\n[DyAsm Mismatch Error] Block {idx}:\n"
+                    f"  > Requesting {global_nid.numel()} nodes for graph calculation.\n"
+                    f"  > Found {missing_count} MISSING nodes in mem_n_box (which has {mem.nid.numel()} nodes).\n"
+                    f"  > Examples of missing NIDs: {examples}\n"
+                    f"  > Mem NID range: min={mem.nid.min()}, max={mem.nid.max()}\n"
+                    f"  > Req NID range: min={global_nid.min()}, max={global_nid.max()}\n"
+                    f"  This implies DyAssembler failed to fetch or merge these nodes."
                 )
 
-            if mem is not None:
-                block.srcdata["mem"] = mem.data[permute_nidx]  # 这里放memory
-                block.srcdata["mem_ts"] = mem.ts[permute_nidx]
-            if box is not None:
-                block.srcdata["box"] = box.data[permute_nidx]
-                block.srcdata["box_ts"] = box.ts[permute_nidx]
+                logger.error(error_msg)
+                # 打印到标准输出以防日志被截断
+                print(error_msg)
 
-            if __debug__:
-                logger.debug(f"DyAsm: Block {idx} filled successfully")
+                # 抛出 Python 异常，这将优雅地停止程序，而不是触发 CUDA Error
+                raise RuntimeError(
+                    f"DyAssembler: Missing {missing_count} nodes for Block {idx}"
+                )
+
+            # 如果能走到这里，说明所有节点都找到了，安全赋值
+            if mem is not None:
+                block.srcdata["mem"] = mem.data[permute_nidx_clamped]
+                block.srcdata["mem_ts"] = mem.ts[permute_nidx_clamped]
+            if box is not None:
+                block.srcdata["box"] = box.data[permute_nidx_clamped]
+                block.srcdata["box_ts"] = box.ts[permute_nidx_clamped]
 
     def _merge(
         self,
@@ -260,47 +260,21 @@ class DyAssembler(StreamThreadBase):
         mem = mem.sort_by_nid()
         box = box.sort_by_nid()
 
-        if __debug__:
-            logger.debug("DyAsm: _merge complete")
         return MemNBox(mem=mem, box=box)
 
     def logic(self) -> None:
         batch_count = 0
         epoch_count = 0
-        if __debug__:
-            logger.debug("DyAsm: Starting logic loop")
 
         while not self.stop_ev.is_set():
-            if __debug__:
-                logger.debug(
-                    f"DyAsm: Waiting for data from in_q (queue size: {self.in_q.qsize()})"
-                )
             batch_start = time.time()
             in_data = self.in_q.get(block=True)
-            queue_wait_time = time.time() - batch_start
-            if __debug__:
-                logger.debug(
-                    f"DyAsm: Received data type={type(in_data).__name__}, waited {queue_wait_time:.4f}s"
-                )
 
             if in_data is None:
-                if __debug__:
-                    logger.debug(
-                        "DyAsm: Received None, sending stop signal and exiting"
-                    )
-
                 self.full_q.put(None, block=True)
-                if __debug__:
-                    logger.debug(
-                        f"DyAsm: Processed {batch_count} batches and {epoch_count} epochs before exit"
-                    )
                 break
             elif in_data == "end_of_epoch":
                 epoch_count += 1
-                if __debug__:
-                    logger.debug(
-                        f"DyAsm: Received end_of_epoch (epoch #{epoch_count}), forwarding"
-                    )
                 self.full_q.put("end_of_epoch", block=True)
                 continue
 
@@ -317,22 +291,10 @@ class DyAssembler(StreamThreadBase):
             #     raise ValueError("Meta NID mismatch between MemTsNid and BoxTsNid.")
 
             assert mem_n_box is not None
-            if __debug__:
-                logger.debug(
-                    f"DyAsm: Batch #{batch_count}, waiting for meta_ready_event"
-                )
 
-            if __debug__:
-                logger.debug(
-                    f"DyAsm: Batch #{batch_count}, waiting for delta from delta_q (queue size: {self.delta_q.qsize()})"
-                )
             delta_tuple = self.delta_q.get(block=True)
 
             if delta_tuple == "nothing":
-                if __debug__:
-                    logger.debug(
-                        f"DyAsm: Batch #{batch_count}, no delta update, using base mem_n_box"
-                    )
                 mem_n_box.mem = mem_n_box.mem.sort_by_nid()
                 mem_n_box.box = mem_n_box.box.sort_by_nid()
                 mem_n_box_full = mem_n_box
@@ -354,8 +316,6 @@ class DyAssembler(StreamThreadBase):
                 # delta, delta_ready_event = delta_tuple
 
                 # torch.cuda.current_stream().wait_event(delta_ready_event)
-                if __debug__:
-                    logger.debug(f"DyAsm: Batch #{batch_count}, merging base and delta")
 
                 # if torch.equal(delta.mem.nid, delta.box.nid) == False:
                 #     print("Delta  Error: MemTsNid and BoxTsNid NIDs do not match.")
@@ -370,33 +330,15 @@ class DyAssembler(StreamThreadBase):
             # mem_n_box_full.box.data = mem_n_box_full.box.data.squeeze(1)
 
             if meta.n2r_mfgs is not None:
-                if __debug__:
-                    logger.debug(
-                        f"DyAsm: Batch #{batch_count}, filling blocks with mem and mailbox data"
-                    )
                 self.fill_block_with_mem_box(
                     meta.n2r_mfgs[0], mem_n_box_full.mem, mem_n_box_full.box
                 )
                 meta.mem_n_box = mem_n_box_full
             else:
                 # 这种是为了APAN哪种种没有mfg的情况
-                if __debug__:
-                    logger.debug(
-                        f"DyAsm: Batch #{batch_count}, no mfgs (APAN mode), retaining and aligning to root_nid"
-                    )
                 meta.mem_n_box = mem_n_box_full.retain_and_align_to_root(meta.root_nid)
 
             # 3) 把结果交给主线程（主线程取时再 wait_stream）
             self._ready_event.record(torch.cuda.current_stream())
-
-            batch_time = time.time() - batch_start
-            if __debug__:
-                logger.debug(
-                    f"DyAsm: Batch #{batch_count} complete, total time={batch_time:.4f}s, putting to full_q"
-                )
+            torch.cuda.current_stream().synchronize()
             self.full_q.put((meta, self._ready_event), block=True)
-
-        if __debug__:
-            logger.debug(
-                f"DyAsm: Exiting logic loop, processed {batch_count} batches and {epoch_count} epochs"
-            )

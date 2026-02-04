@@ -4,6 +4,7 @@ from collections import deque
 from queue import Queue as Q
 from typing import Literal
 
+import numpy
 import torch
 import torch.distributed as dist
 
@@ -38,9 +39,6 @@ class Scatter(ThreadBase):
         shm_managers: list[DoubleBufferedSHM],
     ) -> None:
         super().__init__(name="scatter", stop_ev=stop_ev)
-        logger.debug(
-            f"Scatter: initializing with n_gpu={n_gpu}, world_size={env.world_size}"
-        )
         self.n_gpu = n_gpu
         self.in_q = in_q
         self.mem_plan_out_q = mem_plan_out_q
@@ -54,7 +52,7 @@ class Scatter(ThreadBase):
         self.local_rank: int = env.local_rank
 
         self.inflight = deque()
-        self.inflight_K = 3
+        self.inflight_K = 2
         # 2. 将所有全局变量变为实例属性
         self.host_rank: int = env.host_rank
         self.ngpus: int = env.n_gpu
@@ -63,7 +61,6 @@ class Scatter(ThreadBase):
         self.control_tensor_template = torch.zeros(MANIFEST_SIZE, dtype=torch.long)
 
         assert self.local_rank == self.host_rank
-        logger.debug(f"Scatter: initialized on host_rank={self.host_rank}")
 
     def _offload_to_shm_v2(
         self, mgr: DoubleBufferedSHM, batch_idx: int, meta: Meta
@@ -127,7 +124,7 @@ class Scatter(ThreadBase):
                 )
                 raise e
 
-        def pack_cts(np_array) -> torch.Tensor | None:
+        def pack_cts(np_array: None | numpy.ndarray) -> torch.Tensor | None:
             if np_array is None:
                 return None
             # [核心修复] 强制转换为 int64 (long) 并且 contiguous
@@ -240,58 +237,39 @@ class Scatter(ThreadBase):
         scatter_list: list[Meta | None | Literal["end_of_epoch"]]
 
         if data == "end_of_epoch":
-            logger.debug(
-                f"Scatter: preparing to scatter end_of_epoch to {self.world_size} processes"
-            )
             scatter_list = ["end_of_epoch"] * self.world_size
         elif isinstance(data, list):
-            logger.debug(
-                f"Scatter: preparing to scatter {len(data)} meta objects to {self.ngpus} GPUs"
-            )
             assert len(data) == self.ngpus, (
                 f"需要为 {self.ngpus} 个 GPU worker 准备 payload, 但你给了 {len(data)} 个"
             )
             scatter_list = [*data, None]  # Host 自己的槽位留 None
         else:
-            logger.debug(
-                f"Scatter: preparing to scatter None (stop signal) to {self.world_size} processes"
-            )
             scatter_list = [None] * self.world_size
 
-        logger.debug(
-            f"Scatter: executing scatter_object_list, scatter_list length={len(scatter_list)}"
-        )
         dist.scatter_object_list(
             [None],  # Host 自己的接收缓冲区（没用）
             scatter_list,
             src=self.host_rank,
             group=self.group,
         )
-        logger.debug("Scatter: scatter_object_list complete")
 
         # scatter.py
 
     def gather_receive(self) -> Result:
-        logger.debug("Scatter: preparing to gather results from workers")
         assert self.local_rank == self.host_rank, "只有 Host 进程可以 gather"
 
         gathered_list: list[Result | None] = [None] * self.world_size
 
         # Host 也必须参与，并提供一个"占位"的发送值
-        logger.debug(f"Scatter: executing gather_object, world_size={self.world_size}")
         dist.gather_object(
             None,
             gathered_list,
             dst=self.host_rank,  # Host 发送的占位数据
             group=self.group,
         )
-        logger.debug("Scatter: gather_object complete")
 
         data_0_result = gathered_list[0]
         assert data_0_result is not None, "Worker 返回的 Result 不能为 None"
-        logger.debug(
-            f"Scatter: received result from worker 0: val_auc={data_0_result.val_auc:.4f}, val_ap={data_0_result.val_ap:.4f}"
-        )
         # 丢掉 Host 自己的槽位（最后一个），只返回 workers 的结果
         return data_0_result
 
@@ -303,15 +281,11 @@ class Scatter(ThreadBase):
 
     def logic(self) -> None:
         batch_count = 0
-        logger.debug("Scatter: starting logic loop")
         while not self.stop_ev.is_set():
-            logger.debug("Scatter: waiting for data from in_q")
             meta_2_scatter = self.in_q.get(block=True)
-            logger.debug(f"Scatter: received data type={type(meta_2_scatter).__name__}")
 
             if meta_2_scatter is None:
                 self.flush_inflight()
-                logger.debug("Scatter: received None, sending stop signal and exiting")
                 send_tensors = self._get_control_signal_list(-2)
                 works = []
                 for i in range(self.n_gpu):
@@ -320,7 +294,6 @@ class Scatter(ThreadBase):
                     w.wait()
                 break
             elif meta_2_scatter == "end_of_epoch":
-                logger.debug("Scatter: end_of_epoch signal received")
                 # 【修正 1】发送 Tensor 列表
                 self.flush_inflight()
                 send_tensors = self._get_control_signal_list(-1)
@@ -337,35 +310,19 @@ class Scatter(ThreadBase):
 
             else:
                 batch_count += 1
-                logger.debug(
-                    f"Scatter: processing batch #{batch_count}, n_gpu={len(meta_2_scatter)}"
-                )
                 assert len(meta_2_scatter) == self.n_gpu
 
                 mem_plans = mail_plans = nfeat_plans = None
 
                 if self.mem_plan_out_q is not None:
-                    logger.debug("Scatter: getting mem plans from mem_plan_out_q")
                     mem_plans = self.mem_plan_out_q.get(block=True)
-                    logger.debug(
-                        f"Scatter: received {len(mem_plans) if mem_plans else 0} mem plans"
-                    )
 
                 if self.mail_plan_out_q is not None:
-                    logger.debug("Scatter: getting mail plans from mail_plan_out_q")
                     mail_plans = self.mail_plan_out_q.get(block=True)
-                    logger.debug(
-                        f"Scatter: received {len(mail_plans) if mail_plans else 0} mail plans"
-                    )
 
                 if self.nfeat_plan_out_q is not None:
-                    logger.debug("Scatter: getting nfeat plans from nfeat_plan_out_q")
                     nfeat_plans = self.nfeat_plan_out_q.get(block=True)
-                    logger.debug(
-                        f"Scatter: received {len(nfeat_plans) if nfeat_plans else 0} nfeat plans"
-                    )
 
-                logger.debug(f"Scatter: attaching plans to {self.n_gpu} meta objects")
                 # 3. 【关键修改】组装 Plan 并执行打包操作
                 send_tensors = []
                 for i in range(self.n_gpu):
@@ -415,7 +372,6 @@ class Scatter(ThreadBase):
                     # --- D. 其他清理 ---
                     meta.state = None  # 清理 state，节省传输开销
 
-                logger.debug("Scatter: scattering manifest tensors via NCCL/Gloo")
                 # dummy_recv = torch.zeros(MANIFEST_SIZE, dtype=torch.long)
                 # dist.scatter(
                 #     dummy_recv,
@@ -436,5 +392,3 @@ class Scatter(ThreadBase):
                     old_works, old_tensors = self.inflight.popleft()
                     for w in old_works:
                         w.wait()
-
-        logger.debug(f"Scatter: exiting logic loop, processed {batch_count} batches")

@@ -2,11 +2,18 @@ import logging
 import threading
 import time
 from queue import Queue as Q
-from typing import Any, Literal  # 必须导入这个
+from typing import Any, Literal, cast  # 必须导入这个
 
+import numpy as np
 import torch
 import torch.distributed as dist
+from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.profiler import (
+    ProfilerActivity,
+    profile,
+    record_function,
+)
 from torchmetrics import MetricCollection
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
@@ -28,6 +35,7 @@ from schemas.datatypes.mem_mail_box.box import BoxTsNid
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from schemas.datatypes.misc import Meta, ModelComponents, Result, Shared
 from schemas.datatypes.task import BoxTask, MemTask, P2PTask
+from schemas.protocol.misc import CudaEventLike
 from shm_manager import DoubleBufferedSHM
 from worker.assembler.dy_asm import DyAssembler
 from worker.graph_builder import GraphBuilder
@@ -56,8 +64,6 @@ class Worker:
         shm_manager: DoubleBufferedSHM,
         m_cfg: MemoryCFG | None = None,
     ) -> None:
-        if __debug__:
-            logger.debug(f"Worker: initializing on rank {env.local_rank}")
         self.s_cfg = s_cfg
         self.n_neg = s_cfg.neg_samples
         self.save_to = save_to
@@ -65,11 +71,11 @@ class Worker:
 
         self.shared = shared
         self.total_epoch = t_cfg.epoch
-        self.meta_q: Q[Meta | None | Literal["end_of_epoch"]] = Q(maxsize=1)
-        self.rebuilder_q: Q[Meta | None | Literal["end_of_epoch"]] = Q(maxsize=4)
+        self.meta_q: Q[Meta | None | Literal["end_of_epoch"]] = Q(maxsize=2)
+        self.rebuilder_q: Q[Meta | None | Literal["end_of_epoch"]] = Q(maxsize=2)
         self.graph_builder_q: Q[
-            tuple[Meta, torch.cuda.Event] | None | Literal["end_of_epoch"]
-        ] = Q(maxsize=4)
+            tuple[Meta, CudaEventLike] | None | Literal["end_of_epoch"]
+        ] = Q(maxsize=2)
         self.stop_ev = threading.Event()
         self.nccl = nccl
         self.nccl_p2p = nccl_p2p
@@ -77,19 +83,20 @@ class Worker:
         self.logger: logging.Logger = logger
         self.fetch_factor = 1
         self.model: GNN | MemoryBaseGNN | DDP
-        self.full_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q(maxsize=2)
+        self.full_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q(maxsize=1)
         self.device = torch.device(f"cuda:{env.local_rank}")
-        self.comm_stream = torch.cuda.Stream(device=self.device)
+        self.comm = cast(torch.cuda.Stream, torch.cuda.Stream(device=self.device))
         self.h2d_sem: threading.Semaphore = threading.Semaphore(0)
         self.destination_q_for_h2d: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q(
-            maxsize=2
+            maxsize=1
         )
 
         self.train_start2start_ms = MeanMetric(process_group=self.nccl).cuda()
         self._last_train_start_t: float | None = None
 
-        if __debug__:
-            logger.debug("Worker: initializing buffers")
+        self.epoch_loss_sum = torch.tensor(0.0, device=self.device)
+        self.epoch_step_count = torch.tensor(0.0, device=self.device)
+
         self.buffers: Buffers = init_all_pin_mem(
             shared=shared,
             shared_nfeat=nfeat,
@@ -100,26 +107,22 @@ class Worker:
         )
 
         if self.shared is not None:
-            if __debug__:
-                logger.debug("Worker: initializing with shared memory components")
             assert m_cfg is not None
             self.delta_q: Q[tuple[P2PTask, P2PTask, list[Any]] | Literal["nothing"]] = (
-                Q(maxsize=2)
+                Q(maxsize=1)
             )
-            self.mem_task_q: Q[tuple[MemTask, torch.cuda.Event] | None] = Q(maxsize=2)
-            self.box_task_q: Q[tuple[BoxTask, torch.cuda.Event] | None] = Q(maxsize=2)
+            self.mem_task_q: Q[tuple[MemTask, CudaEventLike] | None] = Q(maxsize=1)
+            self.box_task_q: Q[tuple[BoxTask, CudaEventLike] | None] = Q(maxsize=1)
             self.mem_p2p_q: Q[
-                tuple[P2PTask, torch.cuda.Event] | Literal["nothing_to_p2p"]
-            ] = Q(maxsize=2)
+                tuple[P2PTask, CudaEventLike] | Literal["nothing_to_p2p"]
+            ] = Q(maxsize=1)
             self.box_p2p_q: Q[
-                tuple[P2PTask, torch.cuda.Event] | Literal["nothing_to_p2p"]
-            ] = Q(maxsize=2)
-            self.xpart_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q(maxsize=2)
+                tuple[P2PTask, CudaEventLike] | Literal["nothing_to_p2p"]
+            ] = Q(maxsize=1)
+            self.xpart_q: Q[MetaWEvent | None | Literal["end_of_epoch"]] = Q(maxsize=1)
             assert shared is not None, "Shared memory must be provided if memory exists"
             destination_q_for_h2d = self.xpart_q
 
-            if __debug__:
-                logger.debug("Worker: starting DyAssembler")
             self.dy_asm = DyAssembler(
                 in_q=self.xpart_q,
                 delta_q=self.delta_q,
@@ -127,12 +130,10 @@ class Worker:
                 stop_ev=self.stop_ev,
                 device=self.device,
             )
-            if __debug__:
-                logger.debug("Worker: starting MemHandler")
 
             self.mem_writer_q: Q[
-                tuple[torch.Tensor | None, MemTsNid, torch.cuda.Event]
-            ] = Q(maxsize=2)
+                tuple[torch.Tensor | None, MemTsNid, CudaEventLike]
+            ] = Q(maxsize=1)
             self.mem_handler = MemHandler(
                 h2d_sem=self.h2d_sem,
                 mem_task_q=self.mem_task_q,
@@ -150,12 +151,10 @@ class Worker:
                 mem_writer_q=self.mem_writer_q,
                 device=self.device,
             )
-            if __debug__:
-                logger.debug("Worker: starting BoxHandler")
 
             self.box_writer_q: Q[
-                tuple[torch.Tensor | None, BoxTsNid, torch.cuda.Event]
-            ] = Q(maxsize=2)
+                tuple[torch.Tensor | None, BoxTsNid, CudaEventLike]
+            ] = Q(maxsize=1)
             self.box_handler = BoxHandler(
                 h2d_sem=self.h2d_sem,
                 box_task_q=self.box_task_q,
@@ -176,16 +175,9 @@ class Worker:
                 device=self.device,
             )
 
-            if __debug__:
-                logger.debug("Worker: all memory handlers started")
         else:
-            if __debug__:
-                logger.debug("Worker: no shared memory, using direct queue")
             destination_q_for_h2d = self.full_q
             # there is no thread for handling xpart_q, just put to full_q directly
-
-        if __debug__:
-            logger.debug("Worker: starting H2D thread")
 
         self.rebuilder = Rebuilder(
             in_q=self.meta_q,
@@ -219,10 +211,8 @@ class Worker:
             h2d_sem=self.h2d_sem,
         )
 
-        self.result_q: Q[Result | None] = Q(maxsize=2)
+        self.result_q: Q[Result | None] = Q(maxsize=1)
 
-        if __debug__:
-            logger.debug("Worker: starting Receiver thread")
         self.receiver = Receiver(
             env=self.env,
             gloo=gloo,
@@ -252,12 +242,12 @@ class Worker:
                 header=components.header,
             )
 
-        if __debug__:
-            logger.debug("Worker: moving model to GPU and wrapping with DDP")
         self.model = self.model.cuda()
         find_unused_parameters = False
         if self.s_cfg.history > 1:
             find_unused_parameters = True
+
+        find_unused_parameters = True
         self.model = DDP(
             self.model,
             process_group=self.nccl,
@@ -267,8 +257,6 @@ class Worker:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=t_cfg.lr)
         self.train_loss_tracker = MeanMetric(process_group=self.nccl).cuda()
 
-        if __debug__:
-            logger.debug("Worker: initializing metrics")
         # 2. 验证阶段：全都要
         # Loss 用于看过拟合，AUC/AP 用于选模型
         self.val_metrics = MetricCollection(
@@ -295,20 +283,126 @@ class Worker:
             }
         ).cuda()
         self.local_best_auc = 0.0
-        if __debug__:
-            logger.debug("Worker: initialization complete")
+
+        # === [新增] 用于存储原始验证数据 ===
+        self.val_raw_preds = []
+        self.val_raw_targets = []
+
+        self.test_raw_preds = []
+        self.test_raw_targets = []
 
     def on_train_epoch_end(self) -> Result | None:
         avg_s2s = self.train_start2start_ms.compute().item()
         self.train_start2start_ms.reset()
         print(f"Average train start->start (ms): {avg_s2s:.2f}")
-        if __debug__:
-            logger.debug(f"Worker: epoch {self.curr_epoch} ending, computing metrics")
         # 3. 只有在 Epoch 结束时，才做一次全局同步，计算精准的平均 Loss 记入日志
-        train_loss = self.train_loss_tracker.compute()
+
+        dist.all_reduce(self.epoch_loss_sum, op=dist.ReduceOp.SUM, group=self.nccl)
+        dist.all_reduce(self.epoch_step_count, op=dist.ReduceOp.SUM, group=self.nccl)
+        avg_loss = self.epoch_loss_sum / self.epoch_step_count
+        self.epoch_loss_sum.zero_()
+        self.epoch_step_count.zero_()
 
         val_results = self.val_metrics.compute()
         test_results = self.test_metrics.compute()
+
+        local_preds = torch.cat(self.val_raw_preds).numpy()
+        local_targets = torch.cat(self.val_raw_targets).numpy()
+        all_preds_list = [None for _ in range(dist.get_world_size())]
+        all_targets_list = [None for _ in range(dist.get_world_size())]
+        dist.gather_object(
+            local_preds,
+            all_preds_list if dist.get_rank() == 0 else None,
+            dst=0,
+            group=self.nccl,
+        )
+        dist.gather_object(
+            local_targets,
+            all_targets_list if dist.get_rank() == 0 else None,
+            dst=0,
+            group=self.nccl,
+        )
+        sklearn_ap = 0.0
+        sklearn_auc = 0.0
+        if dist.get_rank() == 0:
+            # 过滤掉 None (以防万一) 并拼接
+            global_preds = np.concatenate([p for p in all_preds_list if p is not None])
+            global_targets = np.concatenate(
+                [t for t in all_targets_list if t is not None]
+            )
+
+            try:
+                sklearn_ap = average_precision_score(global_targets, global_preds)
+                sklearn_auc = roc_auc_score(global_targets, global_preds)
+                print(
+                    f"\n[Validation] TorchMetrics AP: {val_results['val_ap']:.4f} | Sklearn Global AP: {sklearn_ap:.4f}"
+                )
+                print(
+                    f"[Validation] TorchMetrics AUC: {val_results['val_auc']:.4f} | Sklearn Global AUC: {sklearn_auc:.4f}\n"
+                )
+            except Exception as e:
+                print(f"Sklearn metric calculation failed: {e}")
+
+        local_test_preds = (
+            torch.cat(self.test_raw_preds).numpy()
+            if self.test_raw_preds
+            else np.array([])
+        )
+        local_test_targets = (
+            torch.cat(self.test_raw_targets).numpy()
+            if self.test_raw_targets
+            else np.array([])
+        )
+
+        all_test_preds_list = [None for _ in range(dist.get_world_size())]
+        all_test_targets_list = [None for _ in range(dist.get_world_size())]
+
+        dist.gather_object(
+            local_test_preds,
+            all_test_preds_list if dist.get_rank() == 0 else None,
+            dst=0,
+            group=self.nccl,
+        )
+        dist.gather_object(
+            local_test_targets,
+            all_test_targets_list if dist.get_rank() == 0 else None,
+            dst=0,
+            group=self.nccl,
+        )
+
+        sklearn_test_ap = 0.0
+        sklearn_test_auc = 0.0
+
+        if dist.get_rank() == 0:
+            global_test_preds = np.concatenate(
+                [p for p in all_test_preds_list if p is not None and p.size > 0]
+            )
+            global_test_targets = np.concatenate(
+                [t for t in all_test_targets_list if t is not None and t.size > 0]
+            )
+
+            if global_test_preds.size > 0:
+                try:
+                    sklearn_test_ap = average_precision_score(
+                        global_test_targets, global_test_preds
+                    )
+                    sklearn_test_auc = roc_auc_score(
+                        global_test_targets, global_test_preds
+                    )
+                    print(
+                        f"\n[Test] TorchMetrics AP: {test_results['test_ap']:.4f} | Sklearn Global AP: {sklearn_test_ap:.4f}"
+                    )
+                    print(
+                        f"[Test] TorchMetrics AUC: {test_results['test_auc']:.4f} | Sklearn Global AUC: {sklearn_test_auc:.4f}\n"
+                    )
+                except Exception as e:
+                    print(f"Sklearn test metric calculation failed: {e}")
+
+        self.val_raw_preds = []
+        self.val_raw_targets = []
+        self.test_raw_preds = []
+        self.test_raw_targets = []
+
         # if dist.get_rank() == 0:
         #     print(f"Epoch{self.curr_epoch} Done. ")
         #     print(f"Train Loss: {train_loss}, Val Loss {val_results['val_loss']}")
@@ -316,60 +410,53 @@ class Worker:
         #     print(
         #         f"Test AUC: {test_results['test_auc']}, Test AP: {test_results['test_ap']}"
         #     )
-        if __debug__:
-            logger.debug("Worker: resetting metrics")
         self.val_metrics.reset()
         self.test_metrics.reset()
         self.train_loss_tracker.reset()
+
+        if dist.get_rank() == 0:
+            val_results["sk_val_ap"] = torch.tensor(sklearn_ap)
+            val_results["sk_val_auc"] = torch.tensor(sklearn_auc)
+            test_results["sk_test_ap"] = torch.tensor(sklearn_test_ap)
+            test_results["sk_test_auc"] = torch.tensor(sklearn_test_auc)
         res = Result(
-            train_loss=train_loss.item(),
+            train_loss=avg_loss.item(),
             val_loss=val_results["val_loss"].item(),
             val_auc=val_results["val_auc"].item(),
+            sk_val_auc=val_results.get("sk_val_auc", torch.tensor(0.0)).item(),
             val_ap=val_results["val_ap"].item(),
+            sk_val_ap=val_results.get("sk_val_ap", torch.tensor(0.0)).item(),
             test_auc=test_results["test_auc"].item(),
             test_ap=test_results["test_ap"].item(),
+            sk_test_ap=test_results.get("sk_test_ap", torch.tensor(0.0)).item(),
+            sk_test_auc=test_results.get("sk_test_auc", torch.tensor(0.0)).item(),
         )
         self._last_train_start_t = None
-        if __debug__:
-            logger.debug(f"Worker: epoch {self.curr_epoch} results computed")
         if dist.get_rank() == 0:
             return res
         else:
             return None
 
     def train(self, meta: Meta) -> None:
-        if __debug__:
-            logger.debug("Worker: starting training step")
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
-        if __debug__:
-            logger.debug("Worker: forward pass")
         logits = self.model(meta)
         loss = self.criterion(logits.squeeze(-1), meta.labels)
-        if __debug__:
-            logger.debug(f"Worker: loss computed: {loss.item():.4f}")
 
-        if __debug__:
-            logger.debug("Worker: waiting at barrier before backward")
         # dist.barrier(group=self.nccl)
-        if __debug__:
-            logger.debug("Worker: backward pass")
 
         if self.shared is not None:
-            if __debug__:
-                logger.debug("Worker: handling P2P queue")
-            with torch.cuda.stream(self.comm_stream):
+            with torch.cuda.stream(self.comm):
                 self.handle_p2p_q()
         loss.backward()
 
         self.optimizer.step()
-        self.train_loss_tracker.update(loss)
+        with torch.no_grad():
+            self.epoch_loss_sum += loss.detach()
+            self.epoch_step_count += 1
 
     @torch.no_grad()
     def handle_p2p_q(self) -> None:
-        if __debug__:
-            logger.debug("Worker: handling P2P communication (Mem + Box)")
-
         # 1. 获取任务 (并行获取，减少等待间隙)
         # 注意：这里假设 mem 和 box 的 nothing_to_p2p 状态是同步的
         mem_p2p_tuple = self.mem_p2p_q.get(block=True)
@@ -378,8 +465,6 @@ class Worker:
         if mem_p2p_tuple == "nothing_to_p2p":
             box_p2p_tuple = self.box_p2p_q.get(block=True)
             assert box_p2p_tuple == "nothing_to_p2p"
-            if __debug__:
-                logger.debug("Worker: skipping P2P, putting skip to delta_q")
             self.delta_q.put("nothing")
             return
         mem_p2p, mem_event = mem_p2p_tuple
@@ -394,14 +479,49 @@ class Worker:
         # 顺序：Mem_NID -> Mem_Data -> Mem_TS -> Box_NID -> Box_Data -> Box_TS
         # 这样写的好处是 NCCL Kernel 会被密集地压入 CUDA Stream，没有任何 Python 逻辑打断
         p2p_ops = [
-            # --- Mem Parts ---
-            (mem_p2p.nid2recv, mem_p2p.nid2send, mem_p2p.rec_cts, mem_p2p.send_cts),
-            (mem_p2p.data2recv, mem_p2p.data2send, mem_p2p.rec_cts, mem_p2p.send_cts),
-            (mem_p2p.ts2recv, mem_p2p.ts2send, mem_p2p.rec_cts, mem_p2p.send_cts),
-            # --- Box Parts ---
-            (box_p2p.nid2recv, box_p2p.nid2send, box_p2p.rec_cts, box_p2p.send_cts),
-            (box_p2p.data2recv, box_p2p.data2send, box_p2p.rec_cts, box_p2p.send_cts),
-            (box_p2p.ts2recv, box_p2p.ts2send, box_p2p.rec_cts, box_p2p.send_cts),
+            # 格式：(Name, Recv, Send, Rec_Cts, Send_Cts)
+            (
+                "Mem_NID",
+                mem_p2p.nid2recv,
+                mem_p2p.nid2send,
+                mem_p2p.rec_cts,
+                mem_p2p.send_cts,
+            ),
+            (
+                "Mem_Data",
+                mem_p2p.data2recv,
+                mem_p2p.data2send,
+                mem_p2p.rec_cts,
+                mem_p2p.send_cts,
+            ),
+            (
+                "Mem_TS",
+                mem_p2p.ts2recv,
+                mem_p2p.ts2send,
+                mem_p2p.rec_cts,
+                mem_p2p.send_cts,
+            ),
+            (
+                "Box_NID",
+                box_p2p.nid2recv,
+                box_p2p.nid2send,
+                box_p2p.rec_cts,
+                box_p2p.send_cts,
+            ),
+            (
+                "Box_Data",
+                box_p2p.data2recv,
+                box_p2p.data2send,
+                box_p2p.rec_cts,
+                box_p2p.send_cts,
+            ),
+            (
+                "Box_TS",
+                box_p2p.ts2recv,
+                box_p2p.ts2send,
+                box_p2p.rec_cts,
+                box_p2p.send_cts,
+            ),
         ]
 
         # if torch.equal(mem_p2p.nid2recv, box_p2p.nid2recv) == False:
@@ -411,18 +531,36 @@ class Worker:
         #     raise ValueError("Mismatched NIDs in P2P send buffers.")
 
         # 3. 执行所有通信
-        if __debug__:
-            logger.debug(f"Worker: executing merged P2P batch ({len(p2p_ops)} ops)")
 
         works = []
-        for i, (recv_t, send_t, rec_cts, send_cts) in enumerate(p2p_ops):
+        for i, (name, recv_t, send_t, rec_cts, send_cts) in enumerate(p2p_ops):
+            # --- [DEBUG] 强力检查代码开始 ---
+            total_send = sum(send_cts)
+            real_shape = send_t.shape[0]
+            if total_send != real_shape:
+                import sys
+
+                print(
+                    f"\n[CRITICAL ERROR] P2P Mismatch on Rank {dist.get_rank()} | Op: {name}"
+                )
+                print(f"  > Sum of send_cts: {total_send}")
+                print(f"  > Actual Tensor dim0: {real_shape}")
+                print(f"  > Tensor Full Shape: {send_t.shape}")
+                print(f"  > Send Cts List: {send_cts}")
+                sys.stdout.flush()
+                # 抛出异常让程序停在这里
+                raise RuntimeError(
+                    f"Split size mismatch in {name}: planned {total_send} vs actual {real_shape}"
+                )
+            # --- [DEBUG] 强力检查代码结束 ---
+
             work = dist.all_to_all_single(
                 output=recv_t,
                 input=send_t,
                 output_split_sizes=rec_cts,
                 input_split_sizes=send_cts,
                 group=self.nccl_p2p,
-                async_op=True,  # 如果是较新版本的 PyTorch 且需要重叠计算，可以开启，但这里通常不需要
+                async_op=True,
             )
             works.append(work)
 
@@ -437,30 +575,24 @@ class Worker:
         # delta = MemNBox(mem=delta_mem, box=delta_box)
 
         # # 5. 记录 Event 并发送
-        # ready_event: torch.cuda.Event = torch.cuda.Event()
+        # ready_event: CudaEventLike = torch.cuda.Event()
         # ready_event.record(torch.cuda.current_stream())
 
-        # if __debug__:
-        #     logger.debug("Worker: putting merged delta to delta_q")
         self.delta_q.put((mem_p2p, box_p2p, works))
 
     @torch.no_grad()
     def eval(self, meta: Meta) -> None:
-        if __debug__:
-            logger.debug(f"Worker: evaluating on split={meta.m_state.split}")
         assert meta.labels is not None
         self.model.eval()
 
         logits = self.model(meta)
         if self.shared is not None:
-            with torch.cuda.stream(self.comm_stream):
+            with torch.cuda.stream(self.comm):
                 self.handle_p2p_q()
 
         y_pred = logits.sigmoid().squeeze(-1)
 
         if meta.m_state.split == "val":
-            if __debug__:
-                logger.debug("Worker: updating validation metrics")
             loss = self.criterion(logits.squeeze(-1), meta.labels)
 
             # [Fix] 显式指定哪个参数给哪个指标，或者分开更新
@@ -470,15 +602,18 @@ class Worker:
                 target=meta.labels.long(),
                 value=loss,  # 这一行会让 val_loss 找到它需要的参数
             )
+
+            # === [新增] 收集原始数据 (转到 CPU 以节省显存) ===
+            self.val_raw_preds.append(y_pred.detach().cpu())
+            self.val_raw_targets.append(meta.labels.detach().cpu())
         else:
             assert meta.m_state.split == "test"
-            if __debug__:
-                logger.debug("Worker: updating test metrics")
             self.test_metrics.update(preds=y_pred, target=meta.labels.long())
 
+            self.test_raw_preds.append(y_pred.detach().cpu())
+            self.test_raw_targets.append(meta.labels.detach().cpu())
+
     def start_all_threads(self) -> None:
-        if __debug__:
-            logger.debug("Worker: starting all threads")
         self.rebuilder.start()
         self.graph_builder.start()
         self.h2d.start()
@@ -489,153 +624,124 @@ class Worker:
             self.box_writer.start()
             self.mem_writer.start()
             self.dy_asm.start()
-        if __debug__:
-            logger.debug("Worker: all threads started")
 
     def run(self) -> None:
         self.start_all_threads()
-        if __debug__:
-            logger.debug("Worker: starting main run loop")
-        if __debug__:
-            logger.debug("Worker: Starting H2D thread...")
-        if __debug__:
-            logger.debug("Worker: releasing semaphores for H2D startup")
         self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
         self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
         self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
         self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
         if self.shared is not None:
-            if __debug__:
-                logger.debug("Worker: initializing delta_q with None event")
             self.delta_q.put("nothing")
 
         batch_count = 0
+
+        def trace_handler(p):
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            output_filename = f"trace_epoch2_rank_{rank}.json"
+            p.export_chrome_trace(output_filename)
+            print(f"Rank {rank}: Trace saved to {output_filename}")
+
+        prof = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            schedule=None,  # 关键：设为 None，手动控制
+            on_trace_ready=trace_handler,
+            record_shapes=True,
+            with_stack=True,
+            with_flops=False,
+        )
+
+        # 用于记录第二个 epoch 抓了几个 step
+        epoch2_steps_recorded = 0
+        # 标记是否已经保存过，防止重复 start/stop
+        profiling_done = False
+
         while self.stop_ev.is_set() is False:
-            if __debug__:
-                logger.debug("Worker: waiting for data from full_q")
             full = self.full_q.get()
 
             if isinstance(full, tuple):
                 batch_count += 1
-                if __debug__:
-                    logger.debug(f"Worker: processing batch #{batch_count}")
                 meta, ready_event = full
                 torch.cuda.current_stream().wait_event(ready_event)
                 m_info = meta.m_state
-                if __debug__:
-                    logger.debug(f"Worker: batch #{batch_count} split={m_info.split}")
                 if m_info.split == "train":  # if training
-                    now = time.perf_counter()
-                    if self._last_train_start_t is not None:
-                        interval_ms = (now - self._last_train_start_t) * 1000.0
-                        self.train_start2start_ms.update(
-                            torch.tensor(interval_ms, device=self.device)
-                        )
-                    self._last_train_start_t = now
-                    # ----------------------------------------------------------
-                    self.train(meta)
+                    # should_profile = self.curr_epoch == 1 and not profiling_done
+                    should_profile = False
+                    if should_profile:
+                        # 如果是该 Epoch 的前几个 step，确保 profiler 开启
+                        if epoch2_steps_recorded == 0:
+                            prof.start()
+
+                    with record_function("Model_Train_Step"):
+                        now = time.perf_counter()
+                        if self._last_train_start_t is not None:
+                            interval_ms = (now - self._last_train_start_t) * 1000.0
+                            self.train_start2start_ms.update(
+                                torch.tensor(interval_ms, device=self.device)
+                            )
+                        self._last_train_start_t = now
+                        # ----------------------------------------------------------
+                        self.train(meta)
+                    if should_profile:
+                        prof.step()  # 标记一步结束
+                        epoch2_steps_recorded += 1
+
+                        # 抓取 5 个 batch 后立刻停止并保存
+                        if epoch2_steps_recorded >= 100:
+                            prof.stop()
+                            profiling_done = True
+
                 elif m_info.split in ["val", "test"]:  # if evaluating
                     self._last_train_start_t = None
                     self.eval(meta)
-                if __debug__:
-                    logger.debug(f"Worker: batch #{batch_count} complete")
             if full == "end_of_epoch":
-                if __debug__:
-                    logger.debug(f"Worker: end of epoch {self.curr_epoch}")
                 result = self.on_train_epoch_end()
+
                 self.result_q.put(result)
-                if __debug__:
-                    logger.debug(
-                        f"Worker: saving model checkpoint (epoch {self.curr_epoch})"
-                    )
                 # self.save_model(path="last.ckpt")
                 val_auc = result.val_auc if result is not None else 0.0
-                if __debug__:
-                    logger.debug(
-                        f"DEBUG_RANK_{self.env.local_rank}: current_auc={val_auc}, best_auc={self.local_best_auc}"
-                    )
                 if val_auc > self.local_best_auc:
-                    if __debug__:
-                        logger.debug(
-                            f"Worker: new best AUC: {val_auc:.4f} > {self.local_best_auc:.4f}"
-                        )
                     self.local_best_auc = val_auc
                     # 只有打破纪录才写磁盘
                     self.save_model(path="best.ckpt")
                 dist.barrier(group=self.nccl)
                 self.curr_epoch += 1
                 if self.shared:
-                    if __debug__:
-                        logger.debug("Worker: resetting shared memory")
                     self.shared.reset()
             if full is None:
                 self.box_task_q.put(None)
                 self.mem_task_q.put(None)
-                if __debug__:
-                    logger.debug("Worker: received None, synchronizing and exiting")
-
                 break
 
-        if __debug__:
-            logger.debug(f"Worker: run loop complete, processed {batch_count} batches")
-
     def cleanup(self) -> None:
-        if __debug__:
-            logger.debug("Worker: cleanup started")
         self.h2d.join()
-        if __debug__:
-            logger.debug("Worker: H2D thread joined")
         self.receiver.join()
-        if __debug__:
-            logger.debug("Worker: Receiver thread joined")
         if self.mem_handler:
             self.mem_handler.join()
-            if __debug__:
-                logger.debug("Worker: MemHandler thread joined")
         if self.mem_writer:
             self.mem_writer.join()
-            if __debug__:
-                logger.debug("Worker: MemWriter thread joined")
         if self.box_writer:
             self.box_writer.join()
-            if __debug__:
-                logger.debug("Worker: BoxWriter thread joined")
         if self.rebuilder:
             self.rebuilder.join()
-            if __debug__:
-                logger.debug("Worker: Rebuilder thread joined")
         if self.graph_builder:
             self.graph_builder.join()
-            if __debug__:
-                logger.debug("Worker: GraphBuilder thread joined")
         if self.box_handler:
             self.box_handler.join()
-            if __debug__:
-                logger.debug("Worker: BoxHandler thread joined")
         self.dy_asm.join()
-        if __debug__:
-            logger.debug("Worker: Assembler thread joined")
         dist.barrier()
         dist.destroy_process_group()
-        if __debug__:
-            logger.debug("Worker: cleanup complete")
 
     # 供外部保存/加载
     def save_model(self, path: str) -> None:
         rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
-        if __debug__:
-            logger.debug(f"Worker: save_model called on rank {rank}, path={path}")
 
         if rank == 0:
-            if __debug__:
-                logger.debug(f"Worker: rank 0 saving model to {path}")
             # 关键：保存“裸模型”的权重（非DDP也能加载）
             model = self.model.module if isinstance(self.model, DDP) else self.model
             torch.save(model.state_dict(), path)
 
     def load_model(self, path: str) -> None:
-        if __debug__:
-            logger.debug(f"Worker: load_model called, path={path}")
         # 让所有rank都在文件写完后再开始读（更稳）
         if dist.is_available() and dist.is_initialized():
             dist.barrier(group=self.nccl)
@@ -657,9 +763,5 @@ class Worker:
             dist.barrier(group=self.nccl)
 
     def load_memory(self, memory_state: dict) -> None:
-        if __debug__:
-            logger.debug("Worker: load_memory called")
         if self.shared is not None:
             self.model.module.load_memory_state(memory_state)
-            if __debug__:
-                logger.debug("Worker: memory state loaded")

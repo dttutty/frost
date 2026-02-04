@@ -215,11 +215,15 @@ class MemNBox:
 @dataclass(kw_only=True)
 class Result:
     test_auc: float
+    sk_test_auc: float | None = None
     test_ap: float
+    sk_test_ap: float | None = None
     train_loss: float
     val_loss: float
     val_auc: float
+    sk_val_auc: float | None = None
     val_ap: float
+    sk_val_ap: float | None = None
 
 
 @dataclass(kw_only=True)

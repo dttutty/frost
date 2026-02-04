@@ -23,6 +23,15 @@ class MailTsNid:
             f"ts={self.ts.shape}, is_sorted={self.is_sorted}, is_unique={self.is_unique})"
         )
 
+    def clone(self) -> MailTsNid:
+        return MailTsNid(
+            nid=self.nid.clone(),
+            data=self.data.clone(),
+            ts=self.ts.clone(),
+            is_sorted=self.is_sorted,
+            is_unique=self.is_unique,
+        )
+
     def _ensure_sorted_unique_nid(self) -> MailTsNid:
         from ._data_ops import _ensure_sorted_unique_nid
 

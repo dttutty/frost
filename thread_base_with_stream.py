@@ -1,6 +1,7 @@
 import logging
 import threading
 import traceback
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -16,7 +17,7 @@ class StreamThreadBase(threading.Thread):
         stop_ev: threading.Event,
     ) -> None:
         super().__init__(daemon=False, name=name)
-        self.stream: torch.cuda.Stream = torch.cuda.Stream()
+        self.stream = cast(torch.cuda.Stream, torch.cuda.Stream())
         self.stop_ev = stop_ev
 
     def logic(self) -> None:

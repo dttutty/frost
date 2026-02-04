@@ -17,6 +17,7 @@ from gnn.with_memory.tgn import TGN
 from schemas.datatypes.mem_mail_box.mem import MemTsNid
 from schemas.datatypes.misc import Meta
 from schemas.datatypes.task import BoxTask, MemTask
+from schemas.protocol.misc import CudaEventLike
 
 
 logger = logging.getLogger(__name__)
@@ -29,8 +30,8 @@ class MemoryBaseGNN(nn.Module):
         memory_updater: TransformerMemoryUpdater
         | MfgMemoryUpdater
         | NoMfgMemoryUpdater,
-        mem_task_q: Queue[tuple[MemTask, torch.cuda.Event] | None],
-        box_task_q: Queue[tuple[BoxTask, torch.cuda.Event] | None],
+        mem_task_q: Queue[tuple[MemTask, CudaEventLike] | None],
+        box_task_q: Queue[tuple[BoxTask, CudaEventLike] | None],
         header: EdgePredictor,
     ) -> None:
         super().__init__()
@@ -39,7 +40,7 @@ class MemoryBaseGNN(nn.Module):
         self.mem_task_q = mem_task_q
         self.box_task_q = box_task_q
         self.header = header
-        self.updater_stream = torch.cuda.Stream()
+        self.updater_stream = cast(torch.cuda.Stream, torch.cuda.Stream())
 
     def forward(self, meta: Meta) -> torch.Tensor:
         self.update_and_sync_memory(meta=meta)
@@ -117,7 +118,7 @@ class MemoryBaseGNN(nn.Module):
                 nid=meta.root_nid[:n_root_src_n_pos_dst],
             )
 
-        ready_event: torch.cuda.Event = torch.cuda.Event()
+        ready_event: CudaEventLike = torch.cuda.Event()
         ready_event.record(torch.cuda.current_stream())
 
         m_state = meta.m_state

@@ -18,6 +18,7 @@ from schemas.datatypes.misc import (
     Shared,
 )
 from schemas.datatypes.plan import PackedDyPlan, PackedStPlan, PlanSet
+from schemas.protocol.misc import CudaEventLike
 from schemas.shm_layout import ShmKeys
 from shm_manager import DoubleBufferedSHM
 from thread_base_with_stream import StreamThreadBase
@@ -301,8 +302,8 @@ class H2D(StreamThreadBase):
         efeat: torch.Tensor | None,
         shared: Shared | None,
         merge_src: bool,
-        in_q: Q[tuple[Meta, torch.cuda.Event] | None | Literal["end_of_epoch"]],
-        out_q: Q[tuple[Meta, torch.cuda.Event] | None | Literal["end_of_epoch"]],
+        in_q: Q[tuple[Meta, CudaEventLike] | None | Literal["end_of_epoch"]],
+        out_q: Q[tuple[Meta, CudaEventLike] | None | Literal["end_of_epoch"]],
         stop_ev: threading.Event,
         h2d_sem: threading.Semaphore | None,
         device: torch.device,
@@ -310,9 +311,6 @@ class H2D(StreamThreadBase):
         n_neg: int = 1,
     ) -> None:
         super().__init__(name="h2d", stop_ev=stop_ev)
-        logger.debug(
-            f"H2D: Initializing, history={history}, n_neg={n_neg}, merge_src={merge_src}"
-        )
         self.buf = buf
         self.nfeat = nfeat
         self.efeat = efeat
@@ -330,42 +328,17 @@ class H2D(StreamThreadBase):
             shared_nfeat=nfeat, shared_efeat=efeat, device=self.device
         )
 
-        logger.debug(
-            f"H2D: nfeat={'enabled' if nfeat is not None else 'disabled'}, shape={nfeat.shape if nfeat is not None else None}"
-        )
-        logger.debug(
-            f"H2D: efeat={'enabled' if efeat is not None else 'disabled'}, shape={efeat.shape if efeat is not None else None}"
-        )
-        logger.debug(f"H2D: shared={'enabled' if shared is not None else 'disabled'}")
-        logger.debug(
-            f"H2D: Buffers - pos_efeat_h2d={'enabled' if buf.pos_efeat_h2d is not None else 'disabled'}, "
-            f"nfeat_h2d={'enabled' if buf.nfeat_h2d is not None else 'disabled'}, "
-            f"efeat_h2d={'enabled' if buf.efeat_h2d is not None else 'disabled'}, "
-            f"mem_h2d={'enabled' if buf.mem_h2d is not None else 'disabled'}, "
-            f"box_h2d={'enabled' if buf.box_h2d is not None else 'disabled'}"
-        )
-        logger.debug("H2D: Initialized")
-
     @torch.no_grad()
     def logic(self) -> None:
         batch_count = 0
-        logger.debug("H2D: starting logic loop")
 
         while not self.stop_ev.is_set():
-            logger.debug(
-                f"H2D: waiting for meta from in_q (queue size: {self.in_q.qsize()})"
-            )
-
             meta_data = self.in_q.get(block=True)
-            logger.debug(f"H2D: received meta type: {type(meta_data).__name__}")
 
             if meta_data is None:
-                logger.debug("H2D: received None, putting to out_q and exiting")
                 self.out_q.put(None, block=True)
-                logger.debug(f"H2D: Processed {batch_count} batches before exit")
                 break
             elif meta_data == "end_of_epoch":
-                logger.debug("H2D: received end_of_epoch, forwarding to out_q")
                 self.out_q.put("end_of_epoch", block=True)
                 continue
 
@@ -378,51 +351,28 @@ class H2D(StreamThreadBase):
 
             eids: list[list[torch.Tensor]] = []
             if meta.n2r_mfgs is not None:
-                logger.debug(
-                    f"H2D: batch #{batch_count}, transferring {len(meta.n2r_mfgs)} MFG groups to GPU"
-                )
                 for group_idx, blocks in enumerate(meta.n2r_mfgs):
                     eid = [block.edata["ID"] for block in blocks]
                     eids.append(eid)
-                    logger.debug(
-                        f"H2D: batch #{batch_count}, MFG group {group_idx} transferred to GPU"
-                    )
-                logger.debug(f"H2D: batch #{batch_count}, all MFGs on GPU")
-            else:
-                logger.debug(f"H2D: batch #{batch_count}, no MFGs to transfer")
 
             # move gnn_mfgs to gpu
             if meta.n2r_mfgs is not None:
-                logger.debug(
-                    f"H2D: batch #{batch_count}, transferring {len(meta.n2r_mfgs)} MFG groups to GPU"
-                )
                 for group_idx, blocks in enumerate(meta.n2r_mfgs):
                     for block_idx, block in enumerate(blocks):
                         blocks[block_idx] = block.to(self.device, non_blocking=True)
-                    logger.debug(
-                        f"H2D: batch #{batch_count}, MFG group {group_idx} transferred to GPU"
-                    )
-                logger.debug(f"H2D: batch #{batch_count}, all MFGs on GPU")
-            else:
-                logger.debug(f"H2D: batch #{batch_count}, no MFGs to transfer")
 
             # can run no matter has nfeat or not
             if meta.n2r_mfgs is not None:
-                logger.debug(f"H2D: batch #{batch_count}, filling MFGs with features")
                 meta.n2r_mfgs = self.st_asm.fill_mfg_with_efeat(
                     gnn_mfgs=meta.n2r_mfgs,
                     pin_efeat_buf=self.buf.efeat_h2d,
                     eids=eids,
                 )
-                logger.debug(f"H2D: batch #{batch_count}, MFGs filled with features")
 
             # init x
             n_pos_edges = 0
             if meta.pos_edge_id is not None:
                 n_pos_edges = meta.pos_edge_id.numel()
-            logger.debug(
-                f"H2D: batch #{batch_count}, creating labels, n_pos={n_pos_edges}, n_neg_per_pos={self.n_neg}, total={n_pos_edges * (1 + self.n_neg)}"
-            )
             if n_pos_edges > 0:
                 meta.labels = torch.cat(
                     [
@@ -433,74 +383,35 @@ class H2D(StreamThreadBase):
             else:
                 # 即使为空，也要创建正确的空 Tensor 以防下游报错
                 meta.labels = torch.empty(0, device=self.device)
-            logger.debug(
-                f"H2D: batch #{batch_count}, labels created, shape={meta.labels.shape}"
-            )
 
             # move plan to gpu
             # if meta.plan_set is not None:
-            #     logger.debug(f"H2D: batch #{batch_count}, processing plan_set")
             #     if meta.plan_set.mem is not None and meta.plan_set.box is None:
-            #         logger.debug(
-            #             f"H2D: batch #{batch_count}, copying mem plan to box (box is None)"
-            #         )
             #         meta.plan_set.box = meta.plan_set.mem
             #     meta.plan_set = meta.plan_set
-            # else:
-            #     logger.debug(f"H2D: batch #{batch_count}, no plan_set provided")
 
             # move nfeat and efeat to gpu
             if self.nfeat is not None or self.efeat is not None:
-                logger.debug(f"H2D: batch #{batch_count}, processing nfeat/efeat")
                 # prepare if has n_feat
                 if meta.plan_set is not None and meta.plan_set.nfeat is not None:
-                    logger.debug(f"H2D: batch #{batch_count}, preparing nfeat cache")
                     meta.nfeat = self.st_asm.prepare_nfeat_cache(
                         nfeat_plan=meta.plan_set.nfeat,
                         pin_nfeat_buf=self.buf.nfeat_h2d,
                     )
-                    if meta.nfeat is not None:
-                        logger.debug(
-                            f"H2D: batch #{batch_count}, nfeat prepared, nid count={meta.nfeat.nid.numel()}, feature shape={meta.nfeat.nfeat.shape}"
-                        )
-                    else:
-                        logger.debug(
-                            f"H2D: batch #{batch_count}, nfeat preparation returned None"
-                        )
-                else:
-                    logger.debug(
-                        f"H2D: batch #{batch_count}, no nfeat plan, skipping nfeat cache"
-                    )
 
                 # can run no matter has nfeat or not
                 if meta.n2r_mfgs is not None:
-                    logger.debug(
-                        f"H2D: batch #{batch_count}, filling MFGs with features"
-                    )
                     meta.n2r_mfgs = self.st_asm.fill_mfg_with_nfeat(
                         gnn_mfgs=meta.n2r_mfgs,
                         nfeat=meta.nfeat,
                     )
-                    logger.debug(
-                        f"H2D: batch #{batch_count}, MFGs filled with features"
-                    )
 
                 # mfg version do not need nfeat output
                 if meta.n2r_mfgs is not None:
-                    logger.debug(
-                        f"H2D: batch #{batch_count}, deleting nfeat (MFG version)"
-                    )
                     del meta.nfeat  # mfg版本不需要nfeat输出
-            else:
-                logger.debug(
-                    f"H2D: batch #{batch_count}, no nfeat or efeat, skipping feature processing"
-                )
 
             # move mem and box to gpu
             if self.shared is not None:
-                logger.debug(
-                    f"H2D: batch #{batch_count}, acquiring h2d_sem for mem/box transfer (2 permits)"
-                )
                 # assert self.buf.mem_h2d is not None
                 # assert self.buf.box_h2d is not None
                 # assert self.h2d_sem is not None
@@ -509,21 +420,13 @@ class H2D(StreamThreadBase):
                     # [Fix 2] 关键修复：必须在调用 prep 之前处理 box 为 None 的情况！
                     # 原来的逻辑写得太晚了，导致传进 prep 的 box 是 None
                     if meta.plan_set.box is None:
-                        logger.debug(
-                            f"H2D: batch #{batch_count}, box plan is None, reusing mem plan"
-                        )
                         meta.plan_set.box = meta.plan_set.mem
                 self.h2d_sem.acquire()
                 self.h2d_sem.acquire()
-                logger.debug(
-                    f"H2D: batch #{batch_count}, h2d_sem acquired, preparing mem and box"
-                )
                 # assert meta.plan_set is not None
                 # assert meta.plan_set.mem is not None
                 # assert meta.plan_set.box is not None
-                # logger.debug(
-                #     f"H2D: batch #{batch_count}, mem plan fetch size={meta.plan_set.mem.fetch.data.numel()}, box plan fetch size={meta.plan_set.box.fetch.data.numel()}"
-                # )
+
                 meta.mem_n_box = prep_part_mem_n_box(
                     self.shared,
                     meta.plan_set.mem,
@@ -532,19 +435,9 @@ class H2D(StreamThreadBase):
                     pin_box_buf=self.buf.box_h2d,
                     device=self.device,
                 )
-                logger.debug(
-                    f"H2D: batch #{batch_count}, mem and box prepared, mem size={meta.mem_n_box.mem.nid.numel()}, box size={meta.mem_n_box.box.nid.numel()}"
-                )
-            else:
-                logger.debug(
-                    f"H2D: batch #{batch_count}, no shared memory, skipping mem/box transfer"
-                )
 
             # even there is no next batch, we still need plan_set for writeback
             if self.merge_src:
-                logger.debug(
-                    f"H2D: batch #{batch_count}, deduplicating first layer src nodes"
-                )
                 assert meta.n2r_mfgs is not None
                 orig_size = (
                     meta.n2r_mfgs[0][0].num_src_nodes() if meta.n2r_mfgs[0] else 0
@@ -553,16 +446,7 @@ class H2D(StreamThreadBase):
                 new_size = (
                     meta.n2r_mfgs[0][0].num_src_nodes() if meta.n2r_mfgs[0] else 0
                 )
-                logger.debug(
-                    f"H2D: batch #{batch_count}, deduplication complete, src nodes: {orig_size} -> {new_size}"
-                )
 
-            ready_event: torch.cuda.Event = torch.cuda.Event()
+            ready_event: CudaEventLike = torch.cuda.Event()
             ready_event.record(torch.cuda.current_stream())
-            logger.debug(
-                f"H2D: batch #{batch_count} complete, recorded ready_event, putting to out_q"
-            )
             self.out_q.put((meta, ready_event), block=True)
-            logger.debug(f"H2D: batch #{batch_count} sent to out_q")
-
-        logger.debug(f"H2D: exiting, processed {batch_count} batches")
