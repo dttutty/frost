@@ -4,7 +4,7 @@
 #include <cmath>
 #include <random>
 #include <vector>
-#include <omp.h>
+#include <tbb/tbb.h>   // <--- 必须加上这行！
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl.h>
@@ -62,7 +62,6 @@ public:
           recent(_recent), prop_time(_prop_time) {
         
         num_threads = std::max(1, num_thread_per_worker * num_workers);
-        omp_set_num_threads(num_threads);
         num_nodes = static_cast<NodeIDType>(indptr.size() - 1);
         num_edges = static_cast<EdgeIDType>(indices.size());
     }

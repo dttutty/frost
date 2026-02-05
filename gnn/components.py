@@ -390,6 +390,7 @@ class TemporalGraphAttentionLayer(nn.Module):
         dim_out: int = 100,
         num_head: int = 2,
         dropout: float = 0.2,
+        ffn_expansion: int = 4,  # 新增: FFN 扩展倍数，默认 4 倍
     ) -> None:
         super().__init__()
         self.num_head = num_head

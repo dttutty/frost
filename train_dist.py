@@ -26,9 +26,6 @@ from shm_manager import DoubleBufferedSHM
 from utils import load_feat, load_graph, parse_config
 
 
-start = time.time()
-
-
 def _init_gnn(
     t_cfg: TrainCFG,
     s_cfg: SampleCFG,
@@ -393,6 +390,7 @@ else:
     shm_manager = DoubleBufferedSHM(
         worker_rank=env.local_rank, create=False, layout=layout_config
     )
+start = time.time()
 
 
 if env.is_host:

@@ -14,7 +14,7 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_NCCL_BLOCKING_WAIT=0
 export MKL_NUM_THREADS=8
 export TOKENIZERS_PARALLELISM=false
-# export PYTHONOPTIMIZE=1
+export PYTHONOPTIMIZE=1
 # 2. 执行命令 (使用 python -O 启动)
 # 请手动替换 YOUR_DATASET 和 YOUR_CONFIG_NAME
 /home/sqp17/miniforge3/envs/simple_py310/bin/python -m torch.distributed.run \

@@ -99,8 +99,8 @@ class TGN(torch.nn.Module):
             h_combined = updated_mem + node_feat_emb
         else:
             h_combined = updated_mem
-        # del block.srcdata["nfeat"]
-        # block.srcdata["h"] = h_combined
-        block.srcdata["h"] = block.srcdata["nfeat"]
+        del block.srcdata["nfeat"]
+        block.srcdata["h"] = h_combined
+        # block.srcdata["h"] = block.srcdata["nfeat"]
 
         return cast(torch.Tensor, self.encoder(block))

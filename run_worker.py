@@ -247,7 +247,6 @@ class Worker:
         if self.s_cfg.history > 1:
             find_unused_parameters = True
 
-        find_unused_parameters = True
         self.model = DDP(
             self.model,
             process_group=self.nccl,
@@ -459,17 +458,33 @@ class Worker:
     def handle_p2p_q(self) -> None:
         # 1. 获取任务 (并行获取，减少等待间隙)
         # 注意：这里假设 mem 和 box 的 nothing_to_p2p 状态是同步的
+        t_start = time.perf_counter()
         mem_p2p_tuple = self.mem_p2p_q.get(block=True)
+        t_got_mem = time.perf_counter()
+        mem_wait_ms = (t_got_mem - t_start) * 1000.0
 
         # 快速路径：如果没有 P2P 任务，直接跳过
         if mem_p2p_tuple == "nothing_to_p2p":
             box_p2p_tuple = self.box_p2p_q.get(block=True)
             assert box_p2p_tuple == "nothing_to_p2p"
             self.delta_q.put("nothing")
+
+            if mem_wait_ms > 5.0:
+                print(
+                    f"[Rank {self.env.local_rank}] P2P Starvation (Nothing): Waited {mem_wait_ms:.2f}ms for empty signal"
+                )
+
             return
         mem_p2p, mem_event = mem_p2p_tuple
         # 此时肯定有 box 任务
         box_p2p_tuple = self.box_p2p_q.get(block=True)
+        t_got_box = time.perf_counter()
+        box_wait_ms = (t_got_box - t_got_mem) * 1000.0
+        total_wait = mem_wait_ms + box_wait_ms
+        if total_wait > 2.0:
+            print(
+                f"[Rank {self.env.local_rank}] P2P Blocked! Total: {total_wait:.2f}ms | Mem: {mem_wait_ms:.2f}ms | Box: {box_wait_ms:.2f}ms"
+            )
         assert box_p2p_tuple != "nothing_to_p2p"
         box_p2p, box_event = box_p2p_tuple
         torch.cuda.current_stream().wait_event(mem_event)
@@ -631,6 +646,10 @@ class Worker:
         self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
         self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
         self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
+        self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
+        self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
+        self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
+        self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
         if self.shared is not None:
             self.delta_q.put("nothing")
 
@@ -656,8 +675,22 @@ class Worker:
         # 标记是否已经保存过，防止重复 start/stop
         profiling_done = False
 
+        total_wait_ms = 0.0
+        wait_steps = 0
         while self.stop_ev.is_set() is False:
+            t_wait_start = time.perf_counter()
             full = self.full_q.get()
+
+            t_wait_end = time.perf_counter()
+            wait_ms = (t_wait_end - t_wait_start) * 1000.0
+
+            total_wait_ms += wait_ms
+            wait_steps += 1
+
+            if wait_ms > 5.0 and self.curr_epoch > 0:  # Skip epoch 0 warmup
+                print(
+                    f"[Rank {self.env.local_rank}] Data Starvation! Main loop waited {wait_ms:.2f}ms for full_q"
+                )
 
             if isinstance(full, tuple):
                 batch_count += 1
@@ -666,7 +699,7 @@ class Worker:
                 m_info = meta.m_state
                 if m_info.split == "train":  # if training
                     # should_profile = self.curr_epoch == 1 and not profiling_done
-                    should_profile = False
+                    should_profile = (self.curr_epoch == 1) and (not profiling_done)
                     if should_profile:
                         # 如果是该 Epoch 的前几个 step，确保 profiler 开启
                         if epoch2_steps_recorded == 0:
@@ -695,6 +728,18 @@ class Worker:
                     self._last_train_start_t = None
                     self.eval(meta)
             if full == "end_of_epoch":
+                avg_wait = total_wait_ms / max(1, wait_steps)
+                print(
+                    f"[Rank {self.env.local_rank}] Epoch {self.curr_epoch} Avg Data Wait: {avg_wait:.2f}ms"
+                )
+                # print total_wait_ms
+                print(
+                    f"[Rank {self.env.local_rank}] Epoch {self.curr_epoch} Total Data Wait: {total_wait_ms:.2f}ms over {wait_steps} waits"
+                )
+
+                total_wait_ms = 0.0
+                wait_steps = 0
+
                 result = self.on_train_epoch_end()
 
                 self.result_q.put(result)
