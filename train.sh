@@ -1,7 +1,7 @@
 # 1. 设置优化环境变量 (由 launch.json 净化而来)
 export CUDA_VISIBLE_DEVICES=0,1
 export TORCH_DISTRIBUTED_DEBUG=OFF          # 关闭分布式调试
-export LOG_LEVEL=INFO                       # 减少日志输出 IO
+export LOG_LEVEL=WARNING                       # 减少日志输出 IO
 export NUMBA_DEBUG=0
 export CUDA_LAUNCH_BLOCKING=0               # 关键：允许 GPU 异步执行 (极快)
 export TORCH_USE_CUDA_DSA=0                 # 关闭设备端断言

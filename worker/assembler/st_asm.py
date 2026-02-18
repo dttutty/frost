@@ -73,7 +73,7 @@ class StAssembler:
 
             # 3b. Copy: CPU Pinned -> GPU (Async)
             # 因为 blocks 在 GPU 上，所以我们也必须把数据搬到 GPU
-            gpu_all_efeat = buf_view.to(self.device, non_blocking=True)
+            gpu_all_efeat = buf_view.to(self.device, non_blocking=False)
 
         else:
             # print total_edges <= pin_efeat_buf.shape[0]
@@ -84,7 +84,7 @@ class StAssembler:
             # 直接 Gather 并 .to(device)
             # 注意：如果 blocks 在 GPU，这里必须显式 to(device)
             cpu_efeat = efeat[flat_eids]
-            gpu_all_efeat = cpu_efeat.to(self.device, non_blocking=True)
+            gpu_all_efeat = cpu_efeat.to(self.device, non_blocking=False)
 
         # 4. 在 GPU 上切分并赋值
         # 此时 gpu_all_efeat 和 block 都在 GPU 上，赋值是合法的
@@ -124,11 +124,25 @@ class StAssembler:
         nfeat_plan: StPlan,
         pin_nfeat_buf: StBuf | None = None,  # 接收 StBuf
     ) -> NFeatNid | None:
+        pin_nfeat_buf = None
         assert self.shared_nfeat is not None
         to_cache, fetch = nfeat_plan.to_cache.data, nfeat_plan.fetch.data
 
         nfeat_obj = None
 
+        if fetch.numel() == 0:
+            nfeat_obj = self.nfeat_delta
+            assert nfeat_obj is not None, (
+                "NFeat delta should not be None when fetch is empty"
+            )
+
+            nfeat_obj = nfeat_obj.sort_by_nid()
+
+            if to_cache.numel() > 0:
+                self.nfeat_delta = nfeat_obj.filter_by_nid(to_cache)
+            else:
+                self.nfeat_delta = None
+            return nfeat_obj
         # --- Pin Memory Logic ---
         if pin_nfeat_buf is not None and fetch.numel() <= pin_nfeat_buf.data.shape[0]:
             n = fetch.numel()
@@ -138,7 +152,7 @@ class StAssembler:
             # Gather Data
             if __debug__:
                 # 1. 确保 fetch 索引张量不为空
-                assert fetch.numel() > 0, "Fetch indices tensor is empty"
+                assert fetch.numel() > 0, f"{fetch}, Fetch indices tensor is empty"
 
                 # 2. 核心边界检查：确保 fetch 里的所有节点 ID 都在共享内存范围内
                 # self.shared_nfeat.size(0) 通常等于全局节点数 n_nodes
@@ -162,8 +176,8 @@ class StAssembler:
             buf_nid.copy_(fetch.to(dtype=buf_nid.dtype))
 
             # Async Transfer
-            gpu_data = buf_data.to(self.device, non_blocking=True)
-            gpu_nid = buf_nid.to(self.device, non_blocking=True).long()
+            gpu_data = buf_data.to(self.device, non_blocking=False)
+            gpu_nid = buf_nid.to(self.device, non_blocking=False).long()
 
             nfeat_obj = NFeatNid(nid=gpu_nid, nfeat=gpu_data)
         elif pin_nfeat_buf is not None:

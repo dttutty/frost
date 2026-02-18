@@ -23,5 +23,5 @@ FloatArr = NDArray[np.floating]
 
 MetaWEvent: TypeAlias = tuple[Meta, CudaEventLike]
 
-MetasDyNeed: TypeAlias = tuple[list[TensorSet], list[TensorSet]]
+MetasDyNeed: TypeAlias = tuple[list[TensorSet], list[TensorSet], list[Meta]]
 MetasStNeed: TypeAlias = list[TensorSet]

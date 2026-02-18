@@ -56,9 +56,11 @@ class Scatter(ThreadBase):
         # 2. 将所有全局变量变为实例属性
         self.host_rank: int = env.host_rank
         self.ngpus: int = env.n_gpu
-        self.group: dist.ProcessGroup = group
+        self.gloo: dist.ProcessGroup = group
         self.dummy_recv = torch.zeros(MANIFEST_SIZE, dtype=torch.long)
         self.control_tensor_template = torch.zeros(MANIFEST_SIZE, dtype=torch.long)
+        self._gather_seq = 0
+        self._ctrl_send_seq = 0
 
         assert self.local_rank == self.host_rank
 
@@ -250,7 +252,7 @@ class Scatter(ThreadBase):
             [None],  # Host 自己的接收缓冲区（没用）
             scatter_list,
             src=self.host_rank,
-            group=self.group,
+            group=self.gloo,
         )
 
         # scatter.py
@@ -261,11 +263,22 @@ class Scatter(ThreadBase):
         gathered_list: list[Result | None] = [None] * self.world_size
 
         # Host 也必须参与，并提供一个"占位"的发送值
+        self._gather_seq += 1
+        logger.info(
+            "Scatter gather_object start: seq=%d rank=%d",
+            self._gather_seq,
+            self.local_rank,
+        )
         dist.gather_object(
             None,
             gathered_list,
             dst=self.host_rank,  # Host 发送的占位数据
-            group=self.group,
+            group=self.gloo,
+        )
+        logger.info(
+            "Scatter gather_object end: seq=%d rank=%d",
+            self._gather_seq,
+            self.local_rank,
         )
 
         data_0_result = gathered_list[0]
@@ -287,9 +300,16 @@ class Scatter(ThreadBase):
             if meta_2_scatter is None:
                 self.flush_inflight()
                 send_tensors = self._get_control_signal_list(-2)
+
+                self._ctrl_send_seq += 1
+                logger.info(
+                    "Scatter ctrl send: seq=%d code=-2 rank=%d",
+                    self._ctrl_send_seq,
+                    self.local_rank,
+                )
                 works = []
                 for i in range(self.n_gpu):
-                    works.append(dist.isend(send_tensors[i], dst=i, group=self.group))
+                    works.append(dist.isend(send_tensors[i], dst=i, group=self.gloo))
                 for w in works:
                     w.wait()
                 break
@@ -298,9 +318,16 @@ class Scatter(ThreadBase):
                 self.flush_inflight()
                 send_tensors = self._get_control_signal_list(-1)
 
+                self._ctrl_send_seq += 1
+                logger.info(
+                    "Scatter ctrl send: seq=%d code=-1 rank=%d",
+                    self._ctrl_send_seq,
+                    self.local_rank,
+                )
+
                 works = []
                 for i in range(self.n_gpu):
-                    works.append(dist.isend(send_tensors[i], dst=i, group=self.group))
+                    works.append(dist.isend(send_tensors[i], dst=i, group=self.gloo))
                 for w in works:
                     w.wait()
                 # 等待收集结果
@@ -332,6 +359,9 @@ class Scatter(ThreadBase):
 
                     # --- A. 处理 PlanSet ---
                     # 先构建原始 PlanSet
+                    assert nfeat_plans is not None, (
+                        "nfeat_plans 不能为空，因为 StAssembler 需要它来填充 nfeat_plan"
+                    )
                     raw_plan_set = PlanSet(
                         mem=mem_plans[i] if mem_plans else None,
                         box=mail_plans[i] if mail_plans else None,
@@ -367,7 +397,7 @@ class Scatter(ThreadBase):
                     send_tensors.append(manifest)
                     # ... 写入其他 ...
 
-                    meta.batch_idx = batch_count  # 让 Worker 知道这是第几轮
+                    # meta.batch_idx = self.  # 让 Worker 知道这是第几轮
 
                     # --- D. 其他清理 ---
                     meta.state = None  # 清理 state，节省传输开销
@@ -381,7 +411,7 @@ class Scatter(ThreadBase):
                 # )
                 works = []
                 for i in range(self.n_gpu):
-                    w = dist.isend(send_tensors[i], dst=i, group=self.group)
+                    w = dist.isend(send_tensors[i], dst=i, group=self.gloo)
                     works.append(w)
 
                 # 保存引用：确保 send_tensors 在发送完成前不被释放

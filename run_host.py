@@ -3,7 +3,7 @@ import math
 import threading
 import time
 from queue import Queue as Q  # 这是给多线程用的
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 from tqdm import tqdm
 
+from df_split import make_balance_plan
 from gnn.with_memory.apan import APAN
 from gnn.with_memory.jodie import JODIE
 from gnn.with_memory.tgn import TGN
@@ -65,7 +66,7 @@ class Host:
             maxsize=10
         )
         self.scatter_q: Q[MetaBundle | None | Literal["end_of_epoch"]] = Q(maxsize=10)
-        self.curr_mini_of_epoch = 0
+        self.cur_macro_of_epoch = 0
 
         self.mem_plan_out_q: Q[list[DyPlan] | None] | None = None
         self.mail_plan_out_q: Q[list[DyPlan] | None] | None = None
@@ -116,28 +117,15 @@ class Host:
             shm_managers=shm_managers,
         )
         self.curr_epoch = 0
-        self.best_ap_epoch = {
-            "val_ap": 0.0,
-            "sk_val_ap": 0.0,
-            "val_auc": 0.0,
-            "sk_val_auc": 0.0,
-            "epoch": -1,
-            "test_ap": 0.0,
-            "sk_test_ap": 0.0,
-            "test_auc": 0.0,
-            "sk_test_auc": 0.0,
-        }
-        self.best_auc_epoch = {
-            "val_ap": 0.0,
-            "sk_val_ap": 0.0,
-            "val_auc": 0.0,
-            "sk_val_auc": 0.0,
-            "epoch": -1,
-            "test_ap": 0.0,
-            "sk_test_ap": 0.0,
-            "test_auc": 0.0,
-            "sk_test_auc": 0.0,
-        }
+        self.best_ap_epoch: int = -1
+        self.best_ap_result: Result = Result(
+            train_loss=float("inf"),
+            val_loss=float("inf"),
+            val_auc=0.0,
+            val_ap=0.0,
+            test_auc=0.0,
+            test_ap=0.0,
+        )
 
         self.total_epoch = cfg.t.epoch
 
@@ -170,12 +158,11 @@ class Host:
         self.last_epoch_result = res
 
         # 打印日志 (Host 端统一打印，Worker 端就可以静默了)
-        logger.info(
+        print(
             f"[Epoch {self.curr_epoch}] "
             f"Train Loss: {res.train_loss:.4f} | Val Loss: {res.val_loss:.4f} | "
             f"Val AUC: {res.val_auc:.4f} | Val AP: {res.val_ap:.4f} | "
             f"Test AUC: {res.test_auc:.4f} | Test AP: {res.test_ap:.4f} | "
-            f"SK Val AUC: {res.sk_val_auc:.4f} | SK Val AP: {res.sk_val_ap:.4f}"
         )
 
     def early_stop_check(self, cur_epoch: int) -> bool:
@@ -189,34 +176,11 @@ class Host:
 
         # --- 更新最佳指标 (AUC 和 AP 分别记录) ---
         is_best = False
-        # 1. 检查 AUC
-        if res.val_auc > self.best_auc_epoch["val_auc"]:
-            self.best_auc_epoch = {
-                "val_ap": res.val_ap,
-                "val_auc": res.val_auc,
-                "epoch": cur_epoch,
-                "test_ap": res.test_ap,
-                "test_auc": res.test_auc,
-                "sk_val_ap": res.sk_val_ap,
-                "sk_val_auc": res.sk_val_auc,
-                "sk_test_ap": res.sk_test_ap,
-                "sk_test_auc": res.sk_test_auc,
-            }
-            is_best = True  # 标记为有好结果
 
-        # 2. 检查 AP (仅记录，不影响早停，除非你以 AP 为准)
-        if res.val_ap > self.best_ap_epoch["val_ap"]:
-            self.best_ap_epoch = {
-                "val_ap": res.val_ap,
-                "val_auc": res.val_auc,
-                "epoch": cur_epoch,
-                "test_ap": res.test_ap,
-                "test_auc": res.test_auc,
-                "sk_val_ap": res.sk_val_ap,
-                "sk_val_auc": res.sk_val_auc,
-                "sk_test_ap": res.sk_test_ap,
-                "sk_test_auc": res.sk_test_auc,
-            }
+        # 1. 检查 AP (仅记录，不影响早停，除非你以 AP 为准)
+        if res.val_ap > self.best_ap_result.val_ap if self.best_ap_result else -1:
+            self.best_ap_epoch = cur_epoch
+            self.best_ap_result = res
             is_best = True  # 标记为有好结果
         if is_best:
             self.patience_counter = 0
@@ -224,9 +188,9 @@ class Host:
             self.patience_counter += 1
         # --- 早停判断 ---
         if self.patience_counter >= self.patience:
-            logger.warning(
+            print(
                 f"🛑 Early stopping triggered at epoch {cur_epoch}. "
-                f"Best AUC was {self.best_auc_epoch['val_auc']:.4f} at epoch {self.best_auc_epoch['epoch']}."
+                f"Best AP was {self.best_ap_result.val_ap:.4f} at epoch {self.best_ap_epoch}."
             )
             return True
 
@@ -277,12 +241,10 @@ class Host:
                 break
 
         # 打印最佳AP对应的Test结果
-        logger.info(
-            f"Best Val AP: {self.best_ap_epoch['val_ap']:.4f} @ Epoch {self.best_ap_epoch['epoch']} | "
-            f"Corresponding Test AP: {self.best_ap_epoch['test_ap']:.4f} | "
-            f"SK Val AP: {self.best_ap_epoch['sk_val_ap']:.4f} | SK Val AUC: {self.best_ap_epoch['sk_val_auc']:.4f} | "
-            f"SK Test AP: {self.best_ap_epoch['sk_test_ap']:.4f} | SK Test AUC: {self.best_ap_epoch['sk_test_auc']:.4f} | "
-            f"Corresponding Test AUC: {self.best_ap_epoch['test_auc']:.4f}"
+        print(
+            f"Best Val AP: {self.best_ap_result.val_ap:.4f} @ Epoch {self.best_ap_epoch} | "
+            f"Test AP: {self.best_ap_result.test_ap:.4f} | "
+            f"Test AUC: {self.best_ap_result.test_auc:.4f}"
         )
         self._cleanup()
         # wandb.finish()
@@ -312,35 +274,43 @@ class Host:
     ) -> None:
         df = df.reset_index(names=["eid"])
 
-        _, new_batch_size = self._plan_gpu_batches(
-            len(df), self.batch_size, n_gpu=self.n_gpu
+        if len(df) == 0:
+            return
+
+        # Use make_balance_plan for balanced GPU distribution
+        df_out, step_id, gpu_id = make_balance_plan(
+            df, org_batch_size=self.batch_size, n_gpu=self.n_gpu
         )
-        batches_assignment = df.index // new_batch_size
-        # this will be improved for future random group training
-        grouped_df = df.groupby(batches_assignment)
-        n_mini = grouped_df.ngroups
-        assert n_mini % self.n_gpu == 0
-        n_macro_of_split = n_mini // self.n_gpu
-        assert n_macro_of_split >= 3, "need at least 3 macro batches"
+        df_out = df_out.assign(step_id=step_id, gpu_id=gpu_id)
 
-        # this is total macro batches for current epoch, including train num_macro_batches, val num_macro_batches and test num_macro_batches
-        batch_count = 0
-        for _, edges in tqdm(
-            grouped_df, total=n_mini, desc=f"Host processing {split} split"
+        n_macro_of_split = df_out["step_id"].nunique()
+
+        for cur_macro_of_split, step_df in tqdm(
+            df_out.groupby("step_id", sort=False),
+            total=n_macro_of_split,
+            desc="Processing steps",
         ):
-            batch_count += 1
-            cur_macro_of_split = self.curr_mini_of_epoch // self.n_gpu
-
-            epoch_split_iter_info = EpochSplitIterInfo(
-                cur_epoch=cur_epoch,
-                n_epoch=self.total_epoch,
-                cur_macro_of_split=cur_macro_of_split,
-                n_macro_of_split=n_macro_of_split,
-                cur_macro_of_epoch=self.curr_mini_of_epoch // self.n_gpu,
-                split=split,
-            )
-            self._add_to_td_list(edges, epoch_split_iter_info)
-            self.curr_mini_of_epoch += 1
+            for _, edges in step_df.groupby("gpu_id", sort=False):
+                epoch_split_iter_info = EpochSplitIterInfo(
+                    cur_epoch=cur_epoch,
+                    n_epoch=self.total_epoch,
+                    cur_macro_of_split=cast(int, cur_macro_of_split),
+                    n_macro_of_split=n_macro_of_split,
+                    cur_macro_of_epoch=self.cur_macro_of_epoch,
+                    split=split,
+                )
+                logger.info(f"epoch_split_iter_info: {epoch_split_iter_info}")
+                logger.info(
+                    f"macro_position_of_split: {epoch_split_iter_info.macro_position_of_split}"
+                )
+                logger.info(
+                    f"is_last_macro_of_epoch: {epoch_split_iter_info.is_last_macro_of_epoch}"
+                )
+                logger.info(
+                    f"is_last_macro_of_all_epoch: {epoch_split_iter_info.is_last_macro_of_all_epoch}"
+                )
+                self._add_to_td_list(edges, epoch_split_iter_info)
+            self.cur_macro_of_epoch += 1
 
         if split == "test":
             self._cleanup_per_epoch()
@@ -349,7 +319,7 @@ class Host:
         self.meta_in_q.put("end_of_epoch")
         if self.ngh_sampler is not None:
             self.ngh_sampler.reset()
-        self.curr_mini_of_epoch = 0
+        self.cur_macro_of_epoch = 0
         self.curr_epoch += 1
 
     def _add_to_td_list(
@@ -420,6 +390,7 @@ class Host:
             r2n_meta=r2n_meta,
             state=state,
             n_src=src.shape[0],
+            batch_idx=epoch_split_iter_info.cur_macro_of_epoch,
         )
 
         self.meta_in_q.put(meta)

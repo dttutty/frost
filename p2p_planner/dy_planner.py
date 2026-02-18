@@ -1,4 +1,5 @@
 import logging
+import random
 import threading
 from queue import Queue
 from typing import Literal
@@ -7,6 +8,7 @@ import numpy as np
 import torch
 
 from schemas.alias import MetasDyNeed
+from schemas.datatypes.misc import Meta
 from schemas.datatypes.plan import DyPlan
 from tensor_set import TensorSet
 from thread_base import ThreadBase
@@ -88,6 +90,52 @@ def handle_update(
         leftovers.append(leftover)
 
     return leftovers, p2p_plan
+
+
+def dedup_updates_random(
+    updates: list[TensorSet], seed: int | None = None
+) -> tuple[list[TensorSet], TensorSet]:
+    """
+    Implements random deduplication using TensorSet.
+    """
+    n_gpus = len(updates)
+
+    # Create an empty TensorSet for initialization
+    # Ensure dtype matches node IDs (usually torch.long)
+    empty_tensor = torch.tensor([], dtype=torch.long)
+
+    # Move to the correct device if necessary
+    if n_gpus > 0 and updates[0].data.is_cuda:
+        empty_tensor = empty_tensor.to(updates[0].data.device)
+
+    empty_ts = TensorSet(empty_tensor)
+
+    # Initialize the result list with empty sets
+    new_updates: list[TensorSet] = [empty_ts] * n_gpus
+
+    if n_gpus == 0:
+        return new_updates, empty_ts
+
+    all_update = empty_ts
+
+    # 1. Generate a random processing order
+    # Using a list implies CPU operations, which is fine for the loop control
+    indices = list(range(n_gpus))
+
+    random.shuffle(indices)
+
+    # 2. Iterate through GPUs in the random order
+    for i in indices:
+        curr_rank_update_nodes = updates[i]
+
+        # Calculate unique nodes for the current GPU: current - seen
+        # Assign result to the original index 'i', not the loop iteration index
+        new_updates[i] = curr_rank_update_nodes - all_update
+
+        # Add current nodes to the 'seen' set
+        all_update = all_update | curr_rank_update_nodes
+
+    return new_updates, all_update
 
 
 def dedup_updates(
@@ -173,7 +221,7 @@ class DynamicPlanner(ThreadBase):
                 break
             elif in_q_data == "end_of_epoch":
                 assert self.pending is not None
-                needs, updates = self.pending
+                needs, updates, metas = self.pending
                 # 没有下一个 batch 了，next_needs 为空
                 if needs and len(needs) > 0:
                     ref_t = needs[0].data
@@ -184,84 +232,81 @@ class DynamicPlanner(ThreadBase):
                     empty_tensor = torch.tensor([], dtype=torch.long)  # 默认 fallback
                 empty_ts = TensorSet(empty_tensor)
                 next_needs: list[TensorSet] = [empty_ts for _ in range(self.n_gpus)]
-                plan = self._plan(needs, updates, next_needs)
+                next_updates: list[TensorSet] = [empty_ts for _ in range(self.n_gpus)]
+                print("------------------------------------------metas[0].batch_idx")
+                print(metas[0].batch_idx)
+                plan = self._plan(needs, updates, next_needs, next_updates, metas)
                 # this time will generate a plan, but next time will not generate plan
                 self.out_q.put(plan)
                 self.pending = None
                 continue
             if self.pending is None:
-                needs, updates = in_q_data
-                self.pending = needs, updates
-                self.fetchs_of_1 = needs
+                needs, updates, metas = in_q_data
+                self.pending = in_q_data
+                self.fetch = needs
             else:
-                needs, updates = self.pending
-                plan = self._plan(needs, updates, in_q_data[0])
+                needs, updates, metas = self.pending
+                print("------------------------------------------metas[0].batch_idx")
+                print(metas[0].batch_idx)
+
+                plan = self._plan(needs, updates, in_q_data[0], in_q_data[1], metas)
                 self.out_q.put(plan)
                 self.pending = in_q_data
 
     def _plan(
         self,
-        avails_of_1: list[TensorSet],
-        update_avails_of_1: list[TensorSet],
-        needs_of_2: list[TensorSet],
+        all_list: list[TensorSet],
+        update_list: list[TensorSet],
+        next_all_list: list[TensorSet],
+        next_update_list: list[TensorSet],
+        metas: list[Meta],
     ) -> list[DyPlan]:
         """规划内存（Memory）的P2P、CPU预取和CPU写回。"""
 
-        update_avails_of_1, all_update_avails_of_1 = dedup_updates(
-            update_avails_of_1, reverse=True
-        )
-
         n_gpus = self.n_gpus
 
-        # === 解决痛点 2：中间结果存入 self ===
-        leftovers_of_1, fresh_p2p_1to2 = handle_update(needs_of_2, update_avails_of_1)
+        dedup_update_list, all_update = dedup_updates(update_list)
+        next_all_update = TensorSet.empty_like(all_update.data)
+        for update in next_update_list:
+            next_all_update = next_all_update | update
+
+        _, p2p = handle_update(next_all_list, dedup_update_list)
+        writeback_list = [
+            per_gpu_update - next_all_update for per_gpu_update in dedup_update_list
+        ]
 
         # 1. 预处理：确定每个 GPU 实际持有的 "Stale" 数据
         # 如果提供了 fresh 集合，必须从持有列表中排除它们（因为 fresh 优先用于 fresh plan）
-        # avails_of_1 = [avail - all_update_avails_of_1 for avail in avails_of_1]
-        needs_of_2 = [need - all_update_avails_of_1 for need in needs_of_2]
+        # all_of_1 = [avail - all_update_avails_of_1 for avail in all_of_1]
+        next_prefetch = [next_need - all_update for next_need in next_all_list]
 
         # needs_of_2, stale_p2p_1to2 = handle_remaining(
         #     needs_of_2,  # <-- 从 self 读取
-        #     avails_of_1,
+        #     all_of_1,
         #     self.gpus_distance,
         # )  # 这种没有新mem的节点,直接发送旧的mem就可以(由distance最近的发)
 
         plans = []
-        device = (
-            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        )
-        empty_tensor = torch.tensor([], dtype=torch.long, device=device)
-        empty_ts = TensorSet(empty_tensor)
 
         # 2. 初始化 NxN 矩阵
         # 因为 TensorSet 是不可变的，所有格子共享同一个 empty_ts 对象完全没问题
-        p2p: list[list[TensorSet]] = [
-            [empty_ts for _ in range(n_gpus)] for _ in range(n_gpus)
-        ]
 
         p2p_cts = np.zeros((n_gpus, n_gpus), dtype=np.int32)
 
-        fetchs_of_1 = self.fetchs_of_1
-        self.fetchs_of_1 = needs_of_2
-
         for src in range(n_gpus):
             for dst in range(n_gpus):
-                # if __debug__:
-                #     intersection = fresh_p2p_1to2[src][dst]
-                #     assert len(intersection) == 0, (
-                #         "Fresh and Stale P2P sets should be disjoint."
-                #     )
-                p2p[src][dst] = fresh_p2p_1to2[src][dst]
                 p2p_cts[src, dst] = len(p2p[src][dst])
 
         for src in range(n_gpus):
             plan = DyPlan(
                 p2p=p2p[src],
-                fetch=fetchs_of_1[src],
-                writeback=leftovers_of_1[src],
+                fetch=self.fetch[src],
+                writeback=writeback_list[src],
                 rec_cts=p2p_cts[:, src],  # 两个长度相等,可以逐位相加
                 send_cts=p2p_cts[src, :],  # 两个长度相等,可以逐位相加
             )
             plans.append(plan)
+
+        self.fetch = next_prefetch
+
         return plans

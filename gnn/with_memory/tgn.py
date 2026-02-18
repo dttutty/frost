@@ -98,9 +98,12 @@ class TGN(torch.nn.Module):
             node_feat_emb = self.n_feat_mapper(nfeat) if self.n_feat_mapper else nfeat
             h_combined = updated_mem + node_feat_emb
         else:
+            raise NotImplementedError(
+                "TGN without node features is not implemented yet"
+            )
             h_combined = updated_mem
-        del block.srcdata["nfeat"]
+        if "nfeat" in block.srcdata:
+            del block.srcdata["nfeat"]
         block.srcdata["h"] = h_combined
-        # block.srcdata["h"] = block.srcdata["nfeat"]
 
         return cast(torch.Tensor, self.encoder(block))

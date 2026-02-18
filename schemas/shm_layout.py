@@ -52,15 +52,15 @@ def get_shm_layout_config(
     # --- 1. Basic ---
     add(ShmKeys.ROOT_NID, (batch_size * ROOT_FACTOR,), torch.long)
     add(
-        ShmKeys.ROOT_TS, (batch_size * ROOT_FACTOR,), torch.float64
-    )  # 时间戳通常是 float64
+        ShmKeys.ROOT_TS, (batch_size * ROOT_FACTOR,), torch.float32
+    )  # 时间戳通常是 float32
     add(ShmKeys.POS_EDGE_ID, (batch_size * ROOT_FACTOR,), torch.long)
 
     # --- 2. N2R ---
     add(ShmKeys.N2R_NODES, (MAX_NODES,), torch.long)
-    add(ShmKeys.N2R_TS, (MAX_NODES,), torch.float64)
+    add(ShmKeys.N2R_TS, (MAX_NODES,), torch.float32)
     add(ShmKeys.N2R_EID, (MAX_EDGES,), torch.long)
-    add(ShmKeys.N2R_DTS, (MAX_EDGES,), torch.float64)  # 边时间/特征
+    add(ShmKeys.N2R_DTS, (MAX_EDGES,), torch.float32)  # 边时间/特征
     add(ShmKeys.N2R_COL, (MAX_EDGES,), torch.long)
     add(ShmKeys.N2R_ROW, (MAX_EDGES,), torch.long)
     # 元数据 (必须加)
@@ -70,9 +70,9 @@ def get_shm_layout_config(
 
     # --- 3. R2N (同上) ---
     add(ShmKeys.R2N_NODES, (MAX_NODES,), torch.long)
-    add(ShmKeys.R2N_TS, (MAX_NODES,), torch.float64)
+    add(ShmKeys.R2N_TS, (MAX_NODES,), torch.float32)
     add(ShmKeys.R2N_EID, (MAX_EDGES,), torch.long)
-    add(ShmKeys.R2N_DTS, (MAX_EDGES,), torch.float64)
+    add(ShmKeys.R2N_DTS, (MAX_EDGES,), torch.float32)
     add(ShmKeys.R2N_COL, (MAX_EDGES,), torch.long)
     add(ShmKeys.R2N_ROW, (MAX_EDGES,), torch.long)
     add(ShmKeys.R2N_NODE_SECTIONS, (META_LEN,), torch.long)

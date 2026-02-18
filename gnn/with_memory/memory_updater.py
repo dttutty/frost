@@ -21,11 +21,17 @@ class MfgMemoryUpdater(torch.nn.Module):
         super().__init__()
         self.time_encoder = time_encoder
         self.rnn = rnn
+        self.detached_up_mem: torch.Tensor | None = (
+            None  # Store updated memory for downstream use
+        )
+        self.detached_ts: torch.Tensor | None = None
+        self.detached_nid: torch.Tensor | None = None
 
     def forward(
         self,
         block: DGLBlock,
-    ) -> tuple[DGLBlock, torch.Tensor, torch.Tensor, torch.Tensor]:
+        n_root_src_n_pos_dst: int,
+    ) -> DGLBlock:
         mem: torch.Tensor = cast(torch.Tensor, block.srcdata["mem"])
         ts: torch.Tensor = cast(torch.Tensor, block.srcdata["ts"])
         mem_ts: torch.Tensor = cast(torch.Tensor, block.srcdata["mem_ts"])
@@ -39,7 +45,13 @@ class MfgMemoryUpdater(torch.nn.Module):
         up_mem = self.rnn(rnn_input, mem)
         block.srcdata["updated_mem"] = up_mem
 
-        return block, up_mem.detach(), ts.detach(), nid.detach()
+        self.detached_up_mem = up_mem[:n_root_src_n_pos_dst].detach().clone()
+        self.detached_ts = (
+            ts[:n_root_src_n_pos_dst].detach().clone()
+        )  # us ts instead of mem_ts because mem_ts is stale
+        self.detached_nid = nid[:n_root_src_n_pos_dst].detach().clone()
+
+        return block
 
 
 class NoMfgMemoryUpdater(torch.nn.Module):

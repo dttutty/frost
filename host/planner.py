@@ -236,7 +236,7 @@ class Planner(ThreadBase):
                 next_updates = [
                     cast(TensorSet, state_io.mem_updated) for state_io in state_ios
                 ]
-                self.mem_plan_in_q.put((next_needs, next_updates))
+                self.mem_plan_in_q.put((next_needs, next_updates, metas))
 
             if self.mail_plan_in_q is not None:
                 next_needs = [
@@ -245,7 +245,7 @@ class Planner(ThreadBase):
                 next_updates = [
                     cast(TensorSet, state_io.mailbox_updated) for state_io in state_ios
                 ]
-                self.mail_plan_in_q.put((next_needs, next_updates))
+                self.mail_plan_in_q.put((next_needs, next_updates, metas))
 
             if self.nfeat_plan_in_q is not None:
                 next_needs = [

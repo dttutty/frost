@@ -327,6 +327,7 @@ class H2D(StreamThreadBase):
         self.st_asm = StAssembler(
             shared_nfeat=nfeat, shared_efeat=efeat, device=self.device
         )
+        self.seen_root_nids = torch.tensor([], dtype=torch.long, device="cpu")
 
     @torch.no_grad()
     def logic(self) -> None:
@@ -359,7 +360,7 @@ class H2D(StreamThreadBase):
             if meta.n2r_mfgs is not None:
                 for group_idx, blocks in enumerate(meta.n2r_mfgs):
                     for block_idx, block in enumerate(blocks):
-                        blocks[block_idx] = block.to(self.device, non_blocking=True)
+                        blocks[block_idx] = block.to(self.device, non_blocking=False)
 
             # can run no matter has nfeat or not
             if meta.n2r_mfgs is not None:
@@ -398,9 +399,11 @@ class H2D(StreamThreadBase):
                         nfeat_plan=meta.plan_set.nfeat,
                         pin_nfeat_buf=self.buf.nfeat_h2d,
                     )
+                    assert meta.nfeat is not None
 
                 # can run no matter has nfeat or not
                 if meta.n2r_mfgs is not None:
+                    assert meta.nfeat is not None
                     meta.n2r_mfgs = self.st_asm.fill_mfg_with_nfeat(
                         gnn_mfgs=meta.n2r_mfgs,
                         nfeat=meta.nfeat,
@@ -420,6 +423,9 @@ class H2D(StreamThreadBase):
                     # [Fix 2] 关键修复：必须在调用 prep 之前处理 box 为 None 的情况！
                     # 原来的逻辑写得太晚了，导致传进 prep 的 box 是 None
                     if meta.plan_set.box is None:
+                        print(
+                            f"H2D Batch {meta.batch_idx}: mem_plan exists but box_plan is None. Filling box_plan with mem_plan."
+                        )
                         meta.plan_set.box = meta.plan_set.mem
                 self.h2d_sem.acquire()
                 self.h2d_sem.acquire()
@@ -435,6 +441,37 @@ class H2D(StreamThreadBase):
                     pin_box_buf=self.buf.box_h2d,
                     device=self.device,
                 )
+                x = meta.mem_n_box.mem.data  # [N, D]
+                nid = meta.mem_n_box.mem.nid  # [N]
+                # check if nid >3000
+                if nid.numel() > 0:
+                    max_nid = nid.max().item()
+                    if max_nid > 3000:
+                        raise RuntimeError(
+                            f"H2D Batch {meta.batch_idx}: Unusually large nid detected in mem_n_box.mem.nid (max={max_nid}). "
+                            "This may indicate a data issue or a need to adjust the threshold."
+                        )
+
+                row_has_nonzero = (x != 0).any(dim=1)  # [N] True = 这一行有非0
+                zero_row_mask = ~row_has_nonzero  # True = 这一行全是0
+
+                zero_nids = nid[zero_row_mask]
+
+                # print(
+                #     f"H2D Batch {meta.batch_idx}: {zero_nids.numel()} zero-memory rows"
+                # )
+                # print("some zero nids:", zero_nids[:20])
+
+                # # print max meta.mem_n_box.mem.nid
+                # print(
+                #     f"H2D Batch {meta.batch_idx}: max nid in mem_n_box.mem.nid = {meta.mem_n_box.mem.nid.max().item()}"
+                # )
+                # # print root nids
+                # self.seen_root_nids = torch.cat([self.seen_root_nids, meta.root_nid])
+                # self.seen_root_nids = torch.unique(self.seen_root_nids)
+                # print(
+                #     f"H2D Batch {meta.batch_idx}: seen root nid = {self.seen_root_nids}"
+                # )
 
             # even there is no next batch, we still need plan_set for writeback
             if self.merge_src:
@@ -449,4 +486,8 @@ class H2D(StreamThreadBase):
 
             ready_event: CudaEventLike = torch.cuda.Event()
             ready_event.record(torch.cuda.current_stream())
+            mem = meta.mem_n_box.mem
+            box = meta.mem_n_box.box
+            mem_only = mem.nid[~torch.isin(mem.nid, box.nid)]
+            box_only = box.nid[~torch.isin(box.nid, mem.nid)]
             self.out_q.put((meta, ready_event), block=True)

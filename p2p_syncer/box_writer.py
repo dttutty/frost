@@ -43,6 +43,7 @@ class BoxWriter(StreamThreadBase):
         self.writer_stream = cast(
             torch.cuda.Stream, torch.cuda.Stream(device=self.device)
         )
+        self.disable_pin = True
 
     @torch.no_grad()
     def _write_back_via_pinned(
@@ -105,12 +106,20 @@ class BoxWriter(StreamThreadBase):
         # 2. Filter on GPU
         mask = torch.isin(box_ts_nid.nid, writeback)
 
+        # # print datatype of shared_box_ts
+        # print(
+        #     f"shared_box_ts dtype: {self.shared_box_ts.dtype}, device: {self.shared_box_ts.device}"
+        # )
+        # # print datatype of valid_ts_gpu
+        # print(
+        #     f"valid_ts_gpu dtype: {box_ts_nid.ts.dtype}, device: {box_ts_nid.ts.device}"
+        # )
         valid_nid_gpu = box_ts_nid.nid[mask]
         valid_data_gpu = box_ts_nid.data[mask]
         valid_ts_gpu = box_ts_nid.ts[mask]
 
         # 3. Use Pinned Memory D2H
-        if self.buf.box_d2h is not None:
+        if self.buf.box_d2h is not None and not self.disable_pin:
             self._write_back_via_pinned(
                 valid_nid_gpu, valid_data_gpu, valid_ts_gpu, self.buf.box_d2h
             )
@@ -128,8 +137,11 @@ class BoxWriter(StreamThreadBase):
                 break
 
             data, box_ts_nid, ready_event = box_writer_q_task
-            if data is not None:
+            if data is not None and data.shape[0] > 0:
                 torch.cuda.current_stream().wait_event(ready_event)
 
             self.write_back_box(data, box_ts_nid)
+            # print box_ts_nid.nid
+            # if data.shape[0] > 0:
+            #     print("BoxWriter: Written back box for NIDs", data.shape)
             self.h2d_sem.release()

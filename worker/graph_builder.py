@@ -6,6 +6,7 @@ from typing import Literal
 import dgl
 import numpy as np
 import torch
+import torch.distributed as dist  # [新增] 需要用到 dist.get_rank() 打印日志
 from dgl.heterograph import DGLBlock
 
 # In utils.py
@@ -38,12 +39,7 @@ def rebuild_meta_full_from_shm(mgr: DoubleBufferedSHM, manifest: torch.Tensor) -
     def read(key_enum: int) -> torch.Tensor | None:
         length = int(manifest[key_enum].item())
         if length > 0:
-            # [Fix] 必须先转 int，否则 str(Enum) 会返回 "ShmKeys.ROOT_NID" 导致 Key 找不到
-            # 错误写法: return mgr.read(batch_idx, str(key_enum), length)
-
-            # 正确写法:
             return mgr.read(batch_idx, str(int(key_enum)), length).clone()
-
         return None
 
     def read_or_empty(key_enum: int) -> torch.Tensor:
@@ -54,6 +50,14 @@ def rebuild_meta_full_from_shm(mgr: DoubleBufferedSHM, manifest: torch.Tensor) -
 
     # 1. Basic
     root_nid = read(ShmKeys.ROOT_NID)
+    # check if any root_nid > 2000
+    if root_nid is not None and root_nid.numel() > 0:
+        max_root_nid = root_nid.max().item()
+        if max_root_nid > 2000:
+            raise RuntimeError(
+                f"Batch {batch_idx}: Unusually large root_nid detected (max={max_root_nid}). "
+                "This may indicate a data issue or a need to adjust the threshold."
+            )
     root_ts = read(ShmKeys.ROOT_TS)
     pos_edge_id = read(ShmKeys.POS_EDGE_ID)
     assert pos_edge_id is not None
@@ -81,9 +85,7 @@ def rebuild_meta_full_from_shm(mgr: DoubleBufferedSHM, manifest: torch.Tensor) -
     # 2. Rebuild N2R
     n2r_meta = None
 
-    # 检查是否有 N2R 数据
     if manifest[ShmKeys.N2R_NODES] > 0:
-        # 读出所有数据块
         nodes_cat = read(ShmKeys.N2R_NODES)
         ts_cat = read(ShmKeys.N2R_TS)
         eid_cat = read(ShmKeys.N2R_EID)
@@ -91,12 +93,10 @@ def rebuild_meta_full_from_shm(mgr: DoubleBufferedSHM, manifest: torch.Tensor) -
         col_cat = read(ShmKeys.N2R_COL)
         row_cat = read(ShmKeys.N2R_ROW)
 
-        # 读出元数据 Tensor
         t_node_sec = read(ShmKeys.N2R_NODE_SECTIONS)
         t_edge_sec = read(ShmKeys.N2R_EDGE_SECTIONS)
         t_dims = read(ShmKeys.N2R_DIMS)
 
-        # 静态方法解包 (需要你在 misc.py 实现 unpack_from_tensors)
         n2r_meta = PackedDGLBlockMeta.unpack_from_tensors(
             nodes_cat,
             ts_cat,
@@ -139,15 +139,12 @@ def rebuild_meta_full_from_shm(mgr: DoubleBufferedSHM, manifest: torch.Tensor) -
                 t_dims,
             )
             if unpacked:
-                r2n_meta = unpacked[0]  # r2n 通常只有一个 block
+                r2n_meta = unpacked[0]
 
     # --- 4. Rebuild PlanSet ---
     mem_plan = None
     box_plan = None
     nfeat_plan = None
-
-    # Helper: 读取 Plan 元数据
-    # ... 在 read_plan_meta 函数中 ...
 
     def read_plan_meta(
         k_sizes: int, k_rec: int, k_send: int
@@ -156,26 +153,16 @@ def rebuild_meta_full_from_shm(mgr: DoubleBufferedSHM, manifest: torch.Tensor) -
         t_rec = read(k_rec)
         t_send = read(k_send)
 
-        # 1. 恢复 sizes (List[int])
-        # 如果 t_sizes 为空，说明没有 P2P 任务
         sizes = t_sizes.tolist() if t_sizes is not None else []
-
-        # 2. 恢复计数器 (Numpy Array)
-        # 直接转 numpy，因为 scatter 已经强制转为 int64 了，这里很安全
         rec = t_rec.numpy() if t_rec is not None else None
         send = t_send.numpy() if t_send is not None else None
 
-        # [安全检查]
-        # 如果有 sizes (意味着有任务) 但 send 为 None (意味着传输彻底丢了)，
-        # 此时如果不处理，后面一定会崩。
-        # 既然我们修复了 scatter，理论上不应发生。但为了防止 crash，我们可以补全。
         if len(sizes) > 0 and send is None:
             logger.warning(
                 f"[H2D Fix] Batch {batch_idx}: P2P sizes={sizes} but send_cts is None. Filling with zeros."
             )
             send = np.zeros(len(sizes), dtype=np.int64)
 
-        # 如果 send 存在但 sizes 没了
         if send is not None and len(sizes) == 0:
             sizes = [0] * len(send)
 
@@ -221,14 +208,6 @@ def rebuild_meta_full_from_shm(mgr: DoubleBufferedSHM, manifest: torch.Tensor) -
 
     plan_set = PlanSet(mem=mem_plan, box=box_plan, nfeat=nfeat_plan)
 
-    # 4. 组装最终 Meta
-    # --- 5. Assemble Meta ---
-    # 注意：m_state 等轻量级元数据目前没有包含在 Manifest 中
-    # 如果它们对 H2D 很重要，建议也加到 ShmKeys 中。
-    # 这里假设 Worker 可以通过 batch_idx 推断或者暂时不需要它们。
-    # 为了兼容现有 H2D 逻辑，我们可能需要创建一个 Dummy m_state 或从某处获取。
-    # 暂时设为 None，下游逻辑需做判空处理。
-
     meta = Meta(
         n_src=n_src,
         root_nid=root_nid,
@@ -239,9 +218,9 @@ def rebuild_meta_full_from_shm(mgr: DoubleBufferedSHM, manifest: torch.Tensor) -
         r2n_mdt=r2n_mdt,
         plan_set=plan_set,
         batch_idx=batch_idx,
-        state=None,  # State is not needed for H2D
-        m_state=m_state,  # Warning: logic might rely on m_state.cur_macro_of_epoch for logging
-        shm_lens={},  # Legacy field, empty now
+        state=None,
+        m_state=m_state,
+        shm_lens={},
     )
     return meta
 
@@ -253,18 +232,12 @@ def collate_and_build_graph(
     blocks = []
 
     for mfg_meta in mfg_meta_list:
-        # 1. 在 Worker 进程组装 DGLBlock
-        # 此时数据已经在 Worker 的内存空间了
         block = dgl.create_block(
             (mfg_meta.col, mfg_meta.row),
             num_src_nodes=mfg_meta.dim_in,
             num_dst_nodes=mfg_meta.dim_out,
         )
 
-        # num_dst_nodes = tgb.dim_out()少
-        # num_src_nodes = tgb.dim_in()多
-
-        # 2. 绑定特征
         num_roots = mfg_meta.dim_out
         all_nodes = mfg_meta.nodes
         block.srcdata["ID"] = all_nodes
@@ -273,21 +246,15 @@ def collate_and_build_graph(
         block.dstdata["ts"] = mfg_meta.ts[:num_roots]
         block.edata["dt"] = mfg_meta.dts
         block.edata["ID"] = mfg_meta.eid
-        # 3. 统一上 GPU (由 Worker 决定何时上 GPU)
         blocks.append(block)
 
-    # 4. 处理历史分组逻辑
     def chunked(iterable: list, n: int) -> list:
         return [iterable[i : i + n] for i in range(0, len(iterable), n)]
 
     grouped_blocks = chunked(blocks, history)
-
     grouped_blocks.reverse()
 
     return grouped_blocks
-
-
-# h2d.py
 
 
 class GraphBuilder(StreamThreadBase):
@@ -329,25 +296,42 @@ class GraphBuilder(StreamThreadBase):
                     "root_nid is None/Empty. "
                     "Possible causes: 1. Host sent empty batch. 2. Received Padding Tensor (Rank mismatch)."
                 )
-                # 这种情况下，为了不让训练卡死（Scatter还在等Result），我们可能需要发一个假的Result或者报错退出
-                # 暂时选择跳过本轮循环，看看能不能接到下一个正常的 Batch
-                # 但注意：如果 Scatter 在等 Gather，跳过会导致死锁。
-                # 鉴于这通常是 fatal error，我们抛出异常以便快速定位，或者生成一个空的 Dummy Meta 混过去
-
-                # 方案 A: 报错退出 (推荐调试阶段)
                 raise RuntimeError("H2D received empty Meta!")
 
             if meta.plan_set is not None:
                 if meta.plan_set.mem is not None and meta.plan_set.box is None:
                     meta.plan_set.box = meta.plan_set.mem
-                # 使用 non_blocking 即可，无需 buffer
 
-                meta.plan_set = meta.plan_set.to(self.device, non_blocking=True)
+                meta.plan_set = meta.plan_set.to(self.device, non_blocking=False)
 
             # move pos_efeat to gpu
             if self.efeat is not None:
                 # 只有当 pos_edge_id 真的有数据时才传输
                 if meta.pos_edge_id is not None and meta.pos_edge_id.numel() > 0:
+                    # --- [New Debug Code Start] ---
+                    # 在做 index_select 之前，强制检查索引范围
+                    # 这样如果越界，会报 Python 错误，而不是 CUDA Assert Error
+                    max_eid = meta.pos_edge_id.max().item()
+                    min_eid = meta.pos_edge_id.min().item()
+                    num_edges = self.efeat.size(0)
+
+                    if max_eid >= num_edges or min_eid < 0:
+                        err_msg = (
+                            f"\n[CRITICAL ERROR Rank {dist.get_rank()}] Edge Feature Index Out of Bounds!\n"
+                            f"  > Efeat Shape: {self.efeat.shape}\n"
+                            f"  > Max Requested Index: {max_eid}\n"
+                            f"  > Min Requested Index: {min_eid}\n"
+                            f"  > Batch Idx: {meta.batch_idx}\n"
+                        )
+                        logger.error(err_msg)
+                        import sys
+
+                        sys.stdout.flush()
+                        raise RuntimeError(
+                            f"Edge index out of bounds: {max_eid} >= {num_edges}"
+                        )
+                    # --- [New Debug Code End] ---
+
                     if (
                         self.buf.pos_efeat_h2d is not None
                         and meta.pos_edge_id.numel() <= self.buf.pos_efeat_h2d.shape[0]
@@ -355,22 +339,15 @@ class GraphBuilder(StreamThreadBase):
                         n = meta.pos_edge_id.numel()
                         buf_view = self.buf.pos_efeat_h2d[:n]
 
-                        # Debug 检查 (可选)
-                        if __debug__:
-                            assert meta.pos_edge_id.max() < self.efeat.size(0), (
-                                f"Edge Index OutOfBound: {meta.pos_edge_id.max()} vs {self.efeat.size(0)}"
-                            )
-
                         torch.index_select(
                             self.efeat, 0, meta.pos_edge_id, out=buf_view
                         )
-                        meta.pos_efeat = buf_view.to(self.device, non_blocking=True)
+                        meta.pos_efeat = buf_view.to(self.device, non_blocking=False)
                     else:
                         meta.pos_efeat = self.efeat[meta.pos_edge_id].to(
-                            self.device, non_blocking=True
+                            self.device, non_blocking=False
                         )
                 else:
-                    # 如果数据为空，记录警告！这通常意味着 Scatter 端有问题
                     logger.warning(
                         "GraphBuilder: [WARNING] batch has NO pos_edge_id! "
                         f"Manifest[{ShmKeys.POS_EDGE_ID}] was 0. "

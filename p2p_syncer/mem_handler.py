@@ -63,6 +63,10 @@ class MemHandler(StreamThreadBase):
             mem_ts_nid = root_new_mem
 
             if mem_task.is_last is False:
+                # mem_ts_nid.data[:] = mem_ts_nid.nid.unsqueeze(1).to(
+                #     mem_ts_nid.data.dtype
+                # )
+
                 p2p_task = make_p2p_task(
                     data_td_nid=mem_ts_nid,
                     plan=mem_plan,

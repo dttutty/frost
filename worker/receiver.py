@@ -33,6 +33,8 @@ class Receiver(StreamThreadBase):
         self.stop_ev = stop_ev
         self.result_q = result_q
         self.manifest_buf = torch.zeros(MANIFEST_SIZE, dtype=torch.long)
+        self._gather_seq = 0
+        self._recv_seq = 0
 
     @torch.no_grad()
     def logic(self) -> None:
@@ -44,6 +46,13 @@ class Receiver(StreamThreadBase):
 
             dist.recv(self.manifest_buf, src=self.env.host_rank, group=self.gloo)
             batch_idx = int(self.manifest_buf[ShmKeys.BATCH_IDX].item())
+            self._recv_seq += 1
+            # logger.info(
+            #     "Receiver recv: seq=%d batch_idx=%d rank=%d",
+            #     self._recv_seq,
+            #     batch_idx,
+            #     self.env.local_rank,
+            # )
 
             if batch_idx == -2:
                 self.out_q.put(None, block=True)
@@ -54,12 +63,24 @@ class Receiver(StreamThreadBase):
 
                 # --- [Fix] 开始修改 gather 逻辑 ---
                 # 只有 dst rank (0) 需要准备接收容器，大小必须等于进程总数
-
+                self._gather_seq += 1
+                logger.info(
+                    "Receiver gather_object start: seq=%d batch_idx=%d rank=%d",
+                    self._gather_seq,
+                    batch_idx,
+                    self.env.local_rank,
+                )
                 dist.gather_object(
                     obj=result,
                     object_gather_list=None,
                     dst=self.env.host_rank,
                     group=self.gloo,
+                )
+                logger.info(
+                    "Receiver gather_object end: seq=%d batch_idx=%d rank=%d",
+                    self._gather_seq,
+                    batch_idx,
+                    self.env.local_rank,
                 )
             else:
                 batch_count += 1

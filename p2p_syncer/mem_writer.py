@@ -41,6 +41,7 @@ class MemWriter(StreamThreadBase):
         self.writer_stream = cast(
             torch.cuda.Stream, torch.cuda.Stream(device=self.device)
         )
+        self.disable_pin = True
 
     def _write_back_via_pinned(
         self,
@@ -112,7 +113,7 @@ class MemWriter(StreamThreadBase):
         valid_data_gpu = mem_ts_nid.data[mask]
         valid_ts_gpu = mem_ts_nid.ts[mask]
 
-        if self.buf.mem_d2h is not None:
+        if self.buf.mem_d2h is not None and not self.disable_pin:
             self._write_back_via_pinned(
                 valid_nid_gpu, valid_data_gpu, valid_ts_gpu, self.buf.mem_d2h
             )

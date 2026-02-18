@@ -136,5 +136,13 @@ class StaticPlanner(ThreadBase):
             total_to_cache += len(to_cache_of_1)
             total_to_fetch += len(self.fetchs[n])
 
+        # if __debug__:
+        #     # print self.fetchs[0].data.shape[0] and self.fetchs[1].data.shape[0]
+        #     print(f"Fetchs shapes: {[f.fetch.data.shape[0] for f in plans_of_1]}")
+        #     if any(f.fetch.data.shape[0] == 0 for f in plans_of_1):
+        #         raise ValueError("Warning: Some fetchs are empty!")
+        #     print(f"Cache shapes: {[f.to_cache.data.shape[0] for f in plans_of_1]}")
+
         self.fetchs = fetchs_of_2
+        assert plans_of_1[0] is not None and plans_of_1[1] is not None
         return plans_of_1

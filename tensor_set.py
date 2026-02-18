@@ -19,6 +19,19 @@ class TensorSet:
             t = t.reshape(-1)
         self.data = torch.unique(t, sorted=sort_now)
 
+    @classmethod
+    def empty_like(cls, t: torch.Tensor) -> "TensorSet":
+        """
+        Create an empty TensorSet with same device and dtype as t.
+        """
+        empty = torch.empty(
+            0,
+            dtype=t.dtype,
+            device=t.device,
+        )
+        # sort_now=False 避免多余操作
+        return cls(empty, sort_now=False)
+
     def __repr__(self) -> str:
         return f"TensorSet({self.data})"
 

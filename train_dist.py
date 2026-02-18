@@ -26,6 +26,42 @@ from shm_manager import DoubleBufferedSHM
 from utils import load_feat, load_graph, parse_config
 
 
+def _get_level_from_env() -> int:
+    # 优先读 LOG_LEVEL，其次读 APP_ENV
+    lvl = os.getenv("LOG_LEVEL", "").upper()
+    if lvl:
+        return getattr(logging, lvl, logging.WARNING)
+
+    env_str = os.getenv("APP_ENV", "production").lower()
+    return logging.DEBUG if env_str == "dev" else logging.WARNING  # 生产默认 WARNING
+
+
+def init_logging(local_rank: int) -> logging.Logger:
+    level = _get_level_from_env()
+
+    logging.basicConfig(
+        level=level,
+        filename=f"rank_{local_rank}.log",
+        filemode="w",
+        format="%(asctime)s - %(name)s - [%(threadName)s] - %(levelname)s - %(message)s",
+        force=True,
+    )
+
+    root = logging.getLogger()
+
+    # 只让 rank0 打到终端，且等级跟随 level
+    if local_rank == 0:
+        console = logging.StreamHandler()
+        console.setLevel(level)
+        console.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+        root.addHandler(console)
+
+    logging.getLogger("torch").setLevel(logging.WARNING)
+    logging.getLogger("dgl").setLevel(logging.WARNING)
+
+    return logging.getLogger(__name__)
+
+
 def _init_gnn(
     t_cfg: TrainCFG,
     s_cfg: SampleCFG,
@@ -145,51 +181,6 @@ T = TypeVar("T")
 # 获取环境变量 默认为 'production'
 env_str = os.getenv("APP_ENV", "production")
 
-# 开发模式 什么都看 / 生产模式 只看 Info, Warning, Error
-current_level = logging.DEBUG if env_str == "dev" else logging.INFO
-
-
-def __init_logging(local_rank: int) -> logging.Logger:
-    # 1. 只有第一次调用有效，所以确保这里包含所有参数
-    root_logger = logging.getLogger()
-
-    # 1. 强制重置所有配置 (Python 3.8+)
-    logging.basicConfig(
-        level=current_level,
-        filename=f"rank_{local_rank}.log",
-        filemode="w",
-        format="%(asctime)s - %(name)s - [%(threadName)s] - %(levelname)s - %(message)s",
-        force=True,  # <--- 关键：强制覆盖之前的任何配置
-    )
-
-    for handler in logging.getLogger().handlers:
-        if isinstance(handler, logging.FileHandler):
-            # 关键：每次写入都强制刷新到磁盘
-            handler.flush = (
-                lambda h=handler, os=os: (
-                    h.stream.flush(),
-                    os.fsync(h.stream.fileno()),
-                )[0]
-                if hasattr(h.stream, "fileno")
-                else h.stream.flush()
-            )
-            # 也可以通过设置缓冲为 0 来强制实时写入（需要重新创建 Handler）
-
-    # 2. 只有 Rank 0 的信息才输出到终端，避免 4 个进程同时刷屏
-    if local_rank == 0 or local_rank == 2:
-        console = logging.StreamHandler()
-        console.setLevel(logging.INFO)
-        # 终端格式可以简单点，方便阅读
-        formatter = logging.Formatter("\033[32m%(levelname)s\033[0m - %(message)s")
-        console.setFormatter(formatter)
-        root_logger.addHandler(console)
-
-    # 3. 屏蔽掉第三方库（如 torch, dgl）过杂的 DEBUG 信息
-    logging.getLogger("torch").setLevel(logging.WARNING)
-    logging.getLogger("dgl").setLevel(logging.WARNING)
-
-    return logging.getLogger(__name__)
-
 
 def get_free_port() -> int:
     """在 master 节点上获取一个空闲端口"""
@@ -260,7 +251,7 @@ os.environ["MKL_NUM_THREADS"] = str(args.omp_num_threads)
 
 # initialize distributed environment
 local_rank = int(os.environ.get("LOCAL_RANK", 0))
-logger = __init_logging(local_rank)
+logger = init_logging(local_rank)
 dist.init_process_group(backend="gloo", timeout=datetime.timedelta(seconds=3600))
 env = Env.initial()
 worker_ranks = list(range(0, env.world_size - 1))
@@ -273,6 +264,7 @@ assert nccl is not None, "Failed to create nccl process group"
 
 if args.seed is not None:
     set_seed(args.seed)
+set_seed(42)
 
 # host load graph and features, then broadcast to workers
 my_data = None

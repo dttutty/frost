@@ -69,6 +69,7 @@ class BoxHandler(StreamThreadBase):
 
         box_ts_nid = new_mail.to_box()
 
+        # box_ts_nid.data[:] = box_ts_nid.nid.view(-1, 1, 1).to(box_ts_nid.data.dtype)
         p2p_task = make_p2p_task(
             data_td_nid=box_ts_nid,
             plan=box_plan,
@@ -135,7 +136,8 @@ class BoxHandler(StreamThreadBase):
 
             # handle mail or box sync
             # generate new mails from root_new_mem
-
+            # print(box_task.root_new_mem_orig)
+            # print(box_task.pos_efeat.shape)
             new_mail = generate_interaction_mails(
                 box_task.root_new_mem_orig,
                 box_task.pos_efeat,
@@ -147,10 +149,16 @@ class BoxHandler(StreamThreadBase):
                 p2p_task, box_ts_nid = self.handle_small_box(
                     new_mail, self.mail_combine, box_task
                 )
+                if box_task.is_last is True:
+                    # 最后一个macro-batch不需要p2p了，直接写回就好
+                    p2p_task = None
             else:
                 p2p_task, box_ts_nid = self.handle_large_box(
                     new_mail, self.mail_combine, box_task
                 )
+                if box_task.is_last is True:
+                    # 最后一个macro-batch不需要p2p了，直接写回就好
+                    p2p_task = None
 
             if box_task.is_last is False:
                 ready_event: CudaEventLike = torch.cuda.Event()

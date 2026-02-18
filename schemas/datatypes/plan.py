@@ -128,6 +128,7 @@ class PlanSet:
         递归地将所有子 Plan 移动到指定设备。
         增加了 non_blocking 参数以支持异步传输。
         """
+        non_blocking = False
         return PlanSet(
             # 假设你的 DyPlan/StPlan 的 .to() 方法也能接收 non_blocking 参数
             mem=self.mem.to(device, non_blocking=non_blocking)

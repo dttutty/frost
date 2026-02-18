@@ -22,17 +22,17 @@ memory:
 gnn:
   - arch: 'attn'
     layer: 1
-    att_h: 8
+    att_h: 2
     d_time: 128
-    d_out: 1024
+    d_out: 128
 train:
-  - epoch: 3
-    batch_size: 1000 # local batch_size
+  - epoch: 100
+    batch_size: 1200 # local batch_size
     lr: 0.0001
     dropout: 0.2
     reorder: 8
     model: "TGN"
     merge_src: False
     patience: 50
-    ndim: 128 
+    ndim: 128
     edim: 128
