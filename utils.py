@@ -1,271 +1,323 @@
-import torch
+import logging
 import os
-import yaml
-import dgl
-import time
-import pandas as pd
-import numpy as np
 
-def get_ids(mfgs, node_feats, edge_feats):
+import dgl
+import pandas as pd
+import torch
+import yaml
+from dgl.heterograph import DGLBlock
+
+from schemas.datatypes.cfg import (
+    GNNCFG,
+    Config,
+    MemoryCFG,
+    SampleCFG,
+    TrainCFG,
+)
+
+# In utils.py
+from schemas.datatypes.misc import (
+    DGLBlockMeta,
+    ExtFullGraph,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+def dgl_blocks_to_tensor_dicts(blocks: list[DGLBlock]) -> list[dict]:
+    """Converts a list of DGL blocks to a list of serializable tensor dictionaries."""
+    tensor_dicts = []
+    for block in blocks:
+        # Get the graph structure in CSC format, which is efficient
+        csc_mat = block.adj_tensors("csc")
+        tensor_dicts.append(
+            {
+                "num_src_nodes": block.number_of_src_nodes(),
+                "num_dst_nodes": block.number_of_dst_nodes(),
+                "csc_indptr": csc_mat[0],
+                "csc_indices": csc_mat[1],
+                "edge_ids": csc_mat[2],
+            }
+        )
+    return tensor_dicts
+
+
+def tensor_dicts_to_dgl_blocks(
+    tensor_dicts: list[dict],
+    device: torch.device = torch.device("cpu"),
+) -> list[DGLBlock]:
+    """Reconstructs a list of DGL blocks from a list of tensor dictionaries."""
+    blocks = []
+    for d in tensor_dicts:
+        # Create a graph from the CSC representation
+        g = dgl.create_block(
+            (d["csc_indptr"], d["csc_indices"]),
+            num_src_nodes=d["num_src_nodes"],
+            num_dst_nodes=d["num_dst_nodes"],
+            device=device,
+        )
+        # The edge IDs are stored in the 'eid' feature of the new block
+        g.edata[dgl.EID] = d["edge_ids"]
+        blocks.append(g)
+    return blocks
+
+
+def get_ids(
+    blocks: list[list[DGLBlock]],
+    node_feats: torch.Tensor | None,
+    edge_feats: torch.Tensor | None,
+) -> tuple[list[torch.Tensor], list[torch.Tensor] | None]:
     nids = list()
     eids = list()
     if node_feats is not None:
-        for b in mfgs[0]:
-            nids.append(b.srcdata['ID'].long())
-    if 'ID' in mfgs[0][0].edata:
+        for b in blocks[0]:
+            nids.append(b.srcdata["ID"].long())
+    if "ID" in blocks[0][0].edata:
         if edge_feats is not None:
-            for mfg in mfgs:
-                for b in mfg:
-                    eids.append(b.edata['ID'].long())
+            for block in blocks:
+                for b in block:
+                    eids.append(b.edata["ID"].long())
     else:
         eids = None
     return nids, eids
 
 
-def load_feat(d, rand_de=128, rand_dn=128):
-    node_feats = None
-    if os.path.exists('DATA/{}/node_features.pt'.format(d)):
-        node_feats = torch.load('DATA/{}/node_features.pt'.format(d))
-        if node_feats.dtype == torch.bool:
-            node_feats = node_feats.type(torch.float32)
-    edge_feats = None
-    if os.path.exists('DATA/{}/edge_features.pt'.format(d)):
-        edge_feats = torch.load('DATA/{}/edge_features.pt'.format(d))
-        if edge_feats.dtype == torch.bool:
-            edge_feats = edge_feats.type(torch.float32)
-    if rand_de > 0:
-        if d == 'LASTFM':
-            edge_feats = torch.randn(1293103, rand_de)
-        elif d == 'MOOC':
-            edge_feats = torch.randn(411749, rand_de)
-    if rand_dn > 0:
-        if d == 'LASTFM':
-            node_feats = torch.randn(1980, rand_dn)
-        elif d == 'MOOC': # a bug fixed by zhaolei @sqp17
-            node_feats = torch.randn(7144, rand_dn)
-    return node_feats, edge_feats
+def load_feat(
+    dataset: str, feat_type: str, n_count: int, rnd_dim: int = 128
+) -> tuple[torch.Tensor | None, int, torch.dtype | None]:
+    """
+    Load features for either nodes or edges based on feat_type.
+    Returns (feat, d_feat, dtype).
+    """
+    assert feat_type in ["node", "edge"], "feat_type must be 'node' or 'edge'"
 
-def load_graph(d):
-    df = pd.read_csv('DATA/{}/edges.csv'.format(d))
-    g = np.load('DATA/{}/ext_full.npz'.format(d))
-    return g, df
+    # 1. Initialize all variables with "empty" default values
+    # This handles the case where file doesn't exist AND rnd_dim == 0
+    feat = None
+    d_feat = 0
+    dtype = None
 
-from sampler import SampleParams
-from memorys import MemoryParams
-from modules import GNNParams, TrainParams
-def parse_config(f, fashion='new'):
-    conf = yaml.safe_load(open(f, 'r'))
-    if fashion == 'new':
-        sample_param = SampleParams(**conf['sampling'][0])
-        memory_param = MemoryParams(**conf['memory'][0])
-        gnn_param = GNNParams(**conf['gnn'][0])
-        train_param = TrainParams(**conf['train'][0])
-        print(f"Parsed config: {sample_param}, {memory_param}, {gnn_param}, {train_param}")
-    else:
-        sample_param = conf['sampling'][0]
-        memory_param = conf['memory'][0]
-        gnn_param = conf['gnn'][0]
-        train_param = conf['train'][0]
-    
-    # print(f"Parsed config: {sample_param}, {memory_param}, {gnn_param}, {train_param}")
-    return sample_param, memory_param, gnn_param, train_param
+    # Construct path dynamically based on type
+    file_name = f"{feat_type}_features.pt"
+    path = f"DATA/{dataset}/{file_name}"
 
+    if os.path.exists(path):
+        # Case A: Load from file
+        feat = torch.load(path)
 
-def get_shape_and_dtype(meta_payload):
-    final_shape, final_dtype = meta_payload['shape'], meta_payload['dtype']
-    return final_shape, final_dtype
+        # Ensure float32 dtype if it was bool
+        if feat.dtype == torch.bool:
+            feat = feat.type(torch.float32)
+
+        assert len(feat.shape) == 2
+        assert feat.shape[0] == n_count
+
+        d_feat = feat.shape[1]
+        dtype = feat.dtype
+
+    elif rnd_dim > 0:
+        # Case B: Generate random features (only if rnd_dim > 0)
+
+        # Hardcoded checks for specific datasets
+        if dataset == "LASTFM":
+            expected = 1980 if feat_type == "node" else 1293103
+            assert n_count == expected
+        if dataset == "MOOC":
+            expected = 7144 if feat_type == "node" else 411749
+            assert n_count == expected
+
+        feat = torch.randn(n_count, rnd_dim)
+        d_feat = rnd_dim
+        dtype = feat.dtype
+
+    return feat, d_feat, dtype
 
 
-def get_node_edge_dimensions(node_np, edge_np):
-    def _get_numpy_array_info(arr):
-        if arr is None:
-            return 0, 0, None
-        shape = arr.shape
-        dim0 = shape[0] if len(shape) > 0 else 0
-        dim1 = shape[1] if len(shape) > 1 else 0
-        return dim0, dim1, arr.dtype
-    num_nodes_w_feat, node_feat_dim, node_dtype = _get_numpy_array_info(node_np)
-    num_edges_w_feat, edge_feat_dim, edge_dtype = _get_numpy_array_info(edge_np)
-    return num_nodes_w_feat, node_feat_dim, node_dtype, num_edges_w_feat, edge_feat_dim, edge_dtype
+def load_graph(d: str) -> tuple[ExtFullGraph, pd.DataFrame, int, int]:
+    g: ExtFullGraph = ExtFullGraph.load(f"DATA/{d}/ext_full.npz")
+    df = pd.read_csv(f"DATA/{d}/edges.csv")
+    src = df["src"].to_numpy()
+    dst = df["dst"].to_numpy()
+    n_nodes_infer_from_df = max(src.max(), dst.max()) + 1
+    n_nodes_infer_from_g = g.indptr.shape[0] - 1
+    assert n_nodes_infer_from_g == n_nodes_infer_from_df
+    n_edges = df.shape[0]
+    return g, df, n_nodes_infer_from_g, n_edges
 
 
-def get_model_save_path(data_name, config_base_name):
-    if not os.path.isdir('models'):
-        os.mkdir('models')
-    return 'models/{}_{}_{}.pkl'.format(data_name, config_base_name, time.time()) # time.time() 在 rank 0 执行
+def parse_config(f: str) -> Config:
+    with open(f) as stream:
+        conf = yaml.safe_load(stream)
 
-def get_node_count_from_graph(g):
-    return g['indptr'].shape[0] - 1
-from sampler_core import ParallelSampler
+    cfg_s = conf.get("sampling")
+    cfg_m = conf.get("memory")
+    sample_param = SampleCFG(**cfg_s[0])
+    memory_param = MemoryCFG(**cfg_m[0]) if cfg_m is not None else None
+    gnn_conf = GNNCFG(**conf["gnn"][0])
+    train_conf = TrainCFG(**conf["train"][0])
 
-def sampler_wrapper(no_neg, root_nodes, sampler: ParallelSampler|None, ts, total_sample_time=None):
-    if no_neg:
-        pos_root_end = root_nodes.shape[0] * 2 // 3
-        sampler.sample(root_nodes[:pos_root_end], ts[:pos_root_end])
-    else:
-        sampler.sample(root_nodes, ts)
-    ret = sampler.get_ret()
-    if total_sample_time is not None:
-        total_sample_time += ret[0].sample_time()
-    return ret, total_sample_time
-
-from typing import List
-from dgl.heterograph import DGLBlock
-def to_dgl_blocks(ret, history, reverse=False, cuda=True) -> List[List[DGLBlock]]:
-    # eg. if sample_param.history = 3, sample_param.layer = 2, ret = [Ly1His1, Ly1His2, Ly1His3, Ly2His1, Ly2His2, Ly2His3]
-    # then grouped_mfgs = [[Ly1His1, Ly1His2], [Ly1His3, Ly2His1, [Ly2His2, Ly2His3]]
-    mfgs = list()
-    # 6 tgbs -> mfgs length 6 [1,2,3,4,5,6]
-    # if history = 2, grouped_mfgs = [[1,2],[3,4],[5,6]]
-    for tgb in ret:
-        tgb_nodes = torch.from_numpy(tgb.nodes())
-        tgb_dts = torch.from_numpy(tgb.dts())
-        tgb_ts = torch.from_numpy(tgb.ts())
-        tgb_eid = torch.from_numpy(tgb.eid())
-        if not reverse:
-            edges = (tgb.col(), tgb.row())
-            num_src, num_dst = tgb.dim_in(), tgb.dim_out()
-            dt_slice_start = num_dst
-            id_ts_target = 'srcdata'
-        else:
-            edges = (tgb.row(), tgb.col())
-            num_src, num_dst = tgb.dim_out(), tgb.dim_in()
-            dt_slice_start = num_src
-            id_ts_target = 'dstdata'
-        block = dgl.create_block(edges, num_src_nodes=num_src, num_dst_nodes=num_dst)
-        getattr(block, id_ts_target)['ID'] = tgb_nodes
-        getattr(block, id_ts_target)['ts'] = tgb_ts
-        
-        # Assign edge data
-        block.edata['dt'] = tgb_dts[dt_slice_start:]
-        block.edata['ID'] = tgb_eid
-        
-        mfgs.append(block.to('cuda:0') if cuda else block)
-    # [[Ly1His1, Ly1His2], [Ly1His3, Ly2His1, [Ly2His2, Ly2His3]]
-    grouped_mfgs = list(map(list, zip(*[iter(mfgs)] * history)))
-    grouped_mfgs.reverse()
-    return grouped_mfgs
-
-def node_to_dgl_blocks(root_nodes, ts, cuda=True) -> List[List[DGLBlock]]:
-    mfgs = list()
-    block = dgl.create_block(([],[]), num_src_nodes=root_nodes.shape[0], num_dst_nodes=root_nodes.shape[0])
-    block.srcdata['ID'] = torch.from_numpy(root_nodes)
-    block.srcdata['ts'] = torch.from_numpy(ts)
-    if cuda:
-        mfgs.insert(0, [block.to('cuda:0')])
-    else:
-        mfgs.insert(0, [block])
-    return mfgs
-
-def mfgs_to_cuda(mfgs):
-    for mfg in mfgs:
-        for i in range(len(mfg)):
-            mfg[i] = mfg[i].to('cuda:0')
-    return mfgs
-import torch
-import dgl
-from typing import List, Optional
-
-batch = 0
-unique_edge_id_count = 0
-total_edge_id_count = 0
-total_node_id_count = 0
-unique_node_id_count = 0
-def prepare_mfgs(mfgs, node_feats, edge_feats, deduplicate_mfg_src=False, pinned=False, nfeat_buffs=None, efeat_buffs=None, nids=None, eids=None):
-    global batch
-    global unique_edge_id_count 
-    global total_edge_id_count 
-    global total_node_id_count 
-    global unique_node_id_count 
-    # mfgs = [[block1, block2], [block3, block4]] ,也就是layer 0 有 block1 和 block2, layer 1 有 block3 和 block4
-    # 信息传递方向 layer 0 -> layer 1
-    # layer 0: src->dst, layer 1: src->dst
-    # 所有layer 1的dst节点才是我们需要的节点
-    # DGLBlock的设计时src节点包含了dst节点
-    # 所有layer0的src必然包含了所有节点
-    mfgs_0 = mfgs[0] #[block1, block2]
-    # 第1部分: 可选 - 合并第一个MFG中相同的源节点
-    # print(f"[Batch {batch} Combine first MFGs: {deduplicate_mfg_src}")
-    batch = batch + 1
-    if deduplicate_mfg_src:
-        for i, block in enumerate(mfgs_0):
-            # 如果src节点数等于dst节点数,说明dst就包含了所有src节点
-            # src没有多余节点,dst节点和src节点没有重复节点,也就不需要合并了
-            if block.num_src_nodes() > block.num_dst_nodes():
-                num_dst = block.num_dst_nodes()
-                
-                # 下面是src节点的时间戳和ID
-                ts = block.srcdata['ts'][num_dst:]
-                nid = block.srcdata['ID'][num_dst:].float()
-                # 201,85 202,88 203,89 201,85
-                nts = torch.stack([ts, nid], dim=1)
-                unts, idx = torch.unique(nts, dim=0, return_inverse=True)
-                # 201,85 202,88 203,89
-                # 0 1 2 0
-                uts = unts[:, 0] # 85,88,89
-                unid = unts[:, 1]# 201,202,203
-                
-                # import pdb; pdb.set_trace()
-                # use same device as block
-                src = idx + num_dst #其中idx是list # 2+0, 2+1, 2+2, 2+0
-                dst = block.edges()[1] # 0 1
-                new_block = dgl.create_block((src, dst), num_src_nodes=unts.shape[0] + num_dst, num_dst_nodes=num_dst, device=torch.device('cuda:0'))
-                new_block.srcdata['ts'] = torch.cat([block.srcdata['ts'][:num_dst], uts], dim=0)
-                new_block.srcdata['ID'] = torch.cat([block.srcdata['ID'][:num_dst], unid], dim=0)
-                new_block.edata['dt'] = block.edata['dt']
-                new_block.edata['ID'] = block.edata['ID']
-                mfgs_0[i] = new_block
-
-    # add node features to all blocks inside 1st mfgs
-    # 只需要处理第一个mfgs就行了,因为第一个mfgs的src必然包含全部节点
-    i = 0
-    if node_feats is not None:
-        for block in mfgs_0:
-            if pinned:
-                # if nids is not None:
-                #     idx = nids[i]
-                # else:
-                idx = block.srcdata['ID'].cpu().long()
-                
-                # print if len(nids[i]) == len(idx)
-                # is_equal = (len(nids[i]) == idx.shape[0])
-                # print(f"Pinned Buffers Equal: {is_equal}")
-                total_node_id_count += idx.shape[0]
-                unique_node_id_count += torch.unique(idx).shape[0]
-                print(f"[Send node feature to GPU]Node ID: Unique/Total: {int(unique_node_id_count/batch)}/{int(total_node_id_count/batch)}")
-                torch.index_select(node_feats, 0, idx, out=nfeat_buffs[i][:idx.shape[0]])
-                block.srcdata['h'] = nfeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
-                i += 1
-            else:
-                idx = block.srcdata['ID'].long()
-                srch = node_feats[idx].float()
-                block.srcdata['h'] = srch.cuda()
-                
-    # add edge features to all blocks inside all mfgs
-    i = 0
-    if edge_feats is not None:
-        for mfg in mfgs:
-            for block in mfg:
-                if block.num_src_nodes() > block.num_dst_nodes():
-                    if pinned:
-                        # if eids is not None:
-                        #     idx = eids[i]
-                        # else:
-                        idx = block.edata['ID'].cpu().long()
-                        
-                        # is_equal = (len(eids[i]) == idx.shape[0])
-                        # print(f"Pinned Buffers Equal: {is_equal}")
-                        total_edge_id_count += idx.shape[0]
-                        unique_edge_id_count += torch.unique(idx).shape[0]
-                        print(f"[Send edge feature to GPU]Edge ID: Unique/Total: {int(unique_edge_id_count/batch)}/{int(total_edge_id_count/batch)}")
-                        torch.index_select(edge_feats, 0, idx, out=efeat_buffs[i][:idx.shape[0]])
-                        block.edata['f'] = efeat_buffs[i][:idx.shape[0]].cuda(non_blocking=True)
-                        i += 1
-                    else:
-                        idx = block.edata['ID'].long()
-                        srch = edge_feats[idx].float()
-                        block.edata['f'] = srch.cuda()
-    return mfgs
+    # logger.info(
+    #     f"Parsed config: {sample_param}, {memory_param}, {gnn_conf}, {train_conf}"
+    # )
+    cfg = Config(s=sample_param, m=memory_param, g=gnn_conf, t=train_conf)
+    cfg.t.batch_size = int(cfg.t.batch_size)
+    return cfg
 
 
+def to_apan_mailbox_block(mfg_meta: DGLBlockMeta) -> DGLBlock:
+    """
+    专门用于 APAN 的异步邮件传播。
+    只取 ret 中的第一个 TGB (1 layer, 1 history)。
+    """
+    # this is not standard DGL block
+    # 按照 train_dist.py 的逻辑，reverse 时只使用第一个元素
+    # 传播逻辑：row -> col (中心指向邻居)
+    block = dgl.create_block(
+        (mfg_meta.row, mfg_meta.col),
+        num_src_nodes=mfg_meta.dim_out,
+        num_dst_nodes=mfg_meta.dim_in,
+    )
+    all_nodes = mfg_meta.nodes
+    num_roots = mfg_meta.dim_out
 
+    # num_src_nodes = tgb.dim_out()少
+    # num_dst_nodes = tgb.dim_in()多
+
+    # 在传播过程中，目标节点（邻居）需要获取 ID 和时间戳
+    block.srcdata["ID"] = all_nodes[:num_roots]
+    block.dstdata["ID"] = all_nodes
+
+    block.srcdata["ts"] = mfg_meta.ts[:num_roots]
+    block.dstdata["ts"] = mfg_meta.ts  # 只有目标节点需要 ts
+
+    # edge data
+    block.edata["dt"] = mfg_meta.dts[num_roots:]
+    block.edata["ID"] = mfg_meta.eid
+
+    return block
+
+
+def _mail_delivery_tensor(
+    mail_delivery_block: DGLBlock,
+    unique_root_nodes: torch.Tensor,
+) -> torch.Tensor:
+    src_local_id, dst_local_id = mail_delivery_block.edges(
+        order="eid"
+    )  # find out all edges
+    global_src = mail_delivery_block.srcdata["ID"][src_local_id]
+    global_dst = mail_delivery_block.dstdata["ID"][dst_local_id]
+
+    uniq_global_src = torch.unique(global_src)
+    uniq_global_dst = torch.unique(global_dst)
+    is_in_root = torch.isin(global_src, unique_root_nodes)
+
+    roots_sorted = torch.sort(unique_root_nodes).values
+    src_sorted = torch.sort(global_src).values
+    assert torch.equal(roots_sorted, src_sorted), "roots != unique(global_src)"
+
+    final_src = global_src[is_in_root]
+    final_dst = global_dst[is_in_root]
+    tensor = torch.stack([final_src, final_dst], dim=0)
+    return tensor
+
+
+def get_global_edges_directly(mfg_meta: DGLBlockMeta) -> torch.Tensor:
+    """
+    直接从 mfg_meta 获取全局 ID 的边 (Src -> Dst)
+    无需构建 DGLBlock
+    """
+    # 1. 获取全局 ID 查找表 (Tensor)
+    # 假设 mfg_meta.nodes 已经是 tensor，如果是 numpy 需要转一下
+    all_nodes = mfg_meta.nodes
+    if not isinstance(all_nodes, torch.Tensor):
+        all_nodes = torch.from_numpy(all_nodes)
+
+    # 2. 直接利用 row 和 col 进行索引映射
+    # APAN Mailbox 逻辑是：Row (Roots) -> Col (Neighbors)
+    # row 和 col 里的数值就是 all_nodes 的下标
+
+    # 既然 row 里的值对应 roots (在 all_nodes 的前 dim_out 部分)
+    # col 里的值对应 all_nodes 的任意位置
+
+    global_src = all_nodes[mfg_meta.row]  # 这一步代替了 src_local_id -> global
+    global_dst = all_nodes[mfg_meta.col]  # 这一步代替了 dst_local_id -> global
+
+    # 3. 堆叠成结果
+    # shape: [2, num_edges]
+    return torch.stack([global_src, global_dst], dim=0)
+
+
+def node_to_dgl_blocks(root_nodes: torch.Tensor, ts: torch.Tensor) -> list[DGLBlock]:
+    blocks = []
+    block = dgl.create_block(
+        ([], []), num_src_nodes=root_nodes.shape[0], num_dst_nodes=root_nodes.shape[0]
+    )
+    block.srcdata["ID"] = root_nodes
+    block.srcdata["ts"] = ts
+    blocks.append([block])
+    return blocks
+
+
+def blocks_to_device(
+    blockss: list[list[DGLBlock]], device: torch.device
+) -> list[list[DGLBlock]]:
+    """
+    将嵌套的 DGLBlock 列表移动到指定设备。
+    注意：必须使用索引赋值，否则列表内容不会改变。
+    """
+    for blocks in blockss:
+        # 必须用 enumerate 获取索引，才能修改列表本身
+        for i, block in enumerate(blocks):
+            # 1. 使用传入的 device，而不是写死
+            # 2. 必须赋值回 blocks[i]
+            # 3. 加上 non_blocking=False 以实现异步传输加速
+            blocks[i] = block.to(device, non_blocking=False)
+
+    return blockss
+
+
+def _deduplicate_first_layer_src(blockss_0: list[DGLBlock]) -> list[DGLBlock]:
+    """
+    Deduplicates source nodes in the first block layer based on (timestamp, ID).
+    This function modifies the blocks in blocks_on_gpu_0 in place.
+    """
+    for i, block in enumerate(blockss_0):
+        if block.num_src_nodes() > block.num_dst_nodes():
+            num_dst = block.num_dst_nodes()
+
+            # Combine timestamp and ID for unique identification
+            ts = block.srcdata["ts"][num_dst:]
+            nid = block.srcdata["ID"][num_dst:].float()
+            nts = torch.stack([ts, nid], dim=1)
+
+            unts, inv_map = torch.unique(nts, dim=0, return_inverse=True)
+
+            # New source nodes include original destinations + unique non-destinations
+            new_src_count = unts.shape[0] + num_dst
+
+            # Create new block with updated graph structure
+            # Edges now point from original destinations/new unique sources to destinations
+            src_nodes = inv_map + num_dst
+            dst_nodes = block.edges()[1]
+
+            # A node can emit multiple edges or it may not emit any edges at all
+            new_block = dgl.create_block(
+                (src_nodes, dst_nodes),
+                num_src_nodes=new_src_count,
+                num_dst_nodes=num_dst,
+                device=block.device,
+            )
+
+            # Copy over data to the new block
+            new_block.srcdata["ts"] = torch.cat(
+                [block.srcdata["ts"][:num_dst], unts[:, 0]], dim=0
+            )
+            new_block.srcdata["ID"] = torch.cat(
+                [block.srcdata["ID"][:num_dst], unts[:, 1]], dim=0
+            )
+            new_block.edata["dt"] = block.edata["dt"]
+            new_block.edata["ID"] = block.edata["ID"]
+
+            blockss_0[i] = new_block
+    return blockss_0
