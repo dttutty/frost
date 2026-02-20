@@ -11,3 +11,17 @@ __pycache__/
 models/
 *.pt
 logs/
+traces/
+temp/
+logs/
+result.json
+*.gz
+*.zip
+wandb/
+temp/
+logs/
+.trash/
+.ruff_cache/
+_tgmem_out/
+*.ckpt
+experiment_logs*

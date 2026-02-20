@@ -3,13 +3,13 @@ sampling:
     history: 1
 memory: 
   - type: 'node'
-    dim_time: 100
+    d_time: 100
     deliver_to: 'self'
     mail_combine: 'last'
     memory_update: 'rnn'
-    mailbox_size: 1
+    boxsize: 1
     combine_node_feature: True
-    dim_out: 100
+    d_hid: 100
 gnn:
   - arch: 'identity'
     time_transform: 'JODIE'
@@ -18,4 +18,4 @@ train:
     batch_size: 600
     lr: 0.0001
     dropout: 0.1
-    all_on_gpu: True
+    all_on_gpu: False

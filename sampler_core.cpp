@@ -1,473 +1,379 @@
-#include <iostream>
-#include <string>
-#include <cstdlib>
+// sampler_core.cpp (refactor)
+#include <algorithm>
+#include <cstdint>
+#include <cmath>
 #include <random>
+#include <vector>
+
 #include <omp.h>
-#include <math.h>
+
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
 namespace py = pybind11;
 
-typedef int NodeIDType;
-typedef int EdgeIDType;
-typedef float TimeStampType;
+using NodeIDType = int;
+using EdgeIDType = int;
+using TimeStampType = float;
 
-class TemporalGraphBlock
-{
+static constexpr TimeStampType kEps = 1e-7f;
+
+class TemporalGraphBlock {
 public:
-    std::vector<NodeIDType> row;
-    std::vector<NodeIDType> col;
-    std::vector<EdgeIDType> eid;
-    std::vector<TimeStampType> ts;
-    std::vector<TimeStampType> dts;
-    std::vector<NodeIDType> nodes;
-    NodeIDType dim_in, dim_out;
-    double ptr_time = 0;
+    std::vector<NodeIDType> row;   // per-edge: dst index
+    std::vector<NodeIDType> col;   // per-edge: src index
+    std::vector<EdgeIDType> eid;   // per-edge: global edge id
+
+    // per-node (src-side list): length = dim_in
+    std::vector<TimeStampType> ts;   // timestamp for each block-node
+    std::vector<TimeStampType> dts;  // DyX time for each block-node (root nodes -> 0)
+    std::vector<NodeIDType> nodes;   // global node id for each block-node
+
+    NodeIDType dim_in = 0;   // #src nodes in block
+    NodeIDType dim_out = 0;  // #dst nodes in block
+
+    // (可选) profiling
     double search_time = 0;
     double sample_time = 0;
-    double tot_time = 0;
     double coo_time = 0;
+    double tot_time = 0;
 
-    TemporalGraphBlock() {}
+    TemporalGraphBlock() = default;
 
-    TemporalGraphBlock(std::vector<NodeIDType>& _row, std::vector<NodeIDType>& _col,
-        std::vector<EdgeIDType>& _eid, std::vector<TimeStampType>& _ts,
-        std::vector<TimeStampType>& _dts, std::vector<NodeIDType>& _nodes,
-        NodeIDType _dim_in, NodeIDType _dim_out) :
-        row(_row), col(_col), eid(_eid), ts(_ts), dts(_dts),
-        nodes(_nodes), dim_in(_dim_in), dim_out(_dim_out) {
-    }
+    TemporalGraphBlock(const std::vector<NodeIDType>& _row,
+                       const std::vector<NodeIDType>& _col,
+                       const std::vector<EdgeIDType>& _eid,
+                       const std::vector<TimeStampType>& _ts,
+                       const std::vector<TimeStampType>& _dts,
+                       const std::vector<NodeIDType>& _nodes,
+                       NodeIDType _dim_in,
+                       NodeIDType _dim_out)
+        : row(_row), col(_col), eid(_eid), ts(_ts), dts(_dts),
+          nodes(_nodes), dim_in(_dim_in), dim_out(_dim_out) {}
 };
 
-class ParallelSampler
-{
-public:
-    std::vector<EdgeIDType> indptr;
-    std::vector<EdgeIDType> indices;
-    std::vector<EdgeIDType> eid;
-    std::vector<TimeStampType> ts;
-    NodeIDType num_nodes;
-    EdgeIDType num_edges;
-    int num_thread_per_worker;
-    int num_workers;
-    int num_threads;
-    int num_layers;
-    std::vector<int> num_neighbors;
-    bool recent;
-    bool prop_time;
-    int num_history;
-    TimeStampType window_duration;
-    std::vector<std::vector<std::vector<EdgeIDType>::size_type>> ts_ptr;
-    omp_lock_t* ts_ptr_lock;
-    std::vector<TemporalGraphBlock> ret;
-
-    ParallelSampler(std::vector<EdgeIDType>& _indptr, std::vector<EdgeIDType>& _indices,
-        std::vector<EdgeIDType>& _eid, std::vector<TimeStampType>& _ts,
-        int _num_thread_per_worker, int _num_workers, int _num_layers,
-        std::vector<int>& _num_neighbors, bool _recent, bool _prop_time,
-        int _num_history, TimeStampType _window_duration) :
-        indptr(_indptr), indices(_indices), eid(_eid), ts(_ts), prop_time(_prop_time),
-        num_thread_per_worker(_num_thread_per_worker), num_workers(_num_workers),
-        num_layers(_num_layers), num_neighbors(_num_neighbors), recent(_recent),
-        num_history(_num_history), window_duration(_window_duration)
-    {
-        omp_set_num_threads(num_thread_per_worker * num_workers);
-        num_threads = num_thread_per_worker * num_workers;
-        num_nodes = indptr.size() - 1;
-        num_edges = indices.size();
-        ts_ptr_lock = (omp_lock_t*)malloc(num_nodes * sizeof(omp_lock_t));
-        for (int i = 0; i < num_nodes; i++)
-            omp_init_lock(&ts_ptr_lock[i]);
-        ts_ptr.resize(num_history + 1);
-        for (auto it = ts_ptr.begin(); it != ts_ptr.end(); it++)
-        {
-            it->resize(indptr.size() - 1);
-#pragma omp parallel for
-            for (auto itt = indptr.begin(); itt < indptr.end() - 1; itt++)
-                (*it)[itt - indptr.begin()] = *itt;
-        }
-    }
-
-    void reset()
-    {
-        for (auto it = ts_ptr.begin(); it != ts_ptr.end(); it++)
-        {
-            it->resize(indptr.size() - 1);
-#pragma omp parallel for
-            for (auto itt = indptr.begin(); itt < indptr.end() - 1; itt++)
-                (*it)[itt - indptr.begin()] = *itt;
-        }
-    }
-
-    void update_ts_ptr(int slc, std::vector<NodeIDType>& root_nodes,
-        std::vector<TimeStampType>& root_ts, float offset)
-    {
-#pragma omp parallel for schedule(static, int(ceil(static_cast<float>(root_nodes.size()) / num_threads)))
-        for (std::vector<NodeIDType>::size_type i = 0; i < root_nodes.size(); i++)
-        {
-            NodeIDType n = root_nodes[i];
-            omp_set_lock(&(ts_ptr_lock[n]));
-            for (std::vector<EdgeIDType>::size_type j = ts_ptr[slc][n]; j < indptr[n + 1]; j++)
-            {
-                // std::cout << "comparing " << ts[j] << " with " << root_ts[i] << std::endl;
-                if (ts[j] > (root_ts[i] + offset - 1e-7f))
-                {
-                    if (j != ts_ptr[slc][n])
-                        ts_ptr[slc][n] = j - 1;
-                    break;
-                }
-                if (j == indptr[n + 1] - 1)
-                {
-                    ts_ptr[slc][n] = j;
-                }
-            }
-            omp_unset_lock(&(ts_ptr_lock[n]));
-        }
-    }
-
-    inline void add_neighbor(std::vector<NodeIDType>* _row, std::vector<NodeIDType>* _col,
-        std::vector<EdgeIDType>* _eid, std::vector<TimeStampType>* _ts,
-        std::vector<TimeStampType>* _dts, std::vector<NodeIDType>* _nodes,
-        EdgeIDType& k, TimeStampType& src_ts, int& row_id)
-    {
-        _row->push_back(row_id);
-        _col->push_back(_nodes->size());
-        _eid->push_back(eid[k]);
-        if (prop_time)
-            _ts->push_back(src_ts);
-        else
-            _ts->push_back(ts[k]);
-        _dts->push_back(src_ts - ts[k]);
-        _nodes->push_back(indices[k]);
-        // _row.push_back(0);
-        // _col.push_back(0);
-        // _eid.push_back(0);
-        // if (prop_time)
-        //     _ts.push_back(src_ts);
-        // else
-        //     _ts.push_back(10000);
-        // _nodes.push_back(100);
-    }
-
-    inline void combine_coo(TemporalGraphBlock& _ret, std::vector<NodeIDType>** _row,
-        std::vector<NodeIDType>** _col,
-        std::vector<EdgeIDType>** _eid,
-        std::vector<TimeStampType>** _ts,
-        std::vector<TimeStampType>** _dts,
-        std::vector<NodeIDType>** _nodes,
-        std::vector<int>& _out_nodes)
-    {
-        std::vector<EdgeIDType> cum_row, cum_col;
-        cum_row.push_back(0);
-        cum_col.push_back(0);
-        for (int tid = 0; tid < num_threads; tid++)
-        {
-            // std::cout<<tid<<" here "<<_out_nodes[tid]<<std::endl;  
-            cum_row.push_back(cum_row.back() + _out_nodes[tid]);
-            cum_col.push_back(cum_col.back() + _col[tid]->size());
-        }
-        int num_root_nodes = _ret.nodes.size();
-        _ret.row.resize(cum_col.back());
-        _ret.col.resize(cum_col.back());
-        _ret.eid.resize(cum_col.back());
-        _ret.ts.resize(cum_col.back() + num_root_nodes);
-        _ret.dts.resize(cum_col.back() + num_root_nodes);
-        _ret.nodes.resize(cum_col.back() + num_root_nodes);
-#pragma omp parallel for schedule(static, 1)
-        for (int tid = 0; tid < num_threads; tid++)
-        {
-            std::transform(_row[tid]->begin(), _row[tid]->end(), _row[tid]->begin(),
-                [&](auto& v) { return v + cum_row[tid]; });
-            std::transform(_col[tid]->begin(), _col[tid]->end(), _col[tid]->begin(),
-                [&](auto& v) { return v + cum_col[tid] + num_root_nodes; });
-            std::copy(_row[tid]->begin(), _row[tid]->end(), _ret.row.begin() + cum_col[tid]);
-            std::copy(_col[tid]->begin(), _col[tid]->end(), _ret.col.begin() + cum_col[tid]);
-            std::copy(_eid[tid]->begin(), _eid[tid]->end(), _ret.eid.begin() + cum_col[tid]);
-            std::copy(_ts[tid]->begin(), _ts[tid]->end(), _ret.ts.begin() + cum_col[tid] + num_root_nodes);
-            std::copy(_dts[tid]->begin(), _dts[tid]->end(), _ret.dts.begin() + cum_col[tid] + num_root_nodes);
-            std::copy(_nodes[tid]->begin(), _nodes[tid]->end(), _ret.nodes.begin() + cum_col[tid] + num_root_nodes);
-            delete _row[tid];
-            delete _col[tid];
-            delete _eid[tid];
-            delete _ts[tid];
-            delete _dts[tid];
-            delete _nodes[tid];
-        }
-        _ret.dim_in = _ret.nodes.size();
-        _ret.dim_out = cum_row.back();
-    }
-
-    void sample_layer(std::vector<NodeIDType>& _root_nodes, std::vector<TimeStampType>& _root_ts,
-        int neighs, bool use_ptr, bool from_root)
-    {
-        double t_s = omp_get_wtime();
-        std::vector<NodeIDType>* root_nodes;
-        std::vector<TimeStampType>* root_ts;
-        if (from_root)
-        {
-            root_nodes = &_root_nodes;
-            root_ts = &_root_ts;
-        }
-        double t_ptr_s = omp_get_wtime();
-        if (use_ptr)
-            update_ts_ptr(num_history, *root_nodes, *root_ts, 0);
-        ret[0].ptr_time += omp_get_wtime() - t_ptr_s;
-        for (int i = 0; i < num_history; i++)
-        {
-            if (!from_root)
-            {
-                root_nodes = &(ret[ret.size() - 1 - i - num_history].nodes);
-                root_ts = &(ret[ret.size() - 1 - i - num_history].ts);
-            }
-            TimeStampType offset = -i * window_duration;
-            t_ptr_s = omp_get_wtime();
-            if ((use_ptr) && (std::abs(window_duration) > 1e-7f))
-                update_ts_ptr(num_history - 1 - i, *root_nodes, *root_ts, offset - window_duration);
-            ret[0].ptr_time += omp_get_wtime() - t_ptr_s;
-            std::vector<NodeIDType>* _row[num_threads];
-            std::vector<NodeIDType>* _col[num_threads];
-            std::vector<EdgeIDType>* _eid[num_threads];
-            std::vector<TimeStampType>* _ts[num_threads];
-            std::vector<TimeStampType>* _dts[num_threads];
-            std::vector<NodeIDType>* _nodes[num_threads];
-            std::vector<int> _out_node(num_threads, 0);
-            int reserve_capacity = int(ceil((*root_nodes).size() / num_threads)) * neighs;
-#pragma omp parallel
-            {
-                int tid = omp_get_thread_num();
-                unsigned int loc_seed = tid;
-                _row[tid] = new std::vector<NodeIDType>;
-                _col[tid] = new std::vector<NodeIDType>;
-                _eid[tid] = new std::vector<EdgeIDType>;
-                _ts[tid] = new std::vector<TimeStampType>;
-                _dts[tid] = new std::vector<TimeStampType>;
-                _nodes[tid] = new std::vector<NodeIDType>;
-                _row[tid]->reserve(reserve_capacity);
-                _col[tid]->reserve(reserve_capacity);
-                _eid[tid]->reserve(reserve_capacity);
-                _ts[tid]->reserve(reserve_capacity);
-                _dts[tid]->reserve(reserve_capacity);
-                _nodes[tid]->reserve(reserve_capacity);
-                // #pragma omp critical
-                //                     std::cout<<tid<<" sampling: "<<root_nodes->size()<<" "<<int(ceil((*root_nodes).size() / num_threads))<<std::endl;
-#pragma omp for schedule(static, int(ceil(static_cast<float>((*root_nodes).size()) / num_threads)))
-                for (std::vector<NodeIDType>::size_type j = 0; j < (*root_nodes).size(); j++)
-                {
-                    NodeIDType n = (*root_nodes)[j];
-                    // if (tid == 16)
-                    //     std::cout << _out_node[tid] << " " <<j << " " << n << std::endl;
-                    TimeStampType nts = (*root_ts)[j];
-                    EdgeIDType s_search, e_search;
-                    if (use_ptr)
-                    {
-                        s_search = ts_ptr[num_history - 1 - i][n];
-                        e_search = ts_ptr[num_history - i][n];
-                    }
-                    else
-                    {
-                        // search for start and end pointer
-                        double t_search_s = omp_get_wtime();
-                        if (num_history == 1)
-                        {
-                            // TGAT style
-                            s_search = indptr[n];
-                            auto e_it = std::upper_bound(ts.begin() + indptr[n],
-                                ts.begin() + indptr[n + 1], nts);
-                            e_search = std::max(int(e_it - ts.begin()) - 1, s_search);
-                        }
-                        else
-                        {
-                            // DySAT style
-                            auto s_it = std::upper_bound(ts.begin() + indptr[n],
-                                ts.begin() + indptr[n + 1],
-                                nts + offset - window_duration);
-                            s_search = std::max(int(s_it - ts.begin()) - 1, indptr[n]);
-                            auto e_it = std::upper_bound(ts.begin() + indptr[n],
-                                ts.begin() + indptr[n + 1], nts + offset);
-                            e_search = std::max(int(e_it - ts.begin()) - 1, s_search);
-                        }
-                        if (tid == 0)
-                            ret[0].search_time += omp_get_wtime() - t_search_s;
-                    }
-                    // std::cout << n << " " << s_search << " " << e_search << std::endl;
-                    double t_sample_s = omp_get_wtime();
-                    if ((recent) || (e_search - s_search < neighs))
-                    {
-                        // no sampling, pick recent neighbors
-                        for (EdgeIDType k = e_search; k > std::max(s_search, e_search - neighs); k--)
-                        {
-                            if (ts[k] < nts + offset - 1e-7f)
-                            {
-                                add_neighbor(_row[tid], _col[tid], _eid[tid], _ts[tid],
-                                    _dts[tid], _nodes[tid], k, nts, _out_node[tid]);
-                            }
-                        }
-                    }
-                    else
-                    {
-                        // random sampling within ptr
-                        for (int _i = 0; _i < neighs; _i++)
-                        {
-                            EdgeIDType picked = s_search + rand_r(&loc_seed) % (e_search - s_search + 1);
-                            if (ts[picked] < nts + offset - 1e-7f)
-                            {
-                                add_neighbor(_row[tid], _col[tid], _eid[tid], _ts[tid],
-                                    _dts[tid], _nodes[tid], picked, nts, _out_node[tid]);
-                            }
-                        }
-                    }
-                    _out_node[tid] += 1;
-                    if (tid == 0)
-                        ret[0].sample_time += omp_get_wtime() - t_sample_s;
-                }
-            }
-            double t_coo_s = omp_get_wtime();
-            ret[ret.size() - 1 - i].ts.insert(ret[ret.size() - 1 - i].ts.end(),
-                root_ts->begin(), root_ts->end());
-            ret[ret.size() - 1 - i].nodes.insert(ret[ret.size() - 1 - i].nodes.end(),
-                root_nodes->begin(), root_nodes->end());
-            ret[ret.size() - 1 - i].dts.resize(root_nodes->size());
-            combine_coo(ret[ret.size() - 1 - i], _row, _col, _eid, _ts, _dts, _nodes, _out_node);
-            ret[0].coo_time += omp_get_wtime() - t_coo_s;
-        }
-        ret[0].tot_time += omp_get_wtime() - t_s;
-    }
-
-    void sample(std::vector<NodeIDType>& root_nodes, std::vector<TimeStampType>& root_ts)
-    {
-        // a weird bug, dgl library seems to modify the total number of threads
-        omp_set_num_threads(num_threads);
-        ret.resize(0);
-        bool first_layer = true;
-        bool use_ptr = false;
-        for (int i = 0; i < num_layers; i++)
-        {
-            ret.resize(ret.size() + num_history);
-            if ((first_layer) || ((prop_time) && num_history == 1) || (recent))
-            {
-                first_layer = false;
-                use_ptr = true;
-            }
-            else
-                use_ptr = false;
-            if (i == 0)
-                sample_layer(root_nodes, root_ts, num_neighbors[i], use_ptr, true);
-            else
-                sample_layer(root_nodes, root_ts, num_neighbors[i], use_ptr, false);
-        }
-    }
-
-    std::vector<NodeIDType> sample_negatives(const std::vector<NodeIDType>& root_nodes,
-        const std::vector<TimeStampType>& root_ts,
-        int num_neg_samples)
-    {
-        // 最终返回的扁平化负采样节点列表
-        std::vector<NodeIDType> all_neg_samples;
-        all_neg_samples.resize(root_nodes.size() * num_neg_samples);
-
-        // 使用 OpenMP 并行处理每个根节点
-#pragma omp parallel for
-        for (std::vector<NodeIDType>::size_type i = 0; i < root_nodes.size(); ++i)
-        {
-            int tid = omp_get_thread_num();
-            // 为每个线程创建一个独立的随机数种子
-            unsigned int loc_seed = tid + time(NULL);
-
-            const NodeIDType src = root_nodes[i];
-            const TimeStampType current_ts = root_ts[i];
-
-            // 1. 查找所有需要排除的节点 (历史和当前的邻居)
-            // 使用无序集合以获得 O(1) 的平均查找效率
-            std::unordered_set<NodeIDType> exclusion_set;
-            exclusion_set.insert(src); // 首先排除源节点自身
-
-            EdgeIDType start = indptr[src];
-            EdgeIDType end = indptr[src + 1];
-
-            // 遍历所有邻居边
-            for (EdgeIDType k = start; k < end; ++k)
-            {
-                // 如果邻居边的时间戳小于或等于当前时间戳，则将其目标节点加入排除列表
-                if (ts[k] <= current_ts + 1e-7f) {
-                    exclusion_set.insert(indices[k]);
-                }
-            }
-
-            // 2. 执行带排除规则的随机采样 (Rejection Sampling)
-            int count = 0;
-            while (count < num_neg_samples)
-            {
-                // 从全图节点中随机抽取一个候选节点
-                NodeIDType candidate = rand_r(&loc_seed) % num_nodes;
-
-                // 检查候选节点是否在排除列表中
-                if (exclusion_set.find(candidate) == exclusion_set.end())
-                {
-                    // 如果不在，则采样成功
-                    all_neg_samples[i * num_neg_samples + count] = candidate;
-                    count++;
-                }
-            }
-        }
-        return all_neg_samples;
-    }
-};
-
-template<typename T>
-inline py::array vec2npy(const std::vector<T>& vec)
-{
-    // need to let python garbage collector handle C++ vector memory 
-    // see https://github.com/pybind/pybind11/issues/1042
+template <typename T>
+inline py::array vec2npy(const std::vector<T>& vec) {
     auto v = new std::vector<T>(vec);
-    auto capsule = py::capsule(v, [](void* v)
-        { delete reinterpret_cast<std::vector<T>*>(v); });
+    auto capsule = py::capsule(v, [](void* p) {
+        delete reinterpret_cast<std::vector<T>*>(p);
+    });
     return py::array(v->size(), v->data(), capsule);
-    // return py::array(vec.size(), vec.data());
 }
 
-PYBIND11_MODULE(sampler_core, m)
-{
+class ParallelSampler {
+public:
+    // CSR adjacency
+    std::vector<EdgeIDType> indptr;          // len = num_nodes + 1
+    std::vector<NodeIDType> indices;         // len = num_edges, neighbor node ids
+    std::vector<EdgeIDType> edge_ids;        // len = num_edges
+    std::vector<TimeStampType> edge_ts;      // len = num_edges, must be sorted within each node segment
+
+    NodeIDType num_nodes = 0;
+    EdgeIDType num_edges = 0;
+
+    int num_thread_per_worker = 1;
+    int num_workers = 1;
+    int num_threads = 1;
+
+    int num_layers = 1;
+    std::vector<int> num_neighbors;  // per layer
+
+    bool recent = false;     // if true: take most recent edges in window
+    bool prop_time = false;  // if true: neighbor-node ts uses dst_ts (propagated), else uses edge_ts
+
+    int num_history = 1;
+    TimeStampType window_duration = 0;
+
+    std::vector<TemporalGraphBlock> ret;
+
+    ParallelSampler(const std::vector<EdgeIDType>& _indptr,
+                    const std::vector<NodeIDType>& _indices,
+                    const std::vector<EdgeIDType>& _eid,
+                    const std::vector<TimeStampType>& _ts,
+                    int _num_thread_per_worker,
+                    int _num_workers,
+                    int _num_layers,
+                    const std::vector<int>& _num_neighbors,
+                    bool _recent,
+                    bool _prop_time,
+                    int _num_history,
+                    TimeStampType _window_duration)
+        : indptr(_indptr),
+          indices(_indices),
+          edge_ids(_eid),
+          edge_ts(_ts),
+          num_thread_per_worker(_num_thread_per_worker),
+          num_workers(_num_workers),
+          num_layers(_num_layers),
+          num_neighbors(_num_neighbors),
+          recent(_recent),
+          prop_time(_prop_time),
+          num_history(_num_history),
+          window_duration(_window_duration) {
+        num_threads = std::max(1, num_thread_per_worker * num_workers);
+        omp_set_num_threads(num_threads);
+
+        num_nodes = static_cast<NodeIDType>(indptr.size() - 1);
+        num_edges = static_cast<EdgeIDType>(indices.size());
+    }
+
+    void reset() {
+        // 现在没有 ts_ptr 缓存，这里保留接口占位
+    }
+
+private:
+    struct ThreadBuffer {
+        std::vector<NodeIDType> row;
+        std::vector<NodeIDType> col;
+        std::vector<EdgeIDType> eid;
+        std::vector<TimeStampType> ts;
+        std::vector<TimeStampType> dts;
+        std::vector<NodeIDType> nodes;
+
+        void clear_and_reserve(size_t cap) {
+            row.clear(); col.clear(); eid.clear();
+            ts.clear(); dts.clear(); nodes.clear();
+            row.reserve(cap); col.reserve(cap); eid.reserve(cap);
+            ts.reserve(cap); dts.reserve(cap); nodes.reserve(cap);
+        }
+    };
+
+    // 返回 [start, end]（都 inclusive），表示满足 (lower, upper) 的边索引范围。
+    // 若为空，返回 start > end。
+    inline std::pair<EdgeIDType, EdgeIDType> find_edge_range(NodeIDType n,
+                                                            TimeStampType upper,
+                                                            TimeStampType lower) const {
+        const EdgeIDType b = indptr[n];
+        const EdgeIDType e = indptr[n + 1];
+        if (b >= e) return {1, 0};
+
+        const auto seg_begin = edge_ts.begin() + b;
+        const auto seg_end   = edge_ts.begin() + e;
+
+        // start: first edge with ts > lower  (strict)
+        auto it_start = (num_history == 1)
+            ? seg_begin
+            : std::upper_bound(seg_begin, seg_end, lower);
+
+        // end: last edge with ts < upper  (strict) -> last <= upper - eps
+        auto it_end_plus1 = std::upper_bound(seg_begin, seg_end, upper - kEps);
+
+        EdgeIDType start = static_cast<EdgeIDType>(it_start - edge_ts.begin());
+        EdgeIDType end   = static_cast<EdgeIDType>(it_end_plus1 - edge_ts.begin()) - 1;
+
+        if (end < start) return {1, 0};
+        return {start, end};
+    }
+
+    inline void add_neighbor(ThreadBuffer& buf,
+                             NodeIDType dst_row,        // global dst index in this block
+                             EdgeIDType edge_idx,       // global edge index in CSR arrays
+                             TimeStampType dst_ts_raw)  // original dst timestamp (not offset)
+    {
+        buf.row.push_back(dst_row);
+        buf.col.push_back(static_cast<NodeIDType>(buf.nodes.size())); // local src index
+        buf.eid.push_back(edge_ids[edge_idx]);
+
+        const TimeStampType e_ts = edge_ts[edge_idx];
+        buf.ts.push_back(prop_time ? dst_ts_raw : e_ts);
+        buf.dts.push_back(dst_ts_raw - e_ts);
+        buf.nodes.push_back(indices[edge_idx]);
+    }
+
+    // very small fast RNG (xorshift32), enough for sampling
+    static inline uint32_t xorshift32(uint32_t& x) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        return x;
+    }
+
+    void sample_one_block(TemporalGraphBlock& out,
+                          const std::vector<NodeIDType>& dst_nodes,
+                          const std::vector<TimeStampType>& dst_ts,
+                          int neighs,
+                          TimeStampType upper_offset)  // upper = dst_ts + upper_offset
+    {
+        const double t0 = omp_get_wtime();
+
+        const size_t num_dst = dst_nodes.size();
+        out = TemporalGraphBlock{};
+        out.dim_out = static_cast<NodeIDType>(num_dst);
+
+        // 先把 dst/root nodes 放进 block 的 node list（它们也是 src 的一部分）
+        out.nodes = dst_nodes;
+        out.ts = dst_ts;
+        out.dts.assign(num_dst, 0.0f);
+
+        // per-thread buffers
+        std::vector<ThreadBuffer> bufs(num_threads);
+
+        // 估一个 reserve：每个 dst 取 neighs 条边
+        const size_t cap_each = (num_dst == 0) ? 0 : ( (num_dst + num_threads - 1) / num_threads ) * static_cast<size_t>(neighs);
+        for (int t = 0; t < num_threads; ++t) bufs[t].clear_and_reserve(cap_each);
+
+        double search_acc = 0.0;
+        double sample_acc = 0.0;
+
+#pragma omp parallel
+        {
+            const int tid = omp_get_thread_num();
+            ThreadBuffer& buf = bufs[tid];
+
+#pragma omp for schedule(static)
+            for (long long j = 0; j < static_cast<long long>(num_dst); ++j) {
+                const NodeIDType n = dst_nodes[static_cast<size_t>(j)];
+                const TimeStampType base_ts = dst_ts[static_cast<size_t>(j)];
+
+                // history>1: window = (upper-window_duration, upper)
+                // history==1: window = (-inf, upper)  (TGAT-like)
+                const TimeStampType upper = base_ts + upper_offset;
+                const TimeStampType lower = (num_history == 1) ? -INFINITY : (upper - window_duration);
+
+                const double ts_s = omp_get_wtime();
+                const auto [start, end] = find_edge_range(n, upper, lower);
+                search_acc += (omp_get_wtime() - ts_s);
+
+                if (start > end) continue; // no eligible edges
+
+                const EdgeIDType eligible = end - start + 1;
+
+                const double ts_p = omp_get_wtime();
+                if (recent || eligible <= neighs) {
+                    // take most recent min(neighs, eligible)
+                    const EdgeIDType take = static_cast<EdgeIDType>(std::min<EdgeIDType>(eligible, neighs));
+                    EdgeIDType k = end;
+                    EdgeIDType stop = end - take + 1;
+                    for (; k >= stop; --k) {
+                        add_neighbor(buf, static_cast<NodeIDType>(j), k, base_ts);
+                        if (k == stop) break; // avoid underflow
+                    }
+                } else {
+                    // random sampling WITH replacement (行为更接近你原版，但范围严格正确)
+                    uint32_t seed = 2166136261u ^ (static_cast<uint32_t>(tid) * 16777619u) ^ static_cast<uint32_t>(j);
+                    for (int s = 0; s < neighs; ++s) {
+                        const uint32_t r = xorshift32(seed);
+                        const EdgeIDType picked = start + static_cast<EdgeIDType>(r % static_cast<uint32_t>(eligible));
+                        add_neighbor(buf, static_cast<NodeIDType>(j), picked, base_ts);
+                    }
+                }
+                sample_acc += (omp_get_wtime() - ts_p);
+            }
+        } // omp parallel
+
+        // prefix sum: each edge adds exactly one new src node (不去重，保持你原行为)
+        std::vector<size_t> edge_prefix(num_threads + 1, 0);
+        for (int t = 0; t < num_threads; ++t) {
+            edge_prefix[t + 1] = edge_prefix[t] + bufs[t].row.size();
+        }
+        const size_t total_edges = edge_prefix.back();
+
+        const double t_coo = omp_get_wtime();
+
+        out.row.resize(total_edges);
+        out.col.resize(total_edges);
+        out.eid.resize(total_edges);
+
+        out.ts.resize(num_dst + total_edges);
+        out.dts.resize(num_dst + total_edges);
+        out.nodes.resize(num_dst + total_edges);
+
+#pragma omp parallel for schedule(static)
+        for (int t = 0; t < num_threads; ++t) {
+            const size_t eoff = edge_prefix[t];
+            ThreadBuffer& buf = bufs[t];
+
+            // edges
+            for (size_t i = 0; i < buf.row.size(); ++i) {
+                out.row[eoff + i] = buf.row[i]; // global dst row index
+                out.col[eoff + i] = static_cast<NodeIDType>(num_dst + eoff + i); // src index in out.nodes
+                out.eid[eoff + i] = buf.eid[i];
+            }
+
+            // appended src nodes (one per edge)
+            for (size_t i = 0; i < buf.nodes.size(); ++i) {
+                const size_t noff = num_dst + eoff + i;
+                out.nodes[noff] = buf.nodes[i];
+                out.ts[noff] = buf.ts[i];
+                out.dts[noff] = buf.dts[i];
+            }
+        }
+
+        out.dim_in = static_cast<NodeIDType>(out.nodes.size());
+
+        out.search_time = search_acc;   // 粗略累计（跨线程累计会有误差，但量级对）
+        out.sample_time = sample_acc;
+        out.coo_time = omp_get_wtime() - t_coo;
+        out.tot_time = omp_get_wtime() - t0;
+    }
+
+public:
+    void sample(const std::vector<NodeIDType>& root_nodes,
+                const std::vector<TimeStampType>& root_ts)
+    {
+        omp_set_num_threads(num_threads);
+
+        ret.clear();
+        ret.resize(static_cast<size_t>(num_layers * num_history));
+
+        auto idx = [&](int layer, int h) -> size_t {
+            // h: 0..num_history-1  (oldest -> newest)
+            return static_cast<size_t>(layer * num_history + h);
+        };
+
+        for (int layer = 0; layer < num_layers; ++layer) {
+            const int neighs = num_neighbors[layer];
+
+            for (int h = 0; h < num_history; ++h) {
+                // newest window has offset=0; older ones shift backward
+                const int lag = (num_history - 1 - h);
+                const TimeStampType upper_offset = (num_history == 1) ? 0.0f : (-static_cast<TimeStampType>(lag) * window_duration);
+
+                const std::vector<NodeIDType>* in_nodes = &root_nodes;
+                const std::vector<TimeStampType>* in_ts = &root_ts;
+
+                if (layer > 0) {
+                    TemporalGraphBlock& prev = ret[idx(layer - 1, h)];
+                    in_nodes = &prev.nodes; // expand frontier using previous layer's src nodes
+                    in_ts    = &prev.ts;
+                }
+
+                TemporalGraphBlock& out = ret[idx(layer, h)];
+                sample_one_block(out, *in_nodes, *in_ts, neighs, upper_offset);
+            }
+        }
+    }
+};
+
+PYBIND11_MODULE(sampler_core, m) {
     py::class_<TemporalGraphBlock>(m, "TemporalGraphBlock")
-        .def(py::init<std::vector<NodeIDType> &, std::vector<NodeIDType> &,
-            std::vector<EdgeIDType> &, std::vector<TimeStampType> &,
-            std::vector<TimeStampType> &, std::vector<NodeIDType> &,
-            NodeIDType, NodeIDType>())
-        .def("row", [](const TemporalGraphBlock& tgb) { return vec2npy(tgb.row); })
-        .def("col", [](const TemporalGraphBlock& tgb) { return vec2npy(tgb.col); })
-        .def("eid", [](const TemporalGraphBlock& tgb) { return vec2npy(tgb.eid); })
-        .def("ts", [](const TemporalGraphBlock& tgb) { return vec2npy(tgb.ts); })
-        .def("dts", [](const TemporalGraphBlock& tgb) { return vec2npy(tgb.dts); })
-        .def("nodes", [](const TemporalGraphBlock& tgb) { return vec2npy(tgb.nodes); })
-        .def("dim_in", [](const TemporalGraphBlock& tgb) { return tgb.dim_in; })
-        .def("dim_out", [](const TemporalGraphBlock& tgb) { return tgb.dim_out; })
-        .def("tot_time", [](const TemporalGraphBlock& tgb) { return tgb.tot_time; })
-        .def("ptr_time", [](const TemporalGraphBlock& tgb) { return tgb.ptr_time; })
-        .def("search_time", [](const TemporalGraphBlock& tgb) { return tgb.search_time; })
-        .def("sample_time", [](const TemporalGraphBlock& tgb) { return tgb.sample_time; })
-        .def("coo_time", [](const TemporalGraphBlock& tgb) { return tgb.coo_time; });
+        .def(py::init<>())
+        .def("row",   [](const TemporalGraphBlock& b){ return vec2npy(b.row); })
+        .def("col",   [](const TemporalGraphBlock& b){ return vec2npy(b.col); })
+        .def("eid",   [](const TemporalGraphBlock& b){ return vec2npy(b.eid); })
+        .def("ts",    [](const TemporalGraphBlock& b){ return vec2npy(b.ts); })
+        .def("dts",   [](const TemporalGraphBlock& b){ return vec2npy(b.dts); })
+        .def("nodes", [](const TemporalGraphBlock& b){ return vec2npy(b.nodes); })
+        .def("dim_in",  [](const TemporalGraphBlock& b){ return b.dim_in; })
+        .def("dim_out", [](const TemporalGraphBlock& b){ return b.dim_out; })
+        .def("tot_time",    [](const TemporalGraphBlock& b){ return b.tot_time; })
+        .def("search_time", [](const TemporalGraphBlock& b){ return b.search_time; })
+        .def("sample_time", [](const TemporalGraphBlock& b){ return b.sample_time; })
+        .def("coo_time",    [](const TemporalGraphBlock& b){ return b.coo_time; });
+
     py::class_<ParallelSampler>(m, "ParallelSampler")
-        .def(py::init<std::vector<EdgeIDType> &, std::vector<EdgeIDType> &,
-            std::vector<EdgeIDType> &, std::vector<TimeStampType> &,
-            int, int, int, std::vector<int> &, bool, bool,
-            int, TimeStampType>())
+        .def(py::init<const std::vector<EdgeIDType>&,
+                      const std::vector<NodeIDType>&,
+                      const std::vector<EdgeIDType>&,
+                      const std::vector<TimeStampType>&,
+                      int, int, int,
+                      const std::vector<int>&,
+                      bool, bool,
+                      int, TimeStampType>())
         .def("sample", &ParallelSampler::sample)
-        .def("reset", &ParallelSampler::reset)
-        // 新增的绑定
-        .def("sample_negatives", [](ParallelSampler& ps,
-            py::array_t<NodeIDType> root_nodes,
-            py::array_t<TimeStampType> root_ts,
-            int num_neg_samples) {
-                // 将输入的 numpy array 转换为 std::vector
-                std::vector<NodeIDType> nodes_vec(root_nodes.data(), root_nodes.data() + root_nodes.size());
-                std::vector<TimeStampType> ts_vec(root_ts.data(), root_ts.data() + root_ts.size());
-
-                // 调用 C++ 核心函数
-                std::vector<NodeIDType> result_vec = ps.sample_negatives(nodes_vec, ts_vec, num_neg_samples);
-
-                // 将结果从 std::vector 转换回 numpy array 并返回给 Python
-                return vec2npy(result_vec);
-            }, py::arg("root_nodes"), py::arg("root_ts"), py::arg("num_neg_samples"))
-        .def("get_ret", [](const ParallelSampler& ps) { return ps.ret; });
+        .def("reset",  &ParallelSampler::reset)
+        // 注意：这里返回会拷贝（pybind11/stl 默认行为）。要零拷贝需要 bind_vector + reference policy。
+        .def("get_ret", [](const ParallelSampler& ps){ return ps.ret; });
 }

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import math
+
 
 class JODIE(nn.Module):
     """
@@ -15,7 +15,17 @@ class JODIE(nn.Module):
         dropout_rate (float): Dropout rate.
         use_features (bool): Whether to use interaction features. Defaults to True.
     """
-    def __init__(self, n_users, n_items, embed_dim, feature_dim, hidden_dim, dropout_rate=0.1, use_features=True):
+
+    def __init__(
+        self,
+        n_users,
+        n_items,
+        embed_dim,
+        feature_dim,
+        hidden_dim,
+        dropout_rate=0.1,
+        use_features=True,
+    ):
         super().__init__()
 
         self.n_users = n_users
@@ -67,7 +77,9 @@ class JODIE(nn.Module):
         nn.init.xavier_uniform_(self.item_projection.weight)
         nn.init.zeros_(self.item_projection.bias)
 
-    def forward(self, user_ids, item_ids, features, current_user_embeds, current_item_embeds):
+    def forward(
+        self, user_ids, item_ids, features, current_user_embeds, current_item_embeds
+    ):
         """
         Performs one step of JODIE update and projection.
 
@@ -90,8 +102,12 @@ class JODIE(nn.Module):
         """
         if not self.use_features:
             # Create zero features if not using them, simplifies concatenation
-            features = torch.zeros(user_ids.size(0), self.feature_dim,
-                                   device=user_ids.device, dtype=current_user_embeds.dtype)
+            features = torch.zeros(
+                user_ids.size(0),
+                self.feature_dim,
+                device=user_ids.device,
+                dtype=current_user_embeds.dtype,
+            )
 
         # --- 1. Prepare RNN Inputs ---
         # User RNN input: Item embedding + features
@@ -123,19 +139,25 @@ class JODIE(nn.Module):
         predicted_next_item_embeds = self.user_projection(user_proj_input)
         predicted_next_user_embeds = self.item_projection(item_proj_input)
 
-        return updated_user_embeds, updated_item_embeds, predicted_next_user_embeds, predicted_next_item_embeds
+        return (
+            updated_user_embeds,
+            updated_item_embeds,
+            predicted_next_user_embeds,
+            predicted_next_item_embeds,
+        )
 
     def get_embeddings(self, user_ids, item_ids):
         """Helper function to get current embeddings by ID."""
         # Ensure IDs are LongTensors
         if user_ids.dtype != torch.long:
-           user_ids = user_ids.long()
+            user_ids = user_ids.long()
         if item_ids.dtype != torch.long:
             item_ids = item_ids.long()
 
         user_embeds = self.user_embeddings[user_ids]
         item_embeds = self.item_embeddings[item_ids]
         return user_embeds, item_embeds
+
 
 # --- How to use it in a training loop (Conceptual) ---
 
@@ -154,7 +176,7 @@ item_embed_memory = model.item_embeddings.clone().detach()
 model.train()
 total_loss = 0
 
-for u, i, ts, feat in interactions: # Iterate in temporal order
+for u, i, ts, feat in interactions:  # Iterate in temporal order
     optimizer.zero_grad()
 
     # 1. Get current embeddings from memory
@@ -164,19 +186,22 @@ for u, i, ts, feat in interactions: # Iterate in temporal order
     current_i_embed = item_embed_memory[i].clone().detach().requires_grad_(True)
 
     # Convert features to tensor
-    feat_tensor = torch.tensor(feat, dtype=torch.float32).unsqueeze(0) # Add batch dim
+    feat_tensor = torch.tensor(feat, dtype=torch.float32).unsqueeze(0)  # Add batch dim
     u_tensor = torch.tensor([u], dtype=torch.long)
     i_tensor = torch.tensor([i], dtype=torch.long)
 
     # 2. Run the JODIE forward pass
     updated_u_embed, updated_i_embed, pred_next_u_embed, pred_next_i_embed = model(
-        u_tensor, i_tensor, feat_tensor, current_u_embed.unsqueeze(0), current_i_embed.unsqueeze(0)
+        u_tensor,
+        i_tensor,
+        feat_tensor,
+        current_u_embed.unsqueeze(0),
+        current_i_embed.unsqueeze(0),
     )
-    updated_u_embed = updated_u_embed.squeeze(0) # Remove batch dim
+    updated_u_embed = updated_u_embed.squeeze(0)  # Remove batch dim
     updated_i_embed = updated_i_embed.squeeze(0)
     pred_next_u_embed = pred_next_u_embed.squeeze(0)
     pred_next_i_embed = pred_next_i_embed.squeeze(0)
-
 
     # --- 3. Calculate Loss ---
     # Loss has two main components in JODIE:
@@ -193,29 +218,38 @@ for u, i, ts, feat in interactions: # Iterate in temporal order
     neg_item_ids = torch.randint(0, model.n_items, (num_neg_samples,))
     # Avoid sampling the actual item i
     neg_item_ids = neg_item_ids[neg_item_ids != i]
-    if len(neg_item_ids) > 0: # Handle edge case if n_items is small
-        neg_item_embeds = item_embed_memory[neg_item_ids].clone().detach() # Use memory state
+    if len(neg_item_ids) > 0:  # Handle edge case if n_items is small
+        neg_item_embeds = (
+            item_embed_memory[neg_item_ids].clone().detach()
+        )  # Use memory state
 
-        positive_score = torch.sigmoid(torch.sum(pred_next_i_embed * updated_i_embed, dim=-1))
-        negative_scores = torch.sigmoid(torch.sum(pred_next_i_embed.unsqueeze(0) * neg_item_embeds, dim=-1))
+        positive_score = torch.sigmoid(
+            torch.sum(pred_next_i_embed * updated_i_embed, dim=-1)
+        )
+        negative_scores = torch.sigmoid(
+            torch.sum(pred_next_i_embed.unsqueeze(0) * neg_item_embeds, dim=-1)
+        )
 
-        loss_item_pred = -torch.log(positive_score + 1e-6) - torch.sum(torch.log(1 - negative_scores + 1e-6))
+        loss_item_pred = -torch.log(positive_score + 1e-6) - torch.sum(
+            torch.log(1 - negative_scores + 1e-6)
+        )
     else:
         loss_item_pred = torch.tensor(0.0, device=updated_i_embed.device)
 
     # Similarly predict user embedding based on item projection (loss_user_pred)
     # ... (implementation similar to loss_item_pred)
-    loss_user_pred = torch.tensor(0.0) # Placeholder
+    loss_user_pred = torch.tensor(0.0)  # Placeholder
 
-    loss = loss_item_pred + loss_user_pred # Combine losses
+    loss = loss_item_pred + loss_user_pred  # Combine losses
 
     # 4. Backpropagation
     loss.backward()
 
-     # Gradient clipping is often useful with RNNs
+    # Gradient clipping is often useful with RNNs
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-    torch.nn.utils.clip_grad_norm_([current_u_embed, current_i_embed], max_norm=1.0) # Clip gradients flowing *into* memory
-
+    torch.nn.utils.clip_grad_norm_(
+        [current_u_embed, current_i_embed], max_norm=1.0
+    )  # Clip gradients flowing *into* memory
 
     optimizer.step()
 
@@ -226,4 +260,4 @@ for u, i, ts, feat in interactions: # Iterate in temporal order
 
     total_loss += loss.item()
 
-print(f"Total Loss: {total_loss}")
+logger.debug(f"Total Loss: {total_loss}")
