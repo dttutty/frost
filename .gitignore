@@ -25,3 +25,5 @@ logs/
 _tgmem_out/
 *.ckpt
 experiment_logs*
+trace_epoch2_rank_0.json
+trace_epoch2_rank_1.json
