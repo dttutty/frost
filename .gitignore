@@ -27,3 +27,4 @@ _tgmem_out/
 experiment_logs*
 trace_epoch2_rank_0.json
 trace_epoch2_rank_1.json
+distributed_trace.json
