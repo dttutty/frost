@@ -6,4 +6,4 @@ CUDA_VISIBLE_DEVICES=2 TORCH_DISTRIBUTED_DEBUG=DETAIL \
 --master_port=29500 \
 train_dist.py \
 --data <your_dataset> \
---config /home/sqp17/Projects/tgl/config/dist/TGN.yml
+--config /home/sqp17/Projects/lei_pipe/config/dist/TGN.yml

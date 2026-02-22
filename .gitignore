@@ -77,3 +77,4 @@ datasets/
 *.pth
 *.pkl
 *.h5
+slurm/

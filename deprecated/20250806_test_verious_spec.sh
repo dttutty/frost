@@ -16,20 +16,20 @@ mkdir -p $LOG_DIR
 # # --- 0. 预热文件系统 (Preheat OS) ---
 # LOG_FILE_TRUE="$LOG_DIR/0_baseline_dedup_true.log"
 # echo "======> [0. BASELINE] Running Baseline, dedup=True. Log: $LOG_FILE_TRUE"
-# python -u /home/sqp17/Projects/tgl/train.py \
+# python -u /home/sqp17/Projects/lei_pipe/train.py \
 #     --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 \
 #     --dedup 2>&1 | tee "$LOG_FILE_TRUE";
 
 # --- 0. 运行基线配置 (Baseline Configuration) ---
 # LOG_FILE_TRUE="$LOG_DIR/0_baseline_dedup_true.log"
 # echo "======> [0. BASELINE] Running Baseline, dedup=True. Log: $LOG_FILE_TRUE"
-# python -u /home/sqp17/Projects/tgl/train.py \
+# python -u /home/sqp17/Projects/lei_pipe/train.py \
 #     --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 \
 #     --dedup 2>&1 | tee "$LOG_FILE_TRUE";
 
 # LOG_FILE_FALSE="$LOG_DIR/0_baseline_dedup_false.log"
 # echo "======> [0. BASELINE] Running Baseline, dedup=False. Log: $LOG_FILE_FALSE"
-# python -u /home/sqp17/Projects/tgl/train.py \
+# python -u /home/sqp17/Projects/lei_pipe/train.py \
 #     --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 \
 #     2>&1 | tee "$LOG_FILE_FALSE";
 
@@ -38,11 +38,11 @@ mkdir -p $LOG_DIR
 # for val in 256 384; do
 #     LOG_FILE_TRUE="$LOG_DIR/1_rand_edge_features_${val}_dedup_true.log"
 #     echo "======> [1. Test rand_edge_features] Testing ${val}, dedup=True. Log: $LOG_FILE_TRUE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features $val --rand_node_features $val --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 --dedup 2>&1 | tee "$LOG_FILE_TRUE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features $val --rand_node_features $val --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 --dedup 2>&1 | tee "$LOG_FILE_TRUE";
 
 #     LOG_FILE_FALSE="$LOG_DIR/1_rand_edge_features_${val}_dedup_false.log"
 #     echo "======> [1. Test rand_edge_features] Testing ${val}, dedup=False. Log: $LOG_FILE_FALSE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features $val --rand_node_features $val --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 2>&1 | tee "$LOG_FILE_FALSE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features $val --rand_node_features $val --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 2>&1 | tee "$LOG_FILE_FALSE";
 # done
 
 
@@ -50,11 +50,11 @@ mkdir -p $LOG_DIR
 # for val in 200 300 400 500; do
 #     LOG_FILE_TRUE="$LOG_DIR/2_mem_dim_${val}_dedup_true.log"
 #     echo "======> [2. Test mem_dim] Testing ${val}, dedup=True. Log: $LOG_FILE_TRUE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128  --mem_dim $val --batch_size 600 --n_neighbor 10 --n_layer 2 --dedup 2>&1 | tee "$LOG_FILE_TRUE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128  --mem_dim $val --batch_size 600 --n_neighbor 10 --n_layer 2 --dedup 2>&1 | tee "$LOG_FILE_TRUE";
 
 #     LOG_FILE_FALSE="$LOG_DIR/2_mem_dim_${val}_dedup_false.log"
 #     echo "======> [2. Test mem_dim] Testing ${val}, dedup=False. Log: $LOG_FILE_FALSE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim $val --batch_size 600 --n_neighbor 10 --n_layer 2 2>&1 | tee "$LOG_FILE_FALSE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim $val --batch_size 600 --n_neighbor 10 --n_layer 2 2>&1 | tee "$LOG_FILE_FALSE";
 # done
 
 
@@ -62,11 +62,11 @@ mkdir -p $LOG_DIR
 # for val in 300 900 1200 1500; do
 #     LOG_FILE_TRUE="$LOG_DIR/3_batch_size_${val}_dedup_true.log"
 #     echo "======> [3. Test batch_size] Testing ${val}, dedup=True. Log: $LOG_FILE_TRUE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size $val --n_neighbor 10 --n_layer 2 --dedup 2>&1 | tee "$LOG_FILE_TRUE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size $val --n_neighbor 10 --n_layer 2 --dedup 2>&1 | tee "$LOG_FILE_TRUE";
 
 #     LOG_FILE_FALSE="$LOG_DIR/3_batch_size_${val}_dedup_false.log"
 #     echo "======> [3. Test batch_size] Testing ${val}, dedup=False. Log: $LOG_FILE_FALSE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size $val --n_neighbor 10 --n_layer 2 2>&1 | tee "$LOG_FILE_FALSE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size $val --n_neighbor 10 --n_layer 2 2>&1 | tee "$LOG_FILE_FALSE";
 # done
 
 
@@ -74,11 +74,11 @@ mkdir -p $LOG_DIR
 # for val in 20 30 40 50; do
 #     LOG_FILE_TRUE="$LOG_DIR/4_n_neighbor_${val}_dedup_true.log"
 #     echo "======> [4. Test n_neighbor] Testing ${val}, dedup=True. Log: $LOG_FILE_TRUE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor $val --n_layer 2 --dedup 2>&1 | tee "$LOG_FILE_TRUE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor $val --n_layer 2 --dedup 2>&1 | tee "$LOG_FILE_TRUE";
     
 #     LOG_FILE_FALSE="$LOG_DIR/4_n_neighbor_${val}_dedup_false.log"
 #     echo "======> [4. Test n_neighbor] Testing ${val}, dedup=False. Log: $LOG_FILE_FALSE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor $val --n_layer 2 2>&1 | tee "$LOG_FILE_FALSE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor $val --n_layer 2 2>&1 | tee "$LOG_FILE_FALSE";
 # done
 
 
@@ -86,11 +86,11 @@ mkdir -p $LOG_DIR
 # for val in 1 3; do
 #     LOG_FILE_TRUE="$LOG_DIR/5_n_layer_${val}_dedup_true.log"
 #     echo "======> [5. Test n_layer] Testing ${val}, dedup=True. Log: $LOG_FILE_TRUE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer $val --dedup 2>&1 | tee "$LOG_FILE_TRUE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer $val --dedup 2>&1 | tee "$LOG_FILE_TRUE";
     
 #     LOG_FILE_FALSE="$LOG_DIR/5_n_layer_${val}_dedup_false.log"
 #     echo "======> [5. Test n_layer] Testing ${val}, dedup=False. Log: $LOG_FILE_FALSE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer $val 2>&1 | tee "$LOG_FILE_FALSE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data LASTFM --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer $val 2>&1 | tee "$LOG_FILE_FALSE";
 # done
 
 # (请确保 LOG_DIR 变量已经提前设置好, 例如: LOG_DIR="./logs")
@@ -102,7 +102,7 @@ for val in 2 4; do
     # Case 1: dedup = True
     LOG_FILE_TRUE="$LOG_DIR/6_n_history_${val}_dedup_true.log"
     echo "======> [6. Test n_history] Testing ${val}, dedup=True. Log: $LOG_FILE_TRUE"
-    python -u /home/sqp17/Projects/tgl/train.py \
+    python -u /home/sqp17/Projects/lei_pipe/train.py \
         --data LASTFM \
         --config config/DySAT.yml \
         --gpu 6 \
@@ -117,7 +117,7 @@ for val in 2 4; do
     # Case 2: dedup = False
     LOG_FILE_FALSE="$LOG_DIR/6_n_history_${val}_dedup_false.log"
     echo "======> [6. Test n_history] Testing ${val}, dedup=False. Log: $LOG_FILE_FALSE"
-    python -u /home/sqp17/Projects/tgl/train.py \
+    python -u /home/sqp17/Projects/lei_pipe/train.py \
         --data LASTFM \
         --config config/DySAT.yml \
         --gpu 6 \
@@ -136,7 +136,7 @@ for val in 20000 30000; do
     # Case 1: dedup = True
     LOG_FILE_TRUE="$LOG_DIR/7_history_duration_${val}_dedup_true.log"
     echo "======> [7. Test history_duration] Testing ${val}, dedup=True. Log: $LOG_FILE_TRUE"
-    python -u /home/sqp17/Projects/tgl/train.py \
+    python -u /home/sqp17/Projects/lei_pipe/train.py \
         --data LASTFM \
         --config config/DySAT.yml \
         --gpu 6 \
@@ -151,7 +151,7 @@ for val in 20000 30000; do
     # Case 2: dedup = False
     LOG_FILE_FALSE="$LOG_DIR/7_history_duration_${val}_dedup_false.log"
     echo "======> [7. Test history_duration] Testing ${val}, dedup=False. Log: $LOG_FILE_FALSE"
-    python -u /home/sqp17/Projects/tgl/train.py \
+    python -u /home/sqp17/Projects/lei_pipe/train.py \
         --data LASTFM \
         --config config/DySAT.yml \
         --gpu 6 \
@@ -167,11 +167,11 @@ done
 # for val in APAN TGAT DySAT JODIE; do
 #     LOG_FILE_TRUE="$LOG_DIR/6_config_${val}_dedup_true.log"
 #     echo "======> [6. Test config] Testing ${val}, dedup=True. Log: $LOG_FILE_TRUE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data LASTFM --config config/${val}.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 --dedup 2>&1 | tee "$LOG_FILE_TRUE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data LASTFM --config config/${val}.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 --dedup 2>&1 | tee "$LOG_FILE_TRUE";
 
 #     LOG_FILE_FALSE="$LOG_DIR/6_config_${val}_dedup_false.log"
 #     echo "======> [6. Test config] Testing ${val}, dedup=False. Log: $LOG_FILE_FALSE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data LASTFM --config config/${val}.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 2>&1 | tee "$LOG_FILE_FALSE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data LASTFM --config config/${val}.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 2>&1 | tee "$LOG_FILE_FALSE";
 # done
 
 
@@ -179,11 +179,11 @@ done
 # for val in WIKI MOOC REDDIT; do
 #     LOG_FILE_TRUE="$LOG_DIR/7_dataset_${val}_dedup_true.log"
 #     echo "======> [7. Test dataset] Testing ${val}, dedup=True. Log: $LOG_FILE_TRUE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data $val --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 --dedup 2>&1 | tee "$LOG_FILE_TRUE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data $val --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 --dedup 2>&1 | tee "$LOG_FILE_TRUE";
 
 #     LOG_FILE_FALSE="$LOG_DIR/7_dataset_${val}_dedup_false.log"
 #     echo "======> [7. Test dataset] Testing ${val}, dedup=False. Log: $LOG_FILE_FALSE"
-#     python -u /home/sqp17/Projects/tgl/train.py --data $val --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 2>&1 | tee "$LOG_FILE_FALSE";
+#     python -u /home/sqp17/Projects/lei_pipe/train.py --data $val --config config/DySAT.yml --gpu 6 --rand_edge_features 128  --rand_node_features 128 --mem_dim 100 --batch_size 600 --n_neighbor 10 --n_layer 2 2>&1 | tee "$LOG_FILE_FALSE";
 # done
 
 

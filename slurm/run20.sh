@@ -4,7 +4,7 @@
 # Configuration
 # ==========================================
 # Number of times to run the experiment
-MAX_RUNS=20
+MAX_RUNS=100
 
 # Directory to save logs
 LOG_DIR="experiment_logs_$(date +%Y%m%d_%H%M%S)"
@@ -14,7 +14,7 @@ mkdir -p "$LOG_DIR"
 METRICS_FILE="${LOG_DIR}/all_metrics.txt"
 
 # Path to python interpreter
-PYTHON_EXEC="/home/sqp17/miniforge3/envs/simple_py310/bin/python"
+PYTHON_EXEC="/home/sqp17/miniconda3/envs/simple_py310/bin/python"
 
 echo "=================================================="
 echo "Starting ${MAX_RUNS} runs..."
@@ -57,7 +57,7 @@ for ((i=1; i<=MAX_RUNS; i++)); do
         --master_port=$((29505 + i)) \
         train_dist.py \
         --dataset LASTFM \
-        --config /home/sqp17/Projects/tgl/config/dist/TGN.yml \
+        --config /home/sqp17/Projects/lei_pipe/config/dist/TGN.yml \
         --rnd_edim 128 \
         --rnd_ndim 128 \
         > "$CURRENT_LOG" 2>&1

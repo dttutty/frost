@@ -23,7 +23,7 @@ export PYTHONOPTIMIZE=1
     --master_port=29506 \
     train_dist.py \
     --dataset LASTFM \
-    --config /home/sqp17/Projects/tgl/config/dist/TGN.yml \
+    --config /home/sqp17/Projects/lei_pipe/config/dist/TGN.yml \
     --rnd_edim 128 \
     --rnd_ndim 128
 
@@ -55,6 +55,6 @@ export TOKENIZERS_PARALLELISM=false
     --master_port=29505 \
     train_dist.py \
     --dataset LASTFM \
-    --config /home/sqp17/Projects/tgl/config/dist/TGN.yml \
+    --config /home/sqp17/Projects/lei_pipe/config/dist/TGN.yml \
     --rnd_edim 128 \
     --rnd_ndim 128
