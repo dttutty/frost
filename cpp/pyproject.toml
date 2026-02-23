@@ -1,0 +1,9 @@
+# pyproject.toml
+[build-system]
+requires = ["scikit-build-core", "nanobind"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "tgl_sampler"
+version = "0.1.0"
+description = "High performance temporal graph samplers"

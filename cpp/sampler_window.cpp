@@ -60,8 +60,8 @@ public:
         // TBB automatically initializes the thread pool. 
         // We calculate this just for info or if we need to limit concurrency manually.
         num_threads = std::max(1, num_thread_per_worker * num_workers);
-        num_nodes = static_cast<NodeIDType>(indptr.size() - 1);
-        num_edges = static_cast<EdgeIDType>(indices.size());
+        num_nodes = static_cast<NodeIDType>(graph_ref.indptr.shape(0) - 1);
+        num_edges = static_cast<EdgeIDType>(graph_ref.indices.shape(0));
     }
 
 private:
@@ -78,16 +78,17 @@ private:
         const EdgeIDType e = indptr[n + 1];
         if (b >= e) return {1, 0};
 
-        auto seg_begin = edge_ts.begin() + b;
-        auto seg_end   = edge_ts.begin() + e;
+        // ✅ 修复：直接用指针相加
+        auto seg_begin = edge_ts + b;
+        auto seg_end   = edge_ts + e;
 
-        // lower bound: find first edge > lower
         auto it_start = std::upper_bound(seg_begin, seg_end, lower);
-        // upper bound: find last edge < upper
-        auto it_end_plus1 = std::upper_bound(seg_begin, seg_end, upper - kEps);
+        // ✅ 修复：换成了 lower_bound 防数据泄露
+        auto it_end_plus1 = std::lower_bound(seg_begin, seg_end, upper - kEps);
 
-        EdgeIDType start = static_cast<EdgeIDType>(it_start - edge_ts.begin());
-        EdgeIDType end   = static_cast<EdgeIDType>(it_end_plus1 - edge_ts.begin()) - 1;
+        // ✅ 修复：直接用指针相减
+        EdgeIDType start = static_cast<EdgeIDType>(it_start - edge_ts);
+        EdgeIDType end   = static_cast<EdgeIDType>(it_end_plus1 - edge_ts) - 1;
 
         if (end < start) return {1, 0};
         return {start, end};

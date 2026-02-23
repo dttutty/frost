@@ -1,3 +1,4 @@
+conda activate simple_py310
 # 1. 设置优化环境变量 (由 launch.json 净化而来)
 export CUDA_VISIBLE_DEVICES=0,1
 export TORCH_DISTRIBUTED_DEBUG=OFF          # 关闭分布式调试

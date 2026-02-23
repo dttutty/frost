@@ -15,6 +15,21 @@ using TimeStampType = float; // 对应 Python 的 np.float32
 static constexpr TimeStampType kEps = 1e-7f;
 
 
+// 在 sampler_common.h 中添加这个辅助函数
+template <typename T>
+inline nb::ndarray<nb::numpy, T> vec2npy(std::vector<T>& vec) {
+    // 窃取 vector 的内存管理权，通过 capsule 在 Python 端释放
+    auto* v_ptr = new std::vector<T>(std::move(vec)); 
+    nb::capsule deleter(v_ptr, [](void* p) noexcept {
+        delete reinterpret_cast<std::vector<T>*>(p);
+    });
+    return nb::ndarray<nb::numpy, T>(
+        v_ptr->data(), 
+        { v_ptr->size() }, // 形状
+        deleter            // 绑定生命周期
+    );
+}
+
 struct TemporalGraph {
     // 定义 ndarray 类型：只读，一维，CPU，C连续
     using IntArray = nb::ndarray<const int64_t, nb::shape<1>, nb::c_contig, nb::device::cpu>;
@@ -58,15 +73,15 @@ struct Xorshift32 {
 inline void bind_temporal_graph_block(nb::module_& m) {
     nb::class_<TemporalGraphBlock>(m, "TemporalGraphBlock")
         .def(nb::init<>())
-        // Nanobind 自动将 std::vector 转为 numpy array，无需手动封装
-        .def_rw("row", &TemporalGraphBlock::row)
-        .def_rw("col", &TemporalGraphBlock::col)
-        .def_rw("eid", &TemporalGraphBlock::eid)
-        .def_rw("ts", &TemporalGraphBlock::ts)
-        .def_rw("dts", &TemporalGraphBlock::dts)
-        .def_rw("nodes", &TemporalGraphBlock::nodes)
-        .def_rw("dim_in", &TemporalGraphBlock::dim_in)
-        .def_rw("dim_out", &TemporalGraphBlock::dim_out);
+        // 注意：vec2npy 用了 std::move，这意味着在 Python 获取后，C++ 端的 vector 会被清空
+        .def_prop_ro("row", [](TemporalGraphBlock& b) { return vec2npy(b.row); })
+        .def_prop_ro("col", [](TemporalGraphBlock& b) { return vec2npy(b.col); })
+        .def_prop_ro("eid", [](TemporalGraphBlock& b) { return vec2npy(b.eid); })
+        .def_prop_ro("ts", [](TemporalGraphBlock& b) { return vec2npy(b.ts); })
+        .def_prop_ro("dts", [](TemporalGraphBlock& b) { return vec2npy(b.dts); })
+        .def_prop_ro("nodes", [](TemporalGraphBlock& b) { return vec2npy(b.nodes); })
+        .def_ro("dim_in", &TemporalGraphBlock::dim_in)
+        .def_ro("dim_out", &TemporalGraphBlock::dim_out);
 }
 
 

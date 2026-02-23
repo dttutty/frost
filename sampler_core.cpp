@@ -158,7 +158,7 @@ private:
             : std::upper_bound(seg_begin, seg_end, lower);
 
         // end: last edge with ts < upper  (strict) -> last <= upper - eps
-        auto it_end_plus1 = std::upper_bound(seg_begin, seg_end, upper - kEps);
+        auto it_end_plus1 = std::lower_bound(seg_begin, seg_end, upper - kEps);
 
         EdgeIDType start = static_cast<EdgeIDType>(it_start - edge_ts.begin());
         EdgeIDType end   = static_cast<EdgeIDType>(it_end_plus1 - edge_ts.begin()) - 1;

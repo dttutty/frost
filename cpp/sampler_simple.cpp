@@ -7,7 +7,6 @@
 #include <tbb/tbb.h>   // <--- 必须加上这行！
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
-#include <nanobind/stl.h>
 #include "sampler_common.h" // 包含头文件
 using nb::arg;
 namespace nb = nanobind;
@@ -62,8 +61,8 @@ public:
           recent(_recent), prop_time(_prop_time) {
         
         num_threads = std::max(1, num_thread_per_worker * num_workers);
-        num_nodes = static_cast<NodeIDType>(indptr.size() - 1);
-        num_edges = static_cast<EdgeIDType>(indices.size());
+        num_nodes = static_cast<NodeIDType>(graph_ref.indptr.shape(0) - 1);
+        num_edges = static_cast<EdgeIDType>(graph_ref.indices.shape(0));
     }
 private:
     // 线程局部缓存
@@ -86,9 +85,9 @@ private:
         const EdgeIDType e = indptr[n + 1];
         if (b >= e) return {1, 0};
         
-        // 直接使用 upper_bound，逻辑清晰
-        auto it = std::upper_bound(edge_ts.begin() + b, edge_ts.begin() + e, upper - kEps);
-        return {b, static_cast<EdgeIDType>(it - edge_ts.begin()) - 1};
+        // ✅ 修复：直接用指针相加，且换成了 lower_bound 防数据泄露
+        auto it = std::lower_bound(edge_ts + b, edge_ts + e, upper - kEps);
+        return {b, static_cast<EdgeIDType>(it - edge_ts) - 1};
     }
 
     void sample_one_block(TemporalGraphBlock& out,
@@ -193,7 +192,6 @@ private:
 
 public:
     void sample(const std::vector<NodeIDType>& root_nodes, const std::vector<TimeStampType>& root_ts) {
-        omp_set_num_threads(num_threads);
         ret.clear();
         ret.resize(num_layers); // Only layers, no history
 

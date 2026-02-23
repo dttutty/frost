@@ -162,7 +162,7 @@ class Host:
             f"[Epoch {self.curr_epoch}] "
             f"Train Loss: {res.train_loss:.4f} | Val Loss: {res.val_loss:.4f} | "
             f"Val AUC: {res.val_auc:.4f} | Val AP: {res.val_ap:.4f} | "
-            f"Test AUC: {res.test_auc:.4f} | Test AP: {res.test_ap:.4f} | "
+            f"Test AUC: {res.test_auc:.4f} | Test AP: {res.test_ap:.4f}"
         )
 
     def early_stop_check(self, cur_epoch: int) -> bool:
@@ -272,6 +272,20 @@ class Host:
     def _handle_a_split(
         self, df: pd.DataFrame, split: Literal["train", "val", "test"], cur_epoch: int
     ) -> None:
+        if "ext_roll" in df.columns:
+            ext_roll = df["ext_roll"]
+            is_valid_split = (
+                (split == "train" and ext_roll.eq(0).all())
+                or (split == "val" and ext_roll.eq(1).all())
+                or (split == "test" and ext_roll.ge(2).all())
+            )
+            if not is_valid_split:
+                found_rolls = sorted(ext_roll.dropna().unique().tolist())
+                raise ValueError(
+                    f"Split contamination detected for split={split}. "
+                    f"Found ext_roll values: {found_rolls}"
+                )
+
         df = df.reset_index(names=["eid"])
 
         if len(df) == 0:
@@ -284,11 +298,16 @@ class Host:
         df_out = df_out.assign(step_id=step_id, gpu_id=gpu_id)
 
         n_macro_of_split = df_out["step_id"].nunique()
+        step_desc_map = {
+            "train": "Train Step",
+            "val": "Val Step",
+            "test": "Test Step",
+        }
 
         for cur_macro_of_split, step_df in tqdm(
             df_out.groupby("step_id", sort=False),
             total=n_macro_of_split,
-            desc="Processing steps",
+            desc=step_desc_map[split],
         ):
             for _, edges in step_df.groupby("gpu_id", sort=False):
                 epoch_split_iter_info = EpochSplitIterInfo(
@@ -366,6 +385,10 @@ class Host:
             assert self.ngh_sampler is not None
 
             n2r_meta = sample(self.ngh_sampler, src, dst, neg_dst, ts)
+            # todo: print src, dst, neg_dst, ts
+            # print(
+            #     f"src: {src.shape}, dst: {dst.shape}, neg_dst: {neg_dst.shape}, ts: {ts.shape}"
+            # )
             assert len(n2r_meta) == 1, "TGN only supports 1 layer currently"
 
             all_nodes, root_nodes = tgn_analyze_all_n_root(n2r_meta[0], src.shape[0])

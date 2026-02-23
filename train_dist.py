@@ -428,5 +428,6 @@ else:
         components=model_components,
         m_cfg=cfg.m,
         shm_manager=shm_manager,
+        pin_mem=False,
     )
     worker.run()
