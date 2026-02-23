@@ -14,6 +14,7 @@ class DoubleBufferedSHM:
         create: bool,
         layout: dict[str, tuple[tuple[int, ...], torch.dtype]],
         max_size: int = 10,
+        namespace: str = "",
     ) -> None:
         """
         limits: dict, e.g. {'nodes': 500000, 'edges': 1000000}
@@ -24,6 +25,7 @@ class DoubleBufferedSHM:
         ]  # Buffer 0, 1, 2, 3, 4, 5
         self.create = create
         self.worker_rank = worker_rank
+        self.namespace = namespace
 
         self.schema = layout
 
@@ -32,7 +34,8 @@ class DoubleBufferedSHM:
         for buf_idx in range(max_size):
             for key, (shape, dtype) in self.schema.items():
                 # 构造唯一的共享内存名称
-                name = f"TGL_SHM_w{worker_rank}_b{buf_idx}_{key}"
+                prefix = f"{namespace}_" if namespace else ""
+                name = f"{prefix}TGL_SHM_w{worker_rank}_b{buf_idx}_{key}"
 
                 try:
                     if create:
@@ -51,7 +54,10 @@ class DoubleBufferedSHM:
                     )
                     # 如果是创建失败，提示清理
                     if create:
-                        logger.error("Try running: rm /dev/shm/TGL_SHM_*")
+                        if namespace:
+                            logger.error("Try running: rm /dev/shm/%sTGL_SHM_*", prefix)
+                        else:
+                            logger.error("Try running: rm /dev/shm/TGL_SHM_*")
                     raise e
 
     def write(self, batch_idx: int, key: str, tensor: torch.Tensor | None) -> int:

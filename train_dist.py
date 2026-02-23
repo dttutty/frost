@@ -254,6 +254,9 @@ local_rank = int(os.environ.get("LOCAL_RANK", 0))
 logger = init_logging(local_rank)
 dist.init_process_group(backend="gloo", timeout=datetime.timedelta(seconds=3600))
 env = Env.initial()
+run_id = broadcast_data(
+    f"run_{int(time.time())}" if env.is_host else None, src=env.host_rank
+)
 worker_ranks = list(range(0, env.world_size - 1))
 all_ranks = list(range(0, env.world_size))
 gloo = dist.new_group(ranks=all_ranks, backend="gloo")
@@ -291,11 +294,11 @@ if env.is_host:  # only host hold the graph and dataframe(edges)
     save_to = f"models/{args.dataset}_{config_base_name}_{time.time()}.pkl"
 
     if node_np is not None:
-        nfeat = csm("nfeat", [n_nodes, ndim], dtype=node_np.dtype)
+        nfeat = csm(f"{run_id}_nfeat", [n_nodes, ndim], dtype=node_np.dtype)
         nfeat.copy_(node_np)
 
     if edge_np is not None:
-        efeat = csm("efeat", [n_edges, edim], dtype=edge_np.dtype)
+        efeat = csm(f"{run_id}_efeat", [n_edges, edim], dtype=edge_np.dtype)
         efeat.copy_(edge_np)
 
     port = get_free_port()
@@ -311,9 +314,9 @@ if not env.is_host:
     nfeat = None
     efeat = None
     if ndim > 0:
-        nfeat = gsm("nfeat", [n_nodes, ndim], dtype=ndtype)
+        nfeat = gsm(f"{run_id}_nfeat", [n_nodes, ndim], dtype=ndtype)
     if edim > 0:
-        efeat = gsm("efeat", [n_edges, edim], dtype=edtype)
+        efeat = gsm(f"{run_id}_efeat", [n_edges, edim], dtype=edtype)
 cfg = parse_config(args.config)
 if env.local_rank == 0:
     logger.debug(cfg)
@@ -333,18 +336,18 @@ F32 = torch.float32
 # shared.box_next_pos should be int
 
 if env.local_rank == 0 and cfg.m is not None:
-    mem = csm("mem", [n_nodes, cfg.m.d_mem], F32)
-    mem_ts = csm("mem_ts", [n_nodes], F32)
-    box = csm("mail", mail_shape, F32)
-    box_ts = csm("mail_ts", [n_nodes, cfg.m.boxsize], F32)
+    mem = csm(f"{run_id}_mem", [n_nodes, cfg.m.d_mem], F32)
+    mem_ts = csm(f"{run_id}_mem_ts", [n_nodes], F32)
+    box = csm(f"{run_id}_mail", mail_shape, F32)
+    box_ts = csm(f"{run_id}_mail_ts", [n_nodes, cfg.m.boxsize], F32)
 
 dist.barrier()
 
 if env.local_rank != 0 and cfg.m is not None:
-    mem = gsm("mem", [n_nodes, cfg.m.d_mem], F32)
-    mem_ts = gsm("mem_ts", [n_nodes], F32)
-    box = gsm("mail", mail_shape, F32)
-    box_ts = gsm("mail_ts", [n_nodes, cfg.m.boxsize], F32)
+    mem = gsm(f"{run_id}_mem", [n_nodes, cfg.m.d_mem], F32)
+    mem_ts = gsm(f"{run_id}_mem_ts", [n_nodes], F32)
+    box = gsm(f"{run_id}_mail", mail_shape, F32)
+    box_ts = gsm(f"{run_id}_mail_ts", [n_nodes, cfg.m.boxsize], F32)
 
 shared = None
 if cfg.m is not None:
@@ -373,14 +376,20 @@ if env.is_host:
         # Host 负责创建 (create=True)
         # 最后一个rank是host
         buffer_for_rank_i = DoubleBufferedSHM(
-            worker_rank=i, create=True, layout=layout_config
+            worker_rank=i,
+            create=True,
+            layout=layout_config,
+            namespace=run_id,
         )
         shm_managers.append(buffer_for_rank_i)
     dist.barrier()
 else:
     dist.barrier()
     shm_manager = DoubleBufferedSHM(
-        worker_rank=env.local_rank, create=False, layout=layout_config
+        worker_rank=env.local_rank,
+        create=False,
+        layout=layout_config,
+        namespace=run_id,
     )
 start = time.time()
 
