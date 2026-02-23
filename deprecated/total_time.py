@@ -56,7 +56,7 @@ def calculate_average_total_time(file_path):
 
 # log_file = 'training_log.txt' # 请将此路径替换为您的实际文件路径
 avg_total_time = calculate_average_total_time(
-    "/home/sqp17/Projects/lei_pipe/tgl_batch_plan_logs/LASTFM_TGN.log"
+    "~/Projects/lei_pipe/tgl_batch_plan_logs/LASTFM_TGN.log"
 )
 
 # if avg_total_time is not None:

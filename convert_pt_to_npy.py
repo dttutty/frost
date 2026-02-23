@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 # 你的文件路径
-src_path = "/home/sqp17/Projects/lei_pipe/DATA/WIKI/edge_features.pt"
+src_path = "~/Projects/lei_pipe/DATA/WIKI/edge_features.pt"
 # 自动生成目标路径: .../edge_features.npy
 dst_path = src_path.replace(".pt", ".npy")
 
