@@ -22,7 +22,7 @@ for dataset in "${datasets[@]}"; do
 
         echo "Launching: dataset=$dataset config=$config on GPU $gpu_id"
 
-        python3 /home/sqp17/Projects/lei_pipe/train.py \
+        python3 ~/Projects/lei_pipe/train.py \
             --data "$dataset" \
             --config "config/${config}.yml" \
             --gpu "$gpu_id" \
