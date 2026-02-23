@@ -299,14 +299,14 @@ class Host:
                     cur_macro_of_epoch=self.cur_macro_of_epoch,
                     split=split,
                 )
-                logger.info(f"epoch_split_iter_info: {epoch_split_iter_info}")
-                logger.info(
+                logger.debug(f"epoch_split_iter_info: {epoch_split_iter_info}")
+                logger.debug(
                     f"macro_position_of_split: {epoch_split_iter_info.macro_position_of_split}"
                 )
-                logger.info(
+                logger.debug(
                     f"is_last_macro_of_epoch: {epoch_split_iter_info.is_last_macro_of_epoch}"
                 )
-                logger.info(
+                logger.debug(
                     f"is_last_macro_of_all_epoch: {epoch_split_iter_info.is_last_macro_of_all_epoch}"
                 )
                 self._add_to_td_list(edges, epoch_split_iter_info)

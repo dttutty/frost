@@ -36,7 +36,7 @@ def _get_level_from_env() -> int:
     return logging.DEBUG if env_str == "dev" else logging.WARNING  # 生产默认 WARNING
 
 
-def init_logging(local_rank: int) -> logging.Logger:
+def init_logging(local_rank: int, is_host: bool) -> logging.Logger:
     level = _get_level_from_env()
 
     logging.basicConfig(
@@ -49,8 +49,8 @@ def init_logging(local_rank: int) -> logging.Logger:
 
     root = logging.getLogger()
 
-    # 只让 rank0 打到终端，且等级跟随 level
-    if local_rank == 0:
+    # 只让 host 打到终端，且等级跟随 level
+    if is_host:
         console = logging.StreamHandler()
         console.setLevel(level)
         console.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
@@ -235,12 +235,6 @@ parser.add_argument("--omp_num_threads", type=int, default=8)
 parser.add_argument(
     "--model", type=str, choices=["apan", "tgn", "dysat", "jodie", "tgat"]
 )
-parser.add_argument(
-    "--pin-mem",
-    action="store_true",
-    default=False,
-    help="enable pinned-memory buffers in worker",
-)
 args = parser.parse_args()
 
 # match args.model:
@@ -257,9 +251,9 @@ os.environ["MKL_NUM_THREADS"] = str(args.omp_num_threads)
 
 # initialize distributed environment
 local_rank = int(os.environ.get("LOCAL_RANK", 0))
-logger = init_logging(local_rank)
 dist.init_process_group(backend="gloo", timeout=datetime.timedelta(seconds=3600))
 env = Env.initial()
+logger = init_logging(local_rank, env.is_host)
 run_id = broadcast_data(
     f"run_{int(time.time())}" if env.is_host else None, src=env.host_rank
 )
@@ -434,6 +428,5 @@ else:
         components=model_components,
         m_cfg=cfg.m,
         shm_manager=shm_manager,
-        pin_mem=args.pin_mem,
     )
     worker.run()
