@@ -49,7 +49,7 @@ class MemoryBaseGNN(nn.Module):
         )
 
     def forward(self, meta: Meta) -> torch.Tensor:
-        logger.info(f"Processing meta with meta.batch_id={meta.batch_idx}")
+        logger.debug(f"Processing meta with meta.batch_id={meta.batch_idx}")
         self.update_and_sync_memory(meta=meta)
         # torch.cuda.current_stream().wait_event(mu_ready)
         if isinstance(self.gnn, TGN):

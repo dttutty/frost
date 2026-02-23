@@ -316,7 +316,7 @@ if not env.is_host:
         efeat = gsm("efeat", [n_edges, edim], dtype=edtype)
 cfg = parse_config(args.config)
 if env.local_rank == 0:
-    print(cfg)
+    logger.debug(cfg)
 cfg.t.ndim = ndim
 cfg.t.edim = edim
 cfg.g.d_in = cfg.m.d_mem if cfg.m is not None else ndim

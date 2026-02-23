@@ -308,7 +308,7 @@ class Worker:
     def on_train_epoch_end(self) -> Result | None:
         avg_s2s = self.train_start2start_ms.compute().item()
         self.train_start2start_ms.reset()
-        print(f"Average train start->start (ms): {avg_s2s:.2f}")
+        logger.debug("Average train start->start (ms): %.2f", avg_s2s)
         # 3. 只有在 Epoch 结束时，才做一次全局同步，计算精准的平均 Loss 记入日志
 
         avg_loss = self.train_loss_tracker.compute()
@@ -339,17 +339,17 @@ class Worker:
         logits = self.model(meta)
         loss = self.criterion(logits.squeeze(-1), meta.labels)
 
-        # print(f"Rank {dist.get_rank()} - Train Step Loss: {loss.item():.4f}")
+        # logger.debug(f"Rank {dist.get_rank()} - Train Step Loss: {loss.item():.4f}")
 
         # dist.barrier(group=self.nccl)
-        # print(f"Rank {dist.get_rank()} - Train Step Loss: {loss.item():.4f}")
+        # logger.debug(f"Rank {dist.get_rank()} - Train Step Loss: {loss.item():.4f}")
 
         # torch.cuda.synchronize()
         if self.shared is not None:
             # t0 = time.perf_counter()
             self.p2p_sem.acquire()  # 获取信号量，确保当前没有其他 P2P 任务在进行
         #     duration = time.perf_counter() - t0
-        #     print(
+        #     logger.debug(
         #         f"Rank {dist.get_rank()} - Acquired P2P semaphore after waiting {duration * 1000:.2f} ms"
         #     )
         loss.backward()
@@ -373,7 +373,7 @@ class Worker:
     #         self.delta_q.put("nothing")
 
     #         if mem_wait_ms > 5.0:
-    #             print(
+    #             logger.debug(
     #                 f"[Rank {self.env.local_rank}] P2P Starvation (Nothing): Waited {mem_wait_ms:.2f}ms for empty signal"
     #             )
 
@@ -385,7 +385,7 @@ class Worker:
     #     box_wait_ms = (t_got_box - t_got_mem) * 1000.0
     #     total_wait = mem_wait_ms + box_wait_ms
     #     if total_wait > 2.0:
-    #         print(
+    #         logger.debug(
     #             f"[Rank {self.env.local_rank}] P2P Blocked! Total: {total_wait:.2f}ms | Mem: {mem_wait_ms:.2f}ms | Box: {box_wait_ms:.2f}ms"
     #         )
     #     assert box_p2p_tuple != "nothing_to_p2p"
@@ -443,9 +443,9 @@ class Worker:
     #     ]
 
     #     # if torch.equal(mem_p2p.nid2recv, box_p2p.nid2recv) == False:
-    #     #     print("Error: Mem P2P NIDs and Box P2P NIDs to send do not match.")
-    #     #     print("Mem NIDs to send:", mem_p2p.nid2send)
-    #     #     print("Box NIDs to send:", box_p2p.nid2send)
+    #     #     logger.debug("Error: Mem P2P NIDs and Box P2P NIDs to send do not match.")
+    #     #     logger.debug("Mem NIDs to send: %s", mem_p2p.nid2send)
+    #     #     logger.debug("Box NIDs to send: %s", box_p2p.nid2send)
     #     #     raise ValueError("Mismatched NIDs in P2P send buffers.")
 
     #     # 3. 执行所有通信
@@ -458,13 +458,13 @@ class Worker:
     #         if total_send != real_shape:
     #             import sys
 
-    #             print(
+    #             logger.debug(
     #                 f"\n[CRITICAL ERROR] P2P Mismatch on Rank {dist.get_rank()} | Op: {name}"
     #             )
-    #             print(f"  > Sum of send_cts: {total_send}")
-    #             print(f"  > Actual Tensor dim0: {real_shape}")
-    #             print(f"  > Tensor Full Shape: {send_t.shape}")
-    #             print(f"  > Send Cts List: {send_cts}")
+    #             logger.debug(f"  > Sum of send_cts: {total_send}")
+    #             logger.debug(f"  > Actual Tensor dim0: {real_shape}")
+    #             logger.debug(f"  > Tensor Full Shape: {send_t.shape}")
+    #             logger.debug(f"  > Send Cts List: {send_cts}")
     #             sys.stdout.flush()
     #             # 抛出异常让程序停在这里
     #             raise RuntimeError(
@@ -556,7 +556,7 @@ class Worker:
             rank = dist.get_rank() if dist.is_initialized() else 0
             output_filename = f"trace_epoch2_rank_{rank}.json"
             p.export_chrome_trace(output_filename)
-            print(f"Rank {rank}: Trace saved to {output_filename}")
+            logger.debug("Rank %s: Trace saved to %s", rank, output_filename)
 
         prof = profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
@@ -586,7 +586,7 @@ class Worker:
             wait_steps += 1
 
             # if wait_ms > 5.0:  # Skip epoch 0 warmup
-            #     print(
+            #     logger.debug(
             #         f"[Rank {self.env.local_rank}] Data Starvation! Main loop waited {wait_ms:.2f}ms for full_q"
             #     )
 
@@ -627,12 +627,19 @@ class Worker:
                     self.eval(meta)
             if full == "end_of_epoch":
                 avg_wait = total_wait_ms / max(1, wait_steps)
-                print(
-                    f"[Rank {self.env.local_rank}] Epoch {self.curr_epoch} Avg Data Wait: {avg_wait:.2f}ms"
+                logger.debug(
+                    "[Rank %s] Epoch %s Avg Data Wait: %.2fms",
+                    self.env.local_rank,
+                    self.curr_epoch,
+                    avg_wait,
                 )
                 # print total_wait_ms
-                print(
-                    f"[Rank {self.env.local_rank}] Epoch {self.curr_epoch} Total Data Wait: {total_wait_ms:.2f}ms over {wait_steps} waits"
+                logger.debug(
+                    "[Rank %s] Epoch %s Total Data Wait: %.2fms over %s waits",
+                    self.env.local_rank,
+                    self.curr_epoch,
+                    total_wait_ms,
+                    wait_steps,
                 )
 
                 total_wait_ms = 0.0

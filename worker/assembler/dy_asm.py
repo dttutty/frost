@@ -201,9 +201,9 @@ class DyAssembler(StreamThreadBase):
 
             pos = torch.searchsorted(sorted_mem.nid, global_nid)
             if __debug__ and dist.get_rank() == 0:
-                print("--- Debug Info ---")
-                print("sorted_mem", sorted_mem.nid.cpu())
-                print("global_nid", torch.unique(global_nid).cpu())
+                logger.debug("--- Debug Info ---")
+                logger.debug("sorted_mem %s", sorted_mem.nid.cpu())
+                logger.debug("global_nid %s", torch.unique(global_nid).cpu())
 
             # Always validate indices to avoid CUDA-side out-of-bounds.
             out_of_range = pos >= sorted_mem.nid.numel()
@@ -323,7 +323,7 @@ class DyAssembler(StreamThreadBase):
             )
 
             delta_tuple = self.delta_q.get(block=True)
-            logger.info(
+            logger.debug(
                 f"DyAssembler received delta for batch {meta.batch_idx}, epoch {epoch_count}"
             )
 
@@ -353,7 +353,7 @@ class DyAssembler(StreamThreadBase):
             if self.boxsize == 1:
                 mem_n_box.box.data = mem_n_box.box.data.squeeze(1)
 
-            logger.info(
+            logger.debug(
                 f"DyAssembler after merge for batch {meta.batch_idx}, epoch {epoch_count}: "
             )
             if meta.n2r_mfgs is not None:
@@ -372,7 +372,7 @@ class DyAssembler(StreamThreadBase):
             self._ready_event.record(torch.cuda.current_stream())
             # torch.cuda.current_stream().synchronize()
             self.full_q.put((meta, self._ready_event), block=True)
-            logger.info(
+            logger.debug(
                 f"DyAssembler put full meta for batch {meta.batch_idx}, epoch {epoch_count} into full_q"
             )
 
@@ -380,7 +380,7 @@ class DyAssembler(StreamThreadBase):
                 avg_wait = total_wait_ms / max(1, batch_count)
                 avg_merge = total_merge_ms / max(1, batch_count)
                 avg_fill = total_fill_ms / max(1, batch_count)
-                logger.info(
+                logger.debug(
                     "DyAsm avg(ms) over %d batches: wait=%.2f merge=%.2f fill=%.2f",
                     batch_count,
                     avg_wait,

@@ -107,11 +107,11 @@ class BoxWriter(StreamThreadBase):
         mask = torch.isin(box_ts_nid.nid, writeback)
 
         # # print datatype of shared_box_ts
-        # print(
+        # logger.debug(
         #     f"shared_box_ts dtype: {self.shared_box_ts.dtype}, device: {self.shared_box_ts.device}"
         # )
         # # print datatype of valid_ts_gpu
-        # print(
+        # logger.debug(
         #     f"valid_ts_gpu dtype: {box_ts_nid.ts.dtype}, device: {box_ts_nid.ts.device}"
         # )
         valid_nid_gpu = box_ts_nid.nid[mask]
@@ -143,5 +143,5 @@ class BoxWriter(StreamThreadBase):
             self.write_back_box(data, box_ts_nid)
             # print box_ts_nid.nid
             # if data.shape[0] > 0:
-            #     print("BoxWriter: Written back box for NIDs", data.shape)
+            #     logger.debug("BoxWriter: Written back box for NIDs %s", data.shape)
             self.h2d_sem.release()

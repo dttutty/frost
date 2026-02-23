@@ -157,7 +157,7 @@ def parse_config(f: str) -> Config:
     gnn_conf = GNNCFG(**conf["gnn"][0])
     train_conf = TrainCFG(**conf["train"][0])
 
-    # logger.info(
+    # logger.debug(
     #     f"Parsed config: {sample_param}, {memory_param}, {gnn_conf}, {train_conf}"
     # )
     cfg = Config(s=sample_param, m=memory_param, g=gnn_conf, t=train_conf)

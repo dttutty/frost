@@ -44,10 +44,11 @@ class Receiver(StreamThreadBase):
             self.manifest_buf.zero_()
             # dist.scatter(self.manifest_buf, src=self.env.host_rank, group=self.gloo)
 
-            dist.recv(self.manifest_buf, src=self.env.host_rank, group=self.gloo)
+            # dist.recv(self.manifest_buf, src=self.env.host_rank, group=self.gloo)
+            dist.scatter(self.manifest_buf, src=self.env.host_rank, group=self.gloo)
             batch_idx = int(self.manifest_buf[ShmKeys.BATCH_IDX].item())
             self._recv_seq += 1
-            # logger.info(
+            # logger.debug(
             #     "Receiver recv: seq=%d batch_idx=%d rank=%d",
             #     self._recv_seq,
             #     batch_idx,
@@ -64,7 +65,7 @@ class Receiver(StreamThreadBase):
                 # --- [Fix] 开始修改 gather 逻辑 ---
                 # 只有 dst rank (0) 需要准备接收容器，大小必须等于进程总数
                 self._gather_seq += 1
-                logger.info(
+                logger.debug(
                     "Receiver gather_object start: seq=%d batch_idx=%d rank=%d",
                     self._gather_seq,
                     batch_idx,
@@ -76,7 +77,7 @@ class Receiver(StreamThreadBase):
                     dst=self.env.host_rank,
                     group=self.gloo,
                 )
-                logger.info(
+                logger.debug(
                     "Receiver gather_object end: seq=%d batch_idx=%d rank=%d",
                     self._gather_seq,
                     batch_idx,

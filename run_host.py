@@ -158,7 +158,7 @@ class Host:
         self.last_epoch_result = res
 
         # 打印日志 (Host 端统一打印，Worker 端就可以静默了)
-        print(
+        logger.info(
             f"[Epoch {self.curr_epoch}] "
             f"Train Loss: {res.train_loss:.4f} | Val Loss: {res.val_loss:.4f} | "
             f"Val AUC: {res.val_auc:.4f} | Val AP: {res.val_ap:.4f} | "
@@ -188,7 +188,7 @@ class Host:
             self.patience_counter += 1
         # --- 早停判断 ---
         if self.patience_counter >= self.patience:
-            print(
+            logger.info(
                 f"🛑 Early stopping triggered at epoch {cur_epoch}. "
                 f"Best AP was {self.best_ap_result.val_ap:.4f} at epoch {self.best_ap_epoch}."
             )
@@ -232,7 +232,7 @@ class Host:
         """
         self.start_all_threads()
         for e in range(self.total_epoch):
-            print(f"Starting Epoch {e}")
+            logger.info("Starting Epoch %s", e)
             self._handle_a_split(self.tr_df, "train", cur_epoch=e)
             self._handle_a_split(self.va_df, "val", cur_epoch=e)
             self._handle_a_split(self.te_df, "test", cur_epoch=e)
@@ -241,7 +241,7 @@ class Host:
                 break
 
         # 打印最佳AP对应的Test结果
-        print(
+        logger.info(
             f"Best Val AP: {self.best_ap_result.val_ap:.4f} @ Epoch {self.best_ap_epoch} | "
             f"Test AP: {self.best_ap_result.test_ap:.4f} | "
             f"Test AUC: {self.best_ap_result.test_auc:.4f}"
@@ -326,7 +326,7 @@ class Host:
         self, edges: pd.DataFrame, epoch_split_iter_info: EpochSplitIterInfo
     ) -> None:
         # show edges["time"].values for debug
-        # print(f"Edge times: {edges['time'].values}")
+        # logger.info(f"Edge times: {edges['time'].values}")
         src = torch.as_tensor(edges["src"].values, dtype=torch.long)
         dst = torch.as_tensor(edges["dst"].values, dtype=torch.long)
         ts = torch.as_tensor(edges["time"].values, dtype=torch.float32)
@@ -403,4 +403,4 @@ class Host:
         self.scatter.join()
         end = time.time()
         elapsed = end - self.start_time
-        print(f"Elapsed time: {elapsed:.2f} seconds")
+        logger.info("Elapsed time: %.2f seconds", elapsed)

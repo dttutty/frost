@@ -1,9 +1,13 @@
+import logging
 from dataclasses import dataclass
 
 import torch
 
 from schemas.datatypes.misc import Shared
 from worker.receiver import Receiver as Receiver
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True)
@@ -47,8 +51,8 @@ def calculate_gnn_graph_size(batch_size: int, fanouts: list[int]) -> tuple[int, 
     total_edges = 0
     input_nodes = 0
 
-    # print(f"--- 计算详情 (Batch Size = {batch_size}) ---")
-    # print(f"Output Layer (Seed Nodes): {batch_size:,}")
+    # logger.debug(f"--- 计算详情 (Batch Size = {batch_size}) ---")
+    # logger.debug(f"Output Layer (Seed Nodes): {batch_size:,}")
 
     # 通常采样是从 Output 往 Input 倒推的
     # fanouts[-1] 是连接 Output 的那一层
@@ -74,9 +78,9 @@ def calculate_gnn_graph_size(batch_size: int, fanouts: list[int]) -> tuple[int, 
         # 这一层的源节点数 (Src Nodes) = 这一层的边数 (在无重叠假设下)
         src_nodes = edges_count
 
-        # print(f"Layer {layer_idx} (Fanout {fanout}):")
-        # print(f"  - Edges: {current_layer_nodes:,} * {fanout} = {edges_count:,}")
-        # print(f"  - Input Nodes needed: {src_nodes:,}")
+        # logger.debug(f"Layer {layer_idx} (Fanout {fanout}):")
+        # logger.debug(f"  - Edges: {current_layer_nodes:,} * {fanout} = {edges_count:,}")
+        # logger.debug(f"  - Input Nodes needed: {src_nodes:,}")
 
         # 更新下一轮的目标节点
         current_layer_nodes = src_nodes
@@ -85,12 +89,12 @@ def calculate_gnn_graph_size(batch_size: int, fanouts: list[int]) -> tuple[int, 
     # 最底层的 src_nodes 就是最终需要加载特征的节点数
     final_input_nodes = current_layer_nodes
 
-    # print("-" * 30)
-    # print(f"【总结 (Batch Size={batch_size}, Config={fanouts})】")
-    # print(f"1. 最大输入节点数 (Input Nodes): {final_input_nodes:,}")
-    # print("   (需要加载 Feature 的节点数量)")
-    # print(f"2. 最大总边数 (Total Edges):     {total_edges:,}")
-    # print("   (MFG 图中的总边数)")
+    # logger.debug("-" * 30)
+    # logger.debug(f"【总结 (Batch Size={batch_size}, Config={fanouts})】")
+    # logger.debug(f"1. 最大输入节点数 (Input Nodes): {final_input_nodes:,}")
+    # logger.debug("   (需要加载 Feature 的节点数量)")
+    # logger.debug(f"2. 最大总边数 (Total Edges):     {total_edges:,}")
+    # logger.debug("   (MFG 图中的总边数)")
 
     return final_input_nodes, total_edges
 
