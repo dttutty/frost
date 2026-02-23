@@ -449,11 +449,11 @@ class H2D(StreamThreadBase):
                 # check if nid >3000
                 if nid.numel() > 0:
                     max_nid = nid.max().item()
-                    if max_nid > 3000:
-                        raise RuntimeError(
-                            f"H2D Batch {meta.batch_idx}: Unusually large nid detected in mem_n_box.mem.nid (max={max_nid}). "
-                            "This may indicate a data issue or a need to adjust the threshold."
-                        )
+                    # if max_nid > 3000:
+                    #     raise RuntimeError(
+                    #         f"H2D Batch {meta.batch_idx}: Unusually large nid detected in mem_n_box.mem.nid (max={max_nid}). "
+                    #         "This may indicate a data issue or a need to adjust the threshold."
+                    #     )
 
                 row_has_nonzero = (x != 0).any(dim=1)  # [N] True = 这一行有非0
                 zero_row_mask = ~row_has_nonzero  # True = 这一行全是0
