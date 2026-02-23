@@ -1,7 +1,7 @@
 # 1. 设置优化环境变量 (由 launch.json 净化而来)
-export CUDA_VISIBLE_DEVICES=2,3
+export CUDA_VISIBLE_DEVICES=0,1
 export TORCH_DISTRIBUTED_DEBUG=OFF          # 关闭分布式调试
-export LOG_LEVEL=WARNING                       # 减少日志输出 IO
+export LOG_LEVEL=INFO                       # 减少日志输出 IO
 export NUMBA_DEBUG=0
 export CUDA_LAUNCH_BLOCKING=0               # 关键：允许 GPU 异步执行 (极快)
 export TORCH_USE_CUDA_DSA=0                 # 关闭设备端断言
@@ -17,7 +17,7 @@ export TOKENIZERS_PARALLELISM=false
 export PYTHONOPTIMIZE=1
 # 2. 执行命令 (使用 python -O 启动)
 # 请手动替换 YOUR_DATASET 和 YOUR_CONFIG_NAME
-/home/sqp17/miniconda3/envs/simple_py310/bin/python -m torch.distributed.run \
+/home/sqp17/miniforge3/envs/simple_py310/bin/python -m torch.distributed.run \
     --nproc_per_node=3 \
     --master_addr=127.0.0.1 \
     --master_port=29506 \
@@ -45,7 +45,7 @@ export PYTHONOPTIMIZE=1
 # export MKL_NUM_THREADS=8
 # export TOKENIZERS_PARALLELISM=false
 
-# /home/sqp17/miniconda3/envs/simple_py310/bin/python \
+# /home/sqp17/miniforge3/envs/simple_py310/bin/python \
 #     -m viztracer \
 #     --min_duration 200us \
 #     --output_file distributed_trace.json \

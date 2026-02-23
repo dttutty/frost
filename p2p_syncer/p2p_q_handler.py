@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class P2PQHandler(ThreadBase):
     def __init__(
         self,
-        buf: Buffers,
+        buf: Buffers | None,
         env: Env,
         mem_p2p_q: Q[tuple[P2PTask, CudaEventLike] | Literal["nothing_to_p2p"] | None],
         box_p2p_q: Q[tuple[P2PTask, CudaEventLike] | Literal["nothing_to_p2p"]],

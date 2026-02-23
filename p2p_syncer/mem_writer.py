@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class MemWriter(StreamThreadBase):
     def __init__(
         self,
-        buf: Buffers,
+        buf: Buffers | None,
         shared_mem: torch.Tensor,
         shared_mem_ts: torch.Tensor,
         h2d_sem: threading.Semaphore,
@@ -41,7 +41,7 @@ class MemWriter(StreamThreadBase):
         self.writer_stream = cast(
             torch.cuda.Stream, torch.cuda.Stream(device=self.device)
         )
-        self.disable_pin = True
+        self.disable_pin = False
 
     def _write_back_via_pinned(
         self,
@@ -113,7 +113,11 @@ class MemWriter(StreamThreadBase):
         valid_data_gpu = mem_ts_nid.data[mask]
         valid_ts_gpu = mem_ts_nid.ts[mask]
 
-        if self.buf.mem_d2h is not None and not self.disable_pin:
+        if (
+            self.buf is not None
+            and self.buf.mem_d2h is not None
+            and not self.disable_pin
+        ):
             self._write_back_via_pinned(
                 valid_nid_gpu, valid_data_gpu, valid_ts_gpu, self.buf.mem_d2h
             )

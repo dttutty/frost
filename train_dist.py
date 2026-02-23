@@ -235,6 +235,12 @@ parser.add_argument("--omp_num_threads", type=int, default=8)
 parser.add_argument(
     "--model", type=str, choices=["apan", "tgn", "dysat", "jodie", "tgat"]
 )
+parser.add_argument(
+    "--pin-mem",
+    action="store_true",
+    default=False,
+    help="enable pinned-memory buffers in worker",
+)
 args = parser.parse_args()
 
 # match args.model:
@@ -428,5 +434,6 @@ else:
         components=model_components,
         m_cfg=cfg.m,
         shm_manager=shm_manager,
+        pin_mem=args.pin_mem,
     )
     worker.run()

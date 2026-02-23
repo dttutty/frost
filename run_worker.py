@@ -62,6 +62,7 @@ class Worker:
         components: ModelComponents,
         shm_manager: DoubleBufferedSHM,
         m_cfg: MemoryCFG | None = None,
+        pin_mem: bool = False,
     ) -> None:
         self.s_cfg = s_cfg
         self.n_neg = s_cfg.neg_samples
@@ -93,13 +94,18 @@ class Worker:
         self.train_start2start_ms = MeanMetric(process_group=self.nccl).cuda()
         self._last_train_start_t: float | None = None
 
-        self.buffers: Buffers = init_all_pin_mem(
-            shared=shared,
-            shared_nfeat=nfeat,
-            shared_efeat=efeat,
-            batch_size=t_cfg.batch_size,
-            fanout=s_cfg.neighbor,
-            n_neg=self.n_neg,
+        self.pin_mem = pin_mem
+        self.buffers: Buffers | None = (
+            init_all_pin_mem(
+                shared=shared,
+                shared_nfeat=nfeat,
+                shared_efeat=efeat,
+                batch_size=t_cfg.batch_size,
+                fanout=s_cfg.neighbor,
+                n_neg=self.n_neg,
+            )
+            if self.pin_mem
+            else None
         )
         self.p2p_sem = threading.Semaphore(
             0

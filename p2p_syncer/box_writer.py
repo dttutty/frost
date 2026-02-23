@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class BoxWriter(StreamThreadBase):
     def __init__(
         self,
-        buf: Buffers,
+        buf: Buffers | None,
         shared_box: torch.Tensor,
         shared_box_ts: torch.Tensor,
         h2d_sem: threading.Semaphore,
@@ -43,7 +43,7 @@ class BoxWriter(StreamThreadBase):
         self.writer_stream = cast(
             torch.cuda.Stream, torch.cuda.Stream(device=self.device)
         )
-        self.disable_pin = True
+        self.disable_pin = False
 
     @torch.no_grad()
     def _write_back_via_pinned(
@@ -119,7 +119,11 @@ class BoxWriter(StreamThreadBase):
         valid_ts_gpu = box_ts_nid.ts[mask]
 
         # 3. Use Pinned Memory D2H
-        if self.buf.box_d2h is not None and not self.disable_pin:
+        if (
+            self.buf is not None
+            and self.buf.box_d2h is not None
+            and not self.disable_pin
+        ):
             self._write_back_via_pinned(
                 valid_nid_gpu, valid_data_gpu, valid_ts_gpu, self.buf.box_d2h
             )

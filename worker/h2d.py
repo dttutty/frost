@@ -297,7 +297,7 @@ class H2D(StreamThreadBase):
     def __init__(
         self,
         shm_manager: DoubleBufferedSHM,
-        buf: Buffers,
+        buf: Buffers | None,
         nfeat: torch.Tensor | None,
         efeat: torch.Tensor | None,
         shared: Shared | None,
@@ -366,7 +366,7 @@ class H2D(StreamThreadBase):
             if meta.n2r_mfgs is not None:
                 meta.n2r_mfgs = self.st_asm.fill_mfg_with_efeat(
                     gnn_mfgs=meta.n2r_mfgs,
-                    pin_efeat_buf=self.buf.efeat_h2d,
+                    pin_efeat_buf=self.buf.efeat_h2d if self.buf is not None else None,
                     eids=eids,
                 )
 
@@ -397,7 +397,9 @@ class H2D(StreamThreadBase):
                 if meta.plan_set is not None and meta.plan_set.nfeat is not None:
                     meta.nfeat = self.st_asm.prepare_nfeat_cache(
                         nfeat_plan=meta.plan_set.nfeat,
-                        pin_nfeat_buf=self.buf.nfeat_h2d,
+                        pin_nfeat_buf=self.buf.nfeat_h2d
+                        if self.buf is not None
+                        else None,
                     )
                     assert meta.nfeat is not None
 
@@ -438,8 +440,8 @@ class H2D(StreamThreadBase):
                     self.shared,
                     meta.plan_set.mem,
                     meta.plan_set.box,
-                    pin_mem_buf=self.buf.mem_h2d,
-                    pin_box_buf=self.buf.box_h2d,
+                    pin_mem_buf=self.buf.mem_h2d if self.buf is not None else None,
+                    pin_box_buf=self.buf.box_h2d if self.buf is not None else None,
                     device=self.device,
                 )
                 x = meta.mem_n_box.mem.data  # [N, D]

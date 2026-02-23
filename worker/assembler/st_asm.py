@@ -76,10 +76,10 @@ class StAssembler:
             gpu_all_efeat = buf_view.to(self.device, non_blocking=False)
 
         else:
-            # print total_edges <= pin_efeat_buf.shape[0]
-            logger.warning(
-                "StAsm: Pinned buffer insufficient or missing for efeat, using fallback path"
-            )
+            if pin_efeat_buf is not None:
+                logger.warning(
+                    "StAsm: Pinned buffer insufficient for efeat, using fallback path"
+                )
             # --- Fallback: 普通路径 ---
             # 直接 Gather 并 .to(device)
             # 注意：如果 blocks 在 GPU，这里必须显式 to(device)
@@ -124,11 +124,11 @@ class StAssembler:
         nfeat_plan: StPlan,
         pin_nfeat_buf: StBuf | None = None,  # 接收 StBuf
     ) -> NFeatNid | None:
-        pin_nfeat_buf = None
         assert self.shared_nfeat is not None
         to_cache, fetch = nfeat_plan.to_cache.data, nfeat_plan.fetch.data
 
         nfeat_obj = None
+        pin_buf_insufficient = False
 
         if fetch.numel() == 0:
             nfeat_obj = self.nfeat_delta
@@ -181,15 +181,15 @@ class StAssembler:
 
             nfeat_obj = NFeatNid(nid=gpu_nid, nfeat=gpu_data)
         elif pin_nfeat_buf is not None:
-            pass
+            pin_buf_insufficient = True
         # ------------------------
 
         # Fallback
         if nfeat_obj is None:
-            # show error info for debug
-            logger.warning(
-                "StAsm: Falling back to regular path for nfeat due to insufficient pinned buffer"
-            )
+            if pin_buf_insufficient:
+                logger.warning(
+                    "StAsm: Falling back to regular path for nfeat due to insufficient pinned buffer"
+                )
             nfeat_obj = NFeatNid(nid=fetch, nfeat=self.shared_nfeat[fetch])
             nfeat_obj = nfeat_obj.cuda()
             # 注意: 普通路径下数据在 CPU，后续如果需要 GPU 数据，
