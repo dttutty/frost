@@ -6,7 +6,7 @@
 using nb::arg;
 namespace nb = nanobind;
 
-class ParallelSampler {
+class WindowSampler {
 public:
     // CSR Data
 
@@ -42,8 +42,8 @@ public:
 
     std::vector<TemporalGraphBlock> ret;
 
-    ParallelSampler(const TemporalGraph& g,
-                    int _num_thread_per_worker, int _num_workers,
+    WindowSampler(const TemporalGraph& g,
+                    int _num_threads,
                     int _num_layers, const std::vector<int>& _num_neighbors,
                     bool _recent, bool _prop_time,
                     int _num_history, TimeStampType _window_duration)
@@ -52,7 +52,7 @@ public:
           indices(g.indices_ptr()), // 提取指针
           edge_ids(g.eid_ptr()),    // 提取指针
           edge_ts(g.ts_ptr()),      // 提取指针
-          num_thread_per_worker(_num_thread_per_worker), num_workers(_num_workers),
+          num_threads(_num_threads),
           num_layers(_num_layers), num_neighbors(_num_neighbors),
           recent(_recent), prop_time(_prop_time),
           num_history(_num_history), window_duration(_window_duration) {
@@ -211,25 +211,18 @@ public:
     }
 };
 
-NB_MODULE(sampler_core_window, m) {
-    bind_common(m); // 先绑定 Graph
-    bind_temporal_graph_block(m); // Reuse common binding
-
-    nb::class_<ParallelSampler>(m, "ParallelSampler")
-        // 修改这里：为每个参数添加 nb::arg("参数名")
-        .def(nb::init<const TemporalGraph&,
-                      int, int, int, const std::vector<int>&, 
-                      bool, bool, int, TimeStampType>(),
-             // 显式绑定参数名，这样 Python 才能识别关键字
-             nb::arg("graph"), // 名字叫 graph,
-             arg("num_thread_per_worker"), arg("num_workers"), 
-             arg("num_layers"), arg("num_neighbors"),
-             arg("recent") = false,      // 还可以设置默认值！
-             arg("prop_time") = false,   // 设置默认值
-             arg("num_history") = 1,     // 设置默认值
-             arg("window_duration") = 0.0f
-        )
-        .def("sample", &ParallelSampler::sample, 
-             arg("root_nodes"), arg("root_ts")) // sample 函数也支持关键字
-        .def("get_ret", [](const ParallelSampler& ps){ return ps.ret; });
+void bind_window_sampler(nb::module_& m) {
+    nb::class_<WindowSampler>(m, "WindowSampler")
+        .def(nb::init<const TemporalGraph&, int, int, const std::vector<int>&, bool, bool, int, TimeStampType>(),
+             nb::arg("graph"),
+             nb::arg("num_threads"),
+             nb::arg("num_layers"),
+             nb::arg("num_neighbors"),
+             nb::arg("recent") = false,
+             nb::arg("prop_time") = false,
+             nb::arg("num_history") = 1,
+             nb::arg("window_duration") = 0.0f)
+        .def("sample", &WindowSampler::sample, nb::arg("root_nodes"), nb::arg("root_ts"))
+        .def("get_ret", [](const WindowSampler& ps) { return ps.ret; });
 }
+

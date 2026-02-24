@@ -15,7 +15,7 @@ namespace nb = nanobind;
 
 
 // --- 采样器核心 (Simple Version) ---
-class ParallelSampler {
+class SimpleSampler {
 public:
     // CSR Data
     
@@ -44,9 +44,8 @@ public:
     // Output buffer
     std::vector<TemporalGraphBlock> ret;
 
-    ParallelSampler(const TemporalGraph& g,
-                    int _num_thread_per_worker,
-                    int _num_workers,
+    SimpleSampler(const TemporalGraph& g,
+                    int _num_threads,
                     int _num_layers,
                     const std::vector<int>& _num_neighbors,
                     bool _recent,
@@ -56,7 +55,7 @@ public:
           indices(g.indices_ptr()), // 提取指针
           edge_ids(g.eid_ptr()),    // 提取指针
           edge_ts(g.ts_ptr()),      // 提取指针
-          num_thread_per_worker(_num_thread_per_worker), num_workers(_num_workers),
+          num_threads(_num_threads),
           num_layers(_num_layers), num_neighbors(_num_neighbors),
           recent(_recent), prop_time(_prop_time) {
         
@@ -211,27 +210,15 @@ public:
     void reset() {}
 };
 
-NB_MODULE(sampler_core_simple, m) {
-    bind_common(m); // 先绑定 Graph // <--- 必须用 NB_MODULE，不能用 PYBIND11_MODULE
-    bind_temporal_graph_block(m);
-
-    nb::class_<ParallelSampler>(m, "ParallelSampler")
-        // 构造函数：参数极其多，必须加 arg
-        .def(nb::init<const TemporalGraph&,
-                      int, int, int, const std::vector<int>&, 
-                      bool, bool>(),
-             nb::arg("graph"), // 名字叫 graph,
-             arg("num_thread_per_worker"), 
-             arg("num_workers"), 
-             arg("num_layers"), 
-             arg("num_neighbors"),
-             arg("recent") = false,    // 支持默认值
-             arg("prop_time") = false  // 支持默认值
-        )
-        // sample 方法：也建议加 arg
-        .def("sample", &ParallelSampler::sample, 
-             arg("root_nodes"), 
-             arg("root_ts"))
-        // get_ret：没有参数，不需要 arg
-        .def("get_ret", [](const ParallelSampler& ps){ return ps.ret; });
+void bind_simple_sampler(nb::module_& m) {
+    nb::class_<SimpleSampler>(m, "SimpleSampler")
+        .def(nb::init<const TemporalGraph&, int, int, const std::vector<int>&, bool, bool>(),
+             nb::arg("graph"),
+             nb::arg("num_threads"),
+             nb::arg("num_layers"),
+             nb::arg("num_neighbors"),
+             nb::arg("recent") = false,
+             nb::arg("prop_time") = false)
+        .def("sample", &SimpleSampler::sample, nb::arg("root_nodes"), nb::arg("root_ts"))
+        .def("get_ret", [](const SimpleSampler& ps) { return ps.ret; });
 }

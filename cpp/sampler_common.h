@@ -31,14 +31,19 @@ inline nb::ndarray<nb::numpy, T> vec2npy(std::vector<T>& vec) {
 }
 
 struct TemporalGraph {
-    // 定义 ndarray 类型：只读，一维，CPU，C连续
-    using IntArray = nb::ndarray<const int64_t, nb::shape<1>, nb::c_contig, nb::device::cpu>;
-    using FloatArray = nb::ndarray<const float, nb::shape<1>, nb::c_contig, nb::device::cpu>;
+    // Define 1D continuous CPU arrays, without const to accept normal numpy arrays
+    using IntArray = nb::ndarray<int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+    using FloatArray = nb::ndarray<float, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 
     IntArray indptr;
     IntArray indices;
     IntArray eid;
     FloatArray ts;
+
+    TemporalGraph() = default;
+
+    TemporalGraph(IntArray _indptr, IntArray _indices, IntArray _eid, FloatArray _ts)
+        : indptr(_indptr), indices(_indices), eid(_eid), ts(_ts) {}
 
     // 辅助函数：获取原始指针 (这一步是极致性能的关键)
     const int64_t* indptr_ptr() const { return indptr.data(); }
@@ -74,14 +79,14 @@ inline void bind_temporal_graph_block(nb::module_& m) {
     nb::class_<TemporalGraphBlock>(m, "TemporalGraphBlock")
         .def(nb::init<>())
         // 注意：vec2npy 用了 std::move，这意味着在 Python 获取后，C++ 端的 vector 会被清空
-        .def_prop_ro("row", [](TemporalGraphBlock& b) { return vec2npy(b.row); })
-        .def_prop_ro("col", [](TemporalGraphBlock& b) { return vec2npy(b.col); })
-        .def_prop_ro("eid", [](TemporalGraphBlock& b) { return vec2npy(b.eid); })
-        .def_prop_ro("ts", [](TemporalGraphBlock& b) { return vec2npy(b.ts); })
-        .def_prop_ro("dts", [](TemporalGraphBlock& b) { return vec2npy(b.dts); })
-        .def_prop_ro("nodes", [](TemporalGraphBlock& b) { return vec2npy(b.nodes); })
-        .def_ro("dim_in", &TemporalGraphBlock::dim_in)
-        .def_ro("dim_out", &TemporalGraphBlock::dim_out);
+        .def("row", [](TemporalGraphBlock& b) { return vec2npy(b.row); }, nb::rv_policy::reference)
+        .def("col", [](TemporalGraphBlock& b) { return vec2npy(b.col); }, nb::rv_policy::reference)
+        .def("eid", [](TemporalGraphBlock& b) { return vec2npy(b.eid); }, nb::rv_policy::reference)
+        .def("ts", [](TemporalGraphBlock& b) { return vec2npy(b.ts); }, nb::rv_policy::reference)
+        .def("dts", [](TemporalGraphBlock& b) { return vec2npy(b.dts); }, nb::rv_policy::reference)
+        .def("nodes", [](TemporalGraphBlock& b) { return vec2npy(b.nodes); }, nb::rv_policy::reference)
+        .def("dim_in", [](TemporalGraphBlock& b) { return b.dim_in; })
+        .def("dim_out", [](TemporalGraphBlock& b) { return b.dim_out; });
 }
 
 
@@ -89,6 +94,8 @@ inline void bind_temporal_graph_block(nb::module_& m) {
 inline void bind_common(nb::module_& m) {
     nb::class_<TemporalGraph>(m, "TemporalGraph")
         .def(nb::init<>()) // 允许 Python 端构造一个空的，然后赋值
+        .def(nb::init<TemporalGraph::IntArray, TemporalGraph::IntArray, TemporalGraph::IntArray, TemporalGraph::FloatArray>(),
+             nb::arg("indptr"), nb::arg("indices"), nb::arg("eid"), nb::arg("ts"))
         .def_rw("indptr", &TemporalGraph::indptr)
         .def_rw("indices", &TemporalGraph::indices)
         .def_rw("eid", &TemporalGraph::eid)

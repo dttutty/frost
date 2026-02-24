@@ -12,16 +12,15 @@ find_package(nanobind CONFIG REQUIRED)
 find_package(TBB REQUIRED)
 find_package(OpenMP) # In case omp_set_num_threads is still used
 
-# 1. Compile simple sampler
-nanobind_add_module(sampler_core_simple sampler_simple.cpp)
-target_link_libraries(sampler_core_simple PRIVATE TBB::tbb)
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(sampler_core_simple PRIVATE OpenMP::OpenMP_CXX)
-endif()
 
-# 2. Compile window sampler
-nanobind_add_module(sampler_core_window sampler_window.cpp)
-target_link_libraries(sampler_core_window PRIVATE TBB::tbb)
+nanobind_add_module(sampler 
+    sampler_main.cpp 
+    sampler_simple.cpp 
+    sampler_window.cpp
+)
+
+# Link TBB to the unified module
+target_link_libraries(sampler PRIVATE TBB::tbb)
 if(OpenMP_CXX_FOUND)
-    target_link_libraries(sampler_core_window PRIVATE OpenMP::OpenMP_CXX)
+    target_link_libraries(sampler PRIVATE OpenMP::OpenMP_CXX)
 endif()

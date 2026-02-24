@@ -4,7 +4,7 @@ import logging
 
 import torch
 
-from sampler_core import ParallelSampler
+from sampler import SimpleSampler, WindowSampler
 from schemas.datatypes.misc import DGLBlockMeta
 from schemas.datatypes.plan import BatchNodeStateIO
 from tensor_set import TensorSet
@@ -109,7 +109,7 @@ def analyze_need(mfg_meta_list: list[DGLBlockMeta], n_history: int) -> BatchNode
 
 
 def sample(
-    ngh_sampler: ParallelSampler,
+    ngh_sampler: SimpleSampler | WindowSampler,
     src: torch.Tensor,
     dst: torch.Tensor,
     neg_dst: torch.Tensor,

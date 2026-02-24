@@ -18,7 +18,7 @@ from gnn.with_memory.tgn import TGN
 from host import MetaBatcher, Planner, Scatter
 from host.meta_batcher import MetaBundle
 from neg_sampler import NegLinkSampler
-from sampler_core import ParallelSampler
+from sampler import SimpleSampler, TemporalGraph, WindowSampler
 from schemas.datatypes.cfg import Config, SampleCFG
 from schemas.datatypes.env import Env
 from schemas.datatypes.misc import EpochSplitIterInfo, ExtFullGraph, Meta, Result
@@ -198,22 +198,38 @@ class Host:
 
     def _init_sampler(self, graph: ExtFullGraph, s_cfg: SampleCFG) -> None:
         self.neg_sampler = NegLinkSampler(graph)
-        self.ngh_sampler = None
+        self.ngh_sampler: None | SimpleSampler | WindowSampler = None
+        # 1. Ensure arrays are strictly 1D, C-contiguous, and use the correct dtypes
+        indptr_arr = np.ascontiguousarray(graph.indptr, dtype=np.int64)
+        indices_arr = np.ascontiguousarray(graph.indices, dtype=np.int64)
+        eid_arr = np.ascontiguousarray(graph.eid, dtype=np.int64)
+        ts_arr = np.ascontiguousarray(graph.ts, dtype=np.float32)
+
+        temporal_graph = TemporalGraph(
+            indptr=indptr_arr, indices=indices_arr, eid=eid_arr, ts=ts_arr
+        )
+
         if self.sample_support_node:
-            self.ngh_sampler = ParallelSampler(
-                graph.indptr,
-                graph.indices,
-                graph.eid,
-                graph.ts,
-                s_cfg.num_thread,
-                1,
-                s_cfg.layer,
-                s_cfg.neighbor,
-                s_cfg.strategy == "recent",
-                s_cfg.prop_time,
-                s_cfg.history,
-                float(s_cfg.duration),
-            )
+            if s_cfg.history == 1:
+                self.ngh_sampler = SimpleSampler(
+                    temporal_graph,
+                    s_cfg.num_thread,
+                    s_cfg.layer,
+                    s_cfg.neighbor,
+                    s_cfg.strategy == "recent",
+                    s_cfg.prop_time,
+                )
+            else:
+                self.ngh_sampler = WindowSampler(
+                    temporal_graph,
+                    s_cfg.num_thread,
+                    s_cfg.layer,
+                    s_cfg.neighbor,
+                    s_cfg.strategy == "recent",
+                    s_cfg.prop_time,
+                    s_cfg.history,
+                    float(s_cfg.duration),
+                )
             self.sample_history = s_cfg.history
 
     def start_all_threads(self) -> None:
@@ -336,8 +352,8 @@ class Host:
 
     def _cleanup_per_epoch(self) -> None:
         self.meta_in_q.put("end_of_epoch")
-        if self.ngh_sampler is not None:
-            self.ngh_sampler.reset()
+        # if self.ngh_sampler is not None:
+        #     self.ngh_sampler.reset()
         self.cur_macro_of_epoch = 0
         self.curr_epoch += 1
 
