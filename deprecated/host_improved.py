@@ -6,10 +6,9 @@ import torch
 import torch.distributed as dist
 from tqdm import tqdm
 
-from neg_sampler import NegLinkSampler
-
 # Assume these are your existing imports
-from sampler_core import ParallelSampler
+from deprecated.sampler_core import ParallelSampler
+from neg_sampler import NegLinkSampler
 from utils import (
     dgl_blocks_to_tensor_dicts,  # Helper from previous answer
     extract_raw_data,

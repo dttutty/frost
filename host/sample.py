@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 
 import torch
+from graph_sampler import SimpleSampler, WindowSampler
 
-from sampler import SimpleSampler, WindowSampler
 from schemas.datatypes.misc import DGLBlockMeta
 from schemas.datatypes.plan import BatchNodeStateIO
 from tensor_set import TensorSet

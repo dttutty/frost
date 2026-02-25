@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 from host.host_sampler import sample_and_scatter_batch
 from memorys import MemoryMailbox
-from sampler_core import ParallelSampler
+from deprecated.sampler_core import ParallelSampler
 from tqdm import tqdm
 
 from neg_sampler import NegLinkSampler
