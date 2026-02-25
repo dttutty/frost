@@ -1,9 +1,13 @@
 import argparse
 import itertools
+import logging
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+
+
+logger = logging.getLogger(__name__)
 
 
 parser = argparse.ArgumentParser()
@@ -11,21 +15,21 @@ parser.add_argument("--data", type=str, help="dataset name")
 parser.add_argument("--add_reverse", default=False, action="store_true")
 args = parser.parse_args()
 
-df = pd.read_csv("DATA/{}/edges.csv".format(args.data))
+df = pd.read_csv(f"DATA/{args.data}/edges.csv")
 num_nodes = max(int(df["src"].max()), int(df["dst"].max())) + 1
 logger.debug("num_nodes: ", num_nodes)
 
 
 class Dummy:
-    def __init__(self, num_nodes, add_reverse, dtype=np.int):
+    def __init__(self, num_nodes: int, add_reverse: bool, dtype: type = int) -> None:
         self.num_nodes = num_nodes
         self.add_reverse = add_reverse
-        self.indptr = np.zeros(num_nodes + 1, dtype=dtype)
-        self.indices = [[] for _ in range(num_nodes)]
-        self.ts = [[] for _ in range(num_nodes)]
-        self.eid = [[] for _ in range(num_nodes)]
+        self.indptr: np.ndarray = np.zeros(num_nodes + 1, dtype=dtype)
+        self.indices: list[list[int]] = [[] for _ in range(num_nodes)]
+        self.ts: list[list[float]] = [[] for _ in range(num_nodes)]
+        self.eid: list[list[int]] = [[] for _ in range(num_nodes)]
 
-    def append(self, src, dst, time, idx):
+    def append(self, src: int, dst: int, time: float, idx: int) -> None:
         self.indices[src].append(dst)
         self.ts[src].append(time)
         self.eid[src].append(idx)
@@ -35,21 +39,27 @@ class Dummy:
             self.eid[dst].append(idx)
         # self.indptr[src + 1:] += 1
 
-    def save(self, filename):
+    def save(self, filename: str) -> None:
         for i in tqdm(range(num_nodes)):
             self.indptr[i + 1] = self.indptr[i] + len(self.indices[i])
             self.indptr[i + 1] = self.indptr[i] + len(self.indices[i])
             self.indptr[i + 1] = self.indptr[i] + len(self.indices[i])
 
-        def flatten_to_array(list_of_lists):
+        def flatten_to_array(list_of_lists: list[list[int | float]]) -> np.ndarray:
             # chain.from_iterable is a bit leaner than chain(*…)
             return np.array(list(itertools.chain.from_iterable(list_of_lists)))
 
-        self.indices = flatten_to_array(self.indices)
-        self.ts = flatten_to_array(self.ts)
-        self.eid = flatten_to_array(self.eid)
+        indices = flatten_to_array(self.indices)
+        ts = flatten_to_array(self.ts)
+        eid = flatten_to_array(self.eid)
 
-        def tsort(i, indptr, indices, t, eid):
+        def tsort(
+            i: int,
+            indptr: np.ndarray,
+            indices: np.ndarray,
+            t: np.ndarray,
+            eid: np.ndarray,
+        ) -> None:
             beg = indptr[i]
             end = indptr[i + 1]
             sidx = np.argsort(t[beg:end])
@@ -59,15 +69,15 @@ class Dummy:
 
         logger.debug("Sorting...")
         for i in tqdm(range(self.indptr.shape[0] - 1)):
-            tsort(i, self.indptr, self.indices, self.ts, self.eid)
+            tsort(i, self.indptr, indices, ts, eid)
         logger.debug("Saving...")
         # import pdb; pdb.set_trace()
         np.savez(
-            "DATA/{}/{}.npz".format(args.data, filename),
+            f"DATA/{args.data}/{filename}.npz",
             indptr=self.indptr,
-            indices=self.indices,
-            ts=self.ts,
-            eid=self.eid,
+            indices=indices,
+            ts=ts,
+            eid=eid,
         )
 
 

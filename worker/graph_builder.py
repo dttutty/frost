@@ -260,7 +260,7 @@ def collate_and_build_graph(
 class GraphBuilder(StreamThreadBase):
     def __init__(
         self,
-        buf: Buffers,
+        buf: Buffers | None,
         efeat: torch.Tensor | None,
         shared: Shared | None,
         in_q: Q[Meta | None | Literal["end_of_epoch"]],
@@ -333,7 +333,8 @@ class GraphBuilder(StreamThreadBase):
                     # --- [New Debug Code End] ---
 
                     if (
-                        self.buf.pos_efeat_h2d is not None
+                        self.buf is not None
+                        and self.buf.pos_efeat_h2d is not None
                         and meta.pos_edge_id.numel() <= self.buf.pos_efeat_h2d.shape[0]
                     ):
                         n = meta.pos_edge_id.numel()

@@ -136,8 +136,8 @@ class BoxHandler(StreamThreadBase):
 
             # handle mail or box sync
             # generate new mails from root_new_mem
-            # print(box_task.root_new_mem_orig)
-            # print(box_task.pos_efeat.shape)
+            # logger.debug(box_task.root_new_mem_orig)
+            # logger.debug(box_task.pos_efeat.shape)
             new_mail = generate_interaction_mails(
                 box_task.root_new_mem_orig,
                 box_task.pos_efeat,

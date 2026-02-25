@@ -8,7 +8,7 @@ import yaml
 from numba import njit, prange
 from tqdm import tqdm
 
-from sampler_core import ParallelSampler
+from deprecated.sampler_core import ParallelSampler
 from schemas.datatypes.misc import ExtFullGraph
 
 

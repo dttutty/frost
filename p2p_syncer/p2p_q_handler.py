@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class P2PQHandler(ThreadBase):
     def __init__(
         self,
-        buf: Buffers,
+        buf: Buffers | None,
         env: Env,
         mem_p2p_q: Q[tuple[P2PTask, CudaEventLike] | Literal["nothing_to_p2p"] | None],
         box_p2p_q: Q[tuple[P2PTask, CudaEventLike] | Literal["nothing_to_p2p"]],
@@ -58,11 +58,11 @@ class P2PQHandler(ThreadBase):
                 # CPU 侧拿任务、计算时间
                 mem_p2p_tuple = self.mem_p2p_q.get(block=True)
                 if mem_p2p_tuple is None:
-                    # print(
+                    # logger.debug(
                     #     f"[Rank {self.env.local_rank}] Received shutdown signal in P2P handler."
                     # )
                     break
-                # print(f"[Rank {self.env.local_rank}] Got Mem P2P task: {mem_p2p_tuple}")
+                # logger.debug(f"[Rank {self.env.local_rank}] Got Mem P2P task: {mem_p2p_tuple}")
                 mem_wait_ms = 0.0
 
                 # 快速路径：如果没有 P2P 任务，直接跳过
@@ -71,13 +71,13 @@ class P2PQHandler(ThreadBase):
                     assert box_p2p_tuple == "nothing_to_p2p"
                     self.delta_q.put("nothing")
                     # Keep semaphore balanced so the next step doesn't block after no-op P2P.
-                    # print(
+                    # logger.debug(
                     #     "nothing_to_p2p received for both Mem and Box. Skipping P2P and sending 'nothing' to delta_q."
                     # )
                     self.p2p_sem.release()
 
                     # if mem_wait_ms > 5.0:
-                    #     print(
+                    #     logger.debug(
                     #         f"[Rank {self.env.local_rank}] P2P Starvation (Nothing): Waited {mem_wait_ms:.2f}ms for empty signal"
                     # )
 
@@ -88,7 +88,7 @@ class P2PQHandler(ThreadBase):
                 box_wait_ms = 0.0
                 total_wait = mem_wait_ms + box_wait_ms
                 # if total_wait > 2.0:
-                #     print(
+                #     logger.debug(
                 #         f"[Rank {self.env.local_rank}] P2P Blocked! Total: {total_wait:.2f}ms | Mem: {mem_wait_ms:.2f}ms | Box: {box_wait_ms:.2f}ms"
                 # )
                 assert box_p2p_tuple != "nothing_to_p2p"
@@ -146,15 +146,15 @@ class P2PQHandler(ThreadBase):
                 ]
 
                 # if torch.equal(mem_p2p.nid2recv, box_p2p.nid2recv) == False:
-                #     print("Error: Mem P2P NIDs and Box P2P NIDs to send do not match.")
-                #     print("Mem NIDs to send:", mem_p2p.nid2send)
-                #     print("Box NIDs to send:", box_p2p.nid2send)
+                #     logger.debug("Error: Mem P2P NIDs and Box P2P NIDs to send do not match.")
+                #     logger.debug("Mem NIDs to send: %s", mem_p2p.nid2send)
+                #     logger.debug("Box NIDs to send: %s", box_p2p.nid2send)
                 #     raise ValueError("Mismatched NIDs in P2P send buffers.")
 
                 # 3. 执行所有通信
 
                 works = []
-                logger.info(
+                logger.debug(
                     f"Rank {self.env.local_rank} starting P2P communication, count={self.count}"
                 )
                 self.count += 1
@@ -165,13 +165,13 @@ class P2PQHandler(ThreadBase):
                     if total_send != real_shape:
                         import sys
 
-                        # print(
+                        # logger.debug(
                         #     f"\n[CRITICAL ERROR] P2P Mismatch on Rank {dist.get_rank()} | Op: {name}"
                         # )
-                        # print(f"  > Sum of send_cts: {total_send}")
-                        # print(f"  > Actual Tensor dim0: {real_shape}")
-                        # print(f"  > Tensor Full Shape: {send_t.shape}")
-                        # print(f"  > Send Cts List: {send_cts}")
+                        # logger.debug(f"  > Sum of send_cts: {total_send}")
+                        # logger.debug(f"  > Actual Tensor dim0: {real_shape}")
+                        # logger.debug(f"  > Tensor Full Shape: {send_t.shape}")
+                        # logger.debug(f"  > Send Cts List: {send_cts}")
                         sys.stdout.flush()
                         # 抛出异常让程序停在这里
                         raise RuntimeError(
@@ -189,7 +189,7 @@ class P2PQHandler(ThreadBase):
                     )
                     works.append(work)
 
-                logger.info(
+                logger.debug(
                     f"[Rank {self.env.local_rank}] Posted all NCCL P2P ops for count {self.count}. Waiting for completion..."
                 )
                 self.p2p_sem.release()  # 释放信号量，允许下一轮 P2P 任务进入
@@ -208,6 +208,6 @@ class P2PQHandler(ThreadBase):
                 # ready_event.record(torch.cuda.current_stream())
 
                 self.delta_q.put((mem_p2p, box_p2p, works))
-                logger.info(
+                logger.debug(
                     f"Rank {self.env.local_rank} finished P2P communication, posted delta to delta_q, count={self.count}"
                 )

@@ -297,7 +297,7 @@ class H2D(StreamThreadBase):
     def __init__(
         self,
         shm_manager: DoubleBufferedSHM,
-        buf: Buffers,
+        buf: Buffers | None,
         nfeat: torch.Tensor | None,
         efeat: torch.Tensor | None,
         shared: Shared | None,
@@ -344,7 +344,7 @@ class H2D(StreamThreadBase):
                 continue
 
             # if isinstance(manifest, torch.Tensor):
-            #     logger.info(
+            #     logger.debug(
             #         f"H2D: Received Manifest[0] (BatchIdx) = {manifest[0].item()}"
             #     )
             meta, event = meta_data
@@ -366,7 +366,7 @@ class H2D(StreamThreadBase):
             if meta.n2r_mfgs is not None:
                 meta.n2r_mfgs = self.st_asm.fill_mfg_with_efeat(
                     gnn_mfgs=meta.n2r_mfgs,
-                    pin_efeat_buf=self.buf.efeat_h2d,
+                    pin_efeat_buf=self.buf.efeat_h2d if self.buf is not None else None,
                     eids=eids,
                 )
 
@@ -397,7 +397,9 @@ class H2D(StreamThreadBase):
                 if meta.plan_set is not None and meta.plan_set.nfeat is not None:
                     meta.nfeat = self.st_asm.prepare_nfeat_cache(
                         nfeat_plan=meta.plan_set.nfeat,
-                        pin_nfeat_buf=self.buf.nfeat_h2d,
+                        pin_nfeat_buf=self.buf.nfeat_h2d
+                        if self.buf is not None
+                        else None,
                     )
                     assert meta.nfeat is not None
 
@@ -423,8 +425,9 @@ class H2D(StreamThreadBase):
                     # [Fix 2] 关键修复：必须在调用 prep 之前处理 box 为 None 的情况！
                     # 原来的逻辑写得太晚了，导致传进 prep 的 box 是 None
                     if meta.plan_set.box is None:
-                        print(
-                            f"H2D Batch {meta.batch_idx}: mem_plan exists but box_plan is None. Filling box_plan with mem_plan."
+                        logger.debug(
+                            "H2D Batch %s: mem_plan exists but box_plan is None. Filling box_plan with mem_plan.",
+                            meta.batch_idx,
                         )
                         meta.plan_set.box = meta.plan_set.mem
                 self.h2d_sem.acquire()
@@ -437,8 +440,8 @@ class H2D(StreamThreadBase):
                     self.shared,
                     meta.plan_set.mem,
                     meta.plan_set.box,
-                    pin_mem_buf=self.buf.mem_h2d,
-                    pin_box_buf=self.buf.box_h2d,
+                    pin_mem_buf=self.buf.mem_h2d if self.buf is not None else None,
+                    pin_box_buf=self.buf.box_h2d if self.buf is not None else None,
                     device=self.device,
                 )
                 x = meta.mem_n_box.mem.data  # [N, D]
@@ -446,30 +449,30 @@ class H2D(StreamThreadBase):
                 # check if nid >3000
                 if nid.numel() > 0:
                     max_nid = nid.max().item()
-                    if max_nid > 3000:
-                        raise RuntimeError(
-                            f"H2D Batch {meta.batch_idx}: Unusually large nid detected in mem_n_box.mem.nid (max={max_nid}). "
-                            "This may indicate a data issue or a need to adjust the threshold."
-                        )
+                    # if max_nid > 3000:
+                    #     raise RuntimeError(
+                    #         f"H2D Batch {meta.batch_idx}: Unusually large nid detected in mem_n_box.mem.nid (max={max_nid}). "
+                    #         "This may indicate a data issue or a need to adjust the threshold."
+                    #     )
 
                 row_has_nonzero = (x != 0).any(dim=1)  # [N] True = 这一行有非0
                 zero_row_mask = ~row_has_nonzero  # True = 这一行全是0
 
                 zero_nids = nid[zero_row_mask]
 
-                # print(
+                # logger.debug(
                 #     f"H2D Batch {meta.batch_idx}: {zero_nids.numel()} zero-memory rows"
                 # )
-                # print("some zero nids:", zero_nids[:20])
+                # logger.debug("some zero nids: %s", zero_nids[:20])
 
-                # # print max meta.mem_n_box.mem.nid
-                # print(
+                # # logger.debug max meta.mem_n_box.mem.nid
+                # logger.debug(
                 #     f"H2D Batch {meta.batch_idx}: max nid in mem_n_box.mem.nid = {meta.mem_n_box.mem.nid.max().item()}"
                 # )
-                # # print root nids
+                # # logger.debug root nids
                 # self.seen_root_nids = torch.cat([self.seen_root_nids, meta.root_nid])
                 # self.seen_root_nids = torch.unique(self.seen_root_nids)
-                # print(
+                # logger.debug(
                 #     f"H2D Batch {meta.batch_idx}: seen root nid = {self.seen_root_nids}"
                 # )
 

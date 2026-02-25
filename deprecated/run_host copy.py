@@ -9,7 +9,7 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 from planner import ApanPlanner, sliding_planner
-from sampler_core import ParallelSampler
+from deprecated.sampler_core import ParallelSampler
 from tqdm import tqdm
 
 from deprecated.comm import Distributor

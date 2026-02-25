@@ -1,6 +1,5 @@
 import logging
 import threading
-from collections import deque
 from queue import Queue as Q
 from typing import Literal
 
@@ -51,8 +50,6 @@ class Scatter(ThreadBase):
         self.world_size: int = env.world_size
         self.local_rank: int = env.local_rank
 
-        self.inflight = deque()
-        self.inflight_K = 2
         # 2. 将所有全局变量变为实例属性
         self.host_rank: int = env.host_rank
         self.ngpus: int = env.n_gpu
@@ -84,7 +81,7 @@ class Scatter(ThreadBase):
         #     logger.error(f">>> [SCATTER CHECK] Batch {batch_idx}: root_nid is NONE!")
         # else:
         #     # 正常情况下应该看到这行日志
-        #     logger.info(
+        #     logger.debug(
         #         f">>> [SCATTER CHECK] Batch {batch_idx}: root_nid shape={meta.root_nid.shape}, pos_edge_id shape={meta.pos_edge_id.shape if meta.pos_edge_id is not None else 'None'}"
         #     )
         # # ----------------------------
@@ -264,7 +261,7 @@ class Scatter(ThreadBase):
 
         # Host 也必须参与，并提供一个"占位"的发送值
         self._gather_seq += 1
-        logger.info(
+        logger.debug(
             "Scatter gather_object start: seq=%d rank=%d",
             self._gather_seq,
             self.local_rank,
@@ -275,7 +272,7 @@ class Scatter(ThreadBase):
             dst=self.host_rank,  # Host 发送的占位数据
             group=self.gloo,
         )
-        logger.info(
+        logger.debug(
             "Scatter gather_object end: seq=%d rank=%d",
             self._gather_seq,
             self.local_rank,
@@ -286,51 +283,47 @@ class Scatter(ThreadBase):
         # 丢掉 Host 自己的槽位（最后一个），只返回 workers 的结果
         return data_0_result
 
-    def flush_inflight(self):
-        while self.inflight:
-            works, tensors = self.inflight.popleft()
-            for w in works:
-                w.wait()
-
     def logic(self) -> None:
         batch_count = 0
         while not self.stop_ev.is_set():
             meta_2_scatter = self.in_q.get(block=True)
 
             if meta_2_scatter is None:
-                self.flush_inflight()
                 send_tensors = self._get_control_signal_list(-2)
 
                 self._ctrl_send_seq += 1
-                logger.info(
+                logger.debug(
                     "Scatter ctrl send: seq=%d code=-2 rank=%d",
                     self._ctrl_send_seq,
                     self.local_rank,
                 )
-                works = []
-                for i in range(self.n_gpu):
-                    works.append(dist.isend(send_tensors[i], dst=i, group=self.gloo))
-                for w in works:
-                    w.wait()
+                dist.scatter(
+                    self.dummy_recv,
+                    scatter_list=send_tensors,
+                    src=self.host_rank,
+                    group=self.gloo,
+                )
                 break
             elif meta_2_scatter == "end_of_epoch":
+                logger.warning(
+                    "end_of_epoch received by Scatter, sending control signal to Workers..."
+                )
                 # 【修正 1】发送 Tensor 列表
-                self.flush_inflight()
                 send_tensors = self._get_control_signal_list(-1)
 
                 self._ctrl_send_seq += 1
-                logger.info(
+                logger.debug(
                     "Scatter ctrl send: seq=%d code=-1 rank=%d",
                     self._ctrl_send_seq,
                     self.local_rank,
                 )
 
-                works = []
-                for i in range(self.n_gpu):
-                    works.append(dist.isend(send_tensors[i], dst=i, group=self.gloo))
-                for w in works:
-                    w.wait()
-                # 等待收集结果
+                dist.scatter(
+                    self.dummy_recv,
+                    scatter_list=send_tensors,
+                    src=self.host_rank,
+                    group=self.gloo,
+                )
                 data = self.gather_receive()
                 self.result_q.put(data)
                 continue
@@ -351,7 +344,9 @@ class Scatter(ThreadBase):
                     nfeat_plans = self.nfeat_plan_out_q.get(block=True)
 
                 # 3. 【关键修改】组装 Plan 并执行打包操作
-                send_tensors = []
+                scatter_list = [
+                    self.control_tensor_template.clone() for _ in range(self.world_size)
+                ]
                 for i in range(self.n_gpu):
                     worker_rank = i
                     mgr = self.shm_managers[worker_rank]
@@ -394,7 +389,7 @@ class Scatter(ThreadBase):
                     manifest = self._offload_to_shm_v2(
                         self.shm_managers[i], batch_count, meta
                     )
-                    send_tensors.append(manifest)
+                    scatter_list[i] = manifest
                     # ... 写入其他 ...
 
                     # meta.batch_idx = self.  # 让 Worker 知道这是第几轮
@@ -409,16 +404,9 @@ class Scatter(ThreadBase):
                 #     src=self.host_rank,
                 #     group=self.group,
                 # )
-                works = []
-                for i in range(self.n_gpu):
-                    w = dist.isend(send_tensors[i], dst=i, group=self.gloo)
-                    works.append(w)
-
-                # 保存引用：确保 send_tensors 在发送完成前不被释放
-                self.inflight.append((works, send_tensors))
-
-                # 流控：最多允许 K 轮在飞
-                if len(self.inflight) > self.inflight_K:
-                    old_works, old_tensors = self.inflight.popleft()
-                    for w in old_works:
-                        w.wait()
+                dist.scatter(
+                    self.dummy_recv,
+                    scatter_list=scatter_list,
+                    src=self.host_rank,
+                    group=self.gloo,
+                )

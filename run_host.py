@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
+from graph_sampler import SimpleSampler, TemporalGraph, WindowSampler
 from tqdm import tqdm
 
 from df_split import make_balance_plan
@@ -18,7 +19,6 @@ from gnn.with_memory.tgn import TGN
 from host import MetaBatcher, Planner, Scatter
 from host.meta_batcher import MetaBundle
 from neg_sampler import NegLinkSampler
-from sampler_core import ParallelSampler
 from schemas.datatypes.cfg import Config, SampleCFG
 from schemas.datatypes.env import Env
 from schemas.datatypes.misc import EpochSplitIterInfo, ExtFullGraph, Meta, Result
@@ -158,11 +158,11 @@ class Host:
         self.last_epoch_result = res
 
         # 打印日志 (Host 端统一打印，Worker 端就可以静默了)
-        print(
+        logger.info(
             f"[Epoch {self.curr_epoch}] "
             f"Train Loss: {res.train_loss:.4f} | Val Loss: {res.val_loss:.4f} | "
             f"Val AUC: {res.val_auc:.4f} | Val AP: {res.val_ap:.4f} | "
-            f"Test AUC: {res.test_auc:.4f} | Test AP: {res.test_ap:.4f} | "
+            f"Test AUC: {res.test_auc:.4f} | Test AP: {res.test_ap:.4f}"
         )
 
     def early_stop_check(self, cur_epoch: int) -> bool:
@@ -188,7 +188,7 @@ class Host:
             self.patience_counter += 1
         # --- 早停判断 ---
         if self.patience_counter >= self.patience:
-            print(
+            logger.info(
                 f"🛑 Early stopping triggered at epoch {cur_epoch}. "
                 f"Best AP was {self.best_ap_result.val_ap:.4f} at epoch {self.best_ap_epoch}."
             )
@@ -198,22 +198,38 @@ class Host:
 
     def _init_sampler(self, graph: ExtFullGraph, s_cfg: SampleCFG) -> None:
         self.neg_sampler = NegLinkSampler(graph)
-        self.ngh_sampler = None
+        self.ngh_sampler: None | SimpleSampler | WindowSampler = None
+        # 1. Ensure arrays are strictly 1D, C-contiguous, and use the correct dtypes
+        indptr_arr = np.ascontiguousarray(graph.indptr, dtype=np.int64)
+        indices_arr = np.ascontiguousarray(graph.indices, dtype=np.int64)
+        eid_arr = np.ascontiguousarray(graph.eid, dtype=np.int64)
+        ts_arr = np.ascontiguousarray(graph.ts, dtype=np.float32)
+
+        temporal_graph = TemporalGraph(
+            indptr=indptr_arr, indices=indices_arr, eid=eid_arr, ts=ts_arr
+        )
+
         if self.sample_support_node:
-            self.ngh_sampler = ParallelSampler(
-                graph.indptr,
-                graph.indices,
-                graph.eid,
-                graph.ts,
-                s_cfg.num_thread,
-                1,
-                s_cfg.layer,
-                s_cfg.neighbor,
-                s_cfg.strategy == "recent",
-                s_cfg.prop_time,
-                s_cfg.history,
-                float(s_cfg.duration),
-            )
+            if s_cfg.history == 1:
+                self.ngh_sampler = SimpleSampler(
+                    temporal_graph,
+                    s_cfg.num_thread,
+                    s_cfg.layer,
+                    s_cfg.neighbor,
+                    s_cfg.strategy == "recent",
+                    s_cfg.prop_time,
+                )
+            else:
+                self.ngh_sampler = WindowSampler(
+                    temporal_graph,
+                    s_cfg.num_thread,
+                    s_cfg.layer,
+                    s_cfg.neighbor,
+                    s_cfg.strategy == "recent",
+                    s_cfg.prop_time,
+                    s_cfg.history,
+                    float(s_cfg.duration),
+                )
             self.sample_history = s_cfg.history
 
     def start_all_threads(self) -> None:
@@ -232,7 +248,7 @@ class Host:
         """
         self.start_all_threads()
         for e in range(self.total_epoch):
-            print(f"Starting Epoch {e}")
+            logger.info("Starting Epoch %s", e)
             self._handle_a_split(self.tr_df, "train", cur_epoch=e)
             self._handle_a_split(self.va_df, "val", cur_epoch=e)
             self._handle_a_split(self.te_df, "test", cur_epoch=e)
@@ -241,7 +257,7 @@ class Host:
                 break
 
         # 打印最佳AP对应的Test结果
-        print(
+        logger.info(
             f"Best Val AP: {self.best_ap_result.val_ap:.4f} @ Epoch {self.best_ap_epoch} | "
             f"Test AP: {self.best_ap_result.test_ap:.4f} | "
             f"Test AUC: {self.best_ap_result.test_auc:.4f}"
@@ -272,6 +288,20 @@ class Host:
     def _handle_a_split(
         self, df: pd.DataFrame, split: Literal["train", "val", "test"], cur_epoch: int
     ) -> None:
+        if "ext_roll" in df.columns:
+            ext_roll = df["ext_roll"]
+            is_valid_split = (
+                (split == "train" and ext_roll.eq(0).all())
+                or (split == "val" and ext_roll.eq(1).all())
+                or (split == "test" and ext_roll.ge(2).all())
+            )
+            if not is_valid_split:
+                found_rolls = sorted(ext_roll.dropna().unique().tolist())
+                raise ValueError(
+                    f"Split contamination detected for split={split}. "
+                    f"Found ext_roll values: {found_rolls}"
+                )
+
         df = df.reset_index(names=["eid"])
 
         if len(df) == 0:
@@ -284,11 +314,16 @@ class Host:
         df_out = df_out.assign(step_id=step_id, gpu_id=gpu_id)
 
         n_macro_of_split = df_out["step_id"].nunique()
+        step_desc_map = {
+            "train": "Train Step",
+            "val": "Val Step",
+            "test": "Test Step",
+        }
 
         for cur_macro_of_split, step_df in tqdm(
             df_out.groupby("step_id", sort=False),
             total=n_macro_of_split,
-            desc="Processing steps",
+            desc=step_desc_map[split],
         ):
             for _, edges in step_df.groupby("gpu_id", sort=False):
                 epoch_split_iter_info = EpochSplitIterInfo(
@@ -299,14 +334,14 @@ class Host:
                     cur_macro_of_epoch=self.cur_macro_of_epoch,
                     split=split,
                 )
-                logger.info(f"epoch_split_iter_info: {epoch_split_iter_info}")
-                logger.info(
+                logger.debug(f"epoch_split_iter_info: {epoch_split_iter_info}")
+                logger.debug(
                     f"macro_position_of_split: {epoch_split_iter_info.macro_position_of_split}"
                 )
-                logger.info(
+                logger.debug(
                     f"is_last_macro_of_epoch: {epoch_split_iter_info.is_last_macro_of_epoch}"
                 )
-                logger.info(
+                logger.debug(
                     f"is_last_macro_of_all_epoch: {epoch_split_iter_info.is_last_macro_of_all_epoch}"
                 )
                 self._add_to_td_list(edges, epoch_split_iter_info)
@@ -317,8 +352,8 @@ class Host:
 
     def _cleanup_per_epoch(self) -> None:
         self.meta_in_q.put("end_of_epoch")
-        if self.ngh_sampler is not None:
-            self.ngh_sampler.reset()
+        # if self.ngh_sampler is not None:
+        #     self.ngh_sampler.reset()
         self.cur_macro_of_epoch = 0
         self.curr_epoch += 1
 
@@ -326,7 +361,7 @@ class Host:
         self, edges: pd.DataFrame, epoch_split_iter_info: EpochSplitIterInfo
     ) -> None:
         # show edges["time"].values for debug
-        # print(f"Edge times: {edges['time'].values}")
+        # logger.info(f"Edge times: {edges['time'].values}")
         src = torch.as_tensor(edges["src"].values, dtype=torch.long)
         dst = torch.as_tensor(edges["dst"].values, dtype=torch.long)
         ts = torch.as_tensor(edges["time"].values, dtype=torch.float32)
@@ -366,6 +401,10 @@ class Host:
             assert self.ngh_sampler is not None
 
             n2r_meta = sample(self.ngh_sampler, src, dst, neg_dst, ts)
+            # todo: print src, dst, neg_dst, ts
+            # print(
+            #     f"src: {src.shape}, dst: {dst.shape}, neg_dst: {neg_dst.shape}, ts: {ts.shape}"
+            # )
             assert len(n2r_meta) == 1, "TGN only supports 1 layer currently"
 
             all_nodes, root_nodes = tgn_analyze_all_n_root(n2r_meta[0], src.shape[0])
@@ -403,4 +442,4 @@ class Host:
         self.scatter.join()
         end = time.time()
         elapsed = end - self.start_time
-        print(f"Elapsed time: {elapsed:.2f} seconds")
+        logger.info("Elapsed time: %.2f seconds", elapsed)

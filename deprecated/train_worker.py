@@ -2,11 +2,11 @@
 import numpy as np
 import torch
 import torch.distributed as dist
-from sampler_core import ParallelSampler
-from tqdm import tqdm
-
 from dist_loader import TemporalEdgesDataset, plan_gpu_batches
 from dist_sampler import DistSampler
+from tqdm import tqdm
+
+from deprecated.sampler_core import ParallelSampler
 
 
 def run_epoch_worker(

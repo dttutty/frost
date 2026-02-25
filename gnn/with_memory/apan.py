@@ -4,9 +4,9 @@ from typing import cast
 import torch
 import torch.nn as nn
 from dgl.heterograph import DGLBlock
+from graph_sampler import SimpleSampler
 
 from host.sample import extract_raw_data
-from sampler_core import ParallelSampler
 from schemas.datatypes.misc import DGLBlockMeta
 from schemas.datatypes.plan import BatchNodeStateIO
 from tensor_set import TensorSet
@@ -48,7 +48,7 @@ def analyze_need(
 
 
 def sample(
-    ngh_sampler: ParallelSampler,
+    ngh_sampler: SimpleSampler,
     src: torch.Tensor,
     dst: torch.Tensor,
     ts: torch.Tensor,

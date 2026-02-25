@@ -233,8 +233,10 @@ class DynamicPlanner(ThreadBase):
                 empty_ts = TensorSet(empty_tensor)
                 next_needs: list[TensorSet] = [empty_ts for _ in range(self.n_gpus)]
                 next_updates: list[TensorSet] = [empty_ts for _ in range(self.n_gpus)]
-                print("------------------------------------------metas[0].batch_idx")
-                print(metas[0].batch_idx)
+                logger.debug(
+                    "------------------------------------------metas[0].batch_idx"
+                )
+                logger.debug("%s", metas[0].batch_idx)
                 plan = self._plan(needs, updates, next_needs, next_updates, metas)
                 # this time will generate a plan, but next time will not generate plan
                 self.out_q.put(plan)
@@ -246,8 +248,10 @@ class DynamicPlanner(ThreadBase):
                 self.fetch = needs
             else:
                 needs, updates, metas = self.pending
-                print("------------------------------------------metas[0].batch_idx")
-                print(metas[0].batch_idx)
+                logger.debug(
+                    "------------------------------------------metas[0].batch_idx"
+                )
+                logger.debug("%s", metas[0].batch_idx)
 
                 plan = self._plan(needs, updates, in_q_data[0], in_q_data[1], metas)
                 self.out_q.put(plan)

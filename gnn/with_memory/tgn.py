@@ -89,7 +89,7 @@ class TGN(torch.nn.Module):
     ) -> torch.Tensor:
         block = mfgs[0][0]
         # show block info(datatype of each srcdata field)
-        # print(block)
+        # logger.debug(block)
 
         updated_mem: torch.Tensor = cast(torch.Tensor, block.srcdata["updated_mem"])
         # fill in updated memory to blocks

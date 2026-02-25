@@ -126,12 +126,12 @@ def make_p2p_task(
 
         name = "make_p2p_task_construction"
 
-        print(f"\n[CRITICAL ERROR] P2P Mismatch on Rank {rank} | Op: {name}")
-        print(f"  > Sum of send_cts (Planned): {total_planned_send}")
-        print(f"  > Actual Tensor dim0 (Gathered): {real_shape}")
-        print(f"  > Tensor Full Shape: {send_nid.shape}")
-        print(f"  > Send Cts List (Planned): {send_cts}")
-        print(f"  > Actual Gathered Sizes: {sizes}")
+        logger.debug("\n[CRITICAL ERROR] P2P Mismatch on Rank %s | Op: %s", rank, name)
+        logger.debug("  > Sum of send_cts (Planned): %s", total_planned_send)
+        logger.debug("  > Actual Tensor dim0 (Gathered): %s", real_shape)
+        logger.debug("  > Tensor Full Shape: %s", send_nid.shape)
+        logger.debug("  > Send Cts List (Planned): %s", send_cts)
+        logger.debug("  > Actual Gathered Sizes: %s", sizes)
         sys.stdout.flush()
 
         # 抛出异常让程序停在这里
