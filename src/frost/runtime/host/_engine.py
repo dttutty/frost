@@ -52,9 +52,9 @@ class Host:
         start_time: float,
         analyzer: AnalyzerProto,
         gpu_topo: list[int],
-        batch_size: int = 1000,
-        n_epoch: int = 100,
-        patience: int = 50,
+        batch_size: int,
+        n_epoch: int,
+        patience: int,
     ) -> None:
         """
         initialize the host with configuration, graph data, edge dataframe, and environment settings

@@ -375,6 +375,7 @@ class DyAssembler(StreamThreadBase):
 
             # Now block and wait for network data
             delta_tuple = self.delta_q.get(block=True)
+
             logger.debug(
                 f"DyAssembler received delta for batch {meta.batch_idx}, epoch {epoch_count}"
             )
@@ -385,6 +386,9 @@ class DyAssembler(StreamThreadBase):
                 # Wait for P2P network streams to finish receiving
                 for work in works:
                     work.wait()
+
+                mem = mem.clone()
+                box = box.clone()
 
                 box_data = box.data2recv
 

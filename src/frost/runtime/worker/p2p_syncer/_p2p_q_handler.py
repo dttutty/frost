@@ -199,9 +199,8 @@ class P2PQHandler(ThreadBase):
                 # # 5. 记录 Event 并发送
                 # ready_event: CudaEventLike = torch.cuda.Event()
                 # ready_event.record(torch.cuda.current_stream())
-                mem_p2p_new = mem_p2p.clone()
-                box_p2p_new = box_p2p.clone()
-                self.delta_q.put((mem_p2p_new, box_p2p, works))
+
+                self.delta_q.put((mem_p2p, box_p2p, works))
                 logger.debug(
                     f"Rank {self.env.local_rank} finished P2P communication, posted delta to delta_q, count={self.count}"
                 )

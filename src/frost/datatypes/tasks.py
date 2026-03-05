@@ -27,7 +27,7 @@ class BoxTask:
     box_plan: DyPlan
     is_last: bool
     old_box: BoxTsNid
-    graph: Graph
+    graph: Graph | None
 
     def __repr__(self) -> str:
         # if data is tensor, show its shape

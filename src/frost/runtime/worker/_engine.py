@@ -157,6 +157,7 @@ class Worker:
             box_task_q=self.box_task_q,
             header=predictor,
             n_neg=self.n_neg,
+            postman=self.postman,
         )
 
         if optimizer == "adam":
@@ -346,6 +347,7 @@ class Worker:
         meta.plan_set = None
         meta.labels = None
         meta.graph = None
+        meta = None
 
     def start_all_threads(self) -> None:
         self.h2d.start()
@@ -471,6 +473,7 @@ class Worker:
                 self.curr_epoch += 1
                 if self.mem_box_store:
                     self.mem_box_store.reset()
+                torch.cuda.empty_cache()  # 尝试减少内存碎片，帮助稳定训练
             if full is None:
                 if self.mem_box_store is not None:
                     assert self.box_task_q is not None
