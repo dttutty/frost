@@ -70,8 +70,6 @@ class H2D(StreamThreadBase):
             # move gnn_mfgs to gpu
             meta.flat_graph = meta.flat_graph.to(self.device)
 
-            self.ring_buf.release()
-
             # init x
 
             one_labels = torch.ones(meta.n_src, device=self.device)

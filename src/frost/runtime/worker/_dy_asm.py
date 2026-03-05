@@ -108,34 +108,35 @@ class DyAssembler(StreamThreadBase):
         assert valid_mask.dtype == torch.bool, "valid_mask must be a bool tensor"
 
         table_size = shared_data.shape[0]
-        max_id = fetch_nids.max().item()
-        min_id = fetch_nids.min().item()
+        if __debug__:
+            max_id = fetch_nids.max().item()
+            min_id = fetch_nids.min().item()
 
-        if min_id < 0 or max_id >= table_size:
-            bad_mask = (fetch_nids < 0) | (fetch_nids >= table_size)
-            bad_ids = torch.unique(fetch_nids[bad_mask])
-            preview = bad_ids[:20].tolist()
-            raise IndexError(
-                f"plan.fetch.data contains out-of-bounds indices for shared table. "
-                f"Valid range: [0, {table_size - 1}], "
-                f"actual min={min_id}, max={max_id}. "
-                f"First {len(preview)} bad ids: {preview}"
-            )
+            if min_id < 0 or max_id >= table_size:
+                bad_mask = (fetch_nids < 0) | (fetch_nids >= table_size)
+                bad_ids = torch.unique(fetch_nids[bad_mask])
+                preview = bad_ids[:20].tolist()
+                raise IndexError(
+                    f"plan.fetch.data contains out-of-bounds indices for shared table. "
+                    f"Valid range: [0, {table_size - 1}], "
+                    f"actual min={min_id}, max={max_id}. "
+                    f"First {len(preview)} bad ids: {preview}"
+                )
 
         unique_data_gpu = shared_data[fetch_nids].to(self.device)
         unique_ts_gpu = shared_ts[fetch_nids].to(self.device)
         unique_nids_gpu = fetch_on_gpu
-
-        if unique_nids_gpu.numel() > 1:
-            if not torch.all(unique_nids_gpu[1:] > unique_nids_gpu[:-1]):
-                bad_mask = unique_nids_gpu[1:] <= unique_nids_gpu[:-1]
-                bad_pos = torch.nonzero(bad_mask, as_tuple=False).squeeze(-1)
-                preview_pos = bad_pos[:20]
-                preview_vals = unique_nids_gpu[preview_pos].tolist()
-                raise ValueError(
-                    "plan.fetch_on_gpu must be strictly increasing after sort "
-                    f"(sorted and unique). First problematic values: {preview_vals}"
-                )
+        if __debug__:
+            if unique_nids_gpu.numel() > 1:
+                if not torch.all(unique_nids_gpu[1:] > unique_nids_gpu[:-1]):
+                    bad_mask = unique_nids_gpu[1:] <= unique_nids_gpu[:-1]
+                    bad_pos = torch.nonzero(bad_mask, as_tuple=False).squeeze(-1)
+                    preview_pos = bad_pos[:20]
+                    preview_vals = unique_nids_gpu[preview_pos].tolist()
+                    raise ValueError(
+                        "plan.fetch_on_gpu must be strictly increasing after sort "
+                        f"(sorted and unique). First problematic values: {preview_vals}"
+                    )
 
         query_nids = graph.nid[valid_mask]
         if query_nids.numel() == 0:
@@ -175,16 +176,17 @@ class DyAssembler(StreamThreadBase):
         if delta_source.nid.numel() == 0:
             return None, None
 
-        if delta_source.nid.numel() > 1:
-            if not torch.all(delta_source.nid[1:] > delta_source.nid[:-1]):
-                bad_mask = delta_source.nid[1:] <= delta_source.nid[:-1]
-                bad_pos = torch.nonzero(bad_mask, as_tuple=False).squeeze(-1)
-                preview_pos = bad_pos[:20]
-                preview_vals = delta_source.nid[preview_pos].tolist()
-                raise ValueError(
-                    "delta_source.nid must be strictly increasing "
-                    f"(sorted and unique). First problematic values: {preview_vals}"
-                )
+        if __debug__:
+            if delta_source.nid.numel() > 1:
+                if not torch.all(delta_source.nid[1:] > delta_source.nid[:-1]):
+                    bad_mask = delta_source.nid[1:] <= delta_source.nid[:-1]
+                    bad_pos = torch.nonzero(bad_mask, as_tuple=False).squeeze(-1)
+                    preview_pos = bad_pos[:20]
+                    preview_vals = delta_source.nid[preview_pos].tolist()
+                    raise ValueError(
+                        "delta_source.nid must be strictly increasing "
+                        f"(sorted and unique). First problematic values: {preview_vals}"
+                    )
 
         valid_nids = graph.nid[valid_mask]
         if valid_nids.numel() == 0:
@@ -193,16 +195,17 @@ class DyAssembler(StreamThreadBase):
         pos = torch.searchsorted(delta_source.nid, valid_nids)
         in_bound = pos < delta_source.nid.numel()
         pos_safe = pos.clamp(max=delta_source.nid.numel() - 1)
-        found_mask = in_bound & (delta_source.nid[pos_safe] == valid_nids)
+        if __debug__:
+            found_mask = in_bound & (delta_source.nid[pos_safe] == valid_nids)
 
-        if not torch.all(found_mask):
-            missing_nids = torch.unique(valid_nids[~found_mask])
-            preview = missing_nids[:20].tolist()
-            raise ValueError(
-                "Some graph.nid entries selected by valid_mask are missing from delta_source.nid. "
-                f"Missing count: {missing_nids.numel()}. "
-                f"First {len(preview)} missing NIDs: {preview}"
-            )
+            if not torch.all(found_mask):
+                missing_nids = torch.unique(valid_nids[~found_mask])
+                preview = missing_nids[:20].tolist()
+                raise ValueError(
+                    "Some graph.nid entries selected by valid_mask are missing from delta_source.nid. "
+                    f"Missing count: {missing_nids.numel()}. "
+                    f"First {len(preview)} missing NIDs: {preview}"
+                )
 
         global_positions = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
         local_positions = pos_safe
@@ -290,10 +293,11 @@ class DyAssembler(StreamThreadBase):
         shared_nids = plan.fetch_on_gpu
         assert shared_nids.dim() == 1, "plan.fetch_on_gpu must be 1D"
 
-        # searchsorted requires sorted keys
-        if shared_nids.numel() > 1:
-            if not torch.all(shared_nids[1:] >= shared_nids[:-1]):
-                shared_nids = torch.sort(shared_nids).values
+        if __debug__:
+            # searchsorted requires sorted keys
+            if shared_nids.numel() > 1:
+                if not torch.all(shared_nids[1:] >= shared_nids[:-1]):
+                    shared_nids = torch.sort(shared_nids).values
 
         query_nids = graph_nid[base_mask]
         pos = torch.searchsorted(shared_nids, query_nids)
@@ -387,8 +391,8 @@ class DyAssembler(StreamThreadBase):
                 for work in works:
                     work.wait()
 
-                mem = mem.clone()
-                box = box.clone()
+                # mem = mem.clone()
+                # box = box.clone()
 
                 box_data = box.data2recv
 

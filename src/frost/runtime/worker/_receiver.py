@@ -129,9 +129,11 @@ class Receiver(ThreadBase):
                         )
                 # --- end checks ---
                 meta.flat_graph = FlatGraph(
-                    nid=buf["NID"][:buf_len],
-                    eid=buf["EID"][:buf_len],
-                    ts=buf["TS"][:buf_len],
+                    nid=buf["NID"][:buf_len].clone(),
+                    eid=buf["EID"][:buf_len].clone(),
+                    ts=buf["TS"][:buf_len].clone(),
                 )
                 buf = None
+                self.ring_buf.release()
+
                 self.received_q.put(meta, block=True)
