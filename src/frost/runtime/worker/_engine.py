@@ -158,6 +158,7 @@ class Worker:
             header=predictor,
             n_neg=self.n_neg,
             postman=self.postman,
+            sample_4_neg=ring_buf.sample_4_neg,
         )
 
         if optimizer == "adam":

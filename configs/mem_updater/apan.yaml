@@ -1,5 +1,4 @@
 _target_: frost.models.mem_updater.TransformerMemoryUpdater
-strategy: 'last'
 d_time: ${d_time}
 d_mem: 256
 boxsize: 10
