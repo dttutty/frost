@@ -94,7 +94,7 @@ class Worker:
         self.curr_epoch = 0
         self.logger: logging.Logger = logger
         self.fetch_factor = 1
-        self.full_q = Q(maxsize=1)
+        self.full_q = Q(maxsize=2 if mem_box_store is None else 1)
         self.device = torch.device(f"cuda:{env.local_rank}")
         self.comm = cast(torch.cuda.Stream, torch.cuda.Stream(device=self.device))
         self.h2d_sem: threading.Semaphore = threading.Semaphore(0)
@@ -107,7 +107,7 @@ class Worker:
         self.p2p_sem = threading.Semaphore(0)
         self.result_q = Q(maxsize=1)
 
-        self.received_q = Q(maxsize=1)
+        self.received_q = Q(maxsize=2 if mem_box_store is None else 1)
         self.receiver = Receiver(
             env=self.env,
             received_q=self.received_q,

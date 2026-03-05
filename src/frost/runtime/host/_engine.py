@@ -73,9 +73,9 @@ class Host:
         # 1. 初始化通信器
         self.stop_ev = threading.Event()
 
-        self.meta_in_q = Q(maxsize=2)
+        self.meta_in_q = Q(maxsize=4 if not self.has_mem else 2)
         self.meta_bundle_q = Q(maxsize=1)
-        self.scatter_q = Q(maxsize=1)
+        self.scatter_q = Q(maxsize=2 if not self.has_mem else 1)
         self.cur_macro_of_epoch = 0
 
         if self.has_mem:
