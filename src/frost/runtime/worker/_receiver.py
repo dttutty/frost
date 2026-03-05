@@ -12,6 +12,7 @@ from frost.datatypes.graph import FlatGraph
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.runtime._thread_base import ThreadBase
+from frost.runtime._wire import ControlWire, unpack_wire_message, wire_to_meta
 from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
@@ -41,14 +42,21 @@ class Receiver(ThreadBase):
 
         while not self.stop_ev.is_set():
             # self.manifest_buf = [None] * MANIFEST_SIZE
-            recv_list: list[Union[Meta, str, None]] = [None]
+            nbytes = torch.empty(1, dtype=torch.long)
+            dist.recv(nbytes, src=self.env.host_rank)
+            payload = bytes()
+            if nbytes.item() > 0:
+                payload_tensor = torch.empty(int(nbytes.item()), dtype=torch.uint8)
+                dist.recv(payload_tensor, src=self.env.host_rank)
+                payload = bytes(payload_tensor.tolist())
 
-            dist.scatter_object_list(
-                recv_list,
-                scatter_object_input_list=None,
-                src=self.env.host_rank,
-            )
-            meta = recv_list[0]
+            msg: ControlWire = unpack_wire_message(payload)
+            if msg["kind"] == "meta":
+                meta: Union[dict, str, None] = msg["meta"]
+            elif msg["kind"] == "end_of_epoch":
+                meta = "end_of_epoch"
+            else:
+                meta = None
             self._recv_seq += 1
 
             if meta is None:
@@ -67,6 +75,8 @@ class Receiver(ThreadBase):
                 )
 
             else:
+                assert isinstance(meta, dict)
+                meta = wire_to_meta(meta)
                 assert isinstance(meta, Meta)
                 batch_count += 1
                 buf = self.ring_buf.get(meta.buf_len, block=True)
