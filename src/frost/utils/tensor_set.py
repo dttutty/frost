@@ -1,8 +1,12 @@
 import logging
+import threading
 
 import torch
 
 logger = logging.getLogger(__name__)
+
+
+_SET_OP_LOCK = threading.Lock()
 
 
 class TensorSet:
@@ -37,32 +41,50 @@ class TensorSet:
     def _extract_tensor(self, other: object) -> torch.Tensor:
         """Helper to handle both TensorSet and torch.Tensor inputs"""
         if isinstance(other, TensorSet):
-            return other.data
+            other_t = other.data
         elif isinstance(other, torch.Tensor):
-            return other if other.dim() == 1 else other.reshape(-1)
+            other_t = other if other.dim() == 1 else other.reshape(-1)
         else:
             raise TypeError(f"Unsupported operand type: {type(other)}")
+
+        if other_t.device != self.data.device:
+            other_t = other_t.to(self.data.device)
+        if other_t.dtype != self.data.dtype:
+            other_t = other_t.to(self.data.dtype)
+        return other_t
+
+    def _contains_mask(self, other_t: torch.Tensor) -> torch.Tensor:
+        """Return element-wise membership mask without using torch.isin."""
+        if self.data.numel() == 0:
+            return torch.zeros_like(self.data, dtype=torch.bool)
+        if other_t.numel() == 0:
+            return torch.zeros_like(self.data, dtype=torch.bool)
+
+        sorted_other = torch.sort(other_t).values
+        idx = torch.searchsorted(sorted_other, self.data)
+        in_range = idx < sorted_other.numel()
+        mask = torch.zeros_like(self.data, dtype=torch.bool)
+        mask[in_range] = sorted_other[idx[in_range]] == self.data[in_range]
+        return mask
 
     # -----------------------------------------------------------
     # 1. 实现 & 号 (Intersection / 交集)
     # -----------------------------------------------------------
     def __and__(self, other: object) -> "TensorSet":
-        other_t = self._extract_tensor(other)
-        # mask = isin(self, other)
-        mask = torch.isin(
-            self.data,
-            other_t,
-        )
-        # 返回新的 TensorSet
-        return TensorSet(self.data[mask], sort_now=False)
+        with _SET_OP_LOCK:
+            other_t = self._extract_tensor(other)
+            mask = self._contains_mask(other_t)
+            # 返回新的 TensorSet
+            return TensorSet(self.data[mask], sort_now=False)
 
     # -----------------------------------------------------------
     # 2. 实现 | 号 (Union / 并集)
     # -----------------------------------------------------------
     def __or__(self, other: object) -> "TensorSet":
-        other_t = self._extract_tensor(other)
-        # Cat and unique
-        return TensorSet(torch.cat((self.data, other_t)), sort_now=True)
+        with _SET_OP_LOCK:
+            other_t = self._extract_tensor(other)
+            # Cat and unique
+            return TensorSet(torch.cat((self.data, other_t)), sort_now=True)
 
     # -----------------------------------------------------------
     # 3. 实现 + 号 (Alias for Union / 加号也做并集)
@@ -75,34 +97,24 @@ class TensorSet:
     # 4. 实现 - 号 (Difference / 差集)
     # -----------------------------------------------------------
     def __sub__(self, other: object) -> "TensorSet":
-        other_t = self._extract_tensor(other)
-        # ~isin
-        mask = ~torch.isin(
-            self.data,
-            other_t,
-        )
-        return TensorSet(self.data[mask], sort_now=False)
+        with _SET_OP_LOCK:
+            other_t = self._extract_tensor(other)
+            mask = ~self._contains_mask(other_t)
+            return TensorSet(self.data[mask], sort_now=False)
 
     # -----------------------------------------------------------
     # 5. 实现 ^ 号 (Symmetric Difference / 对称差集)
     # -----------------------------------------------------------
     def __xor__(self, other: object) -> "TensorSet":
-        other_t = self._extract_tensor(other)
-        # (A-B) U (B-A)
-        # 为了速度，直接算两边的差集然后拼接
-        diff1 = self.data[
-            ~torch.isin(
-                self.data,
-                other_t,
-            )
-        ]
-        diff2 = other_t[
-            ~torch.isin(
-                other_t,
-                self.data,
-            )
-        ]
-        return TensorSet(torch.cat((diff1, diff2)), sort_now=True)
+        with _SET_OP_LOCK:
+            other_t = self._extract_tensor(other)
+            # (A-B) U (B-A)
+            # 为了速度，直接算两边的差集然后拼接
+            diff1 = self.data[~self._contains_mask(other_t)]
+            diff2 = other_t[
+                ~TensorSet(other_t, sort_now=False)._contains_mask(self.data)
+            ]
+            return TensorSet(torch.cat((diff1, diff2)), sort_now=True)
 
     # 支持 len()
     def __len__(self) -> int:
