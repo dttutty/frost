@@ -98,6 +98,12 @@ class NghSampler:
         self.ring_buf = ring_buf
         self.sample_4_neg = sample_4_neg
         self.n_neg = n_neg
+        # Keep sampler input dtype aligned with temporal-graph indices to avoid
+        # unsafe casts in the nanobind/C++ boundary.
+        graph_indices = getattr(graph, "indices", None)
+        self._node_np_dtype = (
+            graph_indices.dtype if graph_indices is not None else np.int64
+        )
 
     def sample(
         self,
@@ -125,8 +131,15 @@ class NghSampler:
                 f"got nid={nid_4_sample.shape[0]}, ts={ts_4_sample.shape[0]}"
             )
 
-        nid_np = nid_4_sample.cpu().numpy()
-        ts_np = ts_4_sample.cpu().numpy()
+        # Materialize contiguous numpy buffers before crossing into nanobind.
+        # This avoids passing non-contiguous views / unexpected dtypes that can
+        # trigger undefined behavior in C++ sampler code.
+        nid_np_safe = np.ascontiguousarray(
+            nid_4_sample.detach().cpu().numpy(), dtype=self._node_np_dtype
+        )
+        ts_np_safe = np.ascontiguousarray(
+            ts_4_sample.detach().cpu().numpy(), dtype=np.float32
+        )
 
         # Wait for an empty slot
         slot = self.ring_buf.acquire_slot(gpu_id)
@@ -140,24 +153,10 @@ class NghSampler:
         slot["EID"][:n_src] = pos_eid.cpu().clone()
         slot["EID"][n_src:num_seeds] = -1
 
-        nid_np_safe = nid_np.copy()
-        ts_np_safe = ts_np.copy()
-
         # Get neighbors from C++ nanobind backend
         ngh_nid, ngh_eid, ngh_ts = self.seq_sampler.get_historical_neighbors(
             nid_np_safe, ts_np_safe, self.n_ngh
         )
-
-        def to_torch_safe(arr, dtype):
-            # 强制检查，如果还是 object，说明 C++ 逻辑依然没对
-            if getattr(arr, "dtype", None) == object:
-                raise TypeError(f"C++ returned an object-type array! {arr}")
-            return (
-                torch.from_numpy(np.array(arr, copy=False))
-                .to(dtype)
-                .reshape(-1)
-                .clone()
-            )
 
         # 在 NghSampler.sample 内部使用：
         n_tensor = dist_safe_tensor(ngh_nid, torch.int32).reshape(-1)
@@ -269,11 +268,16 @@ class MultiHopNghSampler:
                     n_ngh=n_ngh,
                 )
 
-                # Convert directly using DLPack, retaining 2D shape [num_valid, n_ngh]
-                out_nodes_tensor = torch.from_dlpack(out_nodes).to(torch.int32).clone()
-                out_edges_tensor = torch.from_dlpack(out_edges).to(torch.int32).clone()
-                out_times_tensor = (
-                    torch.from_dlpack(out_times).to(torch.float32).clone()
+                # Use defensive conversion to avoid DLPack / capsule lifetime issues
+                # from nanobind-managed arrays.
+                out_nodes_tensor = dist_safe_tensor(out_nodes, torch.int32).reshape(
+                    -1, n_ngh
+                )
+                out_edges_tensor = dist_safe_tensor(out_edges, torch.int32).reshape(
+                    -1, n_ngh
+                )
+                out_times_tensor = dist_safe_tensor(out_times, torch.float32).reshape(
+                    -1, n_ngh
                 )
 
                 sampled_nodes[valid_mask] = out_nodes_tensor
