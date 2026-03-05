@@ -345,6 +345,7 @@ class Worker:
         meta.flat_graph = None
         meta.plan_set = None
         meta.labels = None
+        meta.graph = None
 
     def start_all_threads(self) -> None:
         self.h2d.start()
