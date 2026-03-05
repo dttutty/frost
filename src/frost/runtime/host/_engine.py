@@ -22,6 +22,12 @@ from frost.sampling.neg_sampler import NegLinkSampler
 logger = logging.getLogger(__name__)
 
 
+def _disable_tqdm_monitor_thread() -> None:
+    """Disable tqdm's monitor thread to avoid debugger/threading instability."""
+    if getattr(tqdm, "monitor_interval", 0) != 0:
+        tqdm.monitor_interval = 0
+
+
 class Host:
     meta_in_q: MataBatcherInQ
     mem_plan_out_q: DyPlanOutQ | None = None
@@ -208,6 +214,7 @@ class Host:
         """
         公共的训练入口方法
         """
+        _disable_tqdm_monitor_thread()
         self.start_all_threads()
         for e in range(self.total_epoch):
             logger.info("Starting Epoch %s", e)
