@@ -307,6 +307,7 @@ class Worker:
 
         self.optimizer.step()
         self.train_loss_tracker.update(loss.detach())
+        self._release_meta_tensors(meta)
 
     @torch.no_grad()
     def eval(self, meta: Meta) -> None:
@@ -335,6 +336,15 @@ class Worker:
         else:
             assert meta.split == "test"
             self.test_metrics.update(preds=y_pred, target=meta.labels.long())
+
+        self._release_meta_tensors(meta)
+
+    def _release_meta_tensors(self, meta: Meta) -> None:
+        """Drop per-batch GPU tensors ASAP to reduce delayed CUDA memory recycling."""
+
+        meta.flat_graph = None
+        meta.plan_set = None
+        meta.labels = None
 
     def start_all_threads(self) -> None:
         self.h2d.start()
