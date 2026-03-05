@@ -1,4 +1,4 @@
 _target_: frost.models.encoder.jodie.JODIE
 d_time: ${d_time}
-d_mem: ${d_mem}
-d_node: ${ndim}
+d_mem: ${mem_updater.d_mem}
+ndim: ${ndim}

@@ -47,11 +47,12 @@ class NoSampler:
         ring_buf: RingBuf,
         n_neg: int = 1,  # from hydra config
         fanout: list[int] | None = None,
+        sample_4_neg: bool = False,
     ):
-        assert fanout is None
         self.ring_buf = ring_buf
         self.n_neg = n_neg
-        self.fanout = fanout
+        self.fanout = None  # NoSampler is always 0-hop; ignore any passed fanout
+        self.sample_4_neg = sample_4_neg
 
     def sample(
         self,
