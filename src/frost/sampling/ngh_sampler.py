@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Literal, cast
 
 import numpy as np
@@ -110,6 +111,12 @@ class NghSampler:
         graph_indices = getattr(graph, "indices", None)
         self._node_np_dtype = (
             graph_indices.dtype if graph_indices is not None else np.int64
+        )
+        omp_disabled = os.getenv("FROST_SEQSAMPLER_NO_OMP", "").strip().lower() in {"1", "true", "yes", "on"}
+        logger.info(
+            "NghSampler initialized with SeqSampler backend path: %s (FROST_SEQSAMPLER_NO_OMP=%r)",
+            "single-thread" if omp_disabled else "OpenMP",
+            os.getenv("FROST_SEQSAMPLER_NO_OMP"),
         )
 
     def sample(
