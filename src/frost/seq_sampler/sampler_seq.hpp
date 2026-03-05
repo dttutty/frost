@@ -97,32 +97,30 @@ public:
         std::vector<ID_T> out_e(bs * n_ngh, -1);
         std::vector<TIME_T> out_t(bs * n_ngh, 0.0f);
 
-        nb::gil_scoped_release release;
+        {
+            nb::gil_scoped_release release;
 
-        if (disable_omp) {
-            for (size_t i = 0; i < bs; ++i) {
-                std::mt19937 local_rng(seed_val + i);
-                auto [start, end] = this->find_edge_range_base(nid[i], ts[i]);
+            if (disable_omp) {
+                for (size_t i = 0; i < bs; ++i) {
+                    std::mt19937 local_rng(seed_val + i);
+                    auto [start, end] = this->find_edge_range_base(nid[i], ts[i]);
 
-                // 计算当前 batch 的起始偏移量
-                size_t offset = i * n_ngh;
-                // 直接传入当前切片的起始地址
-                this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
-                                &out_n[offset], &out_e[offset], &out_t[offset]);
+                    size_t offset = i * n_ngh;
+                    this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
+                                    &out_n[offset], &out_e[offset], &out_t[offset]);
+                }
+            } else {
+                #pragma omp parallel for schedule(static)
+                for (size_t i = 0; i < bs; ++i) {
+                    std::mt19937 local_rng(seed_val + i);
+                    auto [start, end] = this->find_edge_range_base(nid[i], ts[i]);
+
+                    size_t offset = i * n_ngh;
+                    this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
+                                    &out_n[offset], &out_e[offset], &out_t[offset]);
+                }
             }
-        } else {
-            #pragma omp parallel for schedule(static)
-            for (size_t i = 0; i < bs; ++i) {
-                std::mt19937 local_rng(seed_val + i);
-                auto [start, end] = this->find_edge_range_base(nid[i], ts[i]);
-
-                // 计算当前 batch 的起始偏移量
-                size_t offset = i * n_ngh;
-                // 直接传入当前切片的起始地址
-                this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
-                                &out_n[offset], &out_e[offset], &out_t[offset]);
-            }
-        }
+        } // GIL reacquired here before creating Python objects
 
         return { vec2npy_2d(out_n, bs, n_ngh), vec2npy_2d(out_e, bs, n_ngh), vec2npy_2d(out_t, bs, n_ngh) };
     }
@@ -172,45 +170,43 @@ public:
         std::vector<ID_T> out_n(total_size, -1);
         std::vector<ID_T> out_e(total_size, -1);
         std::vector<TIME_T> out_t(total_size, 0.0f);
-        
-        nb::gil_scoped_release release;
 
-        if (disable_omp) {
-            for (size_t i = 0; i < bs; ++i) {
-                std::mt19937 local_rng(seed_val + i);
-                TIME_T base_ts = ts[i];
+        {
+            nb::gil_scoped_release release;
 
-                for (int h = 0; h < num_history; ++h) {
-                    // 计算第 h 个历史窗口的时间范围
-                    TIME_T upper = base_ts - h * window_duration;
-                    TIME_T lower = base_ts - (h + 1) * window_duration;
-                    auto [start, end] = this->find_edge_range_window(nid[i], upper, lower);
+            if (disable_omp) {
+                for (size_t i = 0; i < bs; ++i) {
+                    std::mt19937 local_rng(seed_val + i);
+                    TIME_T base_ts = ts[i];
 
-                    // 计算当前 batch + 当前 window 的起始偏移量
-                    size_t offset = i * (num_history * n_ngh) + h * n_ngh;
-                    this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
-                                    &out_n[offset], &out_e[offset], &out_t[offset]);
+                    for (int h = 0; h < num_history; ++h) {
+                        TIME_T upper = base_ts - h * window_duration;
+                        TIME_T lower = base_ts - (h + 1) * window_duration;
+                        auto [start, end] = this->find_edge_range_window(nid[i], upper, lower);
+
+                        size_t offset = i * (num_history * n_ngh) + h * n_ngh;
+                        this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
+                                        &out_n[offset], &out_e[offset], &out_t[offset]);
+                    }
+                }
+            } else {
+                #pragma omp parallel for schedule(static)
+                for (size_t i = 0; i < bs; ++i) {
+                    std::mt19937 local_rng(seed_val + i);
+                    TIME_T base_ts = ts[i];
+
+                    for (int h = 0; h < num_history; ++h) {
+                        TIME_T upper = base_ts - h * window_duration;
+                        TIME_T lower = base_ts - (h + 1) * window_duration;
+                        auto [start, end] = this->find_edge_range_window(nid[i], upper, lower);
+
+                        size_t offset = i * (num_history * n_ngh) + h * n_ngh;
+                        this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
+                                        &out_n[offset], &out_e[offset], &out_t[offset]);
+                    }
                 }
             }
-        } else {
-            #pragma omp parallel for schedule(static)
-            for (size_t i = 0; i < bs; ++i) {
-                std::mt19937 local_rng(seed_val + i);
-                TIME_T base_ts = ts[i];
-
-                for (int h = 0; h < num_history; ++h) {
-                    // 计算第 h 个历史窗口的时间范围
-                    TIME_T upper = base_ts - h * window_duration;
-                    TIME_T lower = base_ts - (h + 1) * window_duration;
-                    auto [start, end] = this->find_edge_range_window(nid[i], upper, lower);
-
-                    // 计算当前 batch + 当前 window 的起始偏移量
-                    size_t offset = i * (num_history * n_ngh) + h * n_ngh;
-                    this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
-                                    &out_n[offset], &out_e[offset], &out_t[offset]);
-                }
-            }
-        }
+        } // GIL reacquired here before creating Python objects
 
         return { vec2npy_3d(out_n, bs, num_history, n_ngh), vec2npy_3d(out_e, bs, num_history, n_ngh), vec2npy_3d(out_t, bs, num_history, n_ngh) };
     }
