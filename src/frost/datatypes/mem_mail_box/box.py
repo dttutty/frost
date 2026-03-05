@@ -86,3 +86,8 @@ class BoxTsNid:
             is_sorted=self.is_sorted,
             is_unique=self.is_unique,
         )
+
+    def merge_1_mail(self, mail: "MailTsNid") -> BoxTsNid:
+        from ._data_ops import merge_1_mail
+
+        return merge_1_mail(self, mail)
