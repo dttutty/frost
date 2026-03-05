@@ -1,0 +1,5 @@
+index: "int32"    # 可选: int32, int64
+time: "float32"   # 可选: float32, float64
+efeat: "float32"
+nfeat: "float32"
+mem: "float32"

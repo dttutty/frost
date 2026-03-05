@@ -1,7 +1,19 @@
 import argparse
 import hashlib
+import logging
 import os
+from pathlib import Path
 
+import numpy as np
+import pandas as pd
+import torch
+from gnn.TGN import *
+from neg_sampler import *
+from sklearn.metrics import average_precision_score, f1_score
+from tqdm import tqdm
+from utils import *
+
+logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--data", type=str, help="dataset name")
@@ -27,18 +39,6 @@ args = parser.parse_args()
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 if args.data == "WIKI" or args.data == "REDDIT":
     args.posneg = True
-
-from pathlib import Path
-
-import numpy as np
-import pandas as pd
-import torch
-from gnn.TGN import *
-from sklearn.metrics import average_precision_score, f1_score
-from tqdm import tqdm
-
-from neg_sampler import *
-from utils import *
 
 
 ldf = pd.read_csv(f"DATA/{args.data}/labels.csv")
@@ -176,17 +176,17 @@ def generate_temporal_embeddings(ldf, emb_file_name):
                             ret, sample_param.history, reverse=True, save_on_pgu=True
                         )[0][0]
                     mailbox.write_mail_to_mailbox(
-                        model.memory_updater.last_updated_nid,
-                        model.memory_updater.last_updated_memory,
+                        model.mem_updater.last_updated_nid,
+                        model.mem_updater.last_updated_memory,
                         root_nodes,
                         ts,
                         mem_edge_feats,
                         block,
                     )
                     mailbox.write_node_memory(
-                        model.memory_updater.last_updated_nid,
-                        model.memory_updater.last_updated_memory,
-                        model.memory_updater.last_updated_ts,
+                        model.mem_updater.last_updated_nid,
+                        model.mem_updater.last_updated_memory,
+                        model.mem_updater.last_updated_ts,
                     )
             processed_edge_id += train_param.batch_size
             if processed_edge_id >= len(df):

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 import argparse
+import logging
 from collections import Counter
 
 import numpy as np
 
 
-def load_edges(npz_path):
+logger = logging.getLogger(__name__)
+
+
+def load_edges(npz_path: str) -> Counter:
     """
     Load indptr and indices from an .npz CSR file and
     return a Counter of directed edges (u, v).
@@ -23,17 +27,14 @@ def load_edges(npz_path):
     return edges
 
 
-def check_symmetry(edges):
+def check_symmetry(edges: Counter) -> bool:
     """
     Return True if for every (u, v), count == count of (v, u).
     """
-    for (u, v), cnt in edges.items():
-        if edges.get((v, u), 0) != cnt:
-            return False
-    return True
+    return all(edges.get((v, u), 0) == cnt for (u, v), cnt in edges.items())
 
 
-def main():
+def main() -> None:
     p = argparse.ArgumentParser(
         description="Check if a CSR .npz was built with add_reverse=True"
     )

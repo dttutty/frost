@@ -1,81 +1,28 @@
 [build-system]
-requires = [
-  "setuptools>=64.0.0",
-  "wheel",
-  "pybind11>=2.6.0"
-]
-build-backend = "setuptools.build_meta"
+# 使用 scikit-build-core 统一接管 C++ 编译和 Python 打包
+requires = ["scikit-build-core>=0.10", "nanobind>=2.2"]
+build-backend = "scikit_build_core.build"
 
-# ==============================================================================
-# Ruff 配置 (Linter & Formatter)
-# ==============================================================================
-[tool.ruff]
-# 1. 设定目标版本，防止 Ruff 瞎提建议
-target-version = "py310" # 根据你的实际环境修改，如 py38, py311
-line-length = 88
-indent-width = 4
-
-# 2. 显式配置格式化器 (Ruff 现在也是 Formatter，替代 Black)
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
-skip-magic-trailing-comma = false
-line-ending = "auto"
-
-[tool.ruff.lint.isort]
-known-first-party = ["tgl"]
-combine-as-imports = true
-lines-after-imports = 2
-
-[tool.ruff.lint]
-# 3. 开启工业级规则集
-# E/F: 基本语法错误 (Flake8 核心)
-# I: 导入排序 (Isort)
-# B: 潜在 Bug (Bugbear) - 非常重要！
-# UP: 代码现代化 (Pyupgrade)
-# ANN: 类型注解强制 (你原本的)
-# SIM: 代码简化 (Simplify)
-# RUF: Ruff 特有规则
-select = ["E", "F", "I", "B", "UP", "ANN", "SIM", "RUF"]
-
-# 4. 忽略规则 (保持你原来的，增加了一些常用的)
-ignore = [
-    "ANN101", # Missing type annotation for 'self'
-    "ANN102", # Missing type annotation for 'cls'
-    "ANN002", # Missing type annotation for '*args'
-    "ANN003", # Missing type annotation for '**kwargs'
-    "E501",   # Line too long (交给 Formatter 自动处理，Linter 别报错)
+[project]
+name = "frost"  # 统一对外的包名
+version = "0.1.0"
+description = "A high-performance distributed GNN training framework with sequence-based samplers."
+requires-python = ">=3.10"
+license = {text = "MIT"}
+# 合并两者的依赖
+dependencies = [
+    "torch>=2.0.0",
+    "hydra-core>=1.3.2",
+    "omegaconf",
+    "numpy",
+    "pandas",
+    "tbb"
 ]
 
-[tool.ruff.lint.per-file-ignores]
-# 测试代码不需要文档字串和严格类型
-"tests/*" = ["ANN", "D"]
-# __init__.py 经常有 unused imports (F401)，这是正常的
-"__init__.py" = ["F401"]
+[project.optional-dependencies]
+test = ["pytest", "pytest-cov"]
 
-# ==============================================================================
-# Mypy 配置 (Static Type Checker)
-# ==============================================================================
-[tool.mypy]
-python_version = "3.10" # 保持与 Ruff 一致
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-check_untyped_defs = true
-no_implicit_optional = true
-warn_return_any = true
-warn_unused_ignores = true
-# 允许重新定义变量类型 (可选，看个人喜好，有时很方便)
-allow_redefinition = true 
-
-# 针对没有类型提示的第三方库的配置
-# 例如 pybind11 生成的模块可能没有 stub
-[[tool.mypy.overrides]]
-module = [
-    "tgl.*",   # 如果有 C++ 编译出来的同名扩展
-    "scipy.*", # 举例
-]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "numba.*"
-ignore_missing_imports = true
+[tool.scikit-build]
+cmake.build-type = "RelWithDebInfo"
+# 关键：告诉 scikit-build 去 src 目录下把这两个独立的 Python 命名空间都打包进 wheel 中
+wheel.packages = ["src/frost"]

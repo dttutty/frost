@@ -6,13 +6,12 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-
 logger = logging.getLogger(__name__)
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--data", type=str, help="dataset name")
-parser.add_argument("--add_reverse", default=False, action="store_true")
+parser.add_argument("--add_reverse", default=True, action="store_true")
 args = parser.parse_args()
 
 df = pd.read_csv(f"DATA/{args.data}/edges.csv")
@@ -45,13 +44,17 @@ class Dummy:
             self.indptr[i + 1] = self.indptr[i] + len(self.indices[i])
             self.indptr[i + 1] = self.indptr[i] + len(self.indices[i])
 
-        def flatten_to_array(list_of_lists: list[list[int | float]]) -> np.ndarray:
+        def flatten_to_array(
+            list_of_lists: list[list[int | float]], dtype: np.dtype
+        ) -> np.ndarray:
             # chain.from_iterable is a bit leaner than chain(*…)
-            return np.array(list(itertools.chain.from_iterable(list_of_lists)))
+            return np.array(
+                list(itertools.chain.from_iterable(list_of_lists)), dtype=dtype
+            )
 
-        indices = flatten_to_array(self.indices)
-        ts = flatten_to_array(self.ts)
-        eid = flatten_to_array(self.eid)
+        indices = flatten_to_array(self.indices, np.int32)
+        ts = flatten_to_array(self.ts, np.float32)
+        eid = flatten_to_array(self.eid, np.int32)
 
         def tsort(
             i: int,

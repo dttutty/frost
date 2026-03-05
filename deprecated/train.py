@@ -1,8 +1,17 @@
 import argparse
+import logging
 import os
+import random
+import time
 
-from utils import blocks_to_cuda
+import numpy as np
+import pandas as pd
+import torch
+from neg_sampler import NegLinkSampler
+from sklearn.metrics import average_precision_score, roc_auc_score
+from utils import load_feat, load_graph, parse_config
 
+logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--data", type=str, help="dataset name")
@@ -53,33 +62,8 @@ args = parser.parse_args()
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 os.environ["OMP_NUM_THREADS"] = "4"
 
-import random
-import time
 
-import numpy as np
-import torch
-from gnn.TGN import TGN
-from profiler import profiler
-from sklearn.metrics import average_precision_score, roc_auc_score
-
-from neg_sampler import (
-    AvoidInfoLeakNegLinkSampler,
-    NegLinkInductiveSampler,
-    NegLinkSampler,
-    ParallelSampler,
-    create_sampler,
-)
-from utils import (
-    extract_raw_data,
-    load_feat,
-    load_graph,
-    node_to_dgl_blocks,
-    parse_config,
-    prepare_blocks,
-)
-
-
-def set_seed(seed):
+def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -110,7 +94,9 @@ val_edge_end = df[df["ext_roll"].gt(1)].index[0]
 # 0: train, 1: val, 2: test
 
 
-def get_inductive_links(df, train_edge_end, val_edge_end):
+def get_inductive_links(
+    df: pd.DataFrame, train_edge_end: int, val_edge_end: int
+) -> list[int]:
     train_df = df[:train_edge_end]
     test_df = df[val_edge_end:]
 
@@ -137,8 +123,6 @@ if args.use_inductive:
 
 # gnn_dim_node = 0 if node_feats is None else node_feats.shape[1]
 # gnn_dim_edge = 0 if edge_feats is None else edge_feats.shape[1]
-
-from utils import get_node_count_from_graph, get_node_edge_dimensions
 
 
 _, node_feat_dim, _, _, edge_feat_dim, _ = get_node_edge_dimensions(
@@ -168,7 +152,6 @@ shared_cfg = {
 #              shared_cfg,
 #              dim_edge_feat,
 #              shared_arrays = None):
-from memorys import MemoryMailbox
 
 
 model = TGN(
@@ -202,7 +185,7 @@ if args.n_layer is not None:
     gnn_param.layer = args.n_layer
 sampler = None
 if not sample_param.no_sample:
-    sampler = ParallelSampler(
+    sampler = SeqSampler(
         g["indptr"],
         g["indices"],
         g["eid"],
@@ -236,7 +219,7 @@ else:
     eval_neg_link_sampler = create_sampler(g)
 
 
-def eval(mode="val"):
+def eval(mode: str = "val") -> tuple[float, float]:
     neg_samples = 1
     model.eval()
     aps = list()
@@ -334,8 +317,8 @@ def eval(mode="val"):
                         save_on_pgu=train_param.all_on_gpu,
                     )[0][0]
                 mailbox.write_mail_to_mailbox(
-                    model.memory_updater.last_updated_nid,
-                    model.memory_updater.last_updated_memory,
+                    model.mem_updater.last_updated_nid,
+                    model.mem_updater.last_updated_memory,
                     root_nodes,
                     ts,
                     mem_edge_feats,
@@ -344,10 +327,10 @@ def eval(mode="val"):
                 )
                 mailbox.write_node_memory(
                     args.dedup,
-                    model.memory_updater.last_updated_nid,
-                    model.memory_updater.last_updated_memory,
+                    model.mem_updater.last_updated_nid,
+                    model.mem_updater.last_updated_memory,
                     root_nodes,
-                    model.memory_updater.last_updated_ts,
+                    model.mem_updater.last_updated_ts,
                     neg_samples=neg_samples,
                 )
         if mode == "val":
@@ -400,7 +383,7 @@ for e in range(5):
         sampler.reset()
     if mailbox is not None:
         mailbox.reset()
-        model.memory_updater.last_updated_nid = None
+        model.mem_updater.last_updated_nid = None
     for _, edges in df[:train_edge_end].groupby(
         group_indexes[random.randint(0, len(group_indexes) - 1)]
     ):
@@ -471,8 +454,8 @@ for e in range(5):
             if memory_param.deliver_to == "neighbors":
                 block = extract_raw_data(ret, sample_param.history, reverse=True)[0][0]
             mailbox.write_mail_to_mailbox(
-                model.memory_updater.last_updated_nid,
-                model.memory_updater.last_updated_memory,
+                model.mem_updater.last_updated_nid,
+                model.mem_updater.last_updated_memory,
                 root_nodes,
                 ts,
                 mem_edge_feats,
@@ -480,10 +463,10 @@ for e in range(5):
             )
             mailbox.write_node_memory(
                 args.dedup,
-                model.memory_updater.last_updated_nid,
-                model.memory_updater.last_updated_memory,
+                model.mem_updater.last_updated_nid,
+                model.mem_updater.last_updated_memory,
                 root_nodes,
-                model.memory_updater.last_updated_ts,
+                model.mem_updater.last_updated_ts,
             )
         time_prep += time.time() - t_prep_s
         time_tot += time.time() - t_tot_s
@@ -530,7 +513,7 @@ if sampler is not None:
     sampler.reset()
 if mailbox is not None:
     mailbox.reset()
-    model.memory_updater.last_updated_nid = None
+    model.mem_updater.last_updated_nid = None
     eval("train")
     eval("val")
 ap, auc = eval("test")

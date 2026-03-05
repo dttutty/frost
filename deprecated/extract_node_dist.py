@@ -1,5 +1,26 @@
 import argparse
+import hashlib
+import logging
+import math
 import os
+import random
+
+import numpy as np
+import torch
+import torch.distributed as dist
+from neg_sampler import NegLinkSampler
+from shm_utils import create_shared_mem_array, get_shared_mem_array
+from sklearn.metrics import average_precision_score, roc_auc_score
+from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 parser = argparse.ArgumentParser()
@@ -26,34 +47,10 @@ else:
 os.environ["OMP_NUM_THREADS"] = str(args.omp_num_threads)
 os.environ["MKL_NUM_THREADS"] = str(args.omp_num_threads)
 
-import hashlib
-import math
-import random
-
-import numpy as np
-import torch
-from dgl.utils.shared_mem import create_shared_mem_array, get_shared_mem_array
-from gnn.TGN import *
-from sklearn.metrics import average_precision_score, roc_auc_score
-from tqdm import tqdm
-
-from neg_sampler import *
-from utils import *
-from utils import blocks_to_cuda
-
-
-def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
 
 set_seed(args.seed)
-torch.distributed.init_process_group(backend="gloo")
-nccl_group = torch.distributed.new_group(
-    ranks=list(range(args.num_gpus)), backend="nccl"
-)
+dist.init_process_group(backend="gloo")
+nccl_group = dist.new_group(ranks=list(range(args.num_gpus)), backend="nccl")
 
 if args.local_rank == 0:
     _node_feats, _edge_feats = load_feat(args.data)
@@ -81,8 +78,8 @@ if args.local_rank == 0:
         del _edge_feats
     else:
         edge_feats = None
-torch.distributed.barrier()
-torch.distributed.broadcast_object_list(dim_feats, src=0)
+dist.barrier()
+dist.broadcast_object_list(dim_feats, src=0)
 if args.local_rank > 0 and args.local_rank < args.num_gpus:
     node_feats = None
     edge_feats = None
@@ -103,8 +100,8 @@ if args.local_rank == args.num_gpus:
     num_nodes = [g["indptr"].shape[0] - 1]
 else:
     num_nodes = [None]
-torch.distributed.barrier()
-torch.distributed.broadcast_object_list(num_nodes, src=args.num_gpus)
+dist.barrier()
+dist.broadcast_object_list(num_nodes, src=args.num_gpus)
 num_nodes = num_nodes[0]
 
 mailbox = None
@@ -140,7 +137,7 @@ if memory_param.type != "none":
         mail_pos_update_pending_flag = create_shared_mem_array(
             "mail_pos_update_pending_flag", torch.Size([num_nodes]), dtype=torch.int32
         )
-        torch.distributed.barrier()
+        dist.barrier()
         node_memory.zero_()
         node_memory_ts.zero_()
         mails.zero_()
@@ -148,7 +145,7 @@ if memory_param.type != "none":
         next_mail_pos.zero_()
         mail_pos_update_pending_flag.zero_()
     else:
-        torch.distributed.barrier()
+        dist.barrier()
         node_memory = get_shared_mem_array(
             "node_memory",
             torch.Size([num_nodes, memory_param.d_hid]),
@@ -208,9 +205,7 @@ if args.local_rank < args.num_gpus:
     while True:
         my_model_state = [None]
         model_state = [None] * (args.num_gpus + 1)
-        torch.distributed.scatter_object_list(
-            my_model_state, model_state, src=args.num_gpus
-        )
+        dist.scatter_object_list(my_model_state, model_state, src=args.num_gpus)
         if my_model_state[0] == -1:
             break
         elif my_model_state[0] == 4:
@@ -225,9 +220,7 @@ if args.local_rank < args.num_gpus:
             continue
         my_blocks = [None]
         multi_blocks = [None] * (args.num_gpus + 1)
-        torch.distributed.scatter_object_list(
-            my_blocks, multi_blocks, src=args.num_gpus
-        )
+        dist.scatter_object_list(my_blocks, multi_blocks, src=args.num_gpus)
         blocks = blocks_to_cuda(my_blocks[0])
         _, node_feats_on_gpu, edge_feats_on_gpu, node_uniq, edge_uniq = prepare_blocks(
             blocks, node_feats, edge_feats
@@ -258,15 +251,9 @@ if args.local_rank < args.num_gpus:
                     multi_ts = [None] * (args.num_gpus + 1)
                     my_eid = [None]
                     multi_eid = [None] * (args.num_gpus + 1)
-                    torch.distributed.scatter_object_list(
-                        my_root, multi_root, src=args.num_gpus
-                    )
-                    torch.distributed.scatter_object_list(
-                        my_ts, multi_ts, src=args.num_gpus
-                    )
-                    torch.distributed.scatter_object_list(
-                        my_eid, multi_eid, src=args.num_gpus
-                    )
+                    dist.scatter_object_list(my_root, multi_root, src=args.num_gpus)
+                    dist.scatter_object_list(my_ts, multi_ts, src=args.num_gpus)
+                    dist.scatter_object_list(my_eid, multi_eid, src=args.num_gpus)
                     eid = my_eid[0]
                     mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
                     root_nodes = my_root[0]
@@ -275,28 +262,28 @@ if args.local_rank < args.num_gpus:
                     if memory_param.deliver_to == "neighbors":
                         my_block = [None]
                         multi_block = [None] * (args.num_gpus + 1)
-                        torch.distributed.scatter_object_list(
+                        dist.scatter_object_list(
                             my_block, multi_block, src=args.num_gpus
                         )
                         block = my_block[0]
                     mailbox.write_mail_to_mailbox(
-                        model.module.memory_updater.last_updated_nid,
-                        model.module.memory_updater.last_updated_memory,
+                        model.module.mem_updater.last_updated_nid,
+                        model.module.mem_updater.last_updated_memory,
                         root_nodes,
                         ts,
                         mem_edge_feats,
                         block,
                     )
                     mailbox.write_node_memory(
-                        model.module.memory_updater.last_updated_nid,
-                        model.module.memory_updater.last_updated_memory,
-                        model.module.memory_updater.last_updated_ts,
+                        model.module.mem_updater.last_updated_nid,
+                        model.module.mem_updater.last_updated_memory,
+                        model.module.mem_updater.last_updated_ts,
                     )
                     if memory_param.deliver_to == "neighbors":
-                        torch.distributed.barrier(group=nccl_group)
+                        dist.barrier(group=nccl_group)
                         if args.local_rank == 0:
                             mailbox.update_next_mail_pos()
-            torch.distributed.gather_object(float(loss), None, dst=args.num_gpus)
+            dist.gather_object(float(loss), None, dst=args.num_gpus)
         elif my_model_state[0] == 1:
             model.eval()
             with torch.no_grad():
@@ -318,15 +305,9 @@ if args.local_rank < args.num_gpus:
                     multi_ts = [None] * (args.num_gpus + 1)
                     my_eid = [None]
                     multi_eid = [None] * (args.num_gpus + 1)
-                    torch.distributed.scatter_object_list(
-                        my_root, multi_root, src=args.num_gpus
-                    )
-                    torch.distributed.scatter_object_list(
-                        my_ts, multi_ts, src=args.num_gpus
-                    )
-                    torch.distributed.scatter_object_list(
-                        my_eid, multi_eid, src=args.num_gpus
-                    )
+                    dist.scatter_object_list(my_root, multi_root, src=args.num_gpus)
+                    dist.scatter_object_list(my_ts, multi_ts, src=args.num_gpus)
+                    dist.scatter_object_list(my_eid, multi_eid, src=args.num_gpus)
                     eid = my_eid[0]
                     mem_edge_feats = edge_feats[eid] if edge_feats is not None else None
                     root_nodes = my_root[0]
@@ -335,25 +316,25 @@ if args.local_rank < args.num_gpus:
                     if memory_param.deliver_to == "neighbors":
                         my_block = [None]
                         multi_block = [None] * (args.num_gpus + 1)
-                        torch.distributed.scatter_object_list(
+                        dist.scatter_object_list(
                             my_block, multi_block, src=args.num_gpus
                         )
                         block = my_block[0]
                     mailbox.write_mail_to_mailbox(
-                        model.module.memory_updater.last_updated_nid,
-                        model.module.memory_updater.last_updated_memory,
+                        model.module.mem_updater.last_updated_nid,
+                        model.module.mem_updater.last_updated_memory,
                         root_nodes,
                         ts,
                         mem_edge_feats,
                         block,
                     )
                     mailbox.write_node_memory(
-                        model.module.memory_updater.last_updated_nid,
-                        model.module.memory_updater.last_updated_memory,
-                        model.module.memory_updater.last_updated_ts,
+                        model.module.mem_updater.last_updated_nid,
+                        model.module.mem_updater.last_updated_memory,
+                        model.module.mem_updater.last_updated_ts,
                     )
                     if memory_param.deliver_to == "neighbors":
-                        torch.distributed.barrier(group=nccl_group)
+                        dist.barrier(group=nccl_group)
                         if args.local_rank == 0:
                             mailbox.update_next_mail_pos()
                 y_pred = torch.cat([pred_pos, pred_neg], dim=0).sigmoid().cpu()
@@ -362,8 +343,8 @@ if args.local_rank < args.num_gpus:
                 )
                 ap = average_precision_score(y_true, y_pred)
                 auc = roc_auc_score(y_true, y_pred)
-                torch.distributed.gather_object(float(ap), None, dst=args.num_gpus)
-                torch.distributed.gather_object(float(auc), None, dst=args.num_gpus)
+                dist.gather_object(float(ap), None, dst=args.num_gpus)
+                dist.gather_object(float(auc), None, dst=args.num_gpus)
         elif my_model_state[0] == 5:
             model.eval()
             with torch.no_grad():
@@ -372,7 +353,7 @@ if args.local_rank < args.num_gpus:
                         blocks[0], node_uniq
                     )
                 emb = model.module.get_emb(blocks).detach().cpu()
-                torch.distributed.gather_object(emb, None, dst=args.num_gpus)
+                dist.gather_object(emb, None, dst=args.num_gpus)
 else:
     # hosting process
     train_edge_end = df[df["ext_roll"].gt(0)].index[0]
@@ -462,14 +443,10 @@ else:
                 return
             model_state = [1] * (args.num_gpus + 1)
             my_model_state = [None]
-            torch.distributed.scatter_object_list(
-                my_model_state, model_state, src=args.num_gpus
-            )
+            dist.scatter_object_list(my_model_state, model_state, src=args.num_gpus)
             multi_blocks.append(None)
             my_blocks = [None]
-            torch.distributed.scatter_object_list(
-                my_blocks, multi_blocks, src=args.num_gpus
-            )
+            dist.scatter_object_list(my_blocks, multi_blocks, src=args.num_gpus)
             if mailbox is not None:
                 multi_root.append(None)
                 multi_ts.append(None)
@@ -477,25 +454,17 @@ else:
                 my_root = [None]
                 my_ts = [None]
                 my_eid = [None]
-                torch.distributed.scatter_object_list(
-                    my_root, multi_root, src=args.num_gpus
-                )
-                torch.distributed.scatter_object_list(
-                    my_ts, multi_ts, src=args.num_gpus
-                )
-                torch.distributed.scatter_object_list(
-                    my_eid, multi_eid, src=args.num_gpus
-                )
+                dist.scatter_object_list(my_root, multi_root, src=args.num_gpus)
+                dist.scatter_object_list(my_ts, multi_ts, src=args.num_gpus)
+                dist.scatter_object_list(my_eid, multi_eid, src=args.num_gpus)
                 if memory_param.deliver_to == "neighbors":
                     multi_block.append(None)
                     my_block = [None]
-                    torch.distributed.scatter_object_list(
-                        my_block, multi_block, src=args.num_gpus
-                    )
+                    dist.scatter_object_list(my_block, multi_block, src=args.num_gpus)
             gathered_ap = [None] * (args.num_gpus + 1)
             gathered_auc = [None] * (args.num_gpus + 1)
-            torch.distributed.gather_object(float(0), gathered_ap, dst=args.num_gpus)
-            torch.distributed.gather_object(float(0), gathered_auc, dst=args.num_gpus)
+            dist.gather_object(float(0), gathered_ap, dst=args.num_gpus)
+            dist.gather_object(float(0), gathered_auc, dst=args.num_gpus)
             if processed_edge_id >= len(df):
                 break
 
@@ -519,16 +488,12 @@ else:
             forward_model_to(ts[-1])
             model_state = [5] * (args.num_gpus + 1)
             my_model_state = [None]
-            torch.distributed.scatter_object_list(
-                my_model_state, model_state, src=args.num_gpus
-            )
+            dist.scatter_object_list(my_model_state, model_state, src=args.num_gpus)
             multi_blocks.append(None)
             my_blocks = [None]
-            torch.distributed.scatter_object_list(
-                my_blocks, multi_blocks, src=args.num_gpus
-            )
+            dist.scatter_object_list(my_blocks, multi_blocks, src=args.num_gpus)
             multi_embs = [None] * (args.num_gpus + 1)
-            torch.distributed.gather_object(None, multi_embs, dst=args.num_gpus)
+            dist.gather_object(None, multi_embs, dst=args.num_gpus)
             embs += multi_embs[:-1]
             multi_blocks = list()
 
@@ -549,6 +514,4 @@ else:
     # let all process exit
     model_state = [-1] * (args.num_gpus + 1)
     my_model_state = [None]
-    torch.distributed.scatter_object_list(
-        my_model_state, model_state, src=args.num_gpus
-    )
+    dist.scatter_object_list(my_model_state, model_state, src=args.num_gpus)

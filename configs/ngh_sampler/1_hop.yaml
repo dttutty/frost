@@ -1,0 +1,5 @@
+_target_: frost.sampling.ngh_sampler.NghSampler
+strategy: 'recent'
+sample_4_neg: True
+n_neg: ${n_neg}
+seed: ${seed}

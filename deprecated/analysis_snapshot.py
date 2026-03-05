@@ -1,4 +1,8 @@
+import logging
 import pickle
+
+
+logger = logging.getLogger(__name__)
 
 
 with open("memory_snapshot.pkl", "rb") as f:

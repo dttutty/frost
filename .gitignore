@@ -28,7 +28,7 @@ experiment_logs*
 trace_epoch2_rank_0.json
 trace_epoch2_rank_1.json
 distributed_trace.json
-
+outputs/
 logs/
 models/
 __pycache__/
@@ -78,3 +78,5 @@ datasets/
 *.pkl
 *.h5
 slurm/
+scripts/
+hydralance/

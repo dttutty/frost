@@ -183,7 +183,7 @@ class TestPlanner(unittest.TestCase):
         # 模拟 TensorSet (这里用 MagicMock 即可，因为 logic 只做传递)
         mock_tensor_set = MagicMock()
 
-        # 模拟 StateIO (BatchNodeStateIO)
+        # 模拟 StateIO (BatchNodeStateAccess)
         state_io = MagicMock()
         state_io.mem_needed = mock_tensor_set
         state_io.mem_updated = mock_tensor_set

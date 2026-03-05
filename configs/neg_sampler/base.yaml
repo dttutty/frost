@@ -1,0 +1,2 @@
+_target_: frost.sampling.neg_sampler.NegLinkSampler
+n_neg: 1

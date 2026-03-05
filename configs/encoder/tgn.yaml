@@ -1,0 +1,8 @@
+_target_: frost.models.encoder.tgn.TGN
+heads: 2
+d_time: ${d_time}
+d_hid: ${final_emb_dim}
+dropout: ${dropout}
+d_mem: ${mem_updater.d_mem}
+ndim: ${ndim}
+edim: ${edim}
