@@ -1,3 +1,6 @@
 [submodule "third_party/tgl"]
 	path = third_party/tgl
 	url = https://github.com/dttutty/tgl.git
+[submodule "third_party/DyGFormer"]
+	path = third_party/DyGFormer
+	url = https://github.com/dttutty/DyGLib.git
