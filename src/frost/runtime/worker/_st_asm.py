@@ -50,7 +50,7 @@ class StAssembler:
             if to_cache.numel() > 0:
                 self.nfeat_delta = nfeat_obj.filter_by_nid(to_cache)
             else:
-                print("⚠️ [DEBUG] No new NIDs to cache, clearing nfeat_delta")
+                logger.info("⚠️ [DEBUG] No new NIDs to cache, clearing nfeat_delta")
                 self.nfeat_delta = None
 
         else:

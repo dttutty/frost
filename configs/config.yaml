@@ -17,7 +17,7 @@ epoch: 3
 batch_size: 4000 # local batch_size
 patience: 50
 dropout: 0.2
-seed: 42
+seed: null
 d_time: 128
 final_emb_dim: 128
 dataset: "LASTFM"

@@ -301,12 +301,11 @@ class Worker:
         logits = self.model(meta)
         loss = self.criterion(logits.squeeze(-1), meta.labels)
 
-        if self.mem_box_store is not None:
-            self.p2p_sem.acquire()  # 获取信号量，确保当前没有其他 P2P 任务在进行
-
         loss.backward()
 
         self.optimizer.step()
+        if self.mem_box_store is not None:
+            self.p2p_sem.acquire()  # 获取信号量，确保当前没有其他 P2P 任务在进行
         self.train_loss_tracker.update(loss.detach())
         self._release_meta_tensors(meta)
 

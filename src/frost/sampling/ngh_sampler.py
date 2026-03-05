@@ -105,7 +105,7 @@ def dist_safe_tensor(arr, dtype):
     np_safe = np.array(np_arr, copy=True)
 
     # 转回 torch 后再 clone 并 contiguous 确保存储结构最简
-    return torch.from_numpy(np_safe).to(dtype).clone().contiguous()
+    return torch.from_numpy(np_safe).to(dtype)
 
 
 class NghSampler:
@@ -136,7 +136,12 @@ class NghSampler:
         self._node_np_dtype = (
             graph_indices.dtype if graph_indices is not None else np.int64
         )
-        omp_disabled = os.getenv("FROST_SEQSAMPLER_NO_OMP", "").strip().lower() in {"1", "true", "yes", "on"}
+        omp_disabled = os.getenv("FROST_SEQSAMPLER_NO_OMP", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         logger.info(
             "NghSampler initialized with SeqSampler backend path: %s (FROST_SEQSAMPLER_NO_OMP=%r)",
             "single-thread" if omp_disabled else "OpenMP",
@@ -185,10 +190,10 @@ class NghSampler:
             raise RuntimeError("Failed to acquire slot from ring buffer")
 
         # Write seed nodes safely
-        slot["NID"][:num_seeds] = nid.cpu().clone()
-        slot["TS"][:n_src] = ts.cpu().clone()
+        slot["NID"][:num_seeds] = nid.cpu()
+        slot["TS"][:n_src] = ts.cpu()
         slot["TS"][n_src:num_seeds].zero_()
-        slot["EID"][:n_src] = pos_eid.cpu().clone()
+        slot["EID"][:n_src] = pos_eid.cpu()
         slot["EID"][n_src:num_seeds] = -1
 
         if nid_np_safe.size == 0 or self.n_ngh <= 0:

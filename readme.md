@@ -1,34 +1,38 @@
-# 显卡选择 (保持不变)
+# GPU 选择
 export CUDA_VISIBLE_DEVICES=0,1
 
-# 关闭调试阻塞，开启异步执行（性能提升最明显）
+# 异步执行（最关键的性能项）
 export CUDA_LAUNCH_BLOCKING=0
+export TORCH_USE_CUDA_DSA=0
 
-# 降低日志开销
-export LOG_LEVEL=WARNING
-export HYDRA_FULL_ERROR=0
-export TORCH_DISTRIBUTED_DEBUG=OFF
-export NCCL_DEBUG=VERSION
+# 显存管理 — expandable_segments 减少碎片化重分配
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
-# 分布式训练与通信优化
+# cuDNN 自动调优
+export TORCH_CUDNN_BENCHMARK=1
+
+# NCCL 通信
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_NCCL_BLOCKING_WAIT=0
 export NCCL_IB_DISABLE=0
 export NCCL_P2P_DISABLE=0
+export NCCL_DEBUG=WARN
 
-# 内存管理优化 (减少显存分配碎片带来的停顿)
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+# 关闭调试开销
+export TORCH_DISTRIBUTED_DEBUG=OFF
+export HYDRA_FULL_ERROR=0
+export LOG_LEVEL=WARNING
 
-# CPU 并行加速 (根据你的 CPU 核心数调整，建议设为 4, 8 或 16)
+# CPU 并行（根据核数调，一般设物理核数的一半）
 export OMP_NUM_THREADS=8
 export MKL_NUM_THREADS=8
+export TOKENIZERS_PARALLELISM=false
+export PYTHONOPTIMIZE=2
 
-# 调试模式建议：关闭 SeqSampler 的 OpenMP 并行，便于复现与排查
-export FROST_SEQSAMPLER_NO_OMP=1
-
-# 清除之前可能设置的调试堆栈追踪 (防止干扰)
+# 清除调试变量
 unset TORCH_SHOW_CPP_STACKTRACES
 unset TORCH_DISABLE_ADDR2LINE
+
 
 Memory Based Model:
 TGN:

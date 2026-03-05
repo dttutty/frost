@@ -361,7 +361,10 @@ class Host:
         self.meta_batcher.join()
         if self.planner is not None:
             self.planner.join()
+        print("MetaBatcher and Planner threads have been joined.")
         self.scatter.join()
+        print("All threads have been joined. Host cleanup complete.")
         end = time.time()
+        print("Total training time: {:.2f} seconds".format(end - self.start_time))
         elapsed = end - self.start_time
         logger.info("Elapsed time: %.2f seconds", elapsed)

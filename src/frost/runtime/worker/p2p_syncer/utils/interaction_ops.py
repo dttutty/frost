@@ -41,9 +41,7 @@ def generate_interaction_mails(
     # 逻辑: [自己, 对方, 边] -> [Src, Dst, Edge]
     if edge_feats is not None:
         # 在 interaction_ops.py 第 43 行之前添加：
-        logger.debug(f"[DEBUG] src_mem shape: {src_mem.shape}")
-        logger.debug(f"[DEBUG] dst_mem shape: {dst_mem.shape}")
-        logger.debug(f"[DEBUG] edge_feats shape: {edge_feats.shape}")
+
         mail_for_src = torch.cat([src_mem, dst_mem, edge_feats], dim=1)
 
         # 4. 生成给 Dst 节点的 Mail

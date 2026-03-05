@@ -1,10 +1,8 @@
 import logging
-import pickle
 import threading
 from queue import Queue as Q
-from typing import Literal, cast
+from typing import Literal
 
-import torch
 import torch.distributed as dist
 
 from frost.aliases.host import MetaBundle
@@ -13,7 +11,6 @@ from frost.datatypes.meta import Meta
 from frost.datatypes.plan import DyPlan, PlanSet, StPlan
 from frost.datatypes.result import Result
 from frost.runtime._thread_base import ThreadBase
-from frost.runtime._wire import ControlWire, MetaWire, meta_to_wire, pack_wire_message
 
 logger = logging.getLogger(__name__)
 
@@ -42,81 +39,53 @@ class Scatter(ThreadBase):
 
         self.world_size: int = env.world_size
         self.local_rank: int = env.local_rank
-
-        # 2. 将所有全局变量变为实例属性
         self.host_rank: int = env.host_rank
         self.ngpus: int = env.n_gpu
         self._gather_seq = 0
-        self._ctrl_send_seq = 0
 
         assert self.local_rank == self.host_rank
 
-    def _recv_worker_result(self, src_rank: int) -> Result:
-        nbytes = torch.empty(1, dtype=torch.long)
-        dist.recv(nbytes, src=src_rank)
+    def _scatter_to_workers(self, per_worker: list[Meta | str | None]) -> None:
+        """Scatter one object to each rank via collective scatter.
 
-        payload_tensor = torch.empty(int(nbytes.item()), dtype=torch.uint8)
-        if nbytes.item() > 0:
-            dist.recv(payload_tensor, src=src_rank)
+        per_worker is indexed by *worker order* (len == n_gpu).
+        We build a world_size-length list indexed by rank.
+        """
+        scatter_input: list[Meta | str | None] = [None] * self.world_size
+        worker_ranks = [r for r in range(self.world_size) if r != self.host_rank]
+        for rank, obj in zip(worker_ranks, per_worker):
+            scatter_input[rank] = obj
+        # Host's own slot (scatter_input[host_rank]) stays None
+        output: list[None] = [None]
+        dist.scatter_object_list(
+            output, scatter_object_input_list=scatter_input, src=self.host_rank
+        )
 
-        payload = bytes(payload_tensor.tolist())
-        result = pickle.loads(payload)
+    def _gather_from_workers(self) -> Result:
+        """Gather results from all workers via collective gather."""
+        self._gather_seq += 1
+        gather_list: list[Result | None] = [None] * self.world_size
+        dist.gather_object(None, gather_list, dst=self.host_rank)
+        # Return result from worker rank 0
+        worker_ranks = [r for r in range(self.world_size) if r != self.host_rank]
+        result = gather_list[worker_ranks[0]]
         assert isinstance(result, Result), "Worker 返回的对象必须是 Result"
         return result
 
-    def gather_receive(self, worker_ranks: list[int]) -> Result:
-        assert self.local_rank == self.host_rank, "只有 Host 进程可以 gather"
-
-        self._gather_seq += 1
-        logger.debug(
-            "Scatter recv-result start: seq=%d rank=%d",
-            self._gather_seq,
-            self.local_rank,
-        )
-
-        received: dict[int, Result] = {
-            src_rank: self._recv_worker_result(src_rank) for src_rank in worker_ranks
-        }
-
-        logger.debug(
-            "Scatter recv-result end: seq=%d rank=%d",
-            self._gather_seq,
-            self.local_rank,
-        )
-
-        data_0_result = received[worker_ranks[0]]
-        return data_0_result
-
     def logic(self) -> None:
-        def _send_wire(dst_rank: int, msg: ControlWire) -> None:
-            payload = pack_wire_message(msg)
-            nbytes = torch.tensor([len(payload)], dtype=torch.long)
-            dist.send(nbytes, dst=dst_rank)
-            if nbytes.item() > 0:
-                data = torch.tensor(list(payload), dtype=torch.uint8)
-                dist.send(data, dst=dst_rank)
-
-        worker_ranks = [r for r in range(self.world_size) if r != self.host_rank]
-
-        def _broadcast_control(kind: Literal["end_of_epoch", "stop"]) -> None:
-            for dst_rank in worker_ranks:
-                _send_wire(dst_rank, {"kind": kind, "meta": None})
-
         while not self.stop_ev.is_set():
             meta_2_scatter = self.in_q.get(block=True)
 
             if meta_2_scatter is None:
-                _broadcast_control("stop")
-                raise RuntimeError(
-                    "Scatter received None, shutting down..."
-                )  # 这里抛异常是为了
+                self._scatter_to_workers([None] * self.n_gpu)
+                # raise RuntimeError("Scatter received None, shutting down...")
                 break
             elif meta_2_scatter == "end_of_epoch":
                 logger.warning(
                     "end_of_epoch received by Scatter, sending control signal to Workers..."
                 )
-                _broadcast_control("end_of_epoch")
-                data = self.gather_receive(worker_ranks)
+                self._scatter_to_workers(["end_of_epoch"] * self.n_gpu)
+                data = self._gather_from_workers()
                 self.result_q.put(data)
                 continue
 
@@ -128,29 +97,12 @@ class Scatter(ThreadBase):
                 if self.nfeat_plan_out_q is not None:
                     nfeat_plan = self.nfeat_plan_out_q.get(block=True)
                 for i, m in enumerate(meta_2_scatter):
-                    safe_mem = mem_plan[i].clone() if self.mem_plan_out_q else None
-                    safe_mail = mail_plan[i].clone() if self.mail_plan_out_q else None
-                    safe_nfeat = (
-                        nfeat_plan[i].clone() if self.nfeat_plan_out_q else None
-                    )
+                    safe_mem = mem_plan[i] if self.mem_plan_out_q else None
+                    safe_mail = mail_plan[i] if self.mail_plan_out_q else None
+                    safe_nfeat = nfeat_plan[i] if self.nfeat_plan_out_q else None
                     m.plan_set = PlanSet(
                         mem=safe_mem,
                         box=safe_mail,
                         nfeat=safe_nfeat,
                     )
-                meta_2_scatter = cast(list[Meta | None], meta_2_scatter)
-                wire_payload: list[MetaWire | None] = [
-                    meta_to_wire(cast(Meta, m)) if m is not None else None
-                    for m in meta_2_scatter
-                ]
-                try:
-                    for dst_rank, per_rank_meta in zip(worker_ranks, wire_payload, strict=True):
-                        _send_wire(
-                            dst_rank,
-                            {"kind": "meta", "meta": per_rank_meta},
-                        )
-                except Exception as e:
-                    logger.error(f"Scatter point-to-point send failed: {e}")
-                    raise RuntimeError(
-                        f"Scatter point-to-point send failed: {e}"
-                    ) from e
+                self._scatter_to_workers(meta_2_scatter)
