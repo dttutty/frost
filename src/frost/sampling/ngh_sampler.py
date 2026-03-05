@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Literal, cast
 
 import numpy as np
@@ -15,6 +16,28 @@ from frost.utils.tensor_set import TensorSet
 Int64Array = npt.NDArray[np.int64]
 Float32Array = npt.NDArray[np.float32]
 logger = logging.getLogger(__name__)
+
+
+def _ensure_seq_sampler_stable_mode() -> None:
+    """Prefer the single-threaded sampler path in debugger sessions.
+
+    We've observed sporadic native crashes when the OpenMP path is used under
+    debug adapters (debugpy / pydevd). Falling back to the single-threaded C++
+    implementation avoids that class of failures while preserving correctness.
+    Users can still opt back in explicitly by setting
+    ``FROST_SEQSAMPLER_NO_OMP=0``.
+    """
+    no_omp = os.getenv("FROST_SEQSAMPLER_NO_OMP")
+    if no_omp is not None:
+        return
+
+    debugger_attached = sys.gettrace() is not None
+    if debugger_attached:
+        os.environ["FROST_SEQSAMPLER_NO_OMP"] = "1"
+        logger.warning(
+            "Detected active Python debugger; defaulting SeqSampler to "
+            "single-thread mode (FROST_SEQSAMPLER_NO_OMP=1) for stability."
+        )
 
 
 class NoSampler:
@@ -96,6 +119,7 @@ class NghSampler:
         strategy: Literal["uniform", "recent"],  # from hydra config
         seed: int | None,  # from hydra config
     ):
+        _ensure_seq_sampler_stable_mode()
         assert len(fanout) == 1, (
             "Only single-hop sampling is supported in NghSampler. Use MultiHopNghSampler for multi-hop sampling."
         )
@@ -217,6 +241,7 @@ class MultiHopNghSampler:
         strategy: Literal["uniform", "recent"],  # from hydra config
         seed: int | None,  # from hydra config
     ):
+        _ensure_seq_sampler_stable_mode()
         self.sampler = SeqSampler(graph=graph, strategy=strategy, seed=seed)
         self.fanout = fanout
         self.ring_buf = ring_buf
