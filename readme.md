@@ -23,6 +23,9 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export OMP_NUM_THREADS=8
 export MKL_NUM_THREADS=8
 
+# 调试模式建议：关闭 SeqSampler 的 OpenMP 并行，便于复现与排查
+export FROST_SEQSAMPLER_NO_OMP=1
+
 # 清除之前可能设置的调试堆栈追踪 (防止干扰)
 unset TORCH_SHOW_CPP_STACKTRACES
 unset TORCH_DISABLE_ADDR2LINE
