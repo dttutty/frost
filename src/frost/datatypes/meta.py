@@ -31,8 +31,7 @@ class Meta:
 
     def __getstate__(self) -> dict:
         d = dict(self.__dict__)
-        d.pop("macro_position_of_split", None)
-        d.pop("is_last_macro_of_epoch", None)
+        d.pop("access", None)
         return d
 
     @cached_property

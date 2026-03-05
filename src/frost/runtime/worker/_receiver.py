@@ -70,6 +70,7 @@ class Receiver(ThreadBase):
                         f"Ring buffer returned None for meta with batch_id {meta.batch_idx}"
                     )
                 buf_len = meta.buf_len
+                meta.access = None  # 这里不需要传递 access 信息了，receiver 只负责接收 flat_graph 和其他基本信息，access 由 host 端分析器计算并传递给 worker
                 if __debug__:
                     # --- Strict sanity checks ---
                     nid_slice = buf["NID"][:buf_len]
