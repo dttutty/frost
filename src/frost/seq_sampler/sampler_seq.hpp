@@ -148,6 +148,24 @@ public:
     std::tuple<nb::ndarray<nb::numpy, ID_T>, nb::ndarray<nb::numpy, ID_T>, nb::ndarray<nb::numpy, TIME_T>> 
     sample(const std::vector<ID_T>& nid, const std::vector<TIME_T>& ts, int n_ngh = 20) 
     {
+        if (nid.size() != ts.size()) {
+            throw std::invalid_argument("WindowSeqSampler::sample requires nid.size() == ts.size()");
+        }
+        if (n_ngh <= 0) {
+            throw std::invalid_argument("WindowSeqSampler::sample requires n_ngh > 0");
+        }
+
+        const auto is_env_truthy = [](const char* value) {
+            if (value == nullptr) {
+                return false;
+            }
+            std::string normalized(value);
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+        };
+        const bool disable_omp = is_env_truthy(std::getenv("FROST_SEQSAMPLER_NO_OMP"));
+
         size_t bs = nid.size();
         size_t total_size = bs * num_history * n_ngh;
         
@@ -157,21 +175,40 @@ public:
         
         nb::gil_scoped_release release;
 
-        #pragma omp parallel for schedule(static)
-        for (size_t i = 0; i < bs; ++i) {
-            std::mt19937 local_rng(seed_val + i);
-            TIME_T base_ts = ts[i];
+        if (disable_omp) {
+            for (size_t i = 0; i < bs; ++i) {
+                std::mt19937 local_rng(seed_val + i);
+                TIME_T base_ts = ts[i];
 
-            for (int h = 0; h < num_history; ++h) {
-                // 计算第 h 个历史窗口的时间范围
-                TIME_T upper = base_ts - h * window_duration;
-                TIME_T lower = base_ts - (h + 1) * window_duration;
-                auto [start, end] = this->find_edge_range_window(nid[i], upper, lower);
-                
-                // 计算当前 batch + 当前 window 的起始偏移量
-                size_t offset = i * (num_history * n_ngh) + h * n_ngh;
-                this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
-                                &out_n[offset], &out_e[offset], &out_t[offset]);
+                for (int h = 0; h < num_history; ++h) {
+                    // 计算第 h 个历史窗口的时间范围
+                    TIME_T upper = base_ts - h * window_duration;
+                    TIME_T lower = base_ts - (h + 1) * window_duration;
+                    auto [start, end] = this->find_edge_range_window(nid[i], upper, lower);
+
+                    // 计算当前 batch + 当前 window 的起始偏移量
+                    size_t offset = i * (num_history * n_ngh) + h * n_ngh;
+                    this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
+                                    &out_n[offset], &out_e[offset], &out_t[offset]);
+                }
+            }
+        } else {
+            #pragma omp parallel for schedule(static)
+            for (size_t i = 0; i < bs; ++i) {
+                std::mt19937 local_rng(seed_val + i);
+                TIME_T base_ts = ts[i];
+
+                for (int h = 0; h < num_history; ++h) {
+                    // 计算第 h 个历史窗口的时间范围
+                    TIME_T upper = base_ts - h * window_duration;
+                    TIME_T lower = base_ts - (h + 1) * window_duration;
+                    auto [start, end] = this->find_edge_range_window(nid[i], upper, lower);
+
+                    // 计算当前 batch + 当前 window 的起始偏移量
+                    size_t offset = i * (num_history * n_ngh) + h * n_ngh;
+                    this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
+                                    &out_n[offset], &out_e[offset], &out_t[offset]);
+                }
             }
         }
 
