@@ -3,7 +3,6 @@ build/
 models/
 *.egg-info/
 __pycache__/
-.vscode/
 *.so
 *.log
 *.png
@@ -56,7 +55,6 @@ MANIFEST
 env/
 venv/
 ENV/
-.vscode/
 .idea/
 *.swp
 *.swo

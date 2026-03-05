@@ -1,0 +1,45 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+            {
+      "label": "tail rank 0",
+      "type": "shell",
+      "command": "tail -F rank_0.log",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "tail rank 1",
+      "type": "shell",
+      "command": "tail -F rank_1.log",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "tail rank 2",
+      "type": "shell",
+      "command": "tail -F rank_2.log",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "check all ranks logs",
+      "dependsOn": [
+        "clean_logs",
+        "tail rank 0",
+        "tail rank 1",
+        "tail rank 2"
+      ],
+      "dependsOrder": "parallel"
+    },
+    {
+        "label": "clean_logs",
+        "type": "shell",
+        "command": "rm -f ${workspaceFolder}/rank_*.log",
+        "presentation": {
+            "reveal": "silent",
+            "panel": "shared"
+        }
+    }
+    ]
+}
