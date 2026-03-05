@@ -50,7 +50,7 @@ TGAT:
 torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=tgat ngh_sampler=2_hop
 
 DyGFormer:
-torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=dygformer ngh_sampler=1_hop
+torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=dygformer ngh_sampler=1_hop fanout=[32]
 
 GraphMixer:
 torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=graphmixer ngh_sampler=1_hop
