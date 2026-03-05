@@ -11,6 +11,7 @@ from frost.datatypes.meta import Meta
 from frost.datatypes.plan import DyPlan, PlanSet, StPlan
 from frost.datatypes.result import Result
 from frost.runtime._thread_base import ThreadBase
+from frost.runtime._wire import MetaWire, meta_to_wire
 
 logger = logging.getLogger(__name__)
 
@@ -124,11 +125,15 @@ class Scatter(ThreadBase):
                         nfeat=safe_nfeat,
                     )
                 meta_2_scatter = cast(list[Meta | None], meta_2_scatter)
-                meta_2_scatter.append(None)  # Host 自己的槽位留 None
+                wire_payload: list[MetaWire | None] = [
+                    meta_to_wire(cast(Meta, m)) if m is not None else None
+                    for m in meta_2_scatter
+                ]
+                wire_payload.append(None)  # Host 自己的槽位留 None
                 try:
                     dist.scatter_object_list(
                         [None],
-                        scatter_object_input_list=meta_2_scatter,
+                        scatter_object_input_list=wire_payload,
                         src=self.host_rank,
                     )
                 except Exception as e:

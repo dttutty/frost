@@ -12,6 +12,7 @@ from frost.datatypes.graph import FlatGraph
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.runtime._thread_base import ThreadBase
+from frost.runtime._wire import MetaWire, wire_to_meta
 from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ class Receiver(ThreadBase):
 
         while not self.stop_ev.is_set():
             # self.manifest_buf = [None] * MANIFEST_SIZE
-            recv_list: list[Union[Meta, str, None]] = [None]
+            recv_list: list[Union[MetaWire, str, None]] = [None]
 
             dist.scatter_object_list(
                 recv_list,
@@ -67,6 +68,8 @@ class Receiver(ThreadBase):
                 )
 
             else:
+                assert isinstance(meta, dict)
+                meta = wire_to_meta(meta)
                 assert isinstance(meta, Meta)
                 batch_count += 1
                 buf = self.ring_buf.get(meta.buf_len, block=True)
