@@ -15,12 +15,26 @@ class TensorSet:
     A Set-like wrapper for 1D PyTorch Tensors supporting operators.
     """
 
-    def __init__(self, t: torch.Tensor, sort_now: bool = True) -> None:
+    def __init__(
+        self,
+        t: torch.Tensor,
+        sort_now: bool = True,
+        ensure_unique: bool = True,
+    ) -> None:
         # 初始化时确保唯一性，像真正的 Set 一样
         # 保持 1D
         if t.dim() > 1:
             t = t.reshape(-1)
-        self.data = torch.unique(t, sorted=sort_now)
+
+        # clone + contiguous 避免外部 tensor 被并发修改导致底层 storage 风险
+        t = t.contiguous().clone()
+
+        if ensure_unique:
+            self.data = torch.unique(t, sorted=sort_now)
+        elif sort_now:
+            self.data = torch.sort(t).values
+        else:
+            self.data = t
 
     @classmethod
     def empty_like(cls, t: torch.Tensor) -> "TensorSet":
@@ -33,7 +47,7 @@ class TensorSet:
             device=t.device,
         )
         # sort_now=False 避免多余操作
-        return cls(empty, sort_now=False)
+        return cls(empty, sort_now=False, ensure_unique=False)
 
     def __repr__(self) -> str:
         return f"TensorSet({self.data})"
@@ -75,7 +89,7 @@ class TensorSet:
             other_t = self._extract_tensor(other)
             mask = self._contains_mask(other_t)
             # 返回新的 TensorSet
-            return TensorSet(self.data[mask], sort_now=False)
+            return TensorSet(self.data[mask], sort_now=False, ensure_unique=False)
 
     # -----------------------------------------------------------
     # 2. 实现 | 号 (Union / 并集)
@@ -100,7 +114,7 @@ class TensorSet:
         with _SET_OP_LOCK:
             other_t = self._extract_tensor(other)
             mask = ~self._contains_mask(other_t)
-            return TensorSet(self.data[mask], sort_now=False)
+            return TensorSet(self.data[mask], sort_now=False, ensure_unique=False)
 
     # -----------------------------------------------------------
     # 5. 实现 ^ 号 (Symmetric Difference / 对称差集)
@@ -112,7 +126,11 @@ class TensorSet:
             # 为了速度，直接算两边的差集然后拼接
             diff1 = self.data[~self._contains_mask(other_t)]
             diff2 = other_t[
-                ~TensorSet(other_t, sort_now=False)._contains_mask(self.data)
+                ~TensorSet(
+                    other_t,
+                    sort_now=False,
+                    ensure_unique=False,
+                )._contains_mask(self.data)
             ]
             return TensorSet(torch.cat((diff1, diff2)), sort_now=True)
 
