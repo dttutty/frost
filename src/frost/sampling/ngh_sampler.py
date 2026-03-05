@@ -70,8 +70,10 @@ class NoSampler:
 
         # Write seed nodes safely
         slot["NID"][:num_seeds] = nid.cpu()
-        slot["TS"][:n_src] = ts.cpu()
-        slot["TS"][n_src:num_seeds].zero_()
+        ts_cpu = ts.cpu()
+        slot["TS"][:n_src] = ts_cpu
+        slot["TS"][n_src : 2 * n_src] = ts_cpu
+        slot["TS"][2 * n_src : num_seeds] = ts_cpu.repeat(self.n_neg)
         slot["EID"][:n_src] = pos_eid.cpu()
         slot["EID"][n_src:num_seeds] = -1
 
@@ -191,8 +193,10 @@ class NghSampler:
 
         # Write seed nodes safely
         slot["NID"][:num_seeds] = nid.cpu()
-        slot["TS"][:n_src] = ts.cpu()
-        slot["TS"][n_src:num_seeds].zero_()
+        ts_cpu = ts.cpu()
+        slot["TS"][:n_src] = ts_cpu
+        slot["TS"][n_src : 2 * n_src] = ts_cpu
+        slot["TS"][2 * n_src : num_seeds] = ts_cpu.repeat(self.n_neg)
         slot["EID"][:n_src] = pos_eid.cpu()
         slot["EID"][n_src:num_seeds] = -1
 
@@ -286,8 +290,10 @@ class MultiHopNghSampler:
 
         # Write seed nodes safely
         slot["NID"][:num_seeds] = nid.cpu()
-        slot["TS"][:n_src] = ts.cpu()
-        slot["TS"][n_src:num_seeds].zero_()
+        ts_cpu = ts.cpu()
+        slot["TS"][:n_src] = ts_cpu
+        slot["TS"][n_src : 2 * n_src] = ts_cpu
+        slot["TS"][2 * n_src : num_seeds] = ts_cpu.repeat(self.n_neg)
         slot["EID"][:n_src] = pos_eid.cpu()
         slot["EID"][n_src:num_seeds] = -1
 
