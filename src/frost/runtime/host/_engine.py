@@ -335,9 +335,15 @@ class Host:
             nid=roots, ts=ts, pos_eid=eid, gpu_id=gpu_id
         )
 
-        access = self.analyzer.count_access(
-            src, dst, uniq_all.data, fanout=self.ngh_sampler.fanout, valid_all=valid_all
-        )
+        access = None
+        if self.analyzer is not None:
+            access = self.analyzer.count_access(
+                src,
+                dst,
+                uniq_all.data,
+                fanout=self.ngh_sampler.fanout,
+                valid_all=valid_all,
+            )
 
         meta = Meta(
             cur_epoch=cur_epoch,

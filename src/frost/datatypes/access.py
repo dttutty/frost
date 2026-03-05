@@ -7,11 +7,11 @@ from frost.utils.tensor_set import TensorSet
 
 @dataclass(kw_only=True)
 class Access:
-    mem_need: TensorSet
-    mem_update: TensorSet
-    box_need: TensorSet | None
-    box_update: TensorSet | None
-    nfeat_need: TensorSet
+    mem_need: TensorSet | None = None
+    mem_update: TensorSet | None = None
+    box_need: TensorSet | None = None
+    box_update: TensorSet | None = None
+    nfeat_need: TensorSet | None = None
 
     def __repr__(self) -> str:
         return (

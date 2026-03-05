@@ -3,3 +3,4 @@ fanout: [10 10]
 strategy: 'uniform'
 n_neg: ${n_neg}
 seed: ${seed}
+sample_4_neg: True

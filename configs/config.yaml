@@ -1,5 +1,5 @@
 defaults:
-  - analyzer: null
+  - analyzer: no_mem
   - dataset_mgr: base
   - encoder: tgn
   - loss_fn: bce  # no need to change mostly

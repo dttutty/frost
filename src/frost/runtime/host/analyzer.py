@@ -42,6 +42,26 @@ class APANAnalyzer:
         )
 
 
+class NoMemAnalyzer:
+    def __init__(self, n_neg: int):
+        self.n_neg = n_neg  # from hydra config
+
+    def count_access(
+        self,
+        src: torch.Tensor,
+        dst: torch.Tensor,
+        all_nid: torch.Tensor,
+        fanout: list[int] | None,
+        valid_all: torch.Tensor | None = None,
+    ):
+        all_nid = all_nid.clone()  # 克隆一份，避免修改原始输入
+        all_nodes_set = TensorSet(all_nid)
+
+        return Access(
+            nfeat_need=all_nodes_set,
+        )
+
+
 class TGNAnalyzer:
     def __init__(self, n_neg: int):
         self.n_neg = n_neg  # from hydra config

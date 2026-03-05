@@ -162,6 +162,7 @@ class Planner(ThreadBase):
             )
 
         # mail plan
+        self.mail_plan_in_q: None | DyPlanInQ = None
         if mail_plan_out_q:
             self.mail_plan_in_q = Q()
             assert mail_plan_out_q is not None
@@ -173,6 +174,7 @@ class Planner(ThreadBase):
             )
 
         # nfeat plan
+        self.nfeat_plan_in_q: None | StPlanInQ = None
         if nfeat_plan_out_q:
             self.nfeat_plan_in_q = Q()
             assert nfeat_plan_out_q is not None

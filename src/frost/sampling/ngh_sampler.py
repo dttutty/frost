@@ -250,6 +250,7 @@ class MultiHopNghSampler:
         n_neg: int,  # from hydra config
         strategy: Literal["uniform", "recent"],  # from hydra config
         seed: int | None,  # from hydra config
+        sample_4_neg: bool = True,
     ):
         _ensure_seq_sampler_stable_mode()
         self.sampler = SeqSampler(graph=graph, strategy=strategy, seed=seed)
@@ -257,6 +258,7 @@ class MultiHopNghSampler:
         self.ring_buf = ring_buf
         self.n_neg = n_neg
         self.padding_node_id = -1
+        self.sample_4_neg = sample_4_neg
 
     def sample(
         self,
@@ -272,7 +274,9 @@ class MultiHopNghSampler:
         num_seeds = n_src * (2 + self.n_neg)
 
         nid_np = cast(np.ndarray, nid.cpu().numpy())
-        ts_np = cast(np.ndarray, ts.cpu().numpy())
+        # ts from host has shape [n_src]; expand to cover all root nodes for sampling
+        ts_expanded = ts.repeat(2 + self.n_neg)
+        ts_np = cast(np.ndarray, ts_expanded.cpu().numpy())
         assert nid_np.shape[0] == ts_np.shape[0], "nid and ts must have the same length"
 
         if len(fanout) == 0:
@@ -321,7 +325,7 @@ class MultiHopNghSampler:
                 out_nodes, out_edges, out_times = self.sampler.get_historical_neighbors(
                     valid_nodes_safe,
                     valid_times_safe,
-                    n_ngh=n_ngh,
+                    n_ngh,
                 )
 
                 # Use defensive conversion to avoid DLPack / capsule lifetime issues
