@@ -1,0 +1,3 @@
+_target_: frost.sampling.ngh_sampler.NoSampler
+n_neg: ${n_neg}
+sample_4_neg: False

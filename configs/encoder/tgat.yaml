@@ -1,0 +1,8 @@
+_target_: frost.models.encoder.tgat.TGAT
+fanout: ${fanout}
+d_time: ${d_time}
+d_hid: ${final_emb_dim}
+ndim: ${ndim}
+edim: ${edim}
+heads: 2
+dropout: ${dropout}

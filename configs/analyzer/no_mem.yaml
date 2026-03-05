@@ -1,0 +1,2 @@
+_target_: frost.runtime.host.analyzer.NoMemAnalyzer
+n_neg: ${neg_sampler.n_neg}

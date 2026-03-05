@@ -3,7 +3,6 @@ build/
 models/
 *.egg-info/
 __pycache__/
-.vscode/
 *.so
 *.log
 *.png
@@ -28,7 +27,7 @@ experiment_logs*
 trace_epoch2_rank_0.json
 trace_epoch2_rank_1.json
 distributed_trace.json
-
+outputs/
 logs/
 models/
 __pycache__/
@@ -52,12 +51,10 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
-.env
 .venv
 env/
 venv/
 ENV/
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -78,3 +75,5 @@ datasets/
 *.pkl
 *.h5
 slurm/
+scripts/
+hydralance/

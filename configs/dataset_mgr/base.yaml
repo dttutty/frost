@@ -1,0 +1,4 @@
+_target_: frost.shm.dataset_n_feat.DatasetManager
+target_edim: ${ndim}
+target_ndim: ${edim} 
+dataset_name: ${dataset}

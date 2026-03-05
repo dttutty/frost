@@ -1,0 +1,6 @@
+_target_: frost.models.mem_updater.MemoryUpdater
+d_time: ${d_time}
+cell: 'rnn'
+d_mem: ${final_emb_dim}
+boxsize: 1
+

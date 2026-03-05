@@ -1,0 +1,5 @@
+_target_: frost.models.mem_updater.MemoryUpdater
+d_time: ${d_time}
+cell: 'gru'
+d_mem: 512
+boxsize: 1

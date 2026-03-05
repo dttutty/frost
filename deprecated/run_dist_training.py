@@ -3,8 +3,12 @@
 # Its only job is to set up the environment and then run the main application.
 # It should have minimal imports.
 
+import logging
 import os
 import sys
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------- Threads & NCCL safety BEFORE importing torch ----------
@@ -14,7 +18,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "8")
 os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
 
 
-def bootstrap_visible_devices(host_is_last: bool = True):
+def bootstrap_visible_devices(host_is_last: bool = True) -> None:
     """
     Sets the CUDA_VISIBLE_DEVICES environment variable for each process.
     This MUST be called before importing torch.
