@@ -70,8 +70,15 @@ def dist_safe_tensor(arr, dtype):
     if arr is None:
         return torch.empty(0, dtype=dtype)
 
+    # nanobind may return an empty ndarray proxy for zero-sized outputs.
+    # Materialize to numpy first and short-circuit to avoid touching invalid
+    # capsule-backed memory in edge cases.
+    np_arr = np.asarray(arr)
+    if np_arr.size == 0:
+        return torch.empty(0, dtype=dtype)
+
     # 这一步非常关键：np.array(..., copy=True) 会在 Python 堆上创建全新内存
-    np_safe = np.array(arr, copy=True)
+    np_safe = np.array(np_arr, copy=True)
 
     # 转回 torch 后再 clone 并 contiguous 确保存储结构最简
     return torch.from_numpy(np_safe).to(dtype).clone().contiguous()
@@ -153,15 +160,20 @@ class NghSampler:
         slot["EID"][:n_src] = pos_eid.cpu().clone()
         slot["EID"][n_src:num_seeds] = -1
 
-        # Get neighbors from C++ nanobind backend
-        ngh_nid, ngh_eid, ngh_ts = self.seq_sampler.get_historical_neighbors(
-            nid_np_safe, ts_np_safe, self.n_ngh
-        )
+        if nid_np_safe.size == 0 or self.n_ngh <= 0:
+            n_tensor = torch.empty(0, dtype=torch.int32)
+            e_tensor = torch.empty(0, dtype=torch.int32)
+            t_tensor = torch.empty(0, dtype=torch.float32)
+        else:
+            # Get neighbors from C++ nanobind backend
+            ngh_nid, ngh_eid, ngh_ts = self.seq_sampler.get_historical_neighbors(
+                nid_np_safe, ts_np_safe, self.n_ngh
+            )
 
-        # 在 NghSampler.sample 内部使用：
-        n_tensor = dist_safe_tensor(ngh_nid, torch.int32).reshape(-1)
-        e_tensor = dist_safe_tensor(ngh_eid, torch.int32).reshape(-1)
-        t_tensor = dist_safe_tensor(ngh_ts, torch.float32).reshape(-1)
+            # 在 NghSampler.sample 内部使用：
+            n_tensor = dist_safe_tensor(ngh_nid, torch.int32).reshape(-1)
+            e_tensor = dist_safe_tensor(ngh_eid, torch.int32).reshape(-1)
+            t_tensor = dist_safe_tensor(ngh_ts, torch.float32).reshape(-1)
 
         num_out = n_tensor.numel()
 
