@@ -1,4 +1,5 @@
 import logging
+import pickle
 import threading
 from queue import Queue as Q
 from typing import Literal, cast
@@ -50,32 +51,40 @@ class Scatter(ThreadBase):
 
         assert self.local_rank == self.host_rank
 
-    def gather_receive(self) -> Result:
+    def _recv_worker_result(self, src_rank: int) -> Result:
+        nbytes = torch.empty(1, dtype=torch.long)
+        dist.recv(nbytes, src=src_rank)
+
+        payload_tensor = torch.empty(int(nbytes.item()), dtype=torch.uint8)
+        if nbytes.item() > 0:
+            dist.recv(payload_tensor, src=src_rank)
+
+        payload = bytes(payload_tensor.tolist())
+        result = pickle.loads(payload)
+        assert isinstance(result, Result), "Worker 返回的对象必须是 Result"
+        return result
+
+    def gather_receive(self, worker_ranks: list[int]) -> Result:
         assert self.local_rank == self.host_rank, "只有 Host 进程可以 gather"
 
-        gathered_list: list[Result | None] = [None] * self.world_size
-
-        # Host 也必须参与，并提供一个"占位"的发送值
         self._gather_seq += 1
         logger.debug(
-            "Scatter gather_object start: seq=%d rank=%d",
-            self._gather_seq,
-            self.local_rank,
-        )
-        dist.gather_object(
-            None,
-            gathered_list,
-            dst=self.host_rank,  # Host 发送的占位数据
-        )
-        logger.debug(
-            "Scatter gather_object end: seq=%d rank=%d",
+            "Scatter recv-result start: seq=%d rank=%d",
             self._gather_seq,
             self.local_rank,
         )
 
-        data_0_result = gathered_list[0]
-        assert data_0_result is not None, "Worker 返回的 Result 不能为 None"
-        # 丢掉 Host 自己的槽位（最后一个），只返回 workers 的结果
+        received: dict[int, Result] = {
+            src_rank: self._recv_worker_result(src_rank) for src_rank in worker_ranks
+        }
+
+        logger.debug(
+            "Scatter recv-result end: seq=%d rank=%d",
+            self._gather_seq,
+            self.local_rank,
+        )
+
+        data_0_result = received[worker_ranks[0]]
         return data_0_result
 
     def logic(self) -> None:
@@ -107,7 +116,7 @@ class Scatter(ThreadBase):
                     "end_of_epoch received by Scatter, sending control signal to Workers..."
                 )
                 _broadcast_control("end_of_epoch")
-                data = self.gather_receive()
+                data = self.gather_receive(worker_ranks)
                 self.result_q.put(data)
                 continue
 

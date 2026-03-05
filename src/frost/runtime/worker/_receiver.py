@@ -1,4 +1,5 @@
 import logging
+import pickle
 import threading
 from queue import Queue as Q
 from typing import Union
@@ -36,6 +37,14 @@ class Receiver(ThreadBase):
         self._recv_seq = 0
         self.ring_buf = ring_buf
 
+    def _send_result(self, result: Result) -> None:
+        payload = pickle.dumps(result, protocol=pickle.HIGHEST_PROTOCOL)
+        nbytes = torch.tensor([len(payload)], dtype=torch.long)
+        dist.send(nbytes, dst=self.env.host_rank)
+        if nbytes.item() > 0:
+            data = torch.tensor(list(payload), dtype=torch.uint8)
+            dist.send(data, dst=self.env.host_rank)
+
     @torch.no_grad()
     def logic(self) -> None:
         batch_count = 0
@@ -67,12 +76,7 @@ class Receiver(ThreadBase):
                 result = self.result_q.get(block=True)
 
                 self._gather_seq += 1
-
-                dist.gather_object(
-                    obj=result,
-                    object_gather_list=None,
-                    dst=self.env.host_rank,
-                )
+                self._send_result(result)
 
             else:
                 assert isinstance(meta, dict)
