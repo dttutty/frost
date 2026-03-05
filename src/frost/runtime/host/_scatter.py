@@ -3,6 +3,7 @@ import threading
 from queue import Queue as Q
 from typing import Literal, cast
 
+import torch
 import torch.distributed as dist
 
 from frost.aliases.host import MetaBundle
@@ -11,6 +12,7 @@ from frost.datatypes.meta import Meta
 from frost.datatypes.plan import DyPlan, PlanSet, StPlan
 from frost.datatypes.result import Result
 from frost.runtime._thread_base import ThreadBase
+from frost.runtime._wire import ControlWire, MetaWire, meta_to_wire, pack_wire_message
 
 logger = logging.getLogger(__name__)
 
@@ -77,15 +79,25 @@ class Scatter(ThreadBase):
         return data_0_result
 
     def logic(self) -> None:
+        def _send_wire(dst_rank: int, msg: ControlWire) -> None:
+            payload = pack_wire_message(msg)
+            nbytes = torch.tensor([len(payload)], dtype=torch.long)
+            dist.send(nbytes, dst=dst_rank)
+            if nbytes.item() > 0:
+                data = torch.tensor(list(payload), dtype=torch.uint8)
+                dist.send(data, dst=dst_rank)
+
+        worker_ranks = [r for r in range(self.world_size) if r != self.host_rank]
+
+        def _broadcast_control(kind: Literal["end_of_epoch", "stop"]) -> None:
+            for dst_rank in worker_ranks:
+                _send_wire(dst_rank, {"kind": kind, "meta": None})
+
         while not self.stop_ev.is_set():
             meta_2_scatter = self.in_q.get(block=True)
 
             if meta_2_scatter is None:
-                dist.scatter_object_list(
-                    [None],
-                    scatter_object_input_list=None,
-                    src=self.host_rank,
-                )
+                _broadcast_control("stop")
                 raise RuntimeError(
                     "Scatter received None, shutting down..."
                 )  # 这里抛异常是为了
@@ -94,13 +106,7 @@ class Scatter(ThreadBase):
                 logger.warning(
                     "end_of_epoch received by Scatter, sending control signal to Workers..."
                 )
-                # 【修正 1】发送 Tensor 列表
-                send_tensors = ["end_of_epoch"] * 3
-                dist.scatter_object_list(
-                    [None],
-                    scatter_object_input_list=send_tensors,
-                    src=self.host_rank,
-                )
+                _broadcast_control("end_of_epoch")
                 data = self.gather_receive()
                 self.result_q.put(data)
                 continue
@@ -124,15 +130,18 @@ class Scatter(ThreadBase):
                         nfeat=safe_nfeat,
                     )
                 meta_2_scatter = cast(list[Meta | None], meta_2_scatter)
-                meta_2_scatter.append(None)  # Host 自己的槽位留 None
+                wire_payload: list[MetaWire | None] = [
+                    meta_to_wire(cast(Meta, m)) if m is not None else None
+                    for m in meta_2_scatter
+                ]
                 try:
-                    dist.scatter_object_list(
-                        [None],
-                        scatter_object_input_list=meta_2_scatter,
-                        src=self.host_rank,
-                    )
+                    for dst_rank, per_rank_meta in zip(worker_ranks, wire_payload, strict=True):
+                        _send_wire(
+                            dst_rank,
+                            {"kind": "meta", "meta": per_rank_meta},
+                        )
                 except Exception as e:
-                    logger.error(f"Scatter scatter_object_list failed: {e}")
+                    logger.error(f"Scatter point-to-point send failed: {e}")
                     raise RuntimeError(
-                        f"Scatter scatter_object_list failed: {e}"
+                        f"Scatter point-to-point send failed: {e}"
                     ) from e
