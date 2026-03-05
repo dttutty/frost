@@ -13,11 +13,10 @@ constexpr T kEps = static_cast<T>(1e-7);
 // 1. 修正后的核心转换函数
 template <typename T>
 inline nb::ndarray<nb::numpy, T> vec2npy_generic(std::vector<T>& vec, size_t ndim, const size_t* shape_ptr) {
-    if (vec.empty()) {
-        // 返回一个真正空的 ndarray，而不是带 nullptr 的损坏对象
-        return nb::ndarray<nb::numpy, T>();
-    }
-
+    // Keep ownership semantics uniform for both empty and non-empty arrays.
+    // Some runtime paths (debugger hooks / array converters) are sensitive to
+    // default-constructed array objects; an explicit shape + owning capsule is
+    // more robust.
     auto* v_ptr = new std::vector<T>(std::move(vec));
     nb::capsule deleter(v_ptr, [](void* p) noexcept {
         delete reinterpret_cast<std::vector<T>*>(p);
