@@ -110,11 +110,23 @@ class NghSampler:
         num_seeds = n_src * (2 + self.n_neg)
 
         if self.sample_4_neg:
-            nid_np = nid.cpu().numpy()
-            ts_np = ts.cpu().numpy()
+            # roots = [src, dst, neg...], while ts only has one timestamp per source edge.
+            # Repeat timestamps so C++ sampler receives arrays with identical lengths.
+            nid_4_sample = nid
+            ts_4_sample = ts.repeat(2 + self.n_neg)
         else:
-            nid_np = nid[0 : n_src * 2].cpu().numpy()
-            ts_np = ts[0 : n_src * 2].cpu().numpy()
+            # Only sample neighborhoods for [src, dst].
+            nid_4_sample = nid[0 : n_src * 2]
+            ts_4_sample = ts.repeat(2)
+
+        if nid_4_sample.shape[0] != ts_4_sample.shape[0]:
+            raise ValueError(
+                "NghSampler requires nid/ts to have equal length before calling C++ sampler, "
+                f"got nid={nid_4_sample.shape[0]}, ts={ts_4_sample.shape[0]}"
+            )
+
+        nid_np = nid_4_sample.cpu().numpy()
+        ts_np = ts_4_sample.cpu().numpy()
 
         # Wait for an empty slot
         slot = self.ring_buf.acquire_slot(gpu_id)
