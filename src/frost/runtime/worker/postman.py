@@ -41,10 +41,12 @@ class Postman:
         # 2. Extract sender timestamps
         sender_ts = graph.root_ts[:target_len]
 
-        # 3. Reshape neighbor NIDs to [N_total, S] and slice the first 2/3
+        # 3. Reshape neighbor NIDs to [target_len, S]
+        # Neighbors are only sampled for src + pos_dst (target_len nodes),
+        # so the tensor has target_len * S elements, not N_total * S.
         S = graph.sampling_config[0]
-        nbr_nids = graph.neighbors[0].nid.view(N_total, S)
-        target_nbr_nids = nbr_nids[:target_len, :]  # Shape: [target_len, S]
+        nbr_nids = graph.neighbors[0].nid.view(target_len, S)
+        target_nbr_nids = nbr_nids  # Shape: [target_len, S]
 
         # 4. Create a boolean mask to filter out padding nodes (-1)
         valid_mask = target_nbr_nids != -1  # Shape: [target_len, S]

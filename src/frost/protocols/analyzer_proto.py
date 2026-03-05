@@ -17,4 +17,5 @@ class AnalyzerProto(Protocol):
         dst: torch.Tensor,
         all_nid: torch.Tensor,
         fanout: list[int] | None,
+        valid_all: torch.Tensor | None = None,
     ) -> Access: ...

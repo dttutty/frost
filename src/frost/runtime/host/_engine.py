@@ -331,12 +331,12 @@ class Host:
 
         # handle different model types
         roots = torch.cat([src, dst, neg_dst])
-        uniq_all, len = self.ngh_sampler.sample(
+        uniq_all, len, valid_all = self.ngh_sampler.sample(
             nid=roots, ts=ts, pos_eid=eid, gpu_id=gpu_id
         )
 
         access = self.analyzer.count_access(
-            src, dst, uniq_all.data, fanout=self.ngh_sampler.fanout
+            src, dst, uniq_all.data, fanout=self.ngh_sampler.fanout, valid_all=valid_all
         )
 
         meta = Meta(

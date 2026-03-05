@@ -59,7 +59,7 @@ class NoSampler:
         ts: torch.Tensor,
         pos_eid: torch.Tensor,
         gpu_id: int,
-    ) -> tuple[TensorSet, int]:
+    ) -> tuple[TensorSet, int, torch.Tensor]:
         n_src = len(nid) // (2 + self.n_neg)
         num_seeds = n_src * (2 + self.n_neg)
 
@@ -80,13 +80,13 @@ class NoSampler:
         length = num_seeds
 
         # Slice and filter before committing to avoid race conditions
-        valid_nid = slot["NID"][:length].clone()
-        valid_nid = valid_nid[valid_nid != -1]
+        valid_nid_raw = slot["NID"][:length].clone()
+        valid_nid = valid_nid_raw[valid_nid_raw != -1]
 
         # Commit slot only after host is done
         self.ring_buf.commit_slot(gpu_id)
 
-        return TensorSet(valid_nid), length
+        return TensorSet(valid_nid), length, valid_nid_raw
 
 
 def dist_safe_tensor(arr, dtype):
@@ -156,7 +156,7 @@ class NghSampler:
         ts: torch.Tensor,
         pos_eid: torch.Tensor,
         gpu_id: int,
-    ) -> tuple[TensorSet, int]:
+    ) -> tuple[TensorSet, int, torch.Tensor]:
         n_src = nid.shape[0] // (2 + self.n_neg)
         num_seeds = n_src * (2 + self.n_neg)
 
@@ -225,13 +225,13 @@ class NghSampler:
         length = num_seeds + num_out
 
         # Slice and filter before committing
-        valid_nid = slot["NID"][:length].clone()
-        valid_nid = valid_nid[valid_nid != -1]
+        valid_nid_raw = slot["NID"][:length].clone()
+        valid_nid = valid_nid_raw[valid_nid_raw != -1]
 
         # Commit slot only after host is done
         self.ring_buf.commit_slot(gpu_id)
 
-        return TensorSet(valid_nid), length
+        return TensorSet(valid_nid), length, valid_nid_raw
 
 
 class MultiHopNghSampler:
@@ -263,7 +263,7 @@ class MultiHopNghSampler:
         ts: torch.Tensor,
         pos_eid: torch.Tensor,
         gpu_id: int,
-    ) -> tuple[TensorSet, int]:
+    ) -> tuple[TensorSet, int, torch.Tensor]:
         """Sample multi-hop historical neighbors by repeatedly calling ``SeqSampler``."""
         padding_node_id = self.padding_node_id
         fanout = self.fanout
@@ -346,10 +346,10 @@ class MultiHopNghSampler:
         length = end
 
         # Slice and filter before committing
-        valid_nid = slot["NID"][:length].clone()
-        valid_nid = valid_nid[valid_nid != -1]
+        valid_nid_raw = slot["NID"][:length].clone()
+        valid_nid = valid_nid_raw[valid_nid_raw != -1]
 
         # Commit slot only after host is done
         self.ring_buf.commit_slot(gpu_id)
 
-        return TensorSet(valid_nid), length
+        return TensorSet(valid_nid), length, valid_nid_raw
