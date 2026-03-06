@@ -118,6 +118,12 @@ def launch(cfg: DictConfig):
         has_nfeat = ndim > 0
         has_efeat = edim > 0
 
+        mem_box_store_cfg = cfg.get("mem_box_store")
+        handle_stale: bool = bool(
+            mem_box_store_cfg.get("handle_stale", False)
+            if mem_box_store_cfg is not None
+            else False
+        )
         host = Host(
             has_nfeat=has_nfeat,
             has_efeat=has_efeat,
@@ -133,6 +139,7 @@ def launch(cfg: DictConfig):
             n_epoch=cfg.epoch,
             patience=cfg.patience,
             gpu_topo=OmegaConf.to_container(cfg.gpu_topo, resolve=True),
+            handle_stale=handle_stale,
         )
         try:
             host.run()

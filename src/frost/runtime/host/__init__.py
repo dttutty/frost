@@ -1,7 +1,7 @@
-from ._planner import Planner
+from ._plan_router import PlanRouter
 from ._scatter import Scatter
 
 __all__ = [
-    "Planner",
+    "PlanRouter",
     "Scatter",
 ]

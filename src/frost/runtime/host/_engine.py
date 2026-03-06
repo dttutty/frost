@@ -21,7 +21,7 @@ from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.protocols.analyzer_proto import AnalyzerProto
 from frost.protocols.ngh_sampler_proto import NghSamplerProto
-from frost.runtime.host import Planner, Scatter
+from frost.runtime.host import PlanRouter, Scatter
 from frost.runtime.host._batch_balance import make_balance_plan
 from frost.sampling.neg_sampler import NegLinkSampler
 
@@ -40,7 +40,7 @@ class Host:
     nfeat_plan_out_q: StaticPlanOutQ | None = None
 
     scatter_q: Q[MetaBundle | None | Literal["end_of_epoch"]]
-    planner: Planner | None = None
+    plan_router: PlanRouter | None = None
 
     def __init__(
         self,
@@ -54,10 +54,11 @@ class Host:
         env: Env,
         start_time: float,
         analyzer: AnalyzerProto,
-        gpu_topo: list[int],
+        gpu_topo: list,
         batch_size: int,
         n_epoch: int,
         patience: int,
+        handle_stale: bool = False,
     ) -> None:
         self.neg_sampler = neg_sampler
         self.ngh_sampler = ngh_sampler
@@ -88,15 +89,15 @@ class Host:
         self.patience_counter = 0
         self.last_epoch_result: Result | None = None
 
-        self._init_pipeline(env, gpu_topo)
+        self._init_pipeline(env, gpu_topo, handle_stale)
         self._init_dataset(df)
 
-    def _init_pipeline(self, env: Env, gpu_topo: list[int]) -> None:
-        """Fixed linear pipeline: main thread → [Planner.dispatch() →] scatter_q → Scatter.
+    def _init_pipeline(self, env: Env, gpu_topo: list, handle_stale: bool) -> None:
+        """Fixed linear pipeline: main thread → [PlanRouter.dispatch() →] scatter_q → Scatter.
 
         The main thread accumulates n_gpu metas per macro-batch, optionally dispatches to
-        sub-planner threads via Planner.dispatch(), then puts MetaBundle into scatter_q.
-        No dedicated MetaBatcher or Planner thread — both are inlined into the main thread.
+        sub-planner threads via PlanRouter.dispatch(), then puts MetaBundle into scatter_q.
+        No dedicated thread for routing — it is inlined into the main thread.
         """
         has_planner = self.has_nfeat or self.has_mem
 
@@ -110,12 +111,13 @@ class Host:
             if self.has_nfeat:
                 self.nfeat_plan_out_q = Q(maxsize=1)
 
-            self.planner = Planner(
+            self.plan_router = PlanRouter(
                 gpu_topo=gpu_topo,
                 mem_plan_out_q=self.mem_plan_out_q,
                 mail_plan_out_q=self.mail_plan_out_q,
                 nfeat_plan_out_q=self.nfeat_plan_out_q,
                 stop_ev=self.stop_ev,
+                handle_stale=handle_stale,
             )
 
         self.scatter = Scatter(
@@ -271,8 +273,8 @@ class Host:
                 meta_bundle.append(meta)
                 access_bundle.append(access)
                 self.batch_idx += 1
-            if self.planner is not None:
-                self.planner.dispatch(meta_bundle, access_bundle)
+            if self.plan_router is not None:
+                self.plan_router.dispatch(meta_bundle, access_bundle)
             self.scatter_q.put(meta_bundle)
             self.cur_macro_of_epoch += 1
 
@@ -280,8 +282,8 @@ class Host:
             self._cleanup_per_epoch()
 
     def _cleanup_per_epoch(self) -> None:
-        if self.planner is not None:
-            self.planner.signal_epoch_end()
+        if self.plan_router is not None:
+            self.plan_router.signal_epoch_end()
         self.scatter_q.put("end_of_epoch")
 
         self.cur_macro_of_epoch = 0
@@ -351,8 +353,8 @@ class Host:
         return meta, access
 
     def _cleanup(self) -> None:
-        if self.planner is not None:
-            self.planner.shutdown()
+        if self.plan_router is not None:
+            self.plan_router.shutdown()
         self.scatter_q.put(None)
         self.scatter.join()
         print("All threads have been joined. Host cleanup complete.")
