@@ -21,7 +21,7 @@ from frost.datatypes.result import Result
 from frost.protocols.analyzer_proto import AnalyzerProto
 from frost.protocols.ngh_sampler_proto import NghSamplerProto
 from frost.runtime.host import MetaBatcher, Planner, Scatter
-from frost.runtime.host._df_split import make_balance_plan
+from frost.runtime.host._batch_balance import make_balance_plan
 from frost.sampling.neg_sampler import NegLinkSampler
 
 logger = logging.getLogger(__name__)
