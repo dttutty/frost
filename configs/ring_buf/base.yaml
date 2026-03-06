@@ -2,4 +2,4 @@ _target_: frost.shm.ring_buf.RingBuf
 max_batch_size: ${batch_size}
 n_neg: ${n_neg}
 sample_4_neg: ${ngh_sampler.sample_4_neg}
-max_size: 200
+max_size: 16

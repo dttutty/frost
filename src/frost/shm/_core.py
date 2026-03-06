@@ -9,6 +9,8 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+_SHM_NAME_PREFIX = "__FROST"
+
 # Map PyTorch dtypes to NumPy dtypes
 _TORCH_TO_NP = {
     torch.float32: np.float32,
@@ -49,8 +51,18 @@ _IS_HOST_PROCESS = False
 _CLEANUP_DONE = False
 
 
+def _normalize_shm_name(name: str) -> str:
+    if name.startswith(_SHM_NAME_PREFIX):
+        return name
+    if name.startswith("__"):
+        return f"{_SHM_NAME_PREFIX}{name}"
+    return f"{_SHM_NAME_PREFIX}_{name}"
+
+
 def _signal_handler(signum, frame):
-    logger.warning(f"Process received signal {signum}. Forcing shared memory cleanup...")
+    logger.warning(
+        f"Process received signal {signum}. Forcing shared memory cleanup..."
+    )
     cleanup_all_shm(is_host=_IS_HOST_PROCESS)
     sys.exit(1)
 
@@ -109,6 +121,7 @@ def cleanup_all_shm(is_host: bool = True) -> None:
 def create_shared_mem_array(
     name: str, shape: list | tuple, dtype: torch.dtype
 ) -> torch.Tensor:
+    name = _normalize_shm_name(name)
     np_dtype = _TORCH_TO_NP[dtype]
     num_bytes = int(np.prod(shape)) * np.dtype(np_dtype).itemsize
 
@@ -138,6 +151,7 @@ def create_shared_mem_array(
 def get_shared_mem_array(
     name: str, shape: list | tuple, dtype: torch.dtype
 ) -> torch.Tensor:
+    name = _normalize_shm_name(name)
     np_dtype = _TORCH_TO_NP[dtype]
 
     shm = shared_memory.SharedMemory(name=name)

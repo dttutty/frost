@@ -86,7 +86,7 @@ class RingBuf:
             for g_idx in range(self.n_gpu):
                 for buf_idx in range(self.max_size):
                     for key, (shape, dtype) in self.schema.items():
-                        name = f"{prefix}TGL_SHM_g{g_idx}_b{buf_idx}_{key}"
+                        name = f"{prefix}_RING_BUF_gpu{g_idx}_b{buf_idx}_{key}"
                         self.buffers[g_idx][buf_idx][key] = create_shared_mem_array(
                             name, shape, dtype
                         )
@@ -104,7 +104,7 @@ class RingBuf:
             for g_idx in range(self.n_gpu):
                 for buf_idx in range(self.max_size):
                     for key, (shape, dtype) in self.schema.items():
-                        name = f"{prefix}TGL_SHM_g{g_idx}_b{buf_idx}_{key}"
+                        name = f"{prefix}_RING_BUF_gpu{g_idx}_b{buf_idx}_{key}"
                         self.buffers[g_idx][buf_idx][key] = get_shared_mem_array(
                             name, shape, dtype
                         )
