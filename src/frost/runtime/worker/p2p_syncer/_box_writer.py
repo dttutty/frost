@@ -7,12 +7,12 @@ import torch
 
 from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.protocols.cuda_event_proto import CudaEvent
-from frost.runtime._thread_base import StreamThreadBase
+from frost.runtime._thread_base import ThreadBase
 
 logger = logging.getLogger(__name__)
 
 
-class BoxWriter(StreamThreadBase):
+class BoxWriter(ThreadBase):
     def __init__(
         self,
         shared_box: torch.Tensor,

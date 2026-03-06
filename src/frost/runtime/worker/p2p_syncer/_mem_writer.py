@@ -6,12 +6,12 @@ import torch
 
 from frost.aliases.syncer import MemWrQ
 from frost.datatypes.mem_mail_box.mem import MemEntry
-from frost.runtime._thread_base import StreamThreadBase
+from frost.runtime._thread_base import ThreadBase
 
 logger = logging.getLogger(__name__)
 
 
-class MemWriter(StreamThreadBase):
+class MemWriter(ThreadBase):
     def __init__(
         self,
         shared_mem: torch.Tensor,
