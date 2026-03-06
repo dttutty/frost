@@ -3,24 +3,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+from torch import Tensor
 
 
 @dataclass(kw_only=True)
 class FlatGraph:
     """Sequence sampling metadata."""
 
-    nid: torch.Tensor  # Total length of all nids in SeqGraph
-    eid: torch.Tensor  # Total length of all eids in SeqGraph
-    ts: torch.Tensor  # Total length of all timestamps in SeqGraph
-    nfeat: torch.Tensor | None = None
-    efeat: torch.Tensor | None = None
-    mem: torch.Tensor | None = None
-    mem_ts: torch.Tensor | None = None
-    box: torch.Tensor | None = None
-    box_ts: torch.Tensor | None = None
-    detached_mem: torch.Tensor | None = None
-    detached_ts: torch.Tensor | None = None
-    detached_nid: torch.Tensor | None = None
+    nid: Tensor  # Total length of all nids in SeqGraph
+    eid: Tensor  # Total length of all eids in SeqGraph
+    ts: Tensor  # Total length of all timestamps in SeqGraph
+    nfeat: Tensor | None = None
+    efeat: Tensor | None = None
+    mem: Tensor | None = None
+    mem_ts: Tensor | None = None
+    box: Tensor | None = None
+    box_ts: Tensor | None = None
+    detached_mem: Tensor | None = None
+    detached_ts: Tensor | None = None
+    detached_nid: Tensor | None = None
 
     def to(self, device: torch.device) -> FlatGraph:
         # discard detached_mem
@@ -78,7 +79,7 @@ class FlatGraph:
                 sizes.append(current_size)
 
         # Helper function to split tensors safely
-        def _split(t: torch.Tensor | None) -> tuple:
+        def _split(t: Tensor | None) -> tuple:
             if t is None:
                 return tuple([None] * len(sizes))
             return torch.split(t, sizes, dim=0)
@@ -112,9 +113,9 @@ class FlatGraph:
             neighbors.append(nbr)
 
         # 5. Build and return the final SeqGraph
+        # remove root_eid to prevent info leakage,
         return Graph(
             root_nid=nids[0],
-            root_eid=eids[0],
             root_ts=tss[0],
             root_nfeat=nfeats[0],
             root_mem=mems[0],
@@ -128,17 +129,18 @@ class FlatGraph:
 
 @dataclass(kw_only=True)
 class NeighborOnHop:
-    # For 1-hop neighbors, length is root_nid count * fanout[0]
-    # For 2-hop neighbors, length is root_nid count * fanout[0] * fanout[1]
-    nid: torch.Tensor
-    eid: torch.Tensor
-    ts: torch.Tensor
-    nfeat: torch.Tensor | None = None
-    efeat: torch.Tensor | None = None
-    mem: torch.Tensor | None = None
-    mem_ts: torch.Tensor | None = None
-    box: torch.Tensor | None = None
-    box_ts: torch.Tensor | None = None
+    # For 1-hop neighbors, length = root_nid length * fanout[0]
+    # For 2-hop neighbors, length = root_nid length * fanout[0] * fanout[1]
+    # and so on.
+    nid: Tensor
+    eid: Tensor
+    ts: Tensor
+    nfeat: Tensor | None = None
+    efeat: Tensor | None = None
+    mem: Tensor | None = None
+    mem_ts: Tensor | None = None
+    box: Tensor | None = None
+    box_ts: Tensor | None = None
 
 
 @dataclass(kw_only=True)
@@ -146,23 +148,16 @@ class Graph:
     """Sequence sampling metadata."""
 
     # If nid is -1, then eid is also -1, indicating padding that should not be aggregated.
-
-    root_nid: torch.Tensor  # Length is 3x number of src nodes (src, pos, neg)
-    root_eid: torch.Tensor  # Length is 3x number of src nodes
-    root_ts: torch.Tensor  # Length is 3x number of src nodes
-
-    root_nfeat: torch.Tensor | None = None  # Length is 3x number of src nodes
-
-    root_mem: torch.Tensor | None = None  # Length is root_nid count * fanout[0]
-    root_mem_ts: torch.Tensor | None = None  # Length is root_nid count * fanout[0]
-    root_box: torch.Tensor | None = None  # Length is root_nid count * fanout[0] * (box_size)
-    root_box_ts: torch.Tensor | None = None  # Length is root_nid count * fanout[0]
+    # Length is (1+n_neg)x number of src nodes = (src, pos, neg)
+    root_nid: Tensor
+    root_ts: Tensor
+    root_nfeat: Tensor | None = None
+    root_mem: Tensor | None = None
+    root_mem_ts: Tensor | None = None
+    root_box: Tensor | None = None
+    root_box_ts: Tensor | None = None
 
     # Multi-hop neighbors. n_neighbor is a list like [10, 25].
     # Currently TGN only supports 1 hop, while TGAT supports multiple hops.
     neighbors: list[NeighborOnHop] | None = None
-
-    # Sampling configuration like [10] or [10, 25]
     fanout: list[int] | None = None
-
-    root_efeat: torch.Tensor | None = None  # Length is 1x number of src nodes

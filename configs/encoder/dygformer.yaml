@@ -5,7 +5,7 @@ d_time: ${d_time}
 d_out: ${final_emb_dim}
 channel_embedding_dim: 32
 patch_size: 1
-num_layers: 2
+transformer_layers: 2
 num_heads: 2
 dropout: ${dropout}
 max_input_sequence_length: 32
