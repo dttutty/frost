@@ -15,7 +15,7 @@ from frost.protocols.mem_updater_proto import MemoryUpdaterProto
 from frost.protocols.ngh_sampler_proto import NghSamplerProto
 from frost.protocols.postman_proto import PostmanProto
 from frost.sampling.neg_sampler import NegLinkSampler
-from frost.shm.dataset_n_feat import DatasetManager
+from frost.shm.dataset_mgr import DatasetManager
 from frost.shm.mem_mgr import MemBoxStoreManager
 from frost.shm.ring_buf import RingBuf
 from frost.utils._logger import init_logging
@@ -178,4 +178,5 @@ def launch(cfg: DictConfig):
             worker.run()
         finally:
             from frost.shm._core import cleanup_all_shm
+
             cleanup_all_shm(is_host=False)

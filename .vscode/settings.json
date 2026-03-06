@@ -37,5 +37,10 @@
     "**/.DS_Store": true,
     "**/Thumbs.db": true,
     "hydralance": true
-  }
+  },
+  "hydralance.excludePatterns": [
+    ".venv/**",
+    "outputs/**"
+  ],
+  "hydralance.hideHelperFolder": true
 }
