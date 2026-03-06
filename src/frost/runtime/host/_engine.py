@@ -10,17 +10,19 @@ import torch
 from tqdm import tqdm
 
 from frost.aliases.host import (
+    AccessBundle,
     DynamicPlanOutQ,
-    MetaBatcherInQ,
+    MetaBundle,
     MetaBundleQ,
     StaticPlanOutQ,
 )
+from frost.datatypes.access import Access
 from frost.datatypes.env import Env
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.protocols.analyzer_proto import AnalyzerProto
 from frost.protocols.ngh_sampler_proto import NghSamplerProto
-from frost.runtime.host import MetaBatcher, Planner, Scatter
+from frost.runtime.host import Planner, Scatter
 from frost.runtime.host._batch_balance import make_balance_plan
 from frost.sampling.neg_sampler import NegLinkSampler
 
@@ -34,7 +36,7 @@ def _disable_tqdm_monitor_thread() -> None:
 
 
 class Host:
-    meta_in_q: MetaBatcherInQ
+    bundle_dest_q: MetaBundleQ  # main thread puts (MetaBundle, AccessBundle) here
     mem_plan_out_q: DynamicPlanOutQ | None = None
     mail_plan_out_q: DynamicPlanOutQ | None = None
     nfeat_plan_out_q: StaticPlanOutQ | None = None
@@ -92,15 +94,16 @@ class Host:
         self._init_dataset(df)
 
     def _init_pipeline(self, env: Env, gpu_topo: list[int]) -> None:
-        """Fixed linear pipeline: meta_in_q → MetaBatcher → [Planner →] scatter_q → Scatter.
+        """Fixed linear pipeline: main thread → bundle_dest_q → [Planner →] scatter_q → Scatter.
 
-        When a Planner is needed, meta_bundle_q is a local link between MetaBatcher and Planner
-        and is not stored on self (no other method needs it).
+        The main thread accumulates n_gpu metas per macro-batch and puts the bundle directly
+        into bundle_dest_q, eliminating the need for a dedicated MetaBatcher thread.
+        When a Planner is needed, bundle_dest_q is a local link between the main thread and
+        Planner and is not stored on self as scatter_q (no other method needs that distinction).
         """
         has_planner = self.has_nfeat or self.has_mem
 
         self.result_q: Q[Result] = Q(maxsize=10)
-        self.meta_in_q = Q(maxsize=2 if has_planner else 4)
         self.scatter_q = Q(maxsize=1 if has_planner else 2)
 
         if has_planner:
@@ -110,17 +113,12 @@ class Host:
             if self.has_nfeat:
                 self.nfeat_plan_out_q = Q(maxsize=1)
 
-            meta_bundle_q: MetaBundleQ = Q(maxsize=1)
+            bundle_dest_q: MetaBundleQ = Q(maxsize=2)
+            self.bundle_dest_q = bundle_dest_q
 
-            self.meta_batcher = MetaBatcher(
-                n_gpu=env.n_gpu,
-                meta_in_q=self.meta_in_q,
-                dest_q=meta_bundle_q,
-                stop_ev=self.stop_ev,
-            )
             self.planner = Planner(
                 gpu_topo=gpu_topo,
-                in_q=meta_bundle_q,
+                in_q=bundle_dest_q,
                 out_q=self.scatter_q,
                 mem_plan_out_q=self.mem_plan_out_q,
                 mail_plan_out_q=self.mail_plan_out_q,
@@ -128,12 +126,8 @@ class Host:
                 stop_ev=self.stop_ev,
             )
         else:
-            self.meta_batcher = MetaBatcher(
-                n_gpu=env.n_gpu,
-                meta_in_q=self.meta_in_q,
-                dest_q=self.scatter_q,
-                stop_ev=self.stop_ev,
-            )
+            # No Planner: main thread puts bundles directly into scatter_q.
+            self.bundle_dest_q = self.scatter_q
 
         self.scatter = Scatter(
             n_gpu=env.n_gpu,
@@ -205,7 +199,6 @@ class Host:
         return False
 
     def start_all_threads(self) -> None:
-        self.meta_batcher.start()
         if self.planner is not None:
             self.planner.start()
         self.scatter.start()
@@ -275,9 +268,11 @@ class Host:
             desc=step_desc_map[split],
         ):
             assert isinstance(cur_macro_of_split, int)
+            meta_bundle: MetaBundle = []
+            access_bundle: AccessBundle = []
             for gpu, edges in step_df.groupby("gpu_id", sort=False):
                 assert isinstance(gpu, int)
-                self._add_to_td_list(
+                meta, access = self._add_to_td_list(
                     edges,
                     cur_epoch,
                     cur_macro_of_split,
@@ -286,14 +281,17 @@ class Host:
                     self.batch_idx,
                     gpu,
                 )
+                meta_bundle.append(meta)
+                access_bundle.append(access)
                 self.batch_idx += 1
+            self.bundle_dest_q.put((meta_bundle, access_bundle))
             self.cur_macro_of_epoch += 1
 
         if split == "test":
             self._cleanup_per_epoch()
 
     def _cleanup_per_epoch(self) -> None:
-        self.meta_in_q.put("end_of_epoch")
+        self.bundle_dest_q.put("end_of_epoch")
 
         self.cur_macro_of_epoch = 0
         self.curr_epoch += 1
@@ -307,7 +305,7 @@ class Host:
         split: Literal["train", "val", "test"],
         batch_idx: int,
         gpu_id: int,
-    ) -> None:
+    ) -> tuple[Meta, Access | None]:
         # show edges["time"].values for debug
         # logger.info(f"Edge times: {edges['time'].values}")
         src = (
@@ -359,14 +357,13 @@ class Host:
             fanout=self.ngh_sampler.fanout,
         )
 
-        self.meta_in_q.put((meta, access))
+        return meta, access
 
     def _cleanup(self) -> None:
-        self.meta_in_q.put(None)
-        self.meta_batcher.join()
+        self.bundle_dest_q.put(None)
         if self.planner is not None:
             self.planner.join()
-        print("MetaBatcher and Planner threads have been joined.")
+        print("Planner thread has been joined.")
         self.scatter.join()
         print("All threads have been joined. Host cleanup complete.")
         end = time.time()
