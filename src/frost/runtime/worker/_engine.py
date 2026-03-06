@@ -54,7 +54,7 @@ class P2PGuardCommHook:
         """每个 training step 开头调用，标记本轮需要 acquire。"""
         self._need_acquire = True
 
-    def __call__(self, state: dist.ProcessGroup, bucket: dist.GradBucket):
+    def __call__(self, state: dist.ProcessGroup, bucket: dist.GradBucket):  # type: ignore
         if self._need_acquire:
             self.p2p_sem.acquire()
             self._need_acquire = False
