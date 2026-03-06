@@ -41,7 +41,7 @@
         "--master_port=29505",
         "run.py",
         "analyzer=apan",
-        "dataset=lastfm",
+        "dataset=LASTFM",
         "encoder=apan",
         "mem_box_store=base",
         "mem_updater=apan",
@@ -67,7 +67,7 @@
         "--master_port=29505",
         "run.py",
         "analyzer=jodie",
-        "dataset=lastfm",
+        "dataset=LASTFM",
         "encoder=jodie",
         "mem_box_store=base",
         "mem_updater=jodie",
@@ -90,7 +90,7 @@
         "--master_addr=127.0.0.1",
         "--master_port=29505",
         "run.py",
-        "dataset=lastfm",
+        "dataset=LASTFM",
         "encoder=tgat",
         "ngh_sampler=2_hop"
       ]
@@ -110,7 +110,7 @@
         "--master_addr=127.0.0.1",
         "--master_port=29505",
         "run.py",
-        "dataset=lastfm",
+        "dataset=LASTFM",
         "encoder=dygformer",
         "ngh_sampler=1_hop"
       ]
@@ -130,7 +130,7 @@
         "--master_addr=127.0.0.1",
         "--master_port=29505",
         "run.py",
-        "dataset=lastfm",
+        "dataset=LASTFM",
         "encoder=graphmixer",
         "ngh_sampler=1_hop"
       ]

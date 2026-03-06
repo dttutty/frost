@@ -7,6 +7,7 @@ from typing import Literal
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.algorithms.ddp_comm_hooks.default_hooks import allreduce_hook
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.profiler import ProfilerActivity, profile, record_function
 from torchmetrics import MetricCollection
@@ -40,6 +41,24 @@ from frost.shm.mem_mgr import MemBoxStore
 from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
+
+
+class P2PGuardCommHook:
+    """在每个 training step 的第一次 AllReduce 前，等待 P2P 完成。"""
+
+    def __init__(self, p2p_sem: threading.Semaphore) -> None:
+        self.p2p_sem = p2p_sem
+        self._need_acquire = False
+
+    def arm(self) -> None:
+        """每个 training step 开头调用，标记本轮需要 acquire。"""
+        self._need_acquire = True
+
+    def __call__(self, state: dist.ProcessGroup, bucket: dist.GradBucket):
+        if self._need_acquire:
+            self.p2p_sem.acquire()
+            self._need_acquire = False
+        return allreduce_hook(state, bucket)
 
 
 class Worker:
@@ -254,6 +273,13 @@ class Worker:
         self.model = DDP(
             self.model, process_group=self.nccl, find_unused_parameters=False
         )
+        self.p2p_guard = P2PGuardCommHook(self.p2p_sem)
+        _guard = self.p2p_guard
+
+        def p2p_guard_comm_hook(state, bucket):
+            return _guard(state, bucket)
+
+        self.model.register_comm_hook(state=self.nccl, hook=p2p_guard_comm_hook)
         self.criterion = criterion
 
     def _init_metrics(self) -> None:
@@ -313,13 +339,14 @@ class Worker:
             mem_task_q=self.mem_task_q,
             box_task_q=self.box_task_q,
         )
-        loss = self.criterion(logits.squeeze(-1), meta.labels)
 
+        loss = self.criterion(logits.squeeze(-1), meta.labels)
+        if self.mem_box_store is not None:
+            self.p2p_guard.arm()  # 标记本轮需要在第一次 AllReduce 前等待 P2P 完成
         loss.backward()
 
         self.optimizer.step()
-        if self.mem_box_store is not None:
-            self.p2p_sem.acquire()  # 获取信号量，确保当前没有其他 P2P 任务在进行
+
         self.train_loss_tracker.update(loss.detach())
         self._release_meta_tensors(meta)
 
