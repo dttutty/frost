@@ -110,7 +110,9 @@ class Worker:
         self.p2p_sem = threading.Semaphore(0)
 
         self._init_pipeline(ring_buf, nfeat, efeat)
-        self._init_model(encoder, mem_updater, predictor, postman, criterion, optimizer, ring_buf)
+        self._init_model(
+            encoder, mem_updater, predictor, postman, criterion, optimizer, ring_buf
+        )
         self._init_metrics()
 
     def _init_pipeline(
@@ -249,7 +251,9 @@ class Worker:
             raise ValueError(f"Unsupported optimizer: {optimizer}")
 
         self.model = self.model.cuda()
-        self.model = DDP(self.model, process_group=self.nccl, find_unused_parameters=False)
+        self.model = DDP(
+            self.model, process_group=self.nccl, find_unused_parameters=False
+        )
         self.criterion = criterion
 
     def _init_metrics(self) -> None:
@@ -261,14 +265,18 @@ class Worker:
             {
                 "val_loss": MeanMetric(process_group=self.nccl),
                 "val_auc": BinaryAUROC(thresholds=10000, process_group=self.nccl),
-                "val_ap": BinaryAveragePrecision(thresholds=10000, process_group=self.nccl),
+                "val_ap": BinaryAveragePrecision(
+                    thresholds=10000, process_group=self.nccl
+                ),
             }
         ).cuda()
 
         self.test_metrics = MetricCollection(
             {
                 "test_auc": BinaryAUROC(thresholds=10000, process_group=self.nccl),
-                "test_ap": BinaryAveragePrecision(thresholds=10000, process_group=self.nccl),
+                "test_ap": BinaryAveragePrecision(
+                    thresholds=10000, process_group=self.nccl
+                ),
             }
         ).cuda()
 
@@ -472,17 +480,18 @@ class Worker:
                 result = self.on_train_epoch_end()
 
                 self.result_q.put(result)
-                # self.save_model(path="last.ckpt")
                 val_auc = result.val_auc if result is not None else 0.0
                 if val_auc > self.local_best_auc:
                     self.local_best_auc = val_auc
-                    # 只有打破纪录才写磁盘
-                    self.save_model(path="best.ckpt")
-                dist.barrier(group=self.nccl)
+                    # Save asynchronously so rank-0 disk I/O doesn't stall the loop
+                    threading.Thread(
+                        target=self.save_model, args=("best.ckpt",), daemon=True
+                    ).start()
+                # dist.barrier() is redundant: on_train_epoch_end() compute() calls
+                # already performed 7 NCCL all-reduces that synchronize all ranks.
                 self.curr_epoch += 1
                 if self.mem_box_store:
                     self.mem_box_store.reset()
-                torch.cuda.empty_cache()  # 尝试减少内存碎片，帮助稳定训练
             if full is None:
                 if self.mem_box_store is not None:
                     assert self.box_task_q is not None
