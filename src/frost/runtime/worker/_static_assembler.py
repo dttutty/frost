@@ -11,7 +11,7 @@ from ...datatypes.n_feat_nid import NodeFeatNid
 logger = logging.getLogger(__name__)
 
 
-class StAssembler:
+class StaticAssembler:
     """
     静态数据组装器线程，将分块数据和增量数据合并，并填充到 DGL Block 中。
     """

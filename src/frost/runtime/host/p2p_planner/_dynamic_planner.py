@@ -88,7 +88,7 @@ def compute_p2p_transfer_plan(
     return leftovers, p2p_plan
 
 
-def dedup_updates_random(
+def deduplicate_updates_random(
     updates: list[TensorSet], seed: int | None = None
 ) -> tuple[list[TensorSet], TensorSet]:
     """
@@ -134,7 +134,7 @@ def dedup_updates_random(
     return new_updates, all_update
 
 
-def dedup_updates(
+def deduplicate_updates(
     updates: list[TensorSet], reverse: bool = True
 ) -> tuple[list[TensorSet], TensorSet]:
     """
@@ -258,14 +258,15 @@ class DynamicPlanner(ThreadBase):
 
         n_gpus = self.n_gpus
 
-        dedup_update_list, all_update = dedup_updates(update_list)
+        deduplicate_update_list, all_update = deduplicate_updates(update_list)
         next_all_update = TensorSet.empty_like(all_update.data)
         for update in next_update_list:
             next_all_update = next_all_update | update
 
-        _, p2p = compute_p2p_transfer_plan(next_all_list, dedup_update_list)
+        _, p2p = compute_p2p_transfer_plan(next_all_list, deduplicate_update_list)
         writeback_list = [
-            per_gpu_update - next_all_update for per_gpu_update in dedup_update_list
+            per_gpu_update - next_all_update
+            for per_gpu_update in deduplicate_update_list
         ]
 
         # 1. 预处理：确定每个 GPU 实际持有的 "Stale" 数据

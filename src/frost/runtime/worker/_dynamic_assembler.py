@@ -8,7 +8,7 @@ from typing import cast
 
 import torch
 
-from frost.aliases.worker import DeltaQ, FullQ, H2DOutQ
+from frost.aliases.worker import AssembledQ, DeltaQ, H2DOutQ
 from frost.datatypes.graph import FlatGraph
 from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
@@ -44,12 +44,12 @@ class MemAndBox:
         return self
 
 
-class DyAssembler(StreamThreadBase):
+class DynamicAssembler(StreamThreadBase):
     def __init__(
         self,
         h2d_out_q: H2DOutQ,
         delta_q: DeltaQ,
-        full_q: FullQ,
+        full_q: AssembledQ,
         stop_ev: threading.Event,
         device: torch.device,
         h2d_sem: threading.Semaphore,  # Optional semaphore for H2D synchronization
@@ -215,7 +215,7 @@ class DyAssembler(StreamThreadBase):
 
         return global_positions, local_positions
 
-    def prep_shared_features(
+    def prepare_shared_features(
         self, graph: FlatGraph, mem_plan: DynamicPlan, box_plan: DynamicPlan
     ) -> None:
         """Step 1: Initialize tensors and fill local shared memory data."""
@@ -371,7 +371,7 @@ class DyAssembler(StreamThreadBase):
             self.h2d_sem.acquire()
             self.h2d_sem.acquire()
 
-            self.prep_shared_features(
+            self.prepare_shared_features(
                 graph=meta.flat_graph,
                 mem_plan=meta.plan_set.mem,
                 box_plan=meta.plan_set.box,
@@ -381,7 +381,7 @@ class DyAssembler(StreamThreadBase):
             delta_tuple = self.delta_q.get(block=True)
 
             logger.debug(
-                f"DyAssembler received delta for batch {meta.batch_idx}, epoch {epoch_count}"
+                f"DynamicAssembler received delta for batch {meta.batch_idx}, epoch {epoch_count}"
             )
 
             if delta_tuple != "nothing":
@@ -397,9 +397,9 @@ class DyAssembler(StreamThreadBase):
                 box_data = box.data2recv
 
                 delta_mem = MemEntry(
-                    nid=mem.nid2recv, data=mem.data2recv, ts=mem.ts2recv
+                    nid=mem.recv_nid, data=mem.data2recv, ts=mem.ts2recv
                 )
-                delta_box = BoxEntry(nid=box.nid2recv, data=box_data, ts=box.ts2recv)
+                delta_box = BoxEntry(nid=box.recv_nid, data=box_data, ts=box.ts2recv)
                 delta = MemAndBox(mem=delta_mem, box=delta_box)
                 delta = delta.sort_mem_and_box()
 
@@ -418,5 +418,5 @@ class DyAssembler(StreamThreadBase):
             ready_event.record(torch.cuda.current_stream())
             self.full_q.put((meta, ready_event), block=True)
             logger.debug(
-                f"DyAssembler put full meta for batch {meta.batch_idx}, epoch {epoch_count} into full_q"
+                f"DynamicAssembler put full meta for batch {meta.batch_idx}, epoch {epoch_count} into full_q"
             )

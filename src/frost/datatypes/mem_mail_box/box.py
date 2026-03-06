@@ -16,7 +16,7 @@ class BoxEntry:
 
     def __repr__(self) -> str:
         return (
-            f"BoxTsNid(nid={self.nid.shape}, data={self.data.shape}, "
+            f"BoxEntry(nid={self.nid.shape}, data={self.data.shape}, "
             f"ts={self.ts.shape}, is_sorted={self.is_sorted}, is_unique={self.is_unique})"
         )
 
@@ -87,7 +87,7 @@ class BoxEntry:
             is_unique=self.is_unique,
         )
 
-    def merge_1_mail(self, mail: "MailTsNid") -> BoxEntry:
+    def merge_1_mail(self, mail: "MailEntry") -> BoxEntry:
         from ._data_ops import merge_1_mail
 
         return merge_1_mail(self, mail)

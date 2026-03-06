@@ -14,8 +14,8 @@ from frost.aliases.host import (
 )
 from frost.datatypes.access import Access
 from frost.runtime._thread_base import ThreadBase
-from frost.runtime.host.p2p_planner._dy_planner import DynamicPlanner
-from frost.runtime.host.p2p_planner._st_planner import StaticPlanner
+from frost.runtime.host.p2p_planner._dynamic_planner import DynamicPlanner
+from frost.runtime.host.p2p_planner._static_planner import StaticPlanner
 from frost.utils.tensor_set import TensorSet
 
 logger = logging.getLogger(__name__)

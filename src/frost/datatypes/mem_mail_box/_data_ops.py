@@ -11,7 +11,7 @@ from .mail import MailEntry
 from .mem import MemEntry
 
 AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
+Mem_or_Mail = TypeVar("Mem_or_Mail", "MemEntry", "MailEntry")
 logger = logging.getLogger(__name__)
 
 
@@ -76,14 +76,14 @@ def merge_1_mail(box: BoxEntry, mail: MailEntry) -> BoxEntry:
     the new mail is written into the last slot (index ``boxsize - 1``).
 
     Args:
-        box : BoxTsNid – current mailbox loaded from the flat graph.
+        box : BoxEntry – current mailbox loaded from the flat graph.
                          ``nid``  shape [N_all] – may contain -1 padding and
                          duplicate node IDs (same node can appear multiple times
                          in the flat graph; all copies carry identical data from
                          shared memory).
                          ``data`` shape [N_all, boxsize, D]
                          ``ts``   shape [N_all, boxsize]
-        mail: MailTsNid – new mail per destination node, already de-duplicated
+        mail: MailEntry – new mail per destination node, already de-duplicated
                          by ``keep_last()`` / ``keep_mean()`` so ``nid`` is
                          unique and sorted.
                          ``nid``  shape [M]
@@ -91,7 +91,7 @@ def merge_1_mail(box: BoxEntry, mail: MailEntry) -> BoxEntry:
                          ``ts``   shape [M]
 
     Returns:
-        BoxTsNid  nid=[M], data=[M, boxsize, D], ts=[M, boxsize].
+        BoxEntry  nid=[M], data=[M, boxsize, D], ts=[M, boxsize].
         The caller (BoxWriter) writes this back to the shared-memory mailbox.
     """
     M = mail.nid.numel()

@@ -14,7 +14,7 @@ from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.runtime._thread_base import ThreadBase
 
 AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
+Mem_or_Mail = TypeVar("Mem_or_Mail", "MemEntry", "MailEntry")
 
 logger = logging.getLogger(__name__)
 
@@ -96,8 +96,8 @@ class P2PQHandler(ThreadBase):
                     # 格式：(Name, Recv, Send, recv_counts, send_counts)
                     (
                         "Mem_NID",
-                        mem_p2p.nid2recv,
-                        mem_p2p.nid2send,
+                        mem_p2p.recv_nid,
+                        mem_p2p.send_nid,
                         mem_p2p.recv_counts,
                         mem_p2p.send_counts,
                     ),
@@ -117,8 +117,8 @@ class P2PQHandler(ThreadBase):
                     ),
                     (
                         "Box_NID",
-                        box_p2p.nid2recv,
-                        box_p2p.nid2send,
+                        box_p2p.recv_nid,
+                        box_p2p.send_nid,
                         box_p2p.recv_counts,
                         box_p2p.send_counts,
                     ),
@@ -189,10 +189,10 @@ class P2PQHandler(ThreadBase):
                 )
                 self.p2p_sem.release()  # 释放信号量，允许下一轮 P2P 任务进入
                 # # 4. 组装结果
-                # delta_mem = MemTsNid(
+                # delta_mem = MemEntry(
                 #     nid=mem_p2p.nid2recv, data=mem_p2p.data2recv, ts=mem_p2p.ts2recv
                 # )
-                # delta_box = BoxTsNid(
+                # delta_box = BoxEntry(
                 #     nid=box_p2p.nid2recv, data=box_p2p.data2recv, ts=box_p2p.ts2recv
                 # )
 

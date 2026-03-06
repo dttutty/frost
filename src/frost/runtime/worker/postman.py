@@ -65,7 +65,7 @@ class Postman:
         expanded_ts = sender_ts.unsqueeze(1).expand(target_len, S)
         new_ts = expanded_ts[valid_mask]  # Shape: [K]
 
-        # 8. Return the final MailTsNid
+        # 8. Return the final MailEntry
         return MailEntry(
             nid=new_nids,
             data=new_mail_data,

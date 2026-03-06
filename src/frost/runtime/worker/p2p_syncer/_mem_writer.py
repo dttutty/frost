@@ -11,7 +11,7 @@ from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.runtime._thread_base import StreamThreadBase
 
 AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
+Mem_or_Mail = TypeVar("Mem_or_Mail", "MemEntry", "MailEntry")
 
 logger = logging.getLogger(__name__)
 

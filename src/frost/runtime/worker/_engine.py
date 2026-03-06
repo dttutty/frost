@@ -24,14 +24,14 @@ from frost.aliases.syncer import (
     MemTaskQ,
     MemWrQ,
 )
-from frost.aliases.worker import DeltaQ, FullQ, H2DOutQ, ReceivedQ
+from frost.aliases.worker import AssembledQ, DeltaQ, H2DOutQ, ReceivedQ
 from frost.datatypes.env import Env
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.models._assembled_model import AssembledModel
 from frost.protocols.mem_updater_proto import MemoryUpdaterProto
 from frost.protocols.postman_proto import PostmanProto
-from frost.runtime.worker._dynamic_assembler import DyAssembler
+from frost.runtime.worker._dynamic_assembler import DynamicAssembler
 from frost.runtime.worker._host_to_device import H2D
 from frost.runtime.worker._receiver import Receiver as Receiver
 from frost.runtime.worker.p2p_syncer._box_handler import BoxTaskHandler
@@ -49,7 +49,7 @@ class Worker:
     received_q: ReceivedQ
     delta_q: DeltaQ | None = None
     h2d_out_q: H2DOutQ | None = None
-    full_q: FullQ
+    full_q: AssembledQ
 
     mem_task_q: MemTaskQ | None = None
     box_task_q: BoxTaskQ | None = None
@@ -123,7 +123,7 @@ class Worker:
             self.h2d_out_q = Q(maxsize=1)
             destination_q_for_h2d = self.h2d_out_q
 
-            self.dy_asm = DyAssembler(
+            self.dy_asm = DynamicAssembler(
                 mem_box_store=self.mem_box_store,
                 h2d_out_q=self.h2d_out_q,
                 delta_q=self.delta_q,

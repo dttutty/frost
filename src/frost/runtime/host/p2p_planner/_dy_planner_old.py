@@ -167,7 +167,7 @@ def handle_update(
     return leftovers, p2p_plan
 
 
-def dedup_updates(
+def deduplicate_updates(
     updates: list[TensorSet], reverse: bool = True
 ) -> tuple[list[TensorSet], TensorSet]:
     """
@@ -284,7 +284,7 @@ class DynamicPlanner(ThreadBase):
     ) -> list[DynamicPlan]:
         """规划内存（Memory）的P2P、CPU预取和CPU写回。"""
 
-        update_avails_of_1, all_update_avails_of_1 = dedup_updates(
+        update_avails_of_1, all_update_avails_of_1 = deduplicate_updates(
             update_avails_of_1, reverse=True
         )
 

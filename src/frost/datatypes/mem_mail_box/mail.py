@@ -16,7 +16,7 @@ class MailEntry:
 
     def __repr__(self) -> str:
         return (
-            f"MailTsNid(nid={self.nid.shape}, data={self.data.shape}, "
+            f"MailEntry(nid={self.nid.shape}, data={self.data.shape}, "
             f"ts={self.ts.shape}, is_sorted={self.is_sorted}, is_unique={self.is_unique})"
         )
 

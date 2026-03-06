@@ -22,7 +22,6 @@ from .utils.interaction_ops import generate_interaction_mails
 from .utils.p2p_task_maker import make_p2p_task
 
 AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 
 
 logger = logging.getLogger(__name__)
@@ -74,7 +73,7 @@ class BoxTaskHandler(StreamThreadBase):
 
         # box_ts_nid.data[:] = box_ts_nid.nid.view(-1, 1, 1).to(box_ts_nid.data.dtype)
         p2p_task = make_p2p_task(
-            data_td_nid=box_ts_nid,
+            entry=box_ts_nid,
             plan=box_plan,
             device=self.device,
             batch_idx=box_task.batch_idx,
@@ -105,7 +104,7 @@ class BoxTaskHandler(StreamThreadBase):
             box_ts_nid = box.merge_1_mail(new_mail)
 
         p2p_task = make_p2p_task(
-            data_td_nid=box_ts_nid,
+            entry=box_ts_nid,
             plan=box_plan,
             device=self.device,
             batch_idx=box_task.batch_idx,

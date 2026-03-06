@@ -8,7 +8,6 @@ from frost.datatypes.mem_mail_box.mail import MailEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 
 AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +18,7 @@ def generate_interaction_mails(
     """
     这里mem必须和edge一一对应
     Args:
-        root_new_mem_orig: MemTsNid 对象 (包含 2N 个节点)
+        root_new_mem_orig: MemEntry 对象 (包含 2N 个节点)
                            前 N 个是 Src，后 N 个是 Dst。
                            mem 形状: [2N, mem_dim]
         edge_feats:        边的特征，形状 [N, edge_dim]

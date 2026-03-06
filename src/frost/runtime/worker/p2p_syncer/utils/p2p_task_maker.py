@@ -13,12 +13,11 @@ from frost.datatypes.plan import DynamicPlan
 from frost.datatypes.tasks import P2PTask
 
 AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 logger = logging.getLogger(__name__)
 
 
 def make_p2p_task(
-    data_td_nid: AllType,
+    entry: AllType,
     plan: DynamicPlan,
     device: torch.device,
     batch_idx: int,
@@ -30,21 +29,21 @@ def make_p2p_task(
     recv_counts = plan.recv_counts
     send_counts = plan.send_counts
 
-    nid = data_td_nid.nid
-    data = data_td_nid.data
-    ts = data_td_nid.ts
+    nid = entry.nid
+    data = entry.data
+    ts = entry.ts
 
     # 确保源数据是有序的，这是 searchsorted 的前提
     # 如果 data_td_nid.is_sorted 不为 True，这里的优化会得到错误结果
-    if not getattr(data_td_nid, "is_sorted", False):
+    if not getattr(entry, "is_sorted", False):
         # 如果还没排序，这里必须排一下，或者回退到 isin
         # 考虑到你之前的逻辑，这里应该是 sorted 的，加个 assert 确保安全
         # assert False, "data_td_nid must be sorted for this optimization"
         # 如果实在不敢保证，可以临时排序（但会有开销），建议在上游保证 sorted
-        data_td_nid = data_td_nid.sort_by_nid()
-        nid = data_td_nid.nid
-        data = data_td_nid.data
-        ts = data_td_nid.ts
+        entry = entry.sort_by_nid()
+        nid = entry.nid
+        data = entry.data
+        ts = entry.ts
 
     buckets_ids, buckets_data, buckets_ts = [], [], []
     sizes = numpy.zeros(len(p2p), dtype=int)
@@ -151,8 +150,8 @@ def make_p2p_task(
     assert numpy.array_equal(sizes, send_counts)
 
     p2p_task = P2PTask(
-        nid2send=send_nid,
-        nid2recv=recv_nid,
+        send_nid=send_nid,
+        recv_nid=recv_nid,
         data2send=send_data,
         data2recv=recv_data,
         ts2send=send_ts,

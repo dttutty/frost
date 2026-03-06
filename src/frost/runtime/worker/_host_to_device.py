@@ -8,7 +8,7 @@ import torch
 from frost.datatypes.meta import Meta
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase
-from frost.runtime.worker._static_assembler import StAssembler
+from frost.runtime.worker._static_assembler import StaticAssembler
 from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ class H2D(StreamThreadBase):
         self.ring_buf = ring_buf
         self.history = history
         self.n_neg = n_neg
-        self.st_asm = StAssembler(
+        self.st_asm = StaticAssembler(
             shared_nfeat=nfeat, shared_efeat=efeat, device=self.device
         )
         self.seen_root_nids = torch.tensor([], dtype=torch.long, device="cpu")

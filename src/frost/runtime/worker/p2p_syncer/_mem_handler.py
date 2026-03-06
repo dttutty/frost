@@ -15,7 +15,6 @@ from frost.runtime._thread_base import StreamThreadBase
 from .utils.p2p_task_maker import make_p2p_task
 
 AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +57,7 @@ class MemTaskHandler(StreamThreadBase):
 
             if mem_task.is_last is False:
                 p2p_task = make_p2p_task(
-                    data_td_nid=mem_ts_nid,
+                    entry=mem_ts_nid,
                     plan=mem_plan,
                     device=self.device,
                     batch_idx=batch_idx,

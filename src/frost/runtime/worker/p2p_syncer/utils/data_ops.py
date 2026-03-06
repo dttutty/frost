@@ -11,7 +11,7 @@ from frost.datatypes.plan import DynamicPlan
 from frost.datatypes.tasks import P2PTask
 
 AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
+Mem_or_Mail = TypeVar("Mem_or_Mail", "MemEntry", "MailEntry")
 logger = logging.getLogger(__name__)
 
 
@@ -65,8 +65,8 @@ def make_p2p_task(
     assert numpy.array_equal(sizes, send_counts)
 
     return P2PTask(
-        nid2send=send_nid,
-        nid2recv=recv_nid,
+        send_nid=send_nid,
+        recv_nid=recv_nid,
         data2send=send_data,
         data2recv=recv_data,
         ts2send=send_ts,

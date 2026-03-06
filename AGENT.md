@@ -55,7 +55,7 @@ lei_pipe/
     │       ├── _engine.py          # Worker class: train/eval loops
     │       ├── _receiver.py        # Receiver thread (scatter_object_list)
     │       ├── _h2d.py             # H2D thread (features → GPU)
-    │       ├── _dy_asm.py          # DyAssembler (merge shared+P2P memory)
+    │       ├── _dy_asm.py          # DynamicAssembler (merge shared+P2P memory)
     │       ├── postman.py          # Postman.deliver() for APAN mail
     │       └── p2p_syncer/         # MemHandler, BoxHandler, P2PQHandler, writers
     ├── sampling/
@@ -70,7 +70,7 @@ lei_pipe/
     │   ├── meta.py                 # Meta: batch metadata carrier
     │   ├── access.py               # Access: nfeat/mem/box access patterns
     │   ├── env.py                  # Env: distributed rank/device info
-    │   └── mem_mail_box/           # MemTsNid, BoxTsNid, mail ops, _data_ops.py
+    │   └── mem_mail_box/           # MemEntry, BoxEntry, mail ops, _data_ops.py
     ├── protocols/                  # Protocol interfaces (analyzer, sampler, mem_updater, postman)
     └── utils/
         └── tensor_set.py           # TensorSet: unique-node sets for planning
@@ -100,7 +100,7 @@ Host process
  └─ scatter_object_list → ──────────────────────►  Worker processes
                                                     ├─ Receiver (scatter_object_list)
                                                     ├─ H2D (load nfeat/efeat/mem/box → GPU)
-                                                    ├─ [DyAssembler if mem_box_store]
+                                                    ├─ [DynamicAssembler if mem_box_store]
                                                     ├─ full_q.get()
                                                     └─ AssembledModel.forward(meta)
                                                        ├─ mem_updater(flat_graph)
@@ -150,7 +150,7 @@ Queues are sized larger for no-memory models (no P2P sync overhead):
 | `Host.meta_in_q` | 4 | 2 |
 | `Host.scatter_q` | 2 | 1 |
 
-For memory models, `full_q=1` is intentional: `DyAssembler` must wait for P2P completion (`delta_q`) before putting assembled batches in `full_q`. Pipeline depth is controlled by `h2d_sem` (released 4× at startup).
+For memory models, `full_q=1` is intentional: `DynamicAssembler` must wait for P2P completion (`delta_q`) before putting assembled batches in `full_q`. Pipeline depth is controlled by `h2d_sem` (released 4× at startup).
 
 ---
 
