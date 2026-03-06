@@ -9,9 +9,9 @@ import torch
 class FlatGraph:
     """Sequence sampling metadata."""
 
-    nid: torch.Tensor  # 数量是SeqGraph所有nid的长度
-    eid: torch.Tensor  # 数量是SeqGraph所有nid的长度
-    ts: torch.Tensor  # 数量是SeqGraph所有nid的长度
+    nid: torch.Tensor  # Total length of all nids in SeqGraph
+    eid: torch.Tensor  # Total length of all eids in SeqGraph
+    ts: torch.Tensor  # Total length of all timestamps in SeqGraph
     nfeat: torch.Tensor | None = None
     efeat: torch.Tensor | None = None
     mem: torch.Tensor | None = None
@@ -128,14 +128,14 @@ class FlatGraph:
 
 @dataclass(kw_only=True)
 class NeighborOnHop:
-    # 如果是第一层邻居, 长度是root_nid数量的n_neighbor_0倍
-    # 如果是第二层邻居,长度是root_nid数量的n_neighbor_0倍的n_neighbor_1倍
-    nid: torch.Tensor  #
+    # For 1-hop neighbors, length is root_nid count * fanout[0]
+    # For 2-hop neighbors, length is root_nid count * fanout[0] * fanout[1]
+    nid: torch.Tensor
     eid: torch.Tensor
-    ts: torch.Tensor  #
-    nfeat: torch.Tensor | None = None  #
-    efeat: torch.Tensor | None = None  #
-    mem: torch.Tensor | None = None  #
+    ts: torch.Tensor
+    nfeat: torch.Tensor | None = None
+    efeat: torch.Tensor | None = None
+    mem: torch.Tensor | None = None
     mem_ts: torch.Tensor | None = None
     box: torch.Tensor | None = None
     box_ts: torch.Tensor | None = None
@@ -145,23 +145,24 @@ class NeighborOnHop:
 class Graph:
     """Sequence sampling metadata."""
 
-    # 如果nid为-1,那么对应的eid肯定也为-1,表示这个位置是padding的,不需要参与聚合
+    # If nid is -1, then eid is also -1, indicating padding that should not be aggregated.
 
-    root_nid: torch.Tensor  # 长度是src数量3倍
-    root_eid: torch.Tensor  # 长度是src数量3倍
-    root_ts: torch.Tensor  # 长度是src数量3倍
+    root_nid: torch.Tensor  # Length is 3x number of src nodes (src, pos, neg)
+    root_eid: torch.Tensor  # Length is 3x number of src nodes
+    root_ts: torch.Tensor  # Length is 3x number of src nodes
 
-    root_nfeat: torch.Tensor | None = None  # 长度是src数量3倍
+    root_nfeat: torch.Tensor | None = None  # Length is 3x number of src nodes
 
-    root_mem: torch.Tensor | None = None  # 长度是root_nid数量的n_neighbor倍_0倍
-    root_mem_ts: torch.Tensor | None = None  # 长度是root_nid数量的n_neighbor倍_0倍
-    root_box: torch.Tensor | None = None  # 长度是root_nid数量的n_neighbor倍_0倍_0倍
-    root_box_ts: torch.Tensor | None = None  # 长度是root_nid数量的n_neighbor倍_0倍
+    root_mem: torch.Tensor | None = None  # Length is root_nid count * fanout[0]
+    root_mem_ts: torch.Tensor | None = None  # Length is root_nid count * fanout[0]
+    root_box: torch.Tensor | None = None  # Length is root_nid count * fanout[0] * (box_size)
+    root_box_ts: torch.Tensor | None = None  # Length is root_nid count * fanout[0]
 
-    # 下面是1层邻居, n_neighbor是一个[10 25]这样的list,目前TGN不支持多层邻居,但是TGAT支持多层邻居
+    # Multi-hop neighbors. n_neighbor is a list like [10, 25].
+    # Currently TGN only supports 1 hop, while TGAT supports multiple hops.
     neighbors: list[NeighborOnHop] | None = None
 
-    # sampling_config类似于这样的[10] 或者[10,25]
+    # Sampling configuration like [10] or [10, 25]
     fanout: list[int] | None = None
 
-    root_efeat: torch.Tensor | None = None  # 长度是src数量1倍
+    root_efeat: torch.Tensor | None = None  # Length is 1x number of src nodes
