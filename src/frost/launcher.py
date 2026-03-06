@@ -98,7 +98,7 @@ def launch(cfg: DictConfig):
     if env.is_host:
         # 启动 Host 逻辑
         from frost.runtime.host._engine import Host
-        from frost.shm._core import set_as_host
+        from frost.shm._core import cleanup_all_shm, set_as_host
 
         set_as_host()
         start = time.time()
@@ -139,8 +139,7 @@ def launch(cfg: DictConfig):
         try:
             host.run()
         finally:
-            pass
-            # cleanup_all_shm(is_host=True)
+            cleanup_all_shm(is_host=True)
 
     else:
         # 启动 Worker 逻辑
@@ -178,5 +177,5 @@ def launch(cfg: DictConfig):
         try:
             worker.run()
         finally:
-            pass
-            # cleanup_all_shm(is_host=False)
+            from frost.shm._core import cleanup_all_shm
+            cleanup_all_shm(is_host=False)

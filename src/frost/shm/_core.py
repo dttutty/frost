@@ -1,5 +1,6 @@
 import atexit
 import logging
+import signal
 import sys
 from multiprocessing import resource_tracker, shared_memory
 
@@ -45,28 +46,21 @@ if hasattr(resource_tracker, "_resource_tracker"):
 
 _TRACKED_SHM_OBJECTS: dict[str, shared_memory.SharedMemory] = {}
 _IS_HOST_PROCESS = False
+_CLEANUP_DONE = False
 
 
 def _signal_handler(signum, frame):
-    # Log the signal received for debugging
-    logger.warning(
-        f"Process received signal {signum}. Forcing shared memory cleanup..."
-    )
-
-    # Force cleanup immediately
+    logger.warning(f"Process received signal {signum}. Forcing shared memory cleanup...")
     cleanup_all_shm(is_host=_IS_HOST_PROCESS)
-
-    # Exit properly so standard teardown can still occur
     sys.exit(1)
 
 
-# try:
-#     signal.signal(signal.SIGINT, _signal_handler)
-#     signal.signal(signal.SIGTERM, _signal_handler)
-# except ValueError:
-#     # This might happen if _core.py is imported in a non-main thread.
-#     # Usually safe to ignore if running standard multiprocessing.
-#     pass
+try:
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+except ValueError:
+    # _core.py imported in a non-main thread; signal registration not possible.
+    pass
 
 
 def set_as_host():
@@ -97,6 +91,10 @@ def _unregister_shm(shm_name: str) -> None:
 
 
 def cleanup_all_shm(is_host: bool = True) -> None:
+    global _CLEANUP_DONE
+    if _CLEANUP_DONE:
+        return
+    _CLEANUP_DONE = True
     for name, shm in list(_TRACKED_SHM_OBJECTS.items()):
         try:
             shm.close()
