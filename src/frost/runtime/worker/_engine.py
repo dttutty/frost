@@ -153,8 +153,6 @@ class Worker:
         self.model = AssembledModel(
             encoder=encoder,
             mem_updater=mem_updater,
-            mem_task_q=self.mem_task_q,
-            box_task_q=self.box_task_q,
             header=predictor,
             n_neg=self.n_neg,
             postman=self.postman,
@@ -299,7 +297,11 @@ class Worker:
     def train(self, meta: Meta) -> None:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
-        logits = self.model(meta)
+        logits = self.model(
+            meta,
+            mem_task_q=self.mem_task_q,
+            box_task_q=self.box_task_q,
+        )
         loss = self.criterion(logits.squeeze(-1), meta.labels)
 
         loss.backward()
@@ -315,7 +317,11 @@ class Worker:
         assert meta.labels is not None
         self.model.eval()
 
-        logits = self.model(meta)
+        logits = self.model(
+            meta,
+            mem_task_q=self.mem_task_q,
+            box_task_q=self.box_task_q,
+        )
         if self.mem_box_store is not None:
             self.p2p_sem.acquire()  # 获取信号量，确保当前没有其他 P2P 任务在进行
 
