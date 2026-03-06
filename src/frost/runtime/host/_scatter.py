@@ -101,8 +101,8 @@ class Scatter(ThreadBase):
                     safe_mail = mail_plan[i] if self.mail_plan_out_q else None
                     safe_nfeat = nfeat_plan[i] if self.nfeat_plan_out_q else None
                     m.plan_set = PlanSet(
-                        mem=safe_mem,
-                        box=safe_mail,
-                        nfeat=safe_nfeat,
+                        mem_plan=safe_mem,
+                        box_plan=safe_mail,
+                        nfeat_plan=safe_nfeat,
                     )
                 self._scatter_to_workers(meta_2_scatter)

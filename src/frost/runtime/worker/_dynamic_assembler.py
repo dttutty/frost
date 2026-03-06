@@ -366,15 +366,15 @@ class DynamicAssembler(StreamThreadBase):
             # ==========================================================
             assert meta.flat_graph is not None
             assert meta.plan_set is not None
-            assert meta.plan_set.mem is not None
-            assert meta.plan_set.box is not None
+            assert meta.plan_set.mem_plan is not None
+            assert meta.plan_set.box_plan is not None
             self.h2d_sem.acquire()
             self.h2d_sem.acquire()
 
             self.prepare_shared_features(
                 graph=meta.flat_graph,
-                mem_plan=meta.plan_set.mem,
-                box_plan=meta.plan_set.box,
+                mem_plan=meta.plan_set.mem_plan,
+                box_plan=meta.plan_set.box_plan,
             )
 
             # Now block and wait for network data
@@ -409,8 +409,8 @@ class DynamicAssembler(StreamThreadBase):
                 self.apply_delta_features(
                     graph=meta.flat_graph,
                     delta=delta,
-                    mem_plan=meta.plan_set.mem,
-                    box_plan=meta.plan_set.box,
+                    mem_plan=meta.plan_set.mem_plan,
+                    box_plan=meta.plan_set.box_plan,
                 )
 
             # Push to the next queue

@@ -14,12 +14,12 @@ class PlanSet:
     统一的 PlanSet，直接持有 DynamicPlan 和 StaticPlan。
     """
 
-    mem: DynamicPlan | None = None
-    box: DynamicPlan | None = None
-    nfeat: StaticPlan | None = None
+    mem_plan: DynamicPlan | None = None
+    box_plan: DynamicPlan | None = None
+    nfeat_plan: StaticPlan | None = None
 
     def __repr__(self) -> str:
-        return f"PlanSet(mem={self.mem}, box={self.box}, nfeat={self.nfeat})"
+        return f"PlanSet(mem={self.mem_plan}, box={self.box_plan}, nfeat={self.nfeat_plan})"
 
     def to(self, device: torch.device) -> PlanSet:
         """
@@ -28,9 +28,11 @@ class PlanSet:
         """
         return PlanSet(
             # 假设你的 DynamicPlan/StaticPlan 的 .to() 方法也能接收 non_blocking 参数
-            mem=self.mem.to(device) if self.mem is not None else None,
-            box=self.box.to(device) if self.box is not None else None,
-            nfeat=self.nfeat.to(device) if self.nfeat is not None else None,
+            mem_plan=self.mem_plan.to(device) if self.mem_plan is not None else None,
+            box_plan=self.box_plan.to(device) if self.box_plan is not None else None,
+            nfeat_plan=self.nfeat_plan.to(device)
+            if self.nfeat_plan is not None
+            else None,
         )
 
 

@@ -81,9 +81,11 @@ class H2D(StreamThreadBase):
             # move nfeat and efeat to gpu
             if self.nfeat is not None:
                 # prepare if has n_feat
-                assert meta.plan_set is not None and meta.plan_set.nfeat is not None
+                assert (
+                    meta.plan_set is not None and meta.plan_set.nfeat_plan is not None
+                )
                 nfeat = self.st_asm.prepare_nfeat_cache(
-                    nfeat_plan=meta.plan_set.nfeat, meta=meta
+                    nfeat_plan=meta.plan_set.nfeat_plan, meta=meta
                 )
 
                 meta.flat_graph = self.st_asm.fill_nfeat(
