@@ -49,7 +49,9 @@ FROST is a distributed Temporal GNN training framework. Rank assignment: workers
 - `_engine.py` — `Worker` class: train/eval loops
 - `_receiver.py` — `Receiver` thread (receives from host)
 - `_h2d.py` — `H2D` thread (loads features to GPU)
-- `_dy_asm.py` — `DynamicAssembler` (merges shared + P2P memory)
+- `_dynamic_assembler.py` — `DynamicAssembler` (merges shared + P2P memory)
+- `_static_assembler.py` — `StaticAssembler`
+- `_host_to_device.py` — H2D thread (loads features to GPU)
 - `p2p_syncer/` — `MemHandler`, `BoxHandler`, `P2PQHandler`, writers
 
 ### Models (`src/frost/models/`)
