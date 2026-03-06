@@ -1,7 +1,7 @@
 import logging
 import threading
 from queue import Queue as Q
-from typing import Literal
+from typing import Literal, cast
 
 import torch.distributed as dist
 
@@ -26,7 +26,6 @@ class Scatter(ThreadBase):
         env: Env,
         result_q: Q[Result],
         stop_ev: threading.Event,
-        ring_buf=None,
     ) -> None:
         super().__init__(name="scatter", stop_ev=stop_ev)
         self.n_gpu = n_gpu
@@ -90,6 +89,9 @@ class Scatter(ThreadBase):
                 continue
 
             else:
+                mem_plan: list[DynamicPlan] | None = None
+                mail_plan: list[DynamicPlan] | None = None
+                nfeat_plan: list[StaticPlan] | None = None
                 if self.mem_plan_out_q is not None:
                     mem_plan = self.mem_plan_out_q.get(block=True)
                 if self.mail_plan_out_q is not None:
@@ -97,12 +99,12 @@ class Scatter(ThreadBase):
                 if self.nfeat_plan_out_q is not None:
                     nfeat_plan = self.nfeat_plan_out_q.get(block=True)
                 for i, m in enumerate(meta_2_scatter):
-                    safe_mem = mem_plan[i] if self.mem_plan_out_q else None
-                    safe_mail = mail_plan[i] if self.mail_plan_out_q else None
-                    safe_nfeat = nfeat_plan[i] if self.nfeat_plan_out_q else None
+                    safe_mem = mem_plan[i] if mem_plan is not None else None
+                    safe_mail = mail_plan[i] if mail_plan is not None else None
+                    safe_nfeat = nfeat_plan[i] if nfeat_plan is not None else None
                     m.plan_set = PlanSet(
                         mem_plan=safe_mem,
                         box_plan=safe_mail,
                         nfeat_plan=safe_nfeat,
                     )
-                self._scatter_to_workers(meta_2_scatter)
+                self._scatter_to_workers(cast(list[Meta | str | None], meta_2_scatter))

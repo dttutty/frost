@@ -5,11 +5,7 @@ from typing import Literal, cast
 import torch
 
 from frost.aliases.syncer import BoxP2PQ, BoxTaskQ, BoxWrQ
-from frost.datatypes.mem_mail_box._data_ops import (
-    keep_last,
-    keep_mean,
-    mail_to_box,
-)
+from frost.datatypes.mem_mail_box._data_ops import keep_last, keep_mean, mail_to_box
 from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mail import MailEntry
 from frost.datatypes.tasks import BoxTask, P2PTask
@@ -41,7 +37,7 @@ class BoxTaskHandler(StreamThreadBase):
         self.box_task_q = box_task_q
         self.box_p2p_q = box_p2p_q
         self.stop_ev = stop_ev
-        self.mail_combine = mail_combine
+        self.mail_combine: Literal["last", "mean"] = mail_combine
         self.postman = postman
         self.box_wr_q = box_wr_q
         self.h2d_sem = h2d_sem
@@ -85,6 +81,7 @@ class BoxTaskHandler(StreamThreadBase):
     ) -> tuple[P2PTask, BoxEntry]:
         assert self.postman is not None, "Postman is required for handling large boxes"
         graph = box_task.graph
+        assert graph is not None, "BoxTask.graph must not be None for large boxes"
         # disable stale state p2p for speed
         box = box_task.old_box
         box_plan = box_task.box_plan
@@ -146,6 +143,7 @@ class BoxTaskHandler(StreamThreadBase):
                     p2p_task = None
 
             if box_task.is_last is False:
+                assert p2p_task is not None
                 ready_event_1 = cast(CudaEvent, torch.cuda.Event())
                 ready_event_1.record(torch.cuda.current_stream())
                 # torch.cuda.current_stream().synchronize()

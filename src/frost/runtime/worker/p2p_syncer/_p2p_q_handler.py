@@ -69,7 +69,6 @@ class P2PQHandler(StreamThreadBase):
             # 此时肯定有 box 任务
             box_p2p_tuple = self.box_p2p_q.get(block=True)
             box_wait_ms = 0.0
-            total_wait = mem_wait_ms + box_wait_ms
             # if total_wait > 2.0:
             #     logger.debug(
             #         f"[Rank {self.env.local_rank}] P2P Blocked! Total: {total_wait:.2f}ms | Mem: {mem_wait_ms:.2f}ms | Box: {box_wait_ms:.2f}ms"
@@ -141,7 +140,7 @@ class P2PQHandler(StreamThreadBase):
                 f"Rank {self.env.local_rank} starting P2P communication, count={self.count}"
             )
             self.count += 1
-            for i, (name, recv_t, send_t, recv_counts, send_counts) in enumerate(
+            for _, (name, recv_t, send_t, recv_counts, send_counts) in enumerate(
                 p2p_ops
             ):
                 # --- [DEBUG] 强力检查代码开始 ---
