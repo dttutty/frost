@@ -1,7 +1,7 @@
 import logging
 import threading
 
-from frost.aliases.host import MetaBatcherInQ, MetaBundle, MetaBundleQ
+from frost.aliases.host import AccessBundle, MetaBatcherInQ, MetaBundle, MetaBundleQ
 from frost.runtime._thread_base import ThreadBase
 
 logger = logging.getLogger(__name__)
@@ -26,18 +26,21 @@ class MetaBatcher(ThreadBase):
 
         while not self.stop_ev.is_set():
             meta_list: MetaBundle = []
+            access_list: AccessBundle = []
 
             while len(meta_list) < self.n_gpu:
-                meta = self.meta_in_q.get(block=True)
+                item = self.meta_in_q.get(block=True)
 
-                if meta is None:
+                if item is None:
                     self.dest_q.put(None)
                     return
-                elif meta == "end_of_epoch":
+                elif item == "end_of_epoch":
                     self.dest_q.put("end_of_epoch")
                 else:
+                    meta, access = item
                     meta_list.append(meta)
+                    access_list.append(access)
 
             if len(meta_list) == self.n_gpu:
                 batch_count += 1
-                self.dest_q.put(meta_list)
+                self.dest_q.put((meta_list, access_list))

@@ -12,7 +12,6 @@ from frost.aliases.host import (
     StaticPlanInQ,
     StaticPlanOutQ,
 )
-from frost.datatypes.access import Access
 from frost.runtime._thread_base import ThreadBase
 from frost.runtime.host.p2p_planner._dynamic_planner import DynamicPlanner
 from frost.runtime.host.p2p_planner._static_planner import StaticPlanner
@@ -193,25 +192,22 @@ class Planner(ThreadBase):
 
     def logic(self) -> None:
         while not self.stop_ev.is_set():
-            metas = self.meta_bundle_q.get(block=True)
+            bundle = self.meta_bundle_q.get(block=True)
 
-            if metas is None:
+            if bundle is None:
                 self._cleanup()
                 break
 
-            if metas == "end_of_epoch":
+            if bundle == "end_of_epoch":
                 self._clean_epoch()
                 continue
+
+            metas, access_list = bundle
 
             logger.info(
                 f"[Planner] Received batch {metas[0].batch_idx} with {len(metas)} metas"
             )
             assert len(metas) == self.n_gpus
-
-            access_list: list[Access] = []
-            for idx, meta in enumerate(metas):
-                assert meta.access is not None
-                access_list.append(meta.access)
 
             if self.mem_plan_in_q is not None:
                 next_needs = [cast(TensorSet, io.required_mem) for io in access_list]
@@ -226,9 +222,6 @@ class Planner(ThreadBase):
             if self.nfeat_plan_in_q is not None:
                 next_needs = [cast(TensorSet, io.required_nfeat) for io in access_list]
                 self.nfeat_plan_in_q.put(next_needs)
-
-            for meta in metas:
-                meta.access = None  # 释放内存
 
             self.out_q.put(metas)
 

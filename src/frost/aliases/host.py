@@ -7,19 +7,23 @@ from typing import Literal, TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
+from frost.datatypes.access import Access
 from frost.datatypes.meta import Meta
 from frost.datatypes.plan import DynamicPlan, PlanSet, StaticPlan
 from frost.utils.tensor_set import TensorSet
 
 logger = logging.getLogger(__name__)
 
-
-MetaBatcherInQ: TypeAlias = Queue[Meta | None | Literal["end_of_epoch"]]
+# Access travels as a sidecar alongside Meta in the Host pipeline only.
+# Workers never see Access; it is consumed by the Planner before Scatter sends Meta out.
+MetaWithAccess: TypeAlias = tuple[Meta, Access | None]
+MetaBatcherInQ: TypeAlias = Queue[MetaWithAccess | None | Literal["end_of_epoch"]]
 DynamicPlanOutQ: TypeAlias = Queue[list[DynamicPlan] | None]
 StaticPlanOutQ: TypeAlias = Queue[list[StaticPlan] | None]
 
 MetaBundle: TypeAlias = list[Meta]
-MetaBundleQ: TypeAlias = Queue[MetaBundle | None | Literal["end_of_epoch"]]
+AccessBundle: TypeAlias = list[Access | None]
+MetaBundleQ: TypeAlias = Queue[tuple[MetaBundle, AccessBundle] | None | Literal["end_of_epoch"]]
 MetaBundleWithPlan: TypeAlias = tuple[MetaBundle, list[PlanSet]]
 MetaBundleWithoutPlan: TypeAlias = tuple[MetaBundle, None]
 

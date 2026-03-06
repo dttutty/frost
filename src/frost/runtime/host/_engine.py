@@ -349,18 +349,17 @@ class Host:
             cur_epoch=cur_epoch,
             split=split,
             cur_macro_of_split=cur_macro_of_split,
-            cur_macro_of_epoch=self.cur_macro_of_epoch,  # 这里直接用 macro_of_split 来当 macro_of_epoch，因为我们是按照 split 来划分的
+            cur_macro_of_epoch=self.cur_macro_of_epoch,
             n_macro_of_split=n_macro_of_split,
-            flat_graph=None,  # 这个在 Host 端不需要构建，Worker 端会根据采样结果构建
+            flat_graph=None,
             n_src=src.shape[0],
             batch_idx=batch_idx,
             plan_set=None,
-            access=access,
             buf_len=len,
             fanout=self.ngh_sampler.fanout,
         )
 
-        self.meta_in_q.put(meta)
+        self.meta_in_q.put((meta, access))
 
     def _cleanup(self) -> None:
         self.meta_in_q.put(None)

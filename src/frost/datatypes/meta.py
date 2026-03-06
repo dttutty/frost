@@ -6,7 +6,6 @@ from typing import Literal
 
 import torch
 
-from frost.datatypes.access import Access
 from frost.datatypes.graph import FlatGraph, Graph
 
 from .plan import PlanSet
@@ -25,14 +24,8 @@ class Meta:
     buf_len: int
     graph: Graph | None = None
     plan_set: PlanSet | None = None
-    access: Access | None = None
     labels: torch.Tensor | None = None
     fanout: list[int] | None = None
-
-    def __getstate__(self) -> dict:
-        d = dict(self.__dict__)
-        d.pop("access", None)
-        return d
 
     @cached_property
     def macro_position_of_split(self) -> str | None:
