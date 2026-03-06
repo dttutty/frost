@@ -133,6 +133,7 @@ class Planner:
         mail_plan_out_q: DynamicPlanOutQ | None,
         nfeat_plan_out_q: StaticPlanOutQ | None,
         stop_ev: threading.Event,
+        handle_stale: bool = False,
     ) -> None:
         self.gpus_distance = find_all_gpu_distances_list(gpu_topo)
         self.n_gpus = len(self.gpus_distance)
@@ -147,6 +148,7 @@ class Planner:
                 in_q=self.mem_plan_in_q,
                 out_q=mem_plan_out_q,
                 stop_ev=stop_ev,
+                handle_stale=handle_stale,
             )
 
         # mail plan
@@ -158,6 +160,7 @@ class Planner:
                 in_q=self.mail_plan_in_q,
                 out_q=mail_plan_out_q,
                 stop_ev=stop_ev,
+                handle_stale=handle_stale,
             )
 
         # nfeat plan
