@@ -9,18 +9,34 @@ version = "0.1.0"
 description = "A high-performance distributed GNN training framework with sequence-based samplers."
 requires-python = ">=3.10"
 license = {text = "MIT"}
-# 合并两者的依赖
 dependencies = [
+    # Core ML
     "torch>=2.0.0",
+    "torchmetrics>=1.0.0",
+    # torch-scatter must match torch+CUDA version; install separately:
+    #   pip install torch-scatter -f https://data.pyg.org/whl/torch-{ver}+{cuda}.html
+    "torch-scatter",
+    # Config
     "hydra-core>=1.3.2",
-    "omegaconf",
-    "numpy",
-    "pandas",
-    "tbb"
+    "omegaconf>=2.3.0",
+    # Data
+    "numpy>=1.24",
+    "pandas>=2.0",
+    # Utilities
+    "tqdm>=4.60",
+    "PyYAML>=6.0",
+    # C++ extension runtime (Intel TBB, linked by seq_sampler)
+    "tbb",
+    "scikit-learn>=1.0",
 ]
 
 [project.optional-dependencies]
+
 test = ["pytest", "pytest-cov"]
+dev = [
+    "pytest",
+    "ruff",
+]
 
 [tool.scikit-build]
 cmake.build-type = "RelWithDebInfo"
