@@ -118,12 +118,7 @@ def launch(cfg: DictConfig):
         has_nfeat = ndim > 0
         has_efeat = edim > 0
 
-        mem_box_store_cfg = cfg.get("mem_box_store")
-        handle_stale: bool = bool(
-            mem_box_store_cfg.get("handle_stale", False)
-            if mem_box_store_cfg is not None
-            else False
-        )
+        handle_stale: bool = bool(cfg.get("handle_stale", False))
         host = Host(
             has_nfeat=has_nfeat,
             has_efeat=has_efeat,
