@@ -2,10 +2,7 @@ import logging
 import threading
 import time
 from queue import Queue as Q
-from typing import (
-    Literal,
-    cast,  # 必须导入这个
-)
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -46,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 
 class Worker:
+    # --- Pipeline queues ---
     received_q: ReceivedQ
     delta_q: DeltaQ | None = None
     h2d_out_q: H2DOutQ | None = None
@@ -57,6 +55,14 @@ class Worker:
     box_p2p_q: BoxP2PQ | None = None
     mem_wr_q: MemWrQ | None = None
     box_wr_q: BoxWrQ | None = None
+
+    # --- Background threads (None when mem_box_store is absent) ---
+    dy_asm: DynamicAssembler | None = None
+    mem_handler: MemTaskHandler | None = None
+    mem_wr: MemWriter | None = None
+    box_handler: BoxTaskHandler | None = None
+    box_wr: BoxWriter | None = None
+    p2p_q_handler: P2PQHandler | None = None
 
     model: AssembledModel | DDP
     result_q: Q[Result]
@@ -81,6 +87,7 @@ class Worker:
         lr: float,
         mail_combine: Literal["last", "mean"] | None,
     ) -> None:
+        # --- Basic config ---
         self.ring_buf = ring_buf
         self.n_neg = n_neg
         self.save_to = save_to
@@ -88,26 +95,36 @@ class Worker:
         self.postman = postman
         self.mem_updater = mem_updater
         self.mem_box_store = mem_box_store
-        self.stop_ev = threading.Event()
         self.nccl = nccl_ddp
         self.nccl_p2p = nccl_p2p
-        self.curr_epoch = 0
-        self.logger: logging.Logger = logger
-        self.fetch_factor = 1
-        self.full_q = Q(maxsize=2 if mem_box_store is None else 1)
         self.device = torch.device(f"cuda:{env.local_rank}")
-        self.comm = cast(torch.cuda.Stream, torch.cuda.Stream(device=self.device))
-        self.h2d_sem: threading.Semaphore = threading.Semaphore(0)
         self.mail_combine = mail_combine
         self.lr = lr
-
-        self.train_start2start_ms = MeanMetric(process_group=self.nccl).cuda()
+        self.curr_epoch = 0
+        self.local_best_auc = 0.0
         self._last_train_start_t: float | None = None
 
+        # --- Synchronization primitives ---
+        self.stop_ev = threading.Event()
+        self.h2d_sem: threading.Semaphore = threading.Semaphore(0)
         self.p2p_sem = threading.Semaphore(0)
-        self.result_q = Q(maxsize=1)
 
-        self.received_q = Q(maxsize=2 if mem_box_store is None else 1)
+        self._init_pipeline(ring_buf, nfeat, efeat)
+        self._init_model(encoder, mem_updater, predictor, postman, criterion, optimizer, ring_buf)
+        self._init_metrics()
+
+    def _init_pipeline(
+        self,
+        ring_buf: RingBuf,
+        nfeat: torch.Tensor | None,
+        efeat: torch.Tensor | None,
+    ) -> None:
+        """Create all queues and background pipeline threads."""
+        has_mem = self.mem_box_store is not None
+        self.result_q = Q(maxsize=1)
+        self.received_q = Q(maxsize=1 if has_mem else 2)
+        self.full_q = Q(maxsize=1 if has_mem else 2)
+
         self.receiver = Receiver(
             env=self.env,
             received_q=self.received_q,
@@ -116,13 +133,10 @@ class Worker:
             ring_buf=ring_buf,
         )
 
-        if self.mem_box_store is not None:
-            assert mem_box_store is not None
+        if has_mem:
+            assert self.mem_box_store is not None
             self.delta_q = Q(maxsize=1)
-
             self.h2d_out_q = Q(maxsize=1)
-            destination_q_for_h2d = self.h2d_out_q
-
             self.dy_asm = DynamicAssembler(
                 mem_box_store=self.mem_box_store,
                 h2d_out_q=self.h2d_out_q,
@@ -132,12 +146,10 @@ class Worker:
                 device=self.device,
                 h2d_sem=self.h2d_sem,
             )
-            self.init_mem_box_threads()
-
+            self._init_mem_box_threads()
+            h2d_dest_q = self.h2d_out_q
         else:
-            destination_q_for_h2d = self.full_q
-            self.mem_task_q = None
-            self.box_task_q = None
+            h2d_dest_q = self.full_q
 
         self.h2d = H2D(
             ring_buf=ring_buf,
@@ -146,80 +158,24 @@ class Worker:
             device=self.device,
             n_neg=self.n_neg,
             in_q=self.received_q,
-            out_q=destination_q_for_h2d,
+            out_q=h2d_dest_q,
             stop_ev=self.stop_ev,
         )
 
-        self.model = AssembledModel(
-            encoder=encoder,
-            mem_updater=mem_updater,
-            header=predictor,
-            n_neg=self.n_neg,
-            postman=self.postman,
-            sample_4_neg=ring_buf.sample_4_neg,
-        )
-
-        if optimizer == "adam":
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
-        elif optimizer == "sgd":
-            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.lr)
-        else:
-            raise ValueError(f"Unsupported optimizer: {optimizer}")
-
-        def count_parameters(model: torch.nn.Module) -> tuple[int, int]:
-            total = sum(p.numel() for p in model.parameters())
-            trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            return total, trainable
-
-        # total, trainable = count_parameters(self.model)
-
-        self.model = self.model.cuda()
-        find_unused_parameters = False
-
-        self.model = DDP(
-            self.model,
-            process_group=self.nccl,
-            find_unused_parameters=find_unused_parameters,
-        )
-        self.criterion = criterion
-        self.train_loss_tracker = MeanMetric(process_group=self.nccl).cuda()
-
-        # 2. 验证阶段：全都要
-        # Loss 用于看过拟合，AUC/AP 用于选模型
-        self.val_metrics = MetricCollection(
-            {
-                "val_loss": MeanMetric(
-                    process_group=self.nccl
-                ),  # 这里的 Loss 是单纯统计数值
-                "val_auc": BinaryAUROC(
-                    thresholds=10000, process_group=self.nccl
-                ),  # 推荐开分桶加速
-                "val_ap": BinaryAveragePrecision(
-                    thresholds=10000, process_group=self.nccl
-                ),
-            }
-        ).cuda()
-
-        # 3. 测试阶段：只看指标
-        self.test_metrics = MetricCollection(
-            {
-                "test_auc": BinaryAUROC(thresholds=10000, process_group=self.nccl),
-                "test_ap": BinaryAveragePrecision(
-                    thresholds=10000, process_group=self.nccl
-                ),
-            }
-        ).cuda()
-        self.local_best_auc = 0.0
-
-    def init_mem_box_threads(self) -> None:
+    def _init_mem_box_threads(self) -> None:
+        """Create memory/box sync threads. Called only when mem_box_store is present."""
         assert self.mem_updater is not None
         assert self.mem_box_store is not None
         assert self.delta_q is not None
+        assert self.mail_combine is not None
+
         self.mem_task_q = Q(maxsize=1)
         self.box_task_q = Q(maxsize=1)
         self.mem_p2p_q = Q(maxsize=1)
         self.box_p2p_q = Q(maxsize=1)
         self.mem_wr_q = Q(maxsize=1)
+        self.box_wr_q = Q(maxsize=1)
+
         self.mem_handler = MemTaskHandler(
             h2d_sem=self.h2d_sem,
             mem_task_q=self.mem_task_q,
@@ -236,9 +192,6 @@ class Worker:
             mem_wr_q=self.mem_wr_q,
             device=self.device,
         )
-
-        self.box_wr_q = Q(maxsize=1)
-        assert self.mail_combine is not None
         self.box_handler = BoxTaskHandler(
             h2d_sem=self.h2d_sem,
             box_task_q=self.box_task_q,
@@ -257,7 +210,6 @@ class Worker:
             box_wr_q=self.box_wr_q,
             device=self.device,
         )
-
         self.p2p_q_handler = P2PQHandler(
             env=self.env,
             mem_p2p_q=self.mem_p2p_q,
@@ -268,6 +220,57 @@ class Worker:
             delta_q=self.delta_q,
             device=self.device,
         )
+
+    def _init_model(
+        self,
+        encoder: nn.Module,
+        mem_updater: MemoryUpdaterProto | None,
+        predictor: nn.Module,
+        postman: PostmanProto | None,
+        criterion: torch.nn.Module,
+        optimizer: Literal["adam", "sgd"],
+        ring_buf: RingBuf,
+    ) -> None:
+        """Create model, optimizer, and wrap with DDP."""
+        self.model = AssembledModel(
+            encoder=encoder,
+            mem_updater=mem_updater,
+            header=predictor,
+            n_neg=self.n_neg,
+            postman=postman,
+            sample_4_neg=ring_buf.sample_4_neg,
+        )
+
+        if optimizer == "adam":
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        elif optimizer == "sgd":
+            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.lr)
+        else:
+            raise ValueError(f"Unsupported optimizer: {optimizer}")
+
+        self.model = self.model.cuda()
+        self.model = DDP(self.model, process_group=self.nccl, find_unused_parameters=False)
+        self.criterion = criterion
+
+    def _init_metrics(self) -> None:
+        """Create torchmetrics trackers for training and evaluation."""
+        self.train_start2start_ms = MeanMetric(process_group=self.nccl).cuda()
+        self.train_loss_tracker = MeanMetric(process_group=self.nccl).cuda()
+
+        self.val_metrics = MetricCollection(
+            {
+                "val_loss": MeanMetric(process_group=self.nccl),
+                "val_auc": BinaryAUROC(thresholds=10000, process_group=self.nccl),
+                "val_ap": BinaryAveragePrecision(thresholds=10000, process_group=self.nccl),
+            }
+        ).cuda()
+
+        self.test_metrics = MetricCollection(
+            {
+                "test_auc": BinaryAUROC(thresholds=10000, process_group=self.nccl),
+                "test_ap": BinaryAveragePrecision(thresholds=10000, process_group=self.nccl),
+            }
+        ).cuda()
 
     def on_train_epoch_end(self) -> Result:
         avg_s2s = self.train_start2start_ms.compute().item()
@@ -504,7 +507,8 @@ class Worker:
             self.box_handler.join()
         if self.p2p_q_handler:
             self.p2p_q_handler.join()
-        self.dy_asm.join()
+        if self.dy_asm:
+            self.dy_asm.join()
         dist.barrier()
         dist.destroy_process_group()
 
