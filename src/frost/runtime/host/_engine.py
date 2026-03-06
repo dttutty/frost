@@ -39,9 +39,7 @@ class Host:
     mail_plan_out_q: DynamicPlanOutQ | None = None
     nfeat_plan_out_q: StaticPlanOutQ | None = None
 
-    meta_bundle_q: MetaBundleQ
     scatter_q: MetaBundleQ
-
     planner: Planner | None = None
 
     def __init__(
@@ -61,9 +59,6 @@ class Host:
         n_epoch: int,
         patience: int,
     ) -> None:
-        """
-        initialize the host with configuration, graph data, edge dataframe, and environment settings
-        """
         self.neg_sampler = neg_sampler
         self.ngh_sampler = ngh_sampler
         self.start_time = start_time
@@ -72,34 +67,60 @@ class Host:
         self.has_mem = has_mem
         self.mail_same_plan_as_mem = mail_same_plan_as_mem
         self.n_gpu = env.n_gpu
-        self.batch_size = batch_size  # tcfg 会在 run_epoch 中被修改，所以拷贝一份
+        self.batch_size = batch_size
         self.analyzer = analyzer
 
-        # 1. 初始化通信器
         self.stop_ev = threading.Event()
-
-        self.meta_in_q = Q(maxsize=4 if not self.has_mem else 2)
-        self.meta_bundle_q = Q(maxsize=1)
-        self.scatter_q = Q(maxsize=2 if not self.has_mem else 1)
         self.cur_macro_of_epoch = 0
+        self.batch_idx = 0
+        self.curr_epoch = 0
+        self.best_ap_epoch: int = -1
+        self.best_ap_result: Result = Result(
+            train_loss=float("inf"),
+            val_loss=float("inf"),
+            val_auc=0.0,
+            val_ap=0.0,
+            test_auc=0.0,
+            test_ap=0.0,
+        )
+        self.total_epoch = n_epoch
+        self.patience = patience
+        self.patience_counter = 0
+        self.last_epoch_result: Result | None = None
 
-        if self.has_mem:
-            self.mem_plan_out_q = Q(maxsize=1)
-            self.mail_plan_out_q = Q(maxsize=1)
-        if self.has_nfeat:
-            self.nfeat_plan_out_q = Q(maxsize=1)
+        self._init_pipeline(env, gpu_topo)
+        self._init_dataset(df)
 
-        if self.has_nfeat or self.has_mem:
+    def _init_pipeline(self, env: Env, gpu_topo: list[int]) -> None:
+        """Fixed linear pipeline: meta_in_q → MetaBatcher → [Planner →] scatter_q → Scatter.
+
+        When a Planner is needed, meta_bundle_q is a local link between MetaBatcher and Planner
+        and is not stored on self (no other method needs it).
+        """
+        has_planner = self.has_nfeat or self.has_mem
+
+        self.result_q: Q[Result] = Q(maxsize=10)
+        self.meta_in_q = Q(maxsize=2 if has_planner else 4)
+        self.scatter_q = Q(maxsize=1 if has_planner else 2)
+
+        if has_planner:
+            if self.has_mem:
+                self.mem_plan_out_q = Q(maxsize=1)
+                self.mail_plan_out_q = Q(maxsize=1)
+            if self.has_nfeat:
+                self.nfeat_plan_out_q = Q(maxsize=1)
+
+            meta_bundle_q: MetaBundleQ = Q(maxsize=1)
+
             self.meta_batcher = MetaBatcher(
                 n_gpu=env.n_gpu,
                 meta_in_q=self.meta_in_q,
-                dest_q=self.meta_bundle_q,
+                dest_q=meta_bundle_q,
                 stop_ev=self.stop_ev,
             )
-
             self.planner = Planner(
                 gpu_topo=gpu_topo,
-                in_q=self.meta_bundle_q,
+                in_q=meta_bundle_q,
                 out_q=self.scatter_q,
                 mem_plan_out_q=self.mem_plan_out_q,
                 mail_plan_out_q=self.mail_plan_out_q,
@@ -114,7 +135,6 @@ class Host:
                 stop_ev=self.stop_ev,
             )
 
-        self.result_q: Q[Result] = Q(maxsize=10)
         self.scatter = Scatter(
             n_gpu=env.n_gpu,
             in_q=self.scatter_q,
@@ -125,27 +145,6 @@ class Host:
             result_q=self.result_q,
             stop_ev=self.stop_ev,
         )
-        self.curr_epoch = 0
-        self.best_ap_epoch: int = -1
-        self.best_ap_result: Result = Result(
-            train_loss=float("inf"),
-            val_loss=float("inf"),
-            val_auc=0.0,
-            val_ap=0.0,
-            test_auc=0.0,
-            test_ap=0.0,
-        )
-
-        self.total_epoch = n_epoch
-
-        self.patience = patience  # 默认 50
-        self.patience_counter = 0
-        self.last_epoch_result: Result | None = None
-        self.batch_idx = 0
-
-        # 3rd module: scatter sender
-        # 3. 初始化采样器
-        self._init_dataset(df)
 
     def _init_dataset(self, df: pd.DataFrame) -> None:
         # preprocess dataframe
@@ -206,13 +205,9 @@ class Host:
         return False
 
     def start_all_threads(self) -> None:
-        """
-        启动 Host 相关的所有线程
-        """
-        if self.has_nfeat or self.has_mem:
-            self.meta_batcher.start()
-            if self.planner is not None:
-                self.planner.start()
+        self.meta_batcher.start()
+        if self.planner is not None:
+            self.planner.start()
         self.scatter.start()
 
     def run(self) -> None:
