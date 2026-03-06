@@ -62,6 +62,9 @@ def launch(cfg: DictConfig):
         with open_dict(cfg):
             cfg.ndim = ndim
             cfg.edim = edim
+        cfg_dict = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False)
+        print(cfg_dict)
+
     d_mail = 0
     if cfg.get("mem_updater") is not None:
         d_mail = 2 * cfg.mem_updater.d_mem + cfg.edim

@@ -36,12 +36,11 @@ def _disable_tqdm_monitor_thread() -> None:
 
 
 class Host:
-    bundle_dest_q: MetaBundleQ  # main thread puts (MetaBundle, AccessBundle) here
     mem_plan_out_q: DynamicPlanOutQ | None = None
     mail_plan_out_q: DynamicPlanOutQ | None = None
     nfeat_plan_out_q: StaticPlanOutQ | None = None
 
-    scatter_q: MetaBundleQ
+    scatter_q: Q[MetaBundle | None | Literal["end_of_epoch"]]
     planner: Planner | None = None
 
     def __init__(
@@ -94,17 +93,16 @@ class Host:
         self._init_dataset(df)
 
     def _init_pipeline(self, env: Env, gpu_topo: list[int]) -> None:
-        """Fixed linear pipeline: main thread → bundle_dest_q → [Planner →] scatter_q → Scatter.
+        """Fixed linear pipeline: main thread → [Planner.dispatch() →] scatter_q → Scatter.
 
-        The main thread accumulates n_gpu metas per macro-batch and puts the bundle directly
-        into bundle_dest_q, eliminating the need for a dedicated MetaBatcher thread.
-        When a Planner is needed, bundle_dest_q is a local link between the main thread and
-        Planner and is not stored on self as scatter_q (no other method needs that distinction).
+        The main thread accumulates n_gpu metas per macro-batch, optionally dispatches to
+        sub-planner threads via Planner.dispatch(), then puts MetaBundle into scatter_q.
+        No dedicated MetaBatcher or Planner thread — both are inlined into the main thread.
         """
         has_planner = self.has_nfeat or self.has_mem
 
         self.result_q: Q[Result] = Q(maxsize=10)
-        self.scatter_q = Q(maxsize=1 if has_planner else 2)
+        self.scatter_q = Q(maxsize=2)
 
         if has_planner:
             if self.has_mem:
@@ -113,21 +111,13 @@ class Host:
             if self.has_nfeat:
                 self.nfeat_plan_out_q = Q(maxsize=1)
 
-            bundle_dest_q: MetaBundleQ = Q(maxsize=2)
-            self.bundle_dest_q = bundle_dest_q
-
             self.planner = Planner(
                 gpu_topo=gpu_topo,
-                in_q=bundle_dest_q,
-                out_q=self.scatter_q,
                 mem_plan_out_q=self.mem_plan_out_q,
                 mail_plan_out_q=self.mail_plan_out_q,
                 nfeat_plan_out_q=self.nfeat_plan_out_q,
                 stop_ev=self.stop_ev,
             )
-        else:
-            # No Planner: main thread puts bundles directly into scatter_q.
-            self.bundle_dest_q = self.scatter_q
 
         self.scatter = Scatter(
             n_gpu=env.n_gpu,
@@ -199,8 +189,6 @@ class Host:
         return False
 
     def start_all_threads(self) -> None:
-        if self.planner is not None:
-            self.planner.start()
         self.scatter.start()
 
     def run(self) -> None:
@@ -284,14 +272,18 @@ class Host:
                 meta_bundle.append(meta)
                 access_bundle.append(access)
                 self.batch_idx += 1
-            self.bundle_dest_q.put((meta_bundle, access_bundle))
+            if self.planner is not None:
+                self.planner.dispatch(meta_bundle, access_bundle)
+            self.scatter_q.put(meta_bundle)
             self.cur_macro_of_epoch += 1
 
         if split == "test":
             self._cleanup_per_epoch()
 
     def _cleanup_per_epoch(self) -> None:
-        self.bundle_dest_q.put("end_of_epoch")
+        if self.planner is not None:
+            self.planner.signal_epoch_end()
+        self.scatter_q.put("end_of_epoch")
 
         self.cur_macro_of_epoch = 0
         self.curr_epoch += 1
@@ -360,10 +352,9 @@ class Host:
         return meta, access
 
     def _cleanup(self) -> None:
-        self.bundle_dest_q.put(None)
         if self.planner is not None:
-            self.planner.join()
-        print("Planner thread has been joined.")
+            self.planner.shutdown()
+        self.scatter_q.put(None)
         self.scatter.join()
         print("All threads have been joined. Host cleanup complete.")
         end = time.time()
