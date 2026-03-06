@@ -16,3 +16,6 @@
 [submodule "third_party_papers/mspipe_paper"]
 	path = third_party_papers/mspipe_paper
 	url = https://github.com/dttutty/mspipe_paper
+[submodule "third_party/MSPipe"]
+	path = third_party/MSPipe
+	url = https://github.com/dttutty/MSPipe.git
