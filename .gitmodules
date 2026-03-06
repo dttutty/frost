@@ -7,3 +7,12 @@
 [submodule "paper"]
 	path = paper
 	url = https://github.com/dttutty/frost_paper.git
+[submodule "third_party/PipeTGL"]
+	path = third_party/PipeTGL
+	url = https://github.com/dttutty/PipeTGL.git
+[submodule "third_party_papers/tgl_paper"]
+	path = third_party_papers/tgl_paper
+	url = https://github.com/dttutty/tgl_paper
+[submodule "third_party_papers/mspipe_paper"]
+	path = third_party_papers/mspipe_paper
+	url = https://github.com/dttutty/mspipe_paper

@@ -9,7 +9,7 @@ from frost.datatypes.mem_mail_box._data_ops import keep_last
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase
 
-from .utils.p2p_task_maker import make_p2p_task
+from .utils._p2p_task_maker import make_p2p_task
 
 logger = logging.getLogger(__name__)
 
