@@ -65,8 +65,8 @@ class MemBoxStoreManager:
         if self.env.is_host:
             mem = csm(f"{self.run_id}_mem", [n_nodes, d_mem], self.mdtype)
             mem_ts = csm(f"{self.run_id}_mem_ts", [n_nodes], self.mdtype)
-            box = csm(f"{self.run_id}_mail", mail_shape, self.mdtype)
-            box_ts = csm(f"{self.run_id}_mail_ts", [n_nodes, boxsize], self.mdtype)
+            box = csm(f"{self.run_id}_box", mail_shape, self.mdtype)
+            box_ts = csm(f"{self.run_id}_box_ts", [n_nodes, boxsize], self.mdtype)
 
             # Initialize memory states to zero
             mem.zero_()
@@ -79,8 +79,8 @@ class MemBoxStoreManager:
         if not self.env.is_host:
             mem = gsm(f"{self.run_id}_mem", [n_nodes, d_mem], self.mdtype)
             mem_ts = gsm(f"{self.run_id}_mem_ts", [n_nodes], self.mdtype)
-            box = gsm(f"{self.run_id}_mail", mail_shape, self.mdtype)
-            box_ts = gsm(f"{self.run_id}_mail_ts", [n_nodes, boxsize], self.mdtype)
+            box = gsm(f"{self.run_id}_box", mail_shape, self.mdtype)
+            box_ts = gsm(f"{self.run_id}_box_ts", [n_nodes, boxsize], self.mdtype)
 
         # Store the dataclass as an instance attribute
         assert mem is not None

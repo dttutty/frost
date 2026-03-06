@@ -7,7 +7,7 @@ from torch import Tensor
 
 
 @dataclass(kw_only=True)
-class MemTsNid:
+class MemEntry:
     nid: Tensor
     data: Tensor
     ts: Tensor
@@ -20,8 +20,8 @@ class MemTsNid:
             f"ts={self.ts.shape}, is_sorted={self.is_sorted}, is_unique={self.is_unique})"
         )
 
-    def clone(self) -> MemTsNid:
-        return MemTsNid(
+    def clone(self) -> MemEntry:
+        return MemEntry(
             nid=self.nid.clone(),
             data=self.data.clone(),
             ts=self.ts.clone(),
@@ -29,8 +29,8 @@ class MemTsNid:
             is_unique=self.is_unique,
         )
 
-    def cuda(self) -> MemTsNid:
-        return MemTsNid(
+    def cuda(self) -> MemEntry:
+        return MemEntry(
             nid=self.nid.cuda(),
             data=self.data.cuda(),
             ts=self.ts.cuda(),
@@ -38,7 +38,7 @@ class MemTsNid:
             is_unique=self.is_unique,
         )
 
-    def merge_mem(self, other: MemTsNid, is_overlap: bool) -> tuple[MemTsNid, Tensor]:
+    def merge_mem(self, other: MemEntry, is_overlap: bool) -> tuple[MemEntry, Tensor]:
         # 1. 处理空情况 (边界检查需要元素存在)
         if self.nid.numel() == 0:
             return other.clone(), torch.arange(
@@ -60,7 +60,7 @@ class MemTsNid:
         cat_data = cat_data[sort_idx]
         cat_ts = cat_ts[sort_idx]
 
-        return MemTsNid(
+        return MemEntry(
             nid=cat_nid,
             data=cat_data,
             ts=cat_ts,
@@ -68,7 +68,7 @@ class MemTsNid:
             is_unique=self.is_unique and other.is_unique and not is_overlap,
         ), sort_idx
 
-    def sort_by_nid(self) -> MemTsNid:
+    def sort_by_nid(self) -> MemEntry:
         if self.is_sorted:
             return self
         sorted_indices = torch.argsort(self.nid)
@@ -82,8 +82,8 @@ class MemTsNid:
             is_unique=self.is_unique,
         )
 
-    def to(self, device: torch.device) -> MemTsNid:
-        return MemTsNid(
+    def to(self, device: torch.device) -> MemEntry:
+        return MemEntry(
             nid=self.nid.to(device),
             data=self.data.to(device),
             ts=self.ts.to(device),

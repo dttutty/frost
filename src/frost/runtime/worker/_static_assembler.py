@@ -4,9 +4,9 @@ import torch
 
 from frost.datatypes.graph import FlatGraph
 from frost.datatypes.meta import Meta
-from frost.datatypes.plan import StPlan
+from frost.datatypes.plan import StaticPlan
 
-from ...datatypes.n_feat_nid import NFeatNid
+from ...datatypes.n_feat_nid import NodeFeatNid
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ class StAssembler:
     静态数据组装器线程，将分块数据和增量数据合并，并填充到 DGL Block 中。
     """
 
-    nfeat_delta: NFeatNid | None = None
+    nfeat_delta: NodeFeatNid | None = None
 
     def __init__(
         self,
@@ -31,9 +31,9 @@ class StAssembler:
 
     def prepare_nfeat_cache(
         self,
-        nfeat_plan: "StPlan",
+        nfeat_plan: "StaticPlan",
         meta: "Meta",
-    ) -> "NFeatNid":
+    ) -> "NodeFeatNid":
         assert self.shared_nfeat is not None
         to_cache, fetch = nfeat_plan.to_cache.data, nfeat_plan.fetch.data
 
@@ -58,7 +58,7 @@ class StAssembler:
             gpu_nid = fetch.to(self.device)
             gpu_data = self.shared_nfeat[fetch].to(self.device)
 
-            nfeat_obj = NFeatNid(nid=gpu_nid, nfeat=gpu_data)
+            nfeat_obj = NodeFeatNid(nid=gpu_nid, nfeat=gpu_data)
 
             # Merge with existing cached delta if available
             if self.nfeat_delta is not None:
@@ -74,10 +74,10 @@ class StAssembler:
 
         return nfeat_obj
 
-    def fill_mfg_with_nfeat(
+    def fill_nfeat(
         self,
         flat_graph: FlatGraph,
-        nfeat_nid: "NFeatNid",
+        nfeat_nid: "NodeFeatNid",
         meta: "Meta",
     ) -> FlatGraph:
         assert self.shared_nfeat is not None
@@ -128,7 +128,7 @@ class StAssembler:
         flat_graph.nfeat = node_feat
         return flat_graph
 
-    def fill_mfg_with_efeat(
+    def fill_efeat(
         self,
         flat_graph: FlatGraph,
         n_src: int,

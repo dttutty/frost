@@ -10,9 +10,9 @@ import torch
 
 from frost.aliases.worker import DeltaQ, FullQ, H2DOutQ
 from frost.datatypes.graph import FlatGraph
-from frost.datatypes.mem_mail_box.box import BoxTsNid
-from frost.datatypes.mem_mail_box.mem import MemTsNid
-from frost.datatypes.plan import DyPlan
+from frost.datatypes.mem_mail_box.box import BoxEntry
+from frost.datatypes.mem_mail_box.mem import MemEntry
+from frost.datatypes.plan import DynamicPlan
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase
 from frost.shm.mem_mgr import MemBoxStore
@@ -21,18 +21,18 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True)
-class MemNBox:
-    mem: MemTsNid
-    box: BoxTsNid
+class MemAndBox:
+    mem: MemEntry
+    box: BoxEntry
 
     @cached_property
-    def is_mem_mail_sorted(self) -> bool:
+    def is_mem_box_sorted(self) -> bool:
         assert self.mem is not None
         assert self.box is not None
         return self.mem.is_sorted and self.box.is_sorted
 
-    def sort_mem_and_mail(self) -> MemNBox:
-        if self.is_mem_mail_sorted:
+    def sort_mem_and_box(self) -> MemAndBox:
+        if self.is_mem_box_sorted:
             return self
 
         if self.mem is not None:
@@ -68,7 +68,7 @@ class DyAssembler(StreamThreadBase):
 
     def _fill_from_shared(
         self,
-        plan: DyPlan,
+        plan: DynamicPlan,
         shared_data: torch.Tensor,
         shared_ts: torch.Tensor,
         target_data: torch.Tensor,
@@ -216,7 +216,7 @@ class DyAssembler(StreamThreadBase):
         return global_positions, local_positions
 
     def prep_shared_features(
-        self, graph: FlatGraph, mem_plan: DyPlan, box_plan: DyPlan
+        self, graph: FlatGraph, mem_plan: DynamicPlan, box_plan: DynamicPlan
     ) -> None:
         """Step 1: Initialize tensors and fill local shared memory data."""
         num_nodes = graph.nid.shape[0]
@@ -275,7 +275,7 @@ class DyAssembler(StreamThreadBase):
     def _build_delta_mask(
         self,
         graph: FlatGraph,
-        plan: DyPlan | None,
+        plan: DynamicPlan | None,
     ) -> torch.Tensor:
         """Positions that must be filled by delta:
         graph.nid != -1 and not covered by local shared fetch.
@@ -313,9 +313,9 @@ class DyAssembler(StreamThreadBase):
     def apply_delta_features(
         self,
         graph: FlatGraph,
-        delta: MemNBox,
-        mem_plan: DyPlan | None,
-        box_plan: DyPlan | None,
+        delta: MemAndBox,
+        mem_plan: DynamicPlan | None,
+        box_plan: DynamicPlan | None,
     ) -> None:
         """Step 2: Apply network delta data to positions not covered by local shared."""
         assert graph.mem is not None
@@ -396,12 +396,12 @@ class DyAssembler(StreamThreadBase):
 
                 box_data = box.data2recv
 
-                delta_mem = MemTsNid(
+                delta_mem = MemEntry(
                     nid=mem.nid2recv, data=mem.data2recv, ts=mem.ts2recv
                 )
-                delta_box = BoxTsNid(nid=box.nid2recv, data=box_data, ts=box.ts2recv)
-                delta = MemNBox(mem=delta_mem, box=delta_box)
-                delta = delta.sort_mem_and_mail()
+                delta_box = BoxEntry(nid=box.nid2recv, data=box_data, ts=box.ts2recv)
+                delta = MemAndBox(mem=delta_mem, box=delta_box)
+                delta = delta.sort_mem_and_box()
 
                 # ==========================================================
                 # Apply the received delta to the already partially-filled graph

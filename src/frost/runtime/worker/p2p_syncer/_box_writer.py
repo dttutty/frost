@@ -5,13 +5,13 @@ from typing import TypeVar, cast
 
 import torch
 
-from frost.datatypes.mem_mail_box.box import BoxTsNid
-from frost.datatypes.mem_mail_box.mail import MailTsNid
-from frost.datatypes.mem_mail_box.mem import MemTsNid
+from frost.datatypes.mem_mail_box.box import BoxEntry
+from frost.datatypes.mem_mail_box.mail import MailEntry
+from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase
 
-AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
+AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
 Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 
 
@@ -25,7 +25,7 @@ class BoxWriter(StreamThreadBase):
         shared_box_ts: torch.Tensor,
         h2d_sem: threading.Semaphore,
         stop_ev: threading.Event,
-        box_wr_q: Q[tuple[torch.Tensor | None, int, BoxTsNid, CudaEvent] | None],
+        box_wr_q: Q[tuple[torch.Tensor | None, int, BoxEntry, CudaEvent] | None],
         device: torch.device,
     ) -> None:
         super().__init__(name="box_wr", stop_ev=stop_ev)
@@ -42,7 +42,7 @@ class BoxWriter(StreamThreadBase):
     def write_back_box(
         self,
         writeback: torch.Tensor | None,
-        box_ts_nid: BoxTsNid,
+        box_ts_nid: BoxEntry,
     ) -> None:
         if box_ts_nid is None or writeback is None:
             return

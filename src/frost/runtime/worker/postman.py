@@ -3,7 +3,7 @@ import logging
 import torch
 
 from frost.datatypes.graph import Graph
-from frost.datatypes.mem_mail_box.mail import MailTsNid
+from frost.datatypes.mem_mail_box.mail import MailEntry
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +15,7 @@ class Postman:
     ):
         self.n_neg = n_neg  # from hydra config
 
-    def deliver(self, graph: "Graph", mail_data: torch.Tensor) -> "MailTsNid":
+    def deliver(self, graph: "Graph", mail_data: torch.Tensor) -> "MailEntry":
         """
         Deliver mails from the first 2/3 of root nodes to their 1-hop neighbors.
 
@@ -44,7 +44,7 @@ class Postman:
         # 3. Reshape neighbor NIDs to [target_len, S]
         # Neighbors are only sampled for src + pos_dst (target_len nodes),
         # so the tensor has target_len * S elements, not N_total * S.
-        S = graph.sampling_config[0]
+        S = graph.fanout[0]
         nbr_nids = graph.neighbors[0].nid.view(target_len, S)
         target_nbr_nids = nbr_nids  # Shape: [target_len, S]
 
@@ -66,7 +66,7 @@ class Postman:
         new_ts = expanded_ts[valid_mask]  # Shape: [K]
 
         # 8. Return the final MailTsNid
-        return MailTsNid(
+        return MailEntry(
             nid=new_nids,
             data=new_mail_data,
             ts=new_ts,

@@ -6,15 +6,15 @@ import torch
 
 from frost.aliases.syncer import MemP2PQ, MemTaskQ, MemWrQ
 from frost.datatypes.mem_mail_box._data_ops import keep_last
-from frost.datatypes.mem_mail_box.box import BoxTsNid
-from frost.datatypes.mem_mail_box.mail import MailTsNid
-from frost.datatypes.mem_mail_box.mem import MemTsNid
+from frost.datatypes.mem_mail_box.box import BoxEntry
+from frost.datatypes.mem_mail_box.mail import MailEntry
+from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase
 
 from .utils.p2p_task_maker import make_p2p_task
 
-AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
+AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
 Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 
 logger = logging.getLogger(__name__)

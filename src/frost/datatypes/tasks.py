@@ -6,27 +6,27 @@ from numpy.typing import NDArray
 from torch import Tensor
 
 from frost.datatypes.graph import Graph
-from frost.datatypes.mem_mail_box.box import BoxTsNid
-from frost.datatypes.mem_mail_box.mem import MemTsNid
-from frost.datatypes.plan import DyPlan
+from frost.datatypes.mem_mail_box.box import BoxEntry
+from frost.datatypes.mem_mail_box.mem import MemEntry
+from frost.datatypes.plan import DynamicPlan
 
 
 @dataclass(slots=True)
 class MemTask:
     batch_idx: int
-    root_new_mem: MemTsNid
-    mem_plan: DyPlan
+    root_new_mem: MemEntry
+    mem_plan: DynamicPlan
     is_last: bool
 
 
 @dataclass(slots=True)
 class BoxTask:
     pos_efeat: Tensor | None
-    root_new_mem: MemTsNid
+    root_new_mem: MemEntry
     batch_idx: int
-    box_plan: DyPlan
+    box_plan: DynamicPlan
     is_last: bool
-    old_box: BoxTsNid
+    old_box: BoxEntry
     graph: Graph | None
 
     def __repr__(self) -> str:
@@ -47,8 +47,8 @@ class P2PTask:
     data2recv: Tensor
     ts2send: Tensor
     ts2recv: Tensor
-    rec_cts: NDArray
-    send_cts: NDArray
+    recv_counts: NDArray
+    send_counts: NDArray
     batch_idx: int
 
     def __repr__(self) -> str:
@@ -60,8 +60,8 @@ class P2PTask:
             f"data2recv_shape={self.data2recv.shape}, "
             f"ts2send_shape={self.ts2send.shape}, "
             f"ts2recv_shape={self.ts2recv.shape}, "
-            f"rec_cts={self.rec_cts}, "
-            f"send_cts={self.send_cts}, "
+            f"recv_counts={self.recv_counts}, "
+            f"send_counts={self.send_counts}, "
             f"batch_idx={self.batch_idx})"
         )
 
@@ -73,7 +73,7 @@ class P2PTask:
             data2recv=self.data2recv.clone(),
             ts2send=self.ts2send.clone(),
             ts2recv=self.ts2recv.clone(),
-            rec_cts=self.rec_cts.copy(),
-            send_cts=self.send_cts.copy(),
+            recv_counts=self.recv_counts.copy(),
+            send_counts=self.send_counts.copy(),
             batch_idx=self.batch_idx,
         )

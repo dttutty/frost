@@ -6,11 +6,11 @@ from typing import cast
 import numpy as np
 
 from frost.aliases.host import (
-    DyPlanInQ,
-    DyPlanOutQ,
+    DynamicPlanInQ,
+    DynamicPlanOutQ,
     MetaBundleQ,
-    StPlanInQ,
-    StPlanOutQ,
+    StaticPlanInQ,
+    StaticPlanOutQ,
 )
 from frost.datatypes.access import Access
 from frost.runtime._thread_base import ThreadBase
@@ -120,18 +120,18 @@ class Planner(ThreadBase):
     这个是对那种mailbox_update=mem_update的planner
     """
 
-    mem_plan_in_q: None | DyPlanInQ
-    mail_plan_in_q: None | DyPlanInQ
-    nfeat_plan_in_q: None | StPlanInQ
+    mem_plan_in_q: None | DynamicPlanInQ
+    mail_plan_in_q: None | DynamicPlanInQ
+    nfeat_plan_in_q: None | StaticPlanInQ
 
     def __init__(
         self,
         gpu_topo: list[int],
         in_q: MetaBundleQ,
         out_q: MetaBundleQ,
-        mem_plan_out_q: DyPlanOutQ | None,
-        mail_plan_out_q: DyPlanOutQ | None,
-        nfeat_plan_out_q: StPlanOutQ | None,
+        mem_plan_out_q: DynamicPlanOutQ | None,
+        mail_plan_out_q: DynamicPlanOutQ | None,
+        nfeat_plan_out_q: StaticPlanOutQ | None,
         stop_ev: threading.Event,
     ) -> None:
         """
@@ -150,7 +150,7 @@ class Planner(ThreadBase):
         self.out_q = out_q
 
         # mem_plan
-        self.mem_plan_in_q: None | DyPlanInQ = None
+        self.mem_plan_in_q: None | DynamicPlanInQ = None
         if mem_plan_out_q:
             self.mem_plan_in_q = Q()
             assert mem_plan_out_q is not None
@@ -162,7 +162,7 @@ class Planner(ThreadBase):
             )
 
         # mail plan
-        self.mail_plan_in_q: None | DyPlanInQ = None
+        self.mail_plan_in_q: None | DynamicPlanInQ = None
         if mail_plan_out_q:
             self.mail_plan_in_q = Q()
             assert mail_plan_out_q is not None
@@ -174,7 +174,7 @@ class Planner(ThreadBase):
             )
 
         # nfeat plan
-        self.nfeat_plan_in_q: None | StPlanInQ = None
+        self.nfeat_plan_in_q: None | StaticPlanInQ = None
         if nfeat_plan_out_q:
             self.nfeat_plan_in_q = Q()
             assert nfeat_plan_out_q is not None
@@ -214,17 +214,17 @@ class Planner(ThreadBase):
                 access_list.append(meta.access)
 
             if self.mem_plan_in_q is not None:
-                next_needs = [cast(TensorSet, io.mem_need) for io in access_list]
+                next_needs = [cast(TensorSet, io.required_mem) for io in access_list]
                 next_updates = [cast(TensorSet, io.mem_update) for io in access_list]
                 self.mem_plan_in_q.put((next_needs, next_updates, metas))
 
             if self.mail_plan_in_q is not None:
-                next_needs = [cast(TensorSet, io.box_need) for io in access_list]
+                next_needs = [cast(TensorSet, io.required_box) for io in access_list]
                 next_updates = [cast(TensorSet, io.box_update) for io in access_list]
                 self.mail_plan_in_q.put((next_needs, next_updates, metas))
 
             if self.nfeat_plan_in_q is not None:
-                next_needs = [cast(TensorSet, io.nfeat_need) for io in access_list]
+                next_needs = [cast(TensorSet, io.required_nfeat) for io in access_list]
                 self.nfeat_plan_in_q.put(next_needs)
 
             for meta in metas:

@@ -8,12 +8,12 @@ import torch.distributed as dist
 from frost.aliases.syncer import BoxP2PQ, MemP2PQ
 from frost.aliases.worker import DeltaQ
 from frost.datatypes.env import Env
-from frost.datatypes.mem_mail_box.box import BoxTsNid
-from frost.datatypes.mem_mail_box.mail import MailTsNid
-from frost.datatypes.mem_mail_box.mem import MemTsNid
+from frost.datatypes.mem_mail_box.box import BoxEntry
+from frost.datatypes.mem_mail_box.mail import MailEntry
+from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.runtime._thread_base import ThreadBase
 
-AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
+AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
 Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 
 logger = logging.getLogger(__name__)
@@ -93,48 +93,48 @@ class P2PQHandler(ThreadBase):
                 # 顺序：Mem_NID -> Mem_Data -> Mem_TS -> Box_NID -> Box_Data -> Box_TS
                 # 这样写的好处是 NCCL Kernel 会被密集地压入 CUDA Stream，没有任何 Python 逻辑打断
                 p2p_ops = [
-                    # 格式：(Name, Recv, Send, Rec_Cts, Send_Cts)
+                    # 格式：(Name, Recv, Send, recv_counts, send_counts)
                     (
                         "Mem_NID",
                         mem_p2p.nid2recv,
                         mem_p2p.nid2send,
-                        mem_p2p.rec_cts,
-                        mem_p2p.send_cts,
+                        mem_p2p.recv_counts,
+                        mem_p2p.send_counts,
                     ),
                     (
                         "Mem_Data",
                         mem_p2p.data2recv,
                         mem_p2p.data2send,
-                        mem_p2p.rec_cts,
-                        mem_p2p.send_cts,
+                        mem_p2p.recv_counts,
+                        mem_p2p.send_counts,
                     ),
                     (
                         "Mem_TS",
                         mem_p2p.ts2recv,
                         mem_p2p.ts2send,
-                        mem_p2p.rec_cts,
-                        mem_p2p.send_cts,
+                        mem_p2p.recv_counts,
+                        mem_p2p.send_counts,
                     ),
                     (
                         "Box_NID",
                         box_p2p.nid2recv,
                         box_p2p.nid2send,
-                        box_p2p.rec_cts,
-                        box_p2p.send_cts,
+                        box_p2p.recv_counts,
+                        box_p2p.send_counts,
                     ),
                     (
                         "Box_Data",
                         box_p2p.data2recv,
                         box_p2p.data2send,
-                        box_p2p.rec_cts,
-                        box_p2p.send_cts,
+                        box_p2p.recv_counts,
+                        box_p2p.send_counts,
                     ),
                     (
                         "Box_TS",
                         box_p2p.ts2recv,
                         box_p2p.ts2send,
-                        box_p2p.rec_cts,
-                        box_p2p.send_cts,
+                        box_p2p.recv_counts,
+                        box_p2p.send_counts,
                     ),
                 ]
 
@@ -151,9 +151,11 @@ class P2PQHandler(ThreadBase):
                     f"Rank {self.env.local_rank} starting P2P communication, count={self.count}"
                 )
                 self.count += 1
-                for i, (name, recv_t, send_t, rec_cts, send_cts) in enumerate(p2p_ops):
+                for i, (name, recv_t, send_t, recv_counts, send_counts) in enumerate(
+                    p2p_ops
+                ):
                     # --- [DEBUG] 强力检查代码开始 ---
-                    total_send = sum(send_cts)
+                    total_send = sum(send_counts)
                     real_shape = send_t.shape[0]
                     if total_send != real_shape:
                         import sys
@@ -161,10 +163,10 @@ class P2PQHandler(ThreadBase):
                         # logger.debug(
                         #     f"\n[CRITICAL ERROR] P2P Mismatch on Rank {dist.get_rank()} | Op: {name}"
                         # )
-                        # logger.debug(f"  > Sum of send_cts: {total_send}")
+                        # logger.debug(f"  > Sum of send_counts: {total_send}")
                         # logger.debug(f"  > Actual Tensor dim0: {real_shape}")
                         # logger.debug(f"  > Tensor Full Shape: {send_t.shape}")
-                        # logger.debug(f"  > Send Cts List: {send_cts}")
+                        # logger.debug(f"  > Send Cts List: {send_counts}")
                         sys.stdout.flush()
                         # 抛出异常让程序停在这里
                         raise RuntimeError(
@@ -175,8 +177,8 @@ class P2PQHandler(ThreadBase):
                     work = dist.all_to_all_single(
                         output=recv_t,
                         input=send_t,
-                        output_split_sizes=rec_cts,
-                        input_split_sizes=send_cts,
+                        output_split_sizes=recv_counts,
+                        input_split_sizes=send_counts,
                         group=self.nccl_p2p,
                         async_op=True,
                     )

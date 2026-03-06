@@ -1,7 +1,7 @@
 import logging
 import threading
 
-from frost.aliases.host import MataBatcherInQ, MetaBundle, MetaBundleQ
+from frost.aliases.host import MetaBatcherInQ, MetaBundle, MetaBundleQ
 from frost.runtime._thread_base import ThreadBase
 
 logger = logging.getLogger(__name__)
@@ -11,7 +11,7 @@ class MetaBatcher(ThreadBase):
     def __init__(
         self,
         n_gpu: int,
-        meta_in_q: MataBatcherInQ,
+        meta_in_q: MetaBatcherInQ,
         dest_q: MetaBundleQ,
         stop_ev: threading.Event,
     ) -> None:

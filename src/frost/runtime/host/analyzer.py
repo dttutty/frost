@@ -34,11 +34,11 @@ class APANAnalyzer:
         all_nodes_set = TensorSet(all_nid)
 
         return Access(
-            mem_need=all_nodes_set,
+            required_mem=all_nodes_set,
             mem_update=pos_root,
-            box_need=all_nodes_set,
+            required_box=all_nodes_set,
             box_update=TensorSet(pos_ngh),
-            nfeat_need=all_nodes_set,
+            required_nfeat=all_nodes_set,
         )
 
 
@@ -58,7 +58,7 @@ class NoMemAnalyzer:
         all_nodes_set = TensorSet(all_nid)
 
         return Access(
-            nfeat_need=all_nodes_set,
+            required_nfeat=all_nodes_set,
         )
 
 
@@ -79,11 +79,11 @@ class TGNAnalyzer:
         all_nodes_set = TensorSet(all_nid)
 
         return Access(
-            mem_need=all_nodes_set,
+            required_mem=all_nodes_set,
             mem_update=pos_root,
-            box_need=all_nodes_set,
+            required_box=all_nodes_set,
             box_update=pos_root,
-            nfeat_need=all_nodes_set,
+            required_nfeat=all_nodes_set,
         )
 
 
@@ -104,9 +104,9 @@ class JODIEAnalyzer:
         all_nodes_set = TensorSet(all_nid)  # this includes src, dst, and neg_dst
 
         return Access(
-            mem_need=all_nodes_set,
+            required_mem=all_nodes_set,
             mem_update=pos_root,
-            box_need=all_nodes_set,
+            required_box=all_nodes_set,
             box_update=pos_root,
-            nfeat_need=all_nodes_set,
+            required_nfeat=all_nodes_set,
         )

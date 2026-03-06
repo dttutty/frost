@@ -8,7 +8,7 @@ import torch
 from frost.datatypes.meta import Meta
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase
-from frost.runtime.worker._st_asm import StAssembler
+from frost.runtime.worker._static_assembler import StAssembler
 from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ class H2D(StreamThreadBase):
 
             # can run no matter has nfeat or not
             if self.efeat is not None:
-                meta.flat_graph = self.st_asm.fill_mfg_with_efeat(
+                meta.flat_graph = self.st_asm.fill_efeat(
                     meta.flat_graph, n_src=meta.n_src, meta=meta
                 )
 
@@ -86,7 +86,7 @@ class H2D(StreamThreadBase):
                     nfeat_plan=meta.plan_set.nfeat, meta=meta
                 )
 
-                meta.flat_graph = self.st_asm.fill_mfg_with_nfeat(
+                meta.flat_graph = self.st_asm.fill_nfeat(
                     flat_graph=meta.flat_graph,
                     nfeat_nid=nfeat,
                     meta=meta,

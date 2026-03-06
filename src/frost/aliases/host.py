@@ -8,15 +8,15 @@ import numpy as np
 from numpy.typing import NDArray
 
 from frost.datatypes.meta import Meta
-from frost.datatypes.plan import DyPlan, PlanSet, StPlan
+from frost.datatypes.plan import DynamicPlan, PlanSet, StaticPlan
 from frost.utils.tensor_set import TensorSet
 
 logger = logging.getLogger(__name__)
 
 
-MataBatcherInQ: TypeAlias = Queue[Meta | None | Literal["end_of_epoch"]]
-DyPlanOutQ: TypeAlias = Queue[list[DyPlan] | None]
-StPlanOutQ: TypeAlias = Queue[list[StPlan] | None]
+MetaBatcherInQ: TypeAlias = Queue[Meta | None | Literal["end_of_epoch"]]
+DynamicPlanOutQ: TypeAlias = Queue[list[DynamicPlan] | None]
+StaticPlanOutQ: TypeAlias = Queue[list[StaticPlan] | None]
 
 MetaBundle: TypeAlias = list[Meta]
 MetaBundleQ: TypeAlias = Queue[MetaBundle | None | Literal["end_of_epoch"]]
@@ -27,9 +27,9 @@ MetasDyNeed: TypeAlias = tuple[list[TensorSet], list[TensorSet], MetaBundle]
 MetasStNeed: TypeAlias = list[TensorSet]
 
 
-DyPlanInQ: TypeAlias = Queue[MetasDyNeed | None | Literal["end_of_epoch"]]
-StPlanInQ: TypeAlias = Queue[MetasStNeed | None | Literal["end_of_epoch"]]
+DynamicPlanInQ: TypeAlias = Queue[MetasDyNeed | None | Literal["end_of_epoch"]]
+StaticPlanInQ: TypeAlias = Queue[MetasStNeed | None | Literal["end_of_epoch"]]
 
-PlanBundle: TypeAlias = list[DyPlan]
+PlanBundle: TypeAlias = list[DynamicPlan]
 IntArr = NDArray[np.int64]
 FloatArr = NDArray[np.floating]

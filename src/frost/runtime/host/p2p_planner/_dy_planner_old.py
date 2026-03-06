@@ -4,8 +4,8 @@ import threading
 import numpy as np
 import torch
 
-from frost.aliases.host import DyPlanInQ, DyPlanOutQ, MetasDyNeed
-from frost.datatypes.plan import DyPlan
+from frost.aliases.host import DynamicPlanInQ, DynamicPlanOutQ, MetasDyNeed
+from frost.datatypes.plan import DynamicPlan
 from frost.runtime._thread_base import ThreadBase
 from frost.utils.tensor_set import TensorSet
 
@@ -222,8 +222,8 @@ class DynamicPlanner(ThreadBase):
     def __init__(
         self,
         gpus_distance: np.ndarray,
-        in_q: DyPlanInQ,
-        out_q: DyPlanOutQ,
+        in_q: DynamicPlanInQ,
+        out_q: DynamicPlanOutQ,
         stop_ev: threading.Event,
     ) -> None:
         super().__init__(name="dynamic_planner", stop_ev=stop_ev)
@@ -281,7 +281,7 @@ class DynamicPlanner(ThreadBase):
         avails_of_1: list[TensorSet],
         update_avails_of_1: list[TensorSet],
         needs_of_2: list[TensorSet],
-    ) -> list[DyPlan]:
+    ) -> list[DynamicPlan]:
         """规划内存（Memory）的P2P、CPU预取和CPU写回。"""
 
         update_avails_of_1, all_update_avails_of_1 = dedup_updates(
@@ -333,12 +333,12 @@ class DynamicPlanner(ThreadBase):
                 p2p_cts[src, dst] = len(p2p[src][dst])
 
         for src in range(n_gpus):
-            plan = DyPlan(
+            plan = DynamicPlan(
                 p2p=p2p[src],
                 fetch=fetchs_of_1[src],
                 writeback=leftovers_of_1[src],
-                rec_cts=p2p_cts[:, src],  # 两个长度相等,可以逐位相加
-                send_cts=p2p_cts[src, :],  # 两个长度相等,可以逐位相加
+                recv_counts=p2p_cts[:, src],  # 两个长度相等,可以逐位相加
+                send_counts=p2p_cts[src, :],  # 两个长度相等,可以逐位相加
             )
             plans.append(plan)
         return plans

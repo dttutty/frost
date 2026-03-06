@@ -45,7 +45,7 @@ class FlatGraph:
             else None,
         )
 
-    def inflate(
+    def unflatten(
         self,
         n_src: int,
         n_neg: int,
@@ -122,7 +122,7 @@ class FlatGraph:
             root_box=boxs[0],
             root_box_ts=box_tss[0],
             neighbors=neighbors if neighbors else None,
-            sampling_config=fanout,
+            fanout=fanout,
         )
 
 
@@ -162,6 +162,6 @@ class Graph:
     neighbors: list[NeighborOnHop] | None = None
 
     # sampling_config类似于这样的[10] 或者[10,25]
-    sampling_config: list
+    fanout: list[int] | None = None
 
     root_efeat: torch.Tensor | None = None  # 长度是src数量1倍

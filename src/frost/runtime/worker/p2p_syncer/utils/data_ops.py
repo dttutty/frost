@@ -4,20 +4,20 @@ from typing import TypeVar
 import numpy
 import torch
 
-from frost.datatypes.mem_mail_box.box import BoxTsNid
-from frost.datatypes.mem_mail_box.mail import MailTsNid
-from frost.datatypes.mem_mail_box.mem import MemTsNid
-from frost.datatypes.plan import DyPlan
+from frost.datatypes.mem_mail_box.box import BoxEntry
+from frost.datatypes.mem_mail_box.mail import MailEntry
+from frost.datatypes.mem_mail_box.mem import MemEntry
+from frost.datatypes.plan import DynamicPlan
 from frost.datatypes.tasks import P2PTask
 
-AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
+AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
 Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 logger = logging.getLogger(__name__)
 
 
 def make_p2p_task(
     data_td_nid: AllType,
-    plan: DyPlan,
+    plan: DynamicPlan,
     device: torch.device,
 ) -> P2PTask:
     """
@@ -28,8 +28,8 @@ def make_p2p_task(
     如果是feat,需要所有节点的feat
     """
     p2p = plan.p2p
-    rec_cts = plan.rec_cts
-    send_cts = plan.send_cts
+    recv_counts = plan.recv_counts
+    send_counts = plan.send_counts
 
     nid = data_td_nid.nid
     data = data_td_nid.data
@@ -57,12 +57,12 @@ def make_p2p_task(
     send_data = torch.cat(buckets_data, dim=0)
     send_ts = torch.cat(buckets_ts, dim=0)
 
-    total_recv = sum(rec_cts)
+    total_recv = sum(recv_counts)
     recv_nid = torch.empty(total_recv, dtype=nid.dtype, device=device)
     recv_data = torch.empty(total_recv, x_dim, dtype=data.dtype, device=device)
     recv_ts = torch.empty(total_recv, dtype=ts.dtype, device=device)
 
-    assert numpy.array_equal(sizes, send_cts)
+    assert numpy.array_equal(sizes, send_counts)
 
     return P2PTask(
         nid2send=send_nid,
@@ -71,6 +71,6 @@ def make_p2p_task(
         data2recv=recv_data,
         ts2send=send_ts,
         ts2recv=recv_ts,
-        rec_cts=rec_cts,
-        send_cts=send_cts,
+        recv_counts=recv_counts,
+        send_counts=send_counts,
     )

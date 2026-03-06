@@ -9,7 +9,12 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from frost.aliases.host import DyPlanOutQ, MataBatcherInQ, MetaBundleQ, StPlanOutQ
+from frost.aliases.host import (
+    DynamicPlanOutQ,
+    MetaBatcherInQ,
+    MetaBundleQ,
+    StaticPlanOutQ,
+)
 from frost.datatypes.env import Env
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
@@ -29,10 +34,10 @@ def _disable_tqdm_monitor_thread() -> None:
 
 
 class Host:
-    meta_in_q: MataBatcherInQ
-    mem_plan_out_q: DyPlanOutQ | None = None
-    mail_plan_out_q: DyPlanOutQ | None = None
-    nfeat_plan_out_q: StPlanOutQ | None = None
+    meta_in_q: MetaBatcherInQ
+    mem_plan_out_q: DynamicPlanOutQ | None = None
+    mail_plan_out_q: DynamicPlanOutQ | None = None
+    nfeat_plan_out_q: StaticPlanOutQ | None = None
 
     meta_bundle_q: MetaBundleQ
     scatter_q: MetaBundleQ

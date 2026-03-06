@@ -8,13 +8,12 @@ from frost.utils.tensor_set_fn import TensorSetFn
 
 
 @dataclass(kw_only=True)
-class NFeatNid:
+class NodeFeatNid:
     nid: torch.Tensor
     nfeat: torch.Tensor
-    is_zipped: bool = True
     is_sorted: bool = False
 
-    def sort_by_nid(self) -> NFeatNid:
+    def sort_by_nid(self) -> NodeFeatNid:
         if self.is_sorted:
             return self
 
@@ -28,7 +27,7 @@ class NFeatNid:
         self.is_sorted = True
         return self
 
-    def merge(self, other: NFeatNid) -> NFeatNid:
+    def merge(self, other: NodeFeatNid) -> NodeFeatNid:
         assert TensorSetFn.intersection(self.nid, other.nid).numel() == 0, (
             "NID overlap between RootX instances."
         )
@@ -38,11 +37,11 @@ class NFeatNid:
         self.nfeat = torch.cat((self.nfeat, other.nfeat), dim=0)
         return self
 
-    def filter_by_nid(self, nid: torch.Tensor) -> NFeatNid:
+    def filter_by_nid(self, nid: torch.Tensor) -> NodeFeatNid:
         mask = torch.isin(self.nid, nid)
         nid = self.nid[mask]
         nfeat = self.nfeat[mask]
         return self.__class__(nid=nid, nfeat=nfeat)
 
-    def cuda(self) -> NFeatNid:
-        return NFeatNid(nid=self.nid.cuda(), nfeat=self.nfeat.cuda())
+    def cuda(self) -> NodeFeatNid:
+        return NodeFeatNid(nid=self.nid.cuda(), nfeat=self.nfeat.cuda())

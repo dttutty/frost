@@ -3,19 +3,19 @@ from typing import TypeVar
 
 import torch
 
-from frost.datatypes.mem_mail_box.box import BoxTsNid
-from frost.datatypes.mem_mail_box.mail import MailTsNid
-from frost.datatypes.mem_mail_box.mem import MemTsNid
+from frost.datatypes.mem_mail_box.box import BoxEntry
+from frost.datatypes.mem_mail_box.mail import MailEntry
+from frost.datatypes.mem_mail_box.mem import MemEntry
 
-AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
+AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
 Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 
 logger = logging.getLogger(__name__)
 
 
 def generate_interaction_mails(
-    root_new_mem_orig: MemTsNid, edge_feats: torch.Tensor | None = None
-) -> MailTsNid:
+    root_new_mem_orig: MemEntry, edge_feats: torch.Tensor | None = None
+) -> MailEntry:
     """
     这里mem必须和edge一一对应
     Args:
@@ -58,7 +58,7 @@ def generate_interaction_mails(
         # 5. 拼接回 2N 长度，保持顺序一致 (前N个是Src的mail，后N个是Dst的mail)
     all_mails = torch.cat([mail_for_src, mail_for_dst], dim=0)
 
-    mail_ts_nid = MailTsNid(
+    mail_ts_nid = MailEntry(
         nid=root_new_mem_orig.nid,
         data=all_mails,
         ts=root_new_mem_orig.ts,  # 这里ts的len正好=2N

@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from frost.aliases.host import MetasStNeed
-from frost.datatypes.plan import StPlan
+from frost.datatypes.plan import StaticPlan
 from frost.runtime._thread_base import ThreadBase
 from frost.utils.tensor_set import TensorSet
 
@@ -25,7 +25,7 @@ class StaticPlanner(ThreadBase):
         self,
         gpus_distance: np.ndarray,
         in_q: Queue[MetasStNeed | None | Literal["end_of_epoch"]],
-        out_q: Queue[list[StPlan] | None],
+        out_q: Queue[list[StaticPlan] | None],
         stop_ev: threading.Event,
     ) -> None:
         super().__init__(name="static_planner", stop_ev=stop_ev)
@@ -106,7 +106,7 @@ class StaticPlanner(ThreadBase):
         self,
         avails_of_1: list[TensorSet],
         needs_of_2: list[TensorSet],
-    ) -> list[StPlan]:
+    ) -> list[StaticPlan]:
         """规划内存（Memory）的P2P、CPU预取和CPU写回。"""
 
         n_gpus = self.n_gpus
@@ -126,7 +126,7 @@ class StaticPlanner(ThreadBase):
 
         for n in range(n_gpus):
             to_cache_of_1 = avails_of_1[n] & needs_of_2[n]
-            plan_of_1 = StPlan(
+            plan_of_1 = StaticPlan(
                 to_cache=to_cache_of_1,
                 fetch=self.fetchs[n],
             )

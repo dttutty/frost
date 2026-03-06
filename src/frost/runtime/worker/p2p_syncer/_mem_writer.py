@@ -5,12 +5,12 @@ from typing import TypeVar, cast
 import torch
 
 from frost.aliases.syncer import MemWrQ
-from frost.datatypes.mem_mail_box.box import BoxTsNid
-from frost.datatypes.mem_mail_box.mail import MailTsNid
-from frost.datatypes.mem_mail_box.mem import MemTsNid
+from frost.datatypes.mem_mail_box.box import BoxEntry
+from frost.datatypes.mem_mail_box.mail import MailEntry
+from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.runtime._thread_base import StreamThreadBase
 
-AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
+AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
 Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ class MemWriter(StreamThreadBase):
         )
 
     def write_back_mem(
-        self, writeback: torch.Tensor | None, mem_ts_nid: MemTsNid
+        self, writeback: torch.Tensor | None, mem_ts_nid: MemEntry
     ) -> None:
         if mem_ts_nid is None or writeback is None:
             return

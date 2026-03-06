@@ -6,19 +6,19 @@ from typing import TypeVar
 import torch
 from torch_scatter import scatter_max, scatter_sum
 
-from .box import BoxTsNid
-from .mail import MailTsNid
-from .mem import MemTsNid
+from .box import BoxEntry
+from .mail import MailEntry
+from .mem import MemEntry
 
-AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
+AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
 Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 logger = logging.getLogger(__name__)
 
 
-def box_to_mail(box_ts_nid) -> MailTsNid:
-    from .mail import MailTsNid
+def box_to_mail(box_ts_nid) -> MailEntry:
+    from .mail import MailEntry
 
-    return MailTsNid(
+    return MailEntry(
         nid=box_ts_nid.nid,
         data=box_ts_nid.data.squeeze(1),
         ts=box_ts_nid.ts.squeeze(1),
@@ -27,8 +27,8 @@ def box_to_mail(box_ts_nid) -> MailTsNid:
     )
 
 
-def mail_to_box(mem_ts_nid) -> BoxTsNid:
-    return BoxTsNid(
+def mail_to_box(mem_ts_nid) -> BoxEntry:
+    return BoxEntry(
         nid=mem_ts_nid.nid,
         data=mem_ts_nid.data.unsqueeze(1),
         ts=mem_ts_nid.ts.unsqueeze(1),
@@ -62,7 +62,7 @@ def keep_last(data: Mem_or_Mail) -> Mem_or_Mail:
     return data
 
 
-def merge_1_mail(box: BoxTsNid, mail: MailTsNid) -> BoxTsNid:
+def merge_1_mail(box: BoxEntry, mail: MailEntry) -> BoxEntry:
     """Insert one new mail per node into the circular mailbox buffer (shift-left FIFO).
 
     Mirrors TGL_ORIGINAL's ``MailBox.update_mailbox`` circular-buffer write for
@@ -104,7 +104,7 @@ def merge_1_mail(box: BoxTsNid, mail: MailTsNid) -> BoxTsNid:
     out_ts = torch.zeros(M, boxsize, dtype=box.ts.dtype, device=device)
 
     if M == 0:
-        return BoxTsNid(
+        return BoxEntry(
             nid=mail.nid,
             data=out_data,
             ts=out_ts,
@@ -158,7 +158,7 @@ def merge_1_mail(box: BoxTsNid, mail: MailTsNid) -> BoxTsNid:
     out_data[:, boxsize - 1, :] = mail.data
     out_ts[:, boxsize - 1] = mail.ts
 
-    return BoxTsNid(
+    return BoxEntry(
         nid=mail.nid,
         data=out_data,
         ts=out_ts,

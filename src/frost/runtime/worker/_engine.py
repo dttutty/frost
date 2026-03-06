@@ -31,13 +31,13 @@ from frost.datatypes.result import Result
 from frost.models._assembled_model import AssembledModel
 from frost.protocols.mem_updater_proto import MemoryUpdaterProto
 from frost.protocols.postman_proto import PostmanProto
-from frost.runtime.worker._dy_asm import DyAssembler
-from frost.runtime.worker._h2d import H2D
+from frost.runtime.worker._dynamic_assembler import DyAssembler
+from frost.runtime.worker._host_to_device import H2D
 from frost.runtime.worker._receiver import Receiver as Receiver
 from frost.runtime.worker.p2p_syncer._box_handler import BoxTaskHandler
-from frost.runtime.worker.p2p_syncer._box_wr import BoxWriter
+from frost.runtime.worker.p2p_syncer._box_writer import BoxWriter
 from frost.runtime.worker.p2p_syncer._mem_handler import MemTaskHandler
-from frost.runtime.worker.p2p_syncer._mem_wr import MemWriter
+from frost.runtime.worker.p2p_syncer._mem_writer import MemWriter
 from frost.runtime.worker.p2p_syncer._p2p_q_handler import P2PQHandler
 from frost.shm.mem_mgr import MemBoxStore
 from frost.shm.ring_buf import RingBuf

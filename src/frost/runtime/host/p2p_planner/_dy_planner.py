@@ -5,15 +5,15 @@ import threading
 import numpy as np
 import torch
 
-from frost.aliases.host import DyPlanInQ, DyPlanOutQ, MetaBundle, MetasDyNeed
-from frost.datatypes.plan import DyPlan
+from frost.aliases.host import DynamicPlanInQ, DynamicPlanOutQ, MetaBundle, MetasDyNeed
+from frost.datatypes.plan import DynamicPlan
 from frost.runtime._thread_base import ThreadBase
 from frost.utils.tensor_set import TensorSet
 
 logger = logging.getLogger(__name__)
 
 
-def handle_update(
+def compute_p2p_transfer_plan(
     needs: list[TensorSet],
     avails: list[TensorSet],
 ) -> tuple[
@@ -189,8 +189,8 @@ class DynamicPlanner(ThreadBase):
     def __init__(
         self,
         gpus_distance: np.ndarray,
-        in_q: DyPlanInQ,
-        out_q: DyPlanOutQ,
+        in_q: DynamicPlanInQ,
+        out_q: DynamicPlanOutQ,
         stop_ev: threading.Event,
     ) -> None:
         super().__init__(name="dynamic_planner", stop_ev=stop_ev)
@@ -253,7 +253,7 @@ class DynamicPlanner(ThreadBase):
         next_all_list: list[TensorSet],
         next_update_list: list[TensorSet],
         metas: MetaBundle,
-    ) -> list[DyPlan]:
+    ) -> list[DynamicPlan]:
         """规划内存（Memory）的P2P、CPU预取和CPU写回。"""
 
         n_gpus = self.n_gpus
@@ -263,7 +263,7 @@ class DynamicPlanner(ThreadBase):
         for update in next_update_list:
             next_all_update = next_all_update | update
 
-        _, p2p = handle_update(next_all_list, dedup_update_list)
+        _, p2p = compute_p2p_transfer_plan(next_all_list, dedup_update_list)
         writeback_list = [
             per_gpu_update - next_all_update for per_gpu_update in dedup_update_list
         ]
@@ -291,12 +291,12 @@ class DynamicPlanner(ThreadBase):
                 p2p_cts[src, dst] = len(p2p[src][dst])
 
         for src in range(n_gpus):
-            plan = DyPlan(
+            plan = DynamicPlan(
                 p2p=p2p[src],
                 fetch=self.fetch[src],
                 writeback=writeback_list[src],
-                rec_cts=p2p_cts[:, src],  # 两个长度相等,可以逐位相加
-                send_cts=p2p_cts[src, :],  # 两个长度相等,可以逐位相加
+                recv_counts=p2p_cts[:, src],  # 两个长度相等,可以逐位相加
+                send_counts=p2p_cts[src, :],  # 两个长度相等,可以逐位相加
             )
             plans.append(plan)
 

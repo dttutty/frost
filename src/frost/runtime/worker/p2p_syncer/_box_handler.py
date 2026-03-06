@@ -10,9 +10,9 @@ from frost.datatypes.mem_mail_box._data_ops import (
     keep_mean,
     mail_to_box,
 )
-from frost.datatypes.mem_mail_box.box import BoxTsNid
-from frost.datatypes.mem_mail_box.mail import MailTsNid
-from frost.datatypes.mem_mail_box.mem import MemTsNid
+from frost.datatypes.mem_mail_box.box import BoxEntry
+from frost.datatypes.mem_mail_box.mail import MailEntry
+from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.tasks import BoxTask, P2PTask
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase
@@ -21,7 +21,7 @@ from frost.runtime.worker.postman import Postman
 from .utils.interaction_ops import generate_interaction_mails
 from .utils.p2p_task_maker import make_p2p_task
 
-AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
+AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
 Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 
 
@@ -53,10 +53,10 @@ class BoxTaskHandler(StreamThreadBase):
 
     def handle_small_box(
         self,
-        new_mail: MailTsNid,
+        new_mail: MailEntry,
         mail_combine: Literal["last", "mean"],
         box_task: BoxTask,
-    ) -> tuple[P2PTask, BoxTsNid]:
+    ) -> tuple[P2PTask, BoxEntry]:
         box_plan = box_task.box_plan
 
         if mail_combine == "last":
@@ -84,10 +84,10 @@ class BoxTaskHandler(StreamThreadBase):
 
     def handle_large_box(
         self,
-        new_mail: MailTsNid,
+        new_mail: MailEntry,
         mail_combine: Literal["last", "mean"],
         box_task: BoxTask,
-    ) -> tuple[P2PTask, BoxTsNid]:
+    ) -> tuple[P2PTask, BoxEntry]:
         assert self.postman is not None, "Postman is required for handling large boxes"
         graph = box_task.graph
         # disable stale state p2p for speed

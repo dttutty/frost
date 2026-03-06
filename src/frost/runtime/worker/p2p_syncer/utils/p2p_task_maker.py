@@ -6,20 +6,20 @@ import numpy
 import torch
 import torch.distributed as dist
 
-from frost.datatypes.mem_mail_box.box import BoxTsNid
-from frost.datatypes.mem_mail_box.mail import MailTsNid
-from frost.datatypes.mem_mail_box.mem import MemTsNid
-from frost.datatypes.plan import DyPlan
+from frost.datatypes.mem_mail_box.box import BoxEntry
+from frost.datatypes.mem_mail_box.mail import MailEntry
+from frost.datatypes.mem_mail_box.mem import MemEntry
+from frost.datatypes.plan import DynamicPlan
 from frost.datatypes.tasks import P2PTask
 
-AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
+AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
 Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 logger = logging.getLogger(__name__)
 
 
 def make_p2p_task(
     data_td_nid: AllType,
-    plan: DyPlan,
+    plan: DynamicPlan,
     device: torch.device,
     batch_idx: int,
 ) -> P2PTask:
@@ -27,8 +27,8 @@ def make_p2p_task(
     优化版: 利用 is_sorted 属性使用 searchsorted 加速查找
     """
     p2p = plan.p2p
-    rec_cts = plan.rec_cts
-    send_cts = plan.send_cts
+    recv_counts = plan.recv_counts
+    send_counts = plan.send_counts
 
     nid = data_td_nid.nid
     data = data_td_nid.data
@@ -112,7 +112,7 @@ def make_p2p_task(
         )
         send_ts = torch.tensor([], dtype=ts.dtype, device=ts.device)
 
-    total_planned_send = sum(send_cts)
+    total_planned_send = sum(send_counts)
     real_shape = send_nid.shape[0]
 
     if total_planned_send != real_shape:
@@ -125,10 +125,10 @@ def make_p2p_task(
         name = "make_p2p_task_construction"
 
         logger.debug("\n[CRITICAL ERROR] P2P Mismatch on Rank %s | Op: %s", rank, name)
-        logger.debug("  > Sum of send_cts (Planned): %s", total_planned_send)
+        logger.debug("  > Sum of send_counts (Planned): %s", total_planned_send)
         logger.debug("  > Actual Tensor dim0 (Gathered): %s", real_shape)
         logger.debug("  > Tensor Full Shape: %s", send_nid.shape)
-        logger.debug("  > Send Cts List (Planned): %s", send_cts)
+        logger.debug("  > Send Cts List (Planned): %s", send_counts)
         logger.debug("  > Actual Gathered Sizes: %s", sizes)
         sys.stdout.flush()
 
@@ -137,7 +137,7 @@ def make_p2p_task(
             f"AAA Split size mismatch in {name}: planned {total_planned_send} vs actual {real_shape}"
         )
 
-    total_recv = sum(rec_cts)
+    total_recv = sum(recv_counts)
     recv_nid = torch.empty(total_recv, dtype=nid.dtype, device=device)
 
     data_shape = list(data.shape)
@@ -148,7 +148,7 @@ def make_p2p_task(
     ts_shape[0] = total_recv
     recv_ts = torch.empty(ts_shape, dtype=ts.dtype, device=device)
 
-    assert numpy.array_equal(sizes, send_cts)
+    assert numpy.array_equal(sizes, send_counts)
 
     p2p_task = P2PTask(
         nid2send=send_nid,
@@ -157,8 +157,8 @@ def make_p2p_task(
         data2recv=recv_data,
         ts2send=send_ts,
         ts2recv=recv_ts,
-        rec_cts=rec_cts,
-        send_cts=send_cts,
+        recv_counts=recv_counts,
+        send_counts=send_counts,
         batch_idx=batch_idx,
     )
 

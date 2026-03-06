@@ -5,13 +5,12 @@ from typing import Literal
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-
 from host.meta_batcher import MetaBundle
 
 # 假设您的 planner.py 在当前路径或可导入路径下
 from host.planner import Planner, find_all_gpu_distances_list
 from schemas.datatypes.misc import Meta
-from schemas.datatypes.plan import DyPlan, StPlan
+from schemas.datatypes.plan import DynamicPlan, StaticPlan
 
 
 class TestGpuTopology(unittest.TestCase):
@@ -57,7 +56,7 @@ class TestGpuTopology(unittest.TestCase):
         np.testing.assert_array_equal(dist_mat, expected)
 
 
-class TestPlanner(unittest.TestCase):
+class TeStaticPlanner(unittest.TestCase):
     """测试 Planner 线程的逻辑流"""
 
     def setUp(self) -> None:
@@ -70,9 +69,9 @@ class TestPlanner(unittest.TestCase):
         self.in_q: Q[MetaBundle | None | Literal["end_of_epoch"]] = Q(maxsize=1)
         self.out_q: Q[MetaBundle | None | Literal["end_of_epoch"]] = Q(maxsize=1)
 
-        self.mem_plan_out_q: Q[list[DyPlan] | None] | None = None
-        self.mail_plan_out_q: Q[list[DyPlan] | None] | None = None
-        self.nfeat_plan_out_q: Q[list[StPlan] | None] | None = None
+        self.mem_plan_out_q: Q[list[DynamicPlan] | None] | None = None
+        self.mail_plan_out_q: Q[list[DynamicPlan] | None] | None = None
+        self.nfeat_plan_out_q: Q[list[StaticPlan] | None] | None = None
         self.planner: Planner | None = None
         self.mem_out_q = Q(maxsize=1)
         self.mail_out_q = Q(maxsize=1)
@@ -81,8 +80,8 @@ class TestPlanner(unittest.TestCase):
         # 3. Mock 掉内部的子 Planner，避免启动真实线程和依赖复杂逻辑
         self.dy_patcher = patch("host.planner.DynamicPlanner")
         self.st_patcher = patch("host.planner.StaticPlanner")
-        self.MockDyPlanner = self.dy_patcher.start()
-        self.MockStPlanner = self.st_patcher.start()
+        self.MockDynamicPlanner = self.dy_patcher.start()
+        self.MockStaticPlanner = self.st_patcher.start()
 
         # 4. 简单的 2 卡拓扑
         self.topo = [0, 1]
@@ -104,8 +103,8 @@ class TestPlanner(unittest.TestCase):
         )
 
         # 验证是否根据队列的存在初始化了对应的子 Planner
-        self.assertTrue(self.MockDyPlanner.called)
-        self.assertTrue(self.MockStPlanner.called)
+        self.assertTrue(self.MockDynamicPlanner.called)
+        self.assertTrue(self.MockStaticPlanner.called)
         self.assertEqual(planner.n_gpus, 2)
 
     def test_logic_shutdown(self) -> None:

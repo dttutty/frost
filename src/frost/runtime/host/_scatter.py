@@ -8,7 +8,7 @@ import torch.distributed as dist
 from frost.aliases.host import MetaBundle
 from frost.datatypes.env import Env
 from frost.datatypes.meta import Meta
-from frost.datatypes.plan import DyPlan, PlanSet, StPlan
+from frost.datatypes.plan import DynamicPlan, PlanSet, StaticPlan
 from frost.datatypes.result import Result
 from frost.runtime._thread_base import ThreadBase
 
@@ -20,9 +20,9 @@ class Scatter(ThreadBase):
         self,
         n_gpu: int,
         in_q: Q[MetaBundle | None | Literal["end_of_epoch"]],
-        mem_plan_out_q: Q[list[DyPlan] | None] | None,
-        mail_plan_out_q: Q[list[DyPlan] | None] | None,
-        nfeat_plan_out_q: Q[list[StPlan] | None] | None,
+        mem_plan_out_q: Q[list[DynamicPlan] | None] | None,
+        mail_plan_out_q: Q[list[DynamicPlan] | None] | None,
+        nfeat_plan_out_q: Q[list[StaticPlan] | None] | None,
         env: Env,
         result_q: Q[Result],
         stop_ev: threading.Event,

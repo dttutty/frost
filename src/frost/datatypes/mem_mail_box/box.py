@@ -7,7 +7,7 @@ from torch import Tensor
 
 
 @dataclass(kw_only=True)
-class BoxTsNid:
+class BoxEntry:
     nid: Tensor
     data: Tensor
     ts: torch.Tensor
@@ -20,8 +20,8 @@ class BoxTsNid:
             f"ts={self.ts.shape}, is_sorted={self.is_sorted}, is_unique={self.is_unique})"
         )
 
-    def clone(self) -> BoxTsNid:
-        return BoxTsNid(
+    def clone(self) -> BoxEntry:
+        return BoxEntry(
             nid=self.nid.clone(),
             data=self.data.clone(),
             ts=self.ts.clone(),
@@ -29,8 +29,8 @@ class BoxTsNid:
             is_unique=self.is_unique,
         )
 
-    def cuda(self) -> BoxTsNid:
-        return BoxTsNid(
+    def cuda(self) -> BoxEntry:
+        return BoxEntry(
             nid=self.nid.cuda(),
             data=self.data.cuda(),
             ts=self.ts.cuda(),
@@ -39,8 +39,8 @@ class BoxTsNid:
         )
 
     def merge_box(
-        self, other: BoxTsNid, is_overlap: bool, sort_idx: torch.Tensor | None = None
-    ) -> BoxTsNid:
+        self, other: BoxEntry, is_overlap: bool, sort_idx: torch.Tensor | None = None
+    ) -> BoxEntry:
         # 1. 处理空情况
         if self.nid.numel() == 0:
             return other
@@ -56,7 +56,7 @@ class BoxTsNid:
         if sort_idx is None:
             sort_idx = torch.argsort(cat_nid)
 
-        return BoxTsNid(
+        return BoxEntry(
             nid=cat_nid[sort_idx],
             data=cat_data[sort_idx],
             ts=cat_ts[sort_idx],
@@ -64,7 +64,7 @@ class BoxTsNid:
             is_unique=self.is_unique and other.is_unique and not is_overlap,
         )
 
-    def sort_by_nid(self) -> BoxTsNid:
+    def sort_by_nid(self) -> BoxEntry:
         if self.is_sorted:
             return self
         sorted_indices = torch.argsort(self.nid)
@@ -78,8 +78,8 @@ class BoxTsNid:
             is_unique=self.is_unique,
         )
 
-    def to(self, device: torch.device) -> BoxTsNid:
-        return BoxTsNid(
+    def to(self, device: torch.device) -> BoxEntry:
+        return BoxEntry(
             nid=self.nid.to(device),
             data=self.data.to(device),
             ts=self.ts.to(device),
@@ -87,7 +87,7 @@ class BoxTsNid:
             is_unique=self.is_unique,
         )
 
-    def merge_1_mail(self, mail: "MailTsNid") -> BoxTsNid:
+    def merge_1_mail(self, mail: "MailTsNid") -> BoxEntry:
         from ._data_ops import merge_1_mail
 
         return merge_1_mail(self, mail)
