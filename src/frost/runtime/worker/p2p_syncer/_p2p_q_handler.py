@@ -1,6 +1,6 @@
 import logging
 import threading
-from typing import TypeVar, cast
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -8,13 +8,7 @@ import torch.distributed as dist
 from frost.aliases.syncer import BoxP2PQ, MemP2PQ
 from frost.aliases.worker import DeltaQ
 from frost.datatypes.env import Env
-from frost.datatypes.mem_mail_box.box import BoxEntry
-from frost.datatypes.mem_mail_box.mail import MailEntry
-from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.runtime._thread_base import ThreadBase
-
-AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemEntry", "MailEntry")
 
 logger = logging.getLogger(__name__)
 

@@ -1,17 +1,12 @@
 import logging
-from typing import TypeVar
 
 import numpy
 import torch
 
-from frost.datatypes.mem_mail_box.box import BoxEntry
-from frost.datatypes.mem_mail_box.mail import MailEntry
-from frost.datatypes.mem_mail_box.mem import MemEntry
+from frost.aliases.syncer import AllType
 from frost.datatypes.plan import DynamicPlan
 from frost.datatypes.tasks import P2PTask
 
-AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemEntry", "MailEntry")
 logger = logging.getLogger(__name__)
 
 

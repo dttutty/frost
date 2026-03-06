@@ -1,19 +1,13 @@
 import logging
 import threading
 from queue import Queue as Q
-from typing import TypeVar, cast
+from typing import cast
 
 import torch
 
 from frost.datatypes.mem_mail_box.box import BoxEntry
-from frost.datatypes.mem_mail_box.mail import MailEntry
-from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase
-
-AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemEntry", "MailEntry")
-
 
 logger = logging.getLogger(__name__)
 

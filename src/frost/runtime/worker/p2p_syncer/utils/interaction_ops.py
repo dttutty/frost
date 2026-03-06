@@ -1,13 +1,9 @@
 import logging
-from typing import TypeVar
 
 import torch
 
-from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mail import MailEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
-
-AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
 import logging
 import threading
-from typing import Literal, TypeVar, cast
+from typing import Literal, cast
 
 import torch
 
@@ -12,7 +12,6 @@ from frost.datatypes.mem_mail_box._data_ops import (
 )
 from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mail import MailEntry
-from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.tasks import BoxTask, P2PTask
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase
@@ -20,9 +19,6 @@ from frost.runtime.worker.postman import Postman
 
 from .utils.interaction_ops import generate_interaction_mails
 from .utils.p2p_task_maker import make_p2p_task
-
-AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
-
 
 logger = logging.getLogger(__name__)
 

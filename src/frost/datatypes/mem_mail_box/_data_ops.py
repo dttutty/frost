@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import logging
-from typing import TypeVar
 
 import torch
 from torch_scatter import scatter_max, scatter_sum
 
+from frost.aliases.syncer import Mem_or_Mail
+
 from .box import BoxEntry
 from .mail import MailEntry
-from .mem import MemEntry
 
-AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemEntry", "MailEntry")
 logger = logging.getLogger(__name__)
 
 
