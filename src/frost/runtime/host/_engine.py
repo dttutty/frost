@@ -13,7 +13,6 @@ from frost.aliases.host import (
     AccessBundle,
     DynamicPlanOutQ,
     MetaBundle,
-    MetaBundleQ,
     StaticPlanOutQ,
 )
 from frost.datatypes.access import Access
