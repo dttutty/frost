@@ -17,8 +17,6 @@ class TensorSet:
         sort_now: bool = True,
         ensure_unique: bool = True,
     ) -> None:
-        # Ensure uniqueness during initialization, just like a real Set
-        # Keep it 1D
         if t.dim() > 1:
             t = t.reshape(-1)
 
@@ -34,22 +32,13 @@ class TensorSet:
 
     @classmethod
     def empty_like(cls, t: torch.Tensor) -> "TensorSet":
-        """
-        Create an empty TensorSet with same device and dtype as t.
-        """
-        empty = torch.empty(
-            0,
-            dtype=t.dtype,
-            device=t.device,
-        )
-        # sort_now=False to avoid redundant operations
+        empty = torch.empty(0, dtype=t.dtype, device=t.device)
         return cls(empty, sort_now=False, ensure_unique=False)
 
     def __repr__(self) -> str:
         return f"TensorSet({self.data})"
 
     def _extract_tensor(self, other: object) -> torch.Tensor:
-        """Helper to handle both TensorSet and torch.Tensor inputs"""
         if isinstance(other, TensorSet):
             other_t = other.data
         elif isinstance(other, torch.Tensor):
@@ -63,78 +52,30 @@ class TensorSet:
             other_t = other_t.to(self.data.dtype)
         return other_t
 
-    def _contains_mask(self, other_t: torch.Tensor) -> torch.Tensor:
-        """Return element-wise membership mask without using torch.isin."""
-        if self.data.numel() == 0:
-            return torch.zeros_like(self.data, dtype=torch.bool)
-        if other_t.numel() == 0:
-            return torch.zeros_like(self.data, dtype=torch.bool)
-
-        sorted_other = torch.sort(other_t).values
-        idx = torch.searchsorted(sorted_other, self.data)
-        in_range = idx < sorted_other.numel()
-        mask = torch.zeros_like(self.data, dtype=torch.bool)
-        mask[in_range] = sorted_other[idx[in_range]] == self.data[in_range]
-        return mask
-
-    # -----------------------------------------------------------
-    # 1. Implement & operator (Intersection)
-    # -----------------------------------------------------------
     def __and__(self, other: object) -> "TensorSet":
-        with _SET_OP_LOCK:
-            other_t = self._extract_tensor(other)
-            mask = self._contains_mask(other_t)
-            # Return a new TensorSet
-            return TensorSet(self.data[mask], sort_now=False, ensure_unique=False)
+        other_t = self._extract_tensor(other)
+        return TensorSet(self.data[torch.isin(self.data, other_t)], sort_now=False, ensure_unique=False)
 
-    # -----------------------------------------------------------
-    # 2. Implement | operator (Union)
-    # -----------------------------------------------------------
     def __or__(self, other: object) -> "TensorSet":
-        with _SET_OP_LOCK:
-            other_t = self._extract_tensor(other)
-            # Cat and unique
-            return TensorSet(torch.cat((self.data, other_t)), sort_now=True)
+        other_t = self._extract_tensor(other)
+        return TensorSet(torch.cat((self.data, other_t)), sort_now=True)
 
-    # -----------------------------------------------------------
-    # 3. Implement + operator (Alias for Union)
-    # -----------------------------------------------------------
     def __add__(self, other: object) -> "TensorSet":
-        # In set theory, | is typically used for union, but for convenience, + also implements union
         return self.__or__(other)
 
-    # -----------------------------------------------------------
-    # 4. Implement - operator (Difference)
-    # -----------------------------------------------------------
     def __sub__(self, other: object) -> "TensorSet":
-        with _SET_OP_LOCK:
-            other_t = self._extract_tensor(other)
-            mask = ~self._contains_mask(other_t)
-            return TensorSet(self.data[mask], sort_now=False, ensure_unique=False)
+        other_t = self._extract_tensor(other)
+        return TensorSet(self.data[~torch.isin(self.data, other_t)], sort_now=False, ensure_unique=False)
 
-    # -----------------------------------------------------------
-    # 5. Implement ^ operator (Symmetric Difference)
-    # -----------------------------------------------------------
     def __xor__(self, other: object) -> "TensorSet":
-        with _SET_OP_LOCK:
-            other_t = self._extract_tensor(other)
-            # (A-B) U (B-A)
-            # For performance, calculate differences on both sides and concatenate
-            diff1 = self.data[~self._contains_mask(other_t)]
-            diff2 = other_t[
-                ~TensorSet(
-                    other_t,
-                    sort_now=False,
-                    ensure_unique=False,
-                )._contains_mask(self.data)
-            ]
-            return TensorSet(torch.cat((diff1, diff2)), sort_now=True)
+        other_t = self._extract_tensor(other)
+        diff1 = self.data[~torch.isin(self.data, other_t)]
+        diff2 = other_t[~torch.isin(other_t, self.data)]
+        return TensorSet(torch.cat((diff1, diff2)), sort_now=True)
 
-    # Support len()
     def __len__(self) -> int:
         return len(self.data)
 
-    # Support indexing
     def __getitem__(self, idx: int) -> torch.Tensor:
         return self.data[idx]
 
