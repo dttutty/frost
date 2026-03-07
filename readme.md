@@ -61,7 +61,7 @@ TGAT:
 torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=tgat ngh_sampler=2_hop
 
 DyGFormer:
-torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=dygformer ngh_sampler=1_hop fanout=[32]
+torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=dygformer ngh_sampler=1_hop fanout=[32] dropout=0.1
 
 GraphMixer:
 torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=graph_mixer ngh_sampler=1_hop fanout=[20]
@@ -86,10 +86,21 @@ python eval_edgebank.py --dataset LASTFM --split int_roll
 python eval_edgebank.py --dataset LASTFM --n_neg 1
 ```
 
+DyRep:
+torchrun --nproc_per_node=3 run.py \
+  dataset=LASTFM \
+  encoder=dyrep \
+  analyzer=dyrep \
+  mem_box_store=base \
+  mem_updater=dyrep \
+  ngh_sampler=0_hop \
+  mail_combine=last
+
+原版 DyRep 的消息格式为 [self_mem, dst_graph_attn_emb, edge_feat]，其中 dst_graph_attn_emb 由图注意力模块计算。FROST 的 mail 在 interaction_ops.py:generate_interaction_mails() 中构建，时机在 encoder 之前，因此无法直接注入 encoder 的输出。目前近似使用 [self_mem, other_mem, edge_feat]（与 TGN/JODIE 相同）。
 ---
 
 ## 7) 常见排查建议
 
-- 先确认 `CUDA_VISIBLE_DEVICES` 与 `--nproc_per_node` 匹配。  
+- 先确认 `CUDA_VISIBLE_DEVICES` 与 `--nproc_per_node` 匹配。  nproc_per_node应该是gpu数量+1
 - 多卡异常优先查看 NCCL 相关变量是否被外部覆盖。  
 - 吞吐下降时先检查是否误开启调试选项（如阻塞执行、详细错误栈）。
