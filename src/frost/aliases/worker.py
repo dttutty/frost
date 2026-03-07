@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from queue import Queue
-from typing import Any, Literal, TypeAlias  # 必须导入这个
+from typing import Any, Literal, TypeAlias
 
 from frost.datatypes.meta import Meta
 from frost.datatypes.tasks import P2PTask

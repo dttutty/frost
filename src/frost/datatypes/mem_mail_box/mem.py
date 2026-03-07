@@ -39,7 +39,7 @@ class MemEntry:
         )
 
     def merge_mem(self, other: MemEntry, is_overlap: bool) -> tuple[MemEntry, Tensor]:
-        # 1. 处理空情况 (边界检查需要元素存在)
+        # 1. Handle empty cases (boundary checks require at least one element)
         if self.nid.numel() == 0:
             return other.clone(), torch.arange(
                 other.nid.numel(), device=other.nid.device
@@ -47,14 +47,12 @@ class MemEntry:
         if other.nid.numel() == 0:
             return self.clone(), torch.arange(self.nid.numel(), device=self.nid.device)
 
-        # 2. 准备基础拼接
+        # 2. Concatenate both entries
         cat_nid = torch.cat((self.nid, other.nid), dim=0)
         cat_data = torch.cat((self.data, other.data), dim=0)
         cat_ts = torch.cat((self.ts, other.ts), dim=0)
 
-        # 4. 如果没能通过边界检查达成有序，且你需要它有序，则执行排序
-        # (通常 merge_mem 后最好保持有序，方便后续 searchsorted)
-        # 使用 stable=True 保持相对顺序（如果需要的话）
+        # 3. Sort by nid to maintain the sorted invariant required by searchsorted downstream
         sort_idx = torch.argsort(cat_nid)
         cat_nid = cat_nid[sort_idx]
         cat_data = cat_data[sort_idx]
@@ -73,7 +71,7 @@ class MemEntry:
             return self
         sorted_indices = torch.argsort(self.nid)
 
-        # 返回一个新的实例，保持 self 不变（Immutable）
+        # Return a new instance; self is not modified (immutable pattern)
         return self.__class__(
             nid=self.nid[sorted_indices],
             data=self.data[sorted_indices],

@@ -44,14 +44,14 @@ logger = logging.getLogger(__name__)
 
 
 class P2PGuardCommHook:
-    """在每个 training step 的第一次 AllReduce 前，等待 P2P 完成。"""
+    """Wait for P2P memory sync to finish before the first AllReduce of each training step."""
 
     def __init__(self, p2p_sem: threading.Semaphore) -> None:
         self.p2p_sem = p2p_sem
         self._need_acquire = False
 
     def arm(self) -> None:
-        """每个 training step 开头调用，标记本轮需要 acquire。"""
+        """Call at the start of each training step to arm the guard for this round."""
         self._need_acquire = True
 
     def __call__(self, state: dist.ProcessGroup, bucket: dist.GradBucket):  # type: ignore
@@ -310,7 +310,7 @@ class Worker:
         avg_s2s = self.train_start2start_ms.compute().item()
         self.train_start2start_ms.reset()
         logger.debug("Average train start->start (ms): %.2f", avg_s2s)
-        # 3. 只有在 Epoch 结束时，才做一次全局同步，计算精准的平均 Loss 记入日志
+        # Global sync happens only at epoch end for accurate average loss logging
 
         avg_loss = self.train_loss_tracker.compute()
         val_results = self.val_metrics.compute()
@@ -342,7 +342,7 @@ class Worker:
 
         loss = self.criterion(logits.squeeze(-1), meta.labels)
         if self.mem_box_store is not None:
-            self.p2p_guard.arm()  # 标记本轮需要在第一次 AllReduce 前等待 P2P 完成
+            self.p2p_guard.arm()  # Arm guard: wait for P2P before the first AllReduce
         loss.backward()
 
         self.optimizer.step()
@@ -361,22 +361,19 @@ class Worker:
             box_task_q=self.box_task_q,
         )
         if self.mem_box_store is not None:
-            self.p2p_sem.acquire()  # 获取信号量，确保当前没有其他 P2P 任务在进行
+            self.p2p_sem.acquire()  # Ensure no other P2P task is in flight during eval
 
         y_pred = logits.sigmoid().squeeze(-1)
 
         if meta.split == "val":
             loss = self.criterion(logits.squeeze(-1), meta.labels)
 
-            # [Fix] 显式指定哪个参数给哪个指标，或者分开更新
-            # MeanMetric 需要 'value'，分类指标需要 'preds' 和 'target'
+            # MeanMetric expects 'value'; classification metrics expect 'preds' and 'target'
             self.val_metrics.update(
                 preds=y_pred,
                 target=meta.labels.long(),
-                value=loss,  # 这一行会让 val_loss 找到它需要的参数
+                value=loss,
             )
-
-            # === [新增] 收集原始数据 (转到 CPU 以节省显存) ===
 
         else:
             assert meta.split == "test"
@@ -407,10 +404,11 @@ class Worker:
     def run(self) -> None:
         self.start_all_threads()
         if self.mem_box_store is not None:
-            self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
-            self.h2d_sem.release()  # 释放一次信号量，启动第一个 H2D 操作
-            self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
-            self.h2d_sem.release()  # 释放一次信号量，启动第2个 H2D 操作
+            # Pre-release 4 slots to prime the H2D pipeline (2 batches in flight)
+            self.h2d_sem.release()
+            self.h2d_sem.release()
+            self.h2d_sem.release()
+            self.h2d_sem.release()
             assert self.delta_q is not None
             self.delta_q.put("nothing")
 
@@ -422,22 +420,22 @@ class Worker:
 
         prof = profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            schedule=None,  # 关键：设为 None，手动控制
+            schedule=None,  # None = manual step control
             on_trace_ready=trace_handler,
             record_shapes=True,
             with_stack=True,
             with_flops=False,
         )
 
-        # 用于记录第二个 epoch 抓了几个 step
+        # Number of steps captured in the target epoch
         epoch2_steps_recorded = 0
-        # 标记是否已经保存过，防止重复 start/stop
+        # Guard flag to prevent duplicate profiler start/stop
         profiling_done = False
 
         total_wait_ms = 0.0
         wait_steps = 0
         while self.stop_ev.is_set() is False:
-            # torch.cuda.synchronize()  # 确保之前的 CUDA 操作都完成了，准确测量等待时间
+            # torch.cuda.synchronize()  # Ensure prior CUDA ops are done for accurate timing
             t_wait_start = time.perf_counter()
             full = self.full_q.get()
 
@@ -459,7 +457,7 @@ class Worker:
                     # should_profile = self.curr_epoch == 1 and not profiling_done
                     should_profile = False
                     if should_profile:
-                        # 如果是该 Epoch 的前几个 step，确保 profiler 开启
+                        # Start profiler on the first captured step of the target epoch
                         if epoch2_steps_recorded == 0:
                             prof.start()
 
@@ -473,10 +471,10 @@ class Worker:
                         self._last_train_start_t = now
                         self.train(meta)
                     if should_profile:
-                        prof.step()  # 标记一步结束
+                        prof.step()  # Mark end of one profiling step
                         epoch2_steps_recorded += 1
 
-                        # 抓取 5 个 batch 后立刻停止并保存
+                        # Stop and save after capturing 100 batches
                         if epoch2_steps_recorded >= 100:
                             prof.stop()
                             profiling_done = True
@@ -548,31 +546,29 @@ class Worker:
         dist.barrier()
         dist.destroy_process_group()
 
-    # 供外部保存/加载
+    # Public model save/load interface
     def save_model(self, path: str) -> None:
         rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
 
         if rank == 0:
-            # 关键：保存“裸模型”的权重（非DDP也能加载）
+            # Save the unwrapped model weights so the checkpoint can be loaded without DDP
             model = self.model.module if isinstance(self.model, DDP) else self.model
             torch.save(model.state_dict(), path)
 
     def load_model(self, path: str) -> None:
-        # 让所有rank都在文件写完后再开始读（更稳）
+        # Barrier ensures the file is fully written before any rank reads it
         if dist.is_available() and dist.is_initialized():
             dist.barrier(group=self.nccl)
 
         state = torch.load(path, map_location="cpu")
 
-        # 如果当前是DDP，先拿到裸模型来load（因为你保存的是裸模型state_dict）
+        # Unwrap DDP before loading because the checkpoint was saved from the bare model
         model = self.model.module if isinstance(self.model, DDP) else self.model
         model.load_state_dict(state, strict=True)
 
-        # 如果每rank只可见1张GPU，这里用0没问题；否则用local_rank
-
         model = model.to(self.device)
 
-        # wrap 成 DDP
+        # Re-wrap with DDP
         self.model = DDP(model, device_ids=[0])
 
         if dist.is_available() and dist.is_initialized():

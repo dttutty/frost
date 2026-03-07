@@ -89,7 +89,7 @@ class Receiver(ThreadBase):
                             f"Invalid meta.n_src={n_src}: need 3*n_src={need} <= buf_len={eid_slice.numel()} for EID checks."
                         )
 
-                    # 1) nid[:3*n_src] 不允许出现 -1
+                    # 1) nid[:3*n_src] must not contain -1
                     nid_head = nid_slice[:need]
                     if (nid_head == -1).any():
                         bad_pos = torch.nonzero(nid_head == -1, as_tuple=False).squeeze(
@@ -101,7 +101,7 @@ class Receiver(ThreadBase):
                             f"(n_src={n_src}, range=[0, {need})). First {len(preview_pos)} positions: {preview_pos}"
                         )
 
-                    # 2) eid[:n_src] 不允许出现 -1
+                    # 2) eid[:n_src] must not contain -1
                     eid_head = eid_slice[:n_src]
                     if (eid_head == -1).any():
                         bad_pos = torch.nonzero(eid_head == -1, as_tuple=False).squeeze(
@@ -113,7 +113,7 @@ class Receiver(ThreadBase):
                             f"First {len(preview_pos)} positions: {preview_pos}"
                         )
 
-                    # 3) eid[n_src:3*n_src] 必须全是 -1
+                    # 3) eid[n_src:3*n_src] must be all -1 (dst and neg have no edge IDs)
                     eid_mid = eid_slice[n_src : 3 * n_src]
                     if eid_mid.numel() > 0 and not (eid_mid == -1).all():
                         bad_pos = torch.nonzero(eid_mid != -1, as_tuple=False).squeeze(

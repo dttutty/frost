@@ -54,7 +54,7 @@ def keep_last(data: Mem_or_Mail) -> Mem_or_Mail:
         data.data = data.data[indices]
         data.ts = data.ts[indices]
 
-    # compute_last_indices 依赖 unique 的组顺序（默认按 nid 排序）
+    # compute_last_indices relies on unique's group order (sorted by nid by default)
     data.is_sorted = True
     data.is_unique = True
     return data
@@ -167,9 +167,9 @@ def merge_1_mail(box: BoxEntry, mail: MailEntry) -> BoxEntry:
 
 def keep_mean(data: Mem_or_Mail) -> Mem_or_Mail:
     """
-    无 ct 版本：
-    - 对重复 nid：对 data、ts 做普通均值（权重恒为 1）
-    - 原地修改
+    Deduplicate by nid using a uniform-weight mean (no count tensor).
+    - Duplicate nids: data and ts are averaged with equal weights.
+    - Modifies data in place.
     """
     assert data.ts is not None, "TS must be provided for keep_mean"
     if data.nid.numel() == 0:
@@ -180,24 +180,16 @@ def keep_mean(data: Mem_or_Mail) -> Mem_or_Mail:
     unique_nids, compact_idx = torch.unique(data.nid, return_inverse=True)
     M = unique_nids.numel()
 
-    # 每组计数
-    ones = torch.ones_like(data.ts, dtype=torch.float32)
-    ct = scatter_sum(ones, compact_idx, dim=0, dim_size=M)  # [M]
+    # Count per group
+    ct = scatter_sum(torch.ones_like(data.ts), compact_idx, dim=0, dim_size=M)  # [M]
 
-    # data 求和（建议转 float32 更稳）
-    sum_data = scatter_sum(data.data.to(torch.float32), compact_idx, dim=0, dim_size=M)
-
-    # ts 求和
-    sum_ts = scatter_sum(data.ts.to(torch.float32), compact_idx, dim=0, dim_size=M)
-
-    new_data = sum_data / ct.unsqueeze(-1)
-    new_ts = sum_ts / ct
+    # Sum data and timestamps
+    sum_data = scatter_sum(data.data, compact_idx, dim=0, dim_size=M)
+    sum_ts = scatter_sum(data.ts, compact_idx, dim=0, dim_size=M)
 
     data.nid = unique_nids
-    data.data = new_data.to(
-        dtype=data.data.dtype
-    )  # 如你想强制输出 float32，可删掉这一行 cast
-    data.ts = new_ts.to(dtype=data.ts.dtype)
+    data.data = sum_data / ct.unsqueeze(-1)
+    data.ts = sum_ts / ct
 
     data.is_sorted = True
     data.is_unique = True
@@ -206,8 +198,8 @@ def keep_mean(data: Mem_or_Mail) -> Mem_or_Mail:
 
 def _ensure_sorted_unique_nid(x: Mem_or_Mail) -> Mem_or_Mail:
     """
-    确保 x.nid 升序且去重（无 ct 版本）。
-    注意：这里是就地修改 x（和你当前风格一致）。
+    Ensure x.nid is sorted in ascending order and contains no duplicates.
+    Modifies x in place.
     """
     if not getattr(x, "is_sorted", False):
         x = x.sort_by_nid()
@@ -246,8 +238,9 @@ def merge_with_priority(
     high_priority_data: Mem_or_Mail, low_priority_data: Mem_or_Mail
 ) -> Mem_or_Mail:
     """
-    无 ct 版本（且双方都保证 ts 存在）：
-    - 优先保留 high；low 中 nid 若出现在 high 中则丢弃
+    Merge two entries, preferring high_priority_data on conflict.
+    Any nid in low_priority_data that also appears in high_priority_data is discarded.
+    Both inputs must have ts. No count tensor required.
     """
     if low_priority_data.nid.numel() == 0:
         return type(high_priority_data)(
@@ -266,10 +259,10 @@ def merge_with_priority(
             is_unique=low_priority_data.is_unique,
         )
 
-    # 关键前提：high 必须 sorted+unique（就地处理/或返回新对象取决于你的实现）
+    # Precondition: high must be sorted + unique
     high = _ensure_sorted_unique_nid(high_priority_data)
 
-    # low 不需要排序，直接 membership test
+    # low does not need to be sorted; membership test handles it directly
     mask_keep_low = _mask_not_in_sorted_unique(high.nid, low_priority_data.nid)
 
     ret = type(high)(

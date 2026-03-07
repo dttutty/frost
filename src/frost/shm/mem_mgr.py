@@ -10,7 +10,7 @@ from frost.shm._core import get_shared_mem_array as gsm
 
 @dataclass(kw_only=True)
 class MemBoxStore:
-    """一个专门存放所有共享内存张量的数据类"""
+    """Dataclass holding all shared-memory tensors for node memory and mailbox."""
 
     mem: torch.Tensor
     mem_ts: torch.Tensor
@@ -18,7 +18,7 @@ class MemBoxStore:
     box_ts: torch.Tensor
 
     def reset(self) -> None:
-        """将所有共享内存张量清零"""
+        """Zero out all shared-memory tensors (called at epoch boundaries)."""
         self.mem.zero_()
         self.mem_ts.zero_()
         self.box.zero_()

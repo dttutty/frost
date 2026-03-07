@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 
 class StaticAssembler:
     """
-    静态数据组装器线程，将分块数据和增量数据合并，并填充到 DGL Block 中。
+    Assembles static features (nfeat/efeat) for each batch by merging
+    CPU-fetched data with the cached delta from the previous iteration.
     """
 
     nfeat_delta: NodeFeatNid | None = None
@@ -159,11 +160,11 @@ class StaticAssembler:
         if num_valid == 0:
             raise ValueError("No valid edges found in flat_graph to fill efeat!")
 
-        # ---------- 检查 边ID (EID) 是否越界 ----------
+        # ---------- Check EID bounds ----------
 
         max_eid = valid_eids.max().item()
         min_eid = valid_eids.min().item()
-        max_capacity = efeat.shape[0]  # 这里是 1293103
+        max_capacity = efeat.shape[0]
 
         assert max_eid < max_capacity, (
             f"EID OUT OF BOUNDS! Max EID {max_eid} exceeds efeat capacity {max_capacity}"

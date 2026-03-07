@@ -16,11 +16,14 @@ def make_p2p_task(
     device: torch.device,
 ) -> P2PTask:
     """
-    这一步之前,必须确保data_td_nid里面的数据全部是unique的
-    如果是mem,需要确保已经是保留最新的(last),或者平均的(mean,带ct)
-    如果是mail,需要确保只保留更新过的节点(pos_src,pos_dst).....另外保留最新last,平均的(mean,带ct),或者全部(dim变大)
-    如果是mailbox,需要所有节点的mailbox
-    如果是feat,需要所有节点的feat
+    Build a P2PTask from a local data entry and a DynamicPlan.
+
+    Preconditions on data_td_nid:
+    - All nids must be unique.
+    - For memory: keep only the latest (keep_last) or averaged (keep_mean) entry per node.
+    - For mail: keep only updated nodes (pos_src, pos_dst), deduplicated via keep_last/keep_mean.
+    - For mailbox: include all nodes' mailboxes.
+    - For features: include all nodes' features.
     """
     p2p = plan.p2p
     recv_counts = plan.recv_counts

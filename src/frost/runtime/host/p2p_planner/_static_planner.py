@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 class StaticPlanner(ThreadBase):
     """
-    这个是对那种mailbox_update=mem_update的planner
+    Planner for static node features (nfeat), where each batch's access set
+    is determined solely by which nodes appear in that batch (no P2P needed).
     """
 
     def __init__(
@@ -29,13 +30,7 @@ class StaticPlanner(ThreadBase):
         stop_ev: threading.Event,
     ) -> None:
         super().__init__(name="static_planner", stop_ev=stop_ev)
-        """
-        初始化规划器。
-
-        Args:
-            gpus_distance: GPU 距离矩阵，用于计算距离。
-        """
-        # 1. 存储静态配置 (解决痛点 1 和 4)
+        # Store configuration
         self.gpus_distance = gpus_distance
         self.n_gpus = len(self.gpus_distance)
 
@@ -47,7 +42,6 @@ class StaticPlanner(ThreadBase):
         # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         device = torch.device("cpu")
 
-        # 将原来的 list[set[int]] 改为 list[TensorSet]
         self.fetch: list[TensorSet] = [
             TensorSet(torch.tensor([], dtype=torch.long, device=device))
             for _ in range(self.n_gpus)
@@ -75,7 +69,7 @@ class StaticPlanner(ThreadBase):
             if need == "end_of_epoch":  # None
                 assert self.pending is not None
                 avails = self.pending
-                # 没有下一个 batch 了，next_needs 为空
+                # Last batch of the epoch: next_needs is empty
                 next_needs: list[TensorSet] = [
                     TensorSet(
                         torch.tensor([], dtype=torch.long, device=torch.device("cpu"))
@@ -107,14 +101,11 @@ class StaticPlanner(ThreadBase):
         avails_of_1: list[TensorSet],
         needs_of_2: list[TensorSet],
     ) -> list[StaticPlan]:
-        """规划内存（Memory）的P2P、CPU预取和CPU写回。"""
+        """Compute per-GPU StaticPlan: what to cache from batch 1 and what to fetch for batch 2."""
 
         n_gpus = self.n_gpus
-        # fetchs_of_2 need to be filled
-
         device = torch.device("cpu")
 
-        # 将原来的 list[set[int]] 改为 list[TensorSet]
         fetchs_of_2: list[TensorSet] = [
             TensorSet(torch.tensor([], dtype=torch.long, device=device))
             for _ in range(n_gpus)

@@ -68,7 +68,7 @@ class Scatter(ThreadBase):
         # Return result from worker rank 0
         worker_ranks = [r for r in range(self.world_size) if r != self.host_rank]
         result = gather_list[worker_ranks[0]]
-        assert isinstance(result, Result), "Worker 返回的对象必须是 Result"
+        assert isinstance(result, Result), "Object gathered from worker must be a Result"
         return result
 
     def logic(self) -> None:

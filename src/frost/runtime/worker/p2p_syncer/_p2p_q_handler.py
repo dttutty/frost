@@ -38,7 +38,7 @@ class P2PQHandler(StreamThreadBase):
 
     def logic(self) -> None:
         while not self.stop_ev.is_set():
-            # CPU 侧拿任务、计算时间
+            # Dequeue next P2P task on the CPU side
             mem_p2p_tuple = self.mem_p2p_q.get(block=True)
             if mem_p2p_tuple is None:
                 # logger.debug(
@@ -48,7 +48,7 @@ class P2PQHandler(StreamThreadBase):
             # logger.debug(f"[Rank {self.env.local_rank}] Got Mem P2P task: {mem_p2p_tuple}")
             mem_wait_ms = 0.0
 
-            # 快速路径：如果没有 P2P 任务，直接跳过
+            # Fast path: no P2P work this step, pass through
             if mem_p2p_tuple == "nothing_to_p2p":
                 box_p2p_tuple = self.box_p2p_q.get(block=True)
                 assert box_p2p_tuple == "nothing_to_p2p"
@@ -66,7 +66,7 @@ class P2PQHandler(StreamThreadBase):
 
                 continue
             mem_p2p, mem_event = mem_p2p_tuple
-            # 此时肯定有 box 任务
+            # A mem task implies a corresponding box task
             box_p2p_tuple = self.box_p2p_q.get(block=True)
             box_wait_ms = 0.0
             # if total_wait > 2.0:
@@ -78,11 +78,11 @@ class P2PQHandler(StreamThreadBase):
             torch.cuda.current_stream().wait_event(mem_event)
             torch.cuda.current_stream().wait_event(box_event)
 
-            # 2. 准备 NCCL 通讯列表 (Flatten the Loop)
-            # 顺序：Mem_NID -> Mem_Data -> Mem_TS -> Box_NID -> Box_Data -> Box_TS
-            # 这样写的好处是 NCCL Kernel 会被密集地压入 CUDA Stream，没有任何 Python 逻辑打断
+            # 2. Build the NCCL op list in a flat loop to submit all kernels
+            #    back-to-back with no Python logic between them.
+            #    Order: Mem_NID -> Mem_Data -> Mem_TS -> Box_NID -> Box_Data -> Box_TS
             p2p_ops = [
-                # 格式：(Name, Recv, Send, recv_counts, send_counts)
+                # (Name, recv_tensor, send_tensor, recv_counts, send_counts)
                 (
                     "Mem_NID",
                     mem_p2p.recv_nid,
@@ -133,7 +133,7 @@ class P2PQHandler(StreamThreadBase):
             #     logger.debug("Box NIDs to send: %s", box_p2p.nid2send)
             #     raise ValueError("Mismatched NIDs in P2P send buffers.")
 
-            # 3. 执行所有通信
+            # 3. Submit all NCCL all_to_all operations
 
             works = []
             logger.debug(
@@ -143,7 +143,7 @@ class P2PQHandler(StreamThreadBase):
             for _, (name, recv_t, send_t, recv_counts, send_counts) in enumerate(
                 p2p_ops
             ):
-                # --- [DEBUG] 强力检查代码开始 ---
+                # --- [DEBUG] sanity check start ---
                 total_send = sum(send_counts)
                 real_shape = send_t.shape[0]
                 if total_send != real_shape:
@@ -157,11 +157,11 @@ class P2PQHandler(StreamThreadBase):
                     # logger.debug(f"  > Tensor Full Shape: {send_t.shape}")
                     # logger.debug(f"  > Send Cts List: {send_counts}")
                     sys.stdout.flush()
-                    # 抛出异常让程序停在这里
+                    # Raise immediately so the bug is visible
                     raise RuntimeError(
                         f"Split size mismatch in {name}: planned {total_send} vs actual {real_shape}"
                     )
-                # --- [DEBUG] 强力检查代码结束 ---
+                # --- [DEBUG] sanity check end ---
 
                 work = dist.all_to_all_single(
                     output=recv_t,
@@ -176,8 +176,8 @@ class P2PQHandler(StreamThreadBase):
             logger.debug(
                 f"[Rank {self.env.local_rank}] Posted all NCCL P2P ops for count {self.count}. Waiting for completion..."
             )
-            self.p2p_sem.release()  # 释放信号量，允许下一轮 P2P 任务进入
-            # # 4. 组装结果
+            self.p2p_sem.release()  # Allow the next P2P round to proceed
+            # # 4. Assemble results
             # delta_mem = MemEntry(
             #     nid=mem_p2p.nid2recv, data=mem_p2p.data2recv, ts=mem_p2p.ts2recv
             # )
@@ -187,7 +187,7 @@ class P2PQHandler(StreamThreadBase):
 
             # delta = MemNBox(mem=delta_mem, box=delta_box)
 
-            # # 5. 记录 Event 并发送
+            # # 5. Record CUDA event and send to delta_q
             # ready_event: CudaEventLike = torch.cuda.Event()
             # ready_event.record(torch.cuda.current_stream())
 

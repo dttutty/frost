@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from queue import Queue as Q  # 这是给多线程用的
+from queue import Queue as Q
 from typing import Literal
 
 import numpy as np
@@ -147,10 +147,10 @@ class Host:
     def handle_result_q(self) -> None:
         res = self.result_q.get(block=True)
 
-        # 将结果存下来，供 early_stop_check 使用
+        # Cache result so early_stop_check can read it
         self.last_epoch_result = res
 
-        # 打印日志 (Host 端统一打印，Worker 端就可以静默了)
+        # Host prints the epoch summary; workers stay silent
         print(
             f"[Epoch {self.curr_epoch}] "
             f"Train Loss: {res.train_loss:.4f} | Val Loss: {res.val_loss:.4f} | "
@@ -160,26 +160,25 @@ class Host:
 
     def early_stop_check(self, cur_epoch: int) -> bool:
         """
-        检查是否触发早停，并更新最佳模型记录。
-        返回: True 表示需要停止训练，False 表示继续。
+        Check whether early stopping should be triggered and update the best-model record.
+        Returns True if training should stop, False to continue.
         """
         res = self.last_epoch_result
         if res is None:
             return False
 
-        # --- 更新最佳指标 (AUC 和 AP 分别记录) ---
         is_best = False
 
-        # 1. 检查 AP (仅记录，不影响早停，除非你以 AP 为准)
+        # Check AP improvement
         if res.val_ap > self.best_ap_result.val_ap if self.best_ap_result else -1:
             self.best_ap_epoch = cur_epoch
             self.best_ap_result = res
-            is_best = True  # 标记为有好结果
+            is_best = True
         if is_best:
             self.patience_counter = 0
         else:
             self.patience_counter += 1
-        # --- 早停判断 ---
+        # Early stopping check
         if self.patience_counter >= self.patience:
             logger.info(
                 f"🛑 Early stopping triggered at epoch {cur_epoch}. "
@@ -193,9 +192,7 @@ class Host:
         self.scatter.start()
 
     def run(self) -> None:
-        """
-        公共的训练入口方法
-        """
+        """Main training entry point."""
         _disable_tqdm_monitor_thread()
         self.start_all_threads()
         for e in range(self.total_epoch):
@@ -207,7 +204,7 @@ class Host:
             if self.early_stop_check(e):
                 break
 
-        # 打印最佳AP对应的Test结果
+        # Print final test results for the best-AP checkpoint
         print(
             f"Best Val AP: {self.best_ap_result.val_ap:.4f} @ Epoch {self.best_ap_epoch} | "
             f"Test AP: {self.best_ap_result.test_ap:.4f} | "

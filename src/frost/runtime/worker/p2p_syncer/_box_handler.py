@@ -126,20 +126,20 @@ class BoxTaskHandler(StreamThreadBase):
             )
 
             if self.postman is None:
-                # r2n_mdt是用来发送mail到别的box的，如果没有,说明不用发送
+                # No postman means this is a simple mailbox model (e.g. TGN/JODIE); no neighbor routing needed
 
                 p2p_task, box_ts_nid = self.handle_small_box(
                     new_mail, self.mail_combine, box_task
                 )
                 if box_task.is_last is True:
-                    # 最后一个macro-batch不需要p2p了，直接写回就好
+                    # Last macro-batch of the epoch: no P2P needed, just write back
                     p2p_task = None
             else:
                 p2p_task, box_ts_nid = self.handle_large_box(
                     new_mail, self.mail_combine, box_task
                 )
                 if box_task.is_last is True:
-                    # 最后一个macro-batch不需要p2p了，直接写回就好
+                    # Last macro-batch of the epoch: no P2P needed, just write back
                     p2p_task = None
 
             if box_task.is_last is False:

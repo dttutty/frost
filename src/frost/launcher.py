@@ -25,10 +25,9 @@ faulthandler.enable()
 
 
 def launch(cfg: DictConfig):
-    # 自动搜索当前脚本所在目录的 YAML
     dist.init_process_group(backend="gloo")
 
-    env: Env = Env.initial()  # 自动获取 rank 信息
+    env: Env = Env.initial()
     init_logging(env.local_rank, env.is_host)
     run_id = broadcast_data(
         f"run_{int(time.time())}" if env.is_host else None, src=env.host_rank
@@ -56,7 +55,7 @@ def launch(cfg: DictConfig):
     elif isinstance(raw_fanout, int):
         fanout = [raw_fanout]
     else:
-        fanout = list(raw_fanout)  # 确保是标准 list 类型
+        fanout = list(raw_fanout)
 
     if env.is_host:
         with open_dict(cfg):
@@ -96,7 +95,7 @@ def launch(cfg: DictConfig):
         shared = mem_box_store.prepare()
 
     if env.is_host:
-        # 启动 Host 逻辑
+        # Launch host process
         from frost.runtime.host._engine import Host
         from frost.shm._core import cleanup_all_shm, set_as_host
 
@@ -142,7 +141,7 @@ def launch(cfg: DictConfig):
             cleanup_all_shm(is_host=True)
 
     else:
-        # 启动 Worker 逻辑
+        # Launch worker process
         from frost.runtime.worker._engine import Worker
 
         assert nccl_ddp is not None, "Worker rank must be in nccl group"

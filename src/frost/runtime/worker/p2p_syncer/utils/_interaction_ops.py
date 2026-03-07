@@ -12,50 +12,46 @@ def generate_interaction_mails(
     root_new_mem_orig: MemEntry, edge_feats: torch.Tensor | None = None
 ) -> MailEntry:
     """
-    这里mem必须和edge一一对应
+    Generate interaction mails for each node from updated memories and edge features.
+    Memory and edges must correspond one-to-one.
+
     Args:
-        root_new_mem_orig: MemEntry 对象 (包含 2N 个节点)
-                           前 N 个是 Src，后 N 个是 Dst。
-                           mem 形状: [2N, mem_dim]
-        edge_feats:        边的特征，形状 [N, edge_dim]
-                           对应着 Src[i] -> Dst[i] 的边
+        root_new_mem_orig: MemEntry with 2N nodes — first N are Src, last N are Dst.
+                           mem shape: [2N, mem_dim]
+        edge_feats:        Edge features of shape [N, edge_dim],
+                           where edge_feats[i] corresponds to the edge Src[i] -> Dst[i].
     Returns:
-        all_mails:         形状 [2N, 2 * mem_dim + edge_dim]
-                           对应 root_new_mem_orig 中每个节点的 mail
+        MailEntry of shape [2N, 2 * mem_dim + edge_dim],
+        where entry i is the mail for node root_new_mem_orig.nid[i].
     """
-    # 1. 获取 N 的大小
+    # 1. Derive N
     total_nodes = root_new_mem_orig.nid.shape[0]
     n = total_nodes // 2
 
-    # 2. 切分 Src 和 Dst 的 Memory
-    # root_new_mem_orig.mem 的结构是 [Src_Mem ... | Dst_Mem ...]
-    src_mem = root_new_mem_orig.data[:n]  # Self Memory for Src Nodes
-    dst_mem = root_new_mem_orig.data[n:]  # Other Memory for Src Nodes (Self for Dst)
+    # 2. Split Src and Dst memories
+    #    root_new_mem_orig.data layout: [Src_Mem... | Dst_Mem...]
+    src_mem = root_new_mem_orig.data[:n]  # self memory for Src nodes
+    dst_mem = root_new_mem_orig.data[n:]  # self memory for Dst nodes
 
-    # 3. 生成给 Src 节点的 Mail
-    # 逻辑: [自己, 对方, 边] -> [Src, Dst, Edge]
+    # 3. Mail for Src nodes: [self, other, edge] = [Src, Dst, Edge]
     if edge_feats is not None:
-        # 在 interaction_ops.py 第 43 行之前添加：
-
         mail_for_src = torch.cat([src_mem, dst_mem, edge_feats], dim=1)
 
-        # 4. 生成给 Dst 节点的 Mail
-        # 逻辑: [自己, 对方, 边] -> [Dst, Src, Edge]
-        # 注意：通常这里要交换 src/dst mem 的位置，保证模型看到的第一部分永远是"自己"
+        # 4. Mail for Dst nodes: [self, other, edge] = [Dst, Src, Edge]
+        #    Swap src/dst memory so the model always sees its own memory first
         mail_for_dst = torch.cat([dst_mem, src_mem, edge_feats], dim=1)
     else:
         mail_for_src = torch.cat([src_mem, dst_mem], dim=1)
 
-        # 4. 生成给 Dst 节点的 Mail
-        # 逻辑: [自己, 对方, 边] -> [Dst, Src, Edge]
-        # 注意：通常这里要交换 src/dst mem 的位置，保证模型看到的第一部分永远是"自己"
+        # 4. Mail for Dst nodes: [self, other] = [Dst, Src]
         mail_for_dst = torch.cat([dst_mem, src_mem], dim=1)
-        # 5. 拼接回 2N 长度，保持顺序一致 (前N个是Src的mail，后N个是Dst的mail)
+
+    # 5. Concatenate back to 2N length; first N entries are Src mails, last N are Dst mails
     all_mails = torch.cat([mail_for_src, mail_for_dst], dim=0)
 
     mail_ts_nid = MailEntry(
         nid=root_new_mem_orig.nid,
         data=all_mails,
-        ts=root_new_mem_orig.ts,  # 这里ts的len正好=2N
+        ts=root_new_mem_orig.ts,  # ts length equals 2N
     )
     return mail_ts_nid

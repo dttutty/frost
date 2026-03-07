@@ -41,18 +41,18 @@ class BoxEntry:
     def merge_box(
         self, other: BoxEntry, is_overlap: bool, sort_idx: torch.Tensor | None = None
     ) -> BoxEntry:
-        # 1. 处理空情况
+        # 1. Handle empty cases
         if self.nid.numel() == 0:
             return other
         if other.nid.numel() == 0:
             return self
 
-        # 3. Fallback: 必须硬连并排序
+        # 2. Fallback: concatenate and sort
         cat_nid = torch.cat((self.nid, other.nid), dim=0)
         cat_data = torch.cat((self.data, other.data), dim=0)
         cat_ts = torch.cat((self.ts, other.ts), dim=0)
 
-        # 计算排序索引
+        # Compute sort order
         if sort_idx is None:
             sort_idx = torch.argsort(cat_nid)
 
@@ -69,7 +69,7 @@ class BoxEntry:
             return self
         sorted_indices = torch.argsort(self.nid)
 
-        # 返回一个新的实例，保持 self 不变（Immutable）
+        # Return a new instance; self is not modified (immutable pattern)
         return self.__class__(
             nid=self.nid[sorted_indices],
             data=self.data[sorted_indices],

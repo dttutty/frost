@@ -54,7 +54,7 @@ class NoMemAnalyzer:
         fanout: list[int] | None,
         valid_all: torch.Tensor | None = None,
     ):
-        all_nid = all_nid.clone()  # 克隆一份，避免修改原始输入
+        all_nid = all_nid.clone()  # Clone to avoid mutating the caller's tensor
         all_nodes_set = TensorSet(all_nid)
 
         return Access(
@@ -74,7 +74,7 @@ class TGNAnalyzer:
         fanout: list[int] | None,
         valid_all: torch.Tensor | None = None,
     ):
-        all_nid = all_nid.clone()  # 克隆一份，避免修改原始输入
+        all_nid = all_nid.clone()  # Clone to avoid mutating the caller's tensor
         pos_root = TensorSet(torch.cat([src, dst], dim=0))
         all_nodes_set = TensorSet(all_nid)
 
@@ -99,7 +99,7 @@ class JODIEAnalyzer:
         fanout: list[int] | None,
         valid_all: torch.Tensor | None = None,
     ):
-        all_nid = all_nid.clone()  # 克隆一份，避免修改原始输入
+        all_nid = all_nid.clone()  # Clone to avoid mutating the caller's tensor
         pos_root = TensorSet(torch.cat([src, dst], dim=0))
         all_nodes_set = TensorSet(all_nid)  # this includes src, dst, and neg_dst
 

@@ -13,7 +13,7 @@ def load_precision_config(config_path=DEFAULT_CONFIG_PATH):
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
 
-    # 映射表
+    # dtype mapping table
     type_map = {
         "int32": (np.int32, torch.int32),
         "int64": (np.int64, torch.int64),

@@ -92,7 +92,7 @@ class NoSampler:
 
 def dist_safe_tensor(arr, dtype):
     """
-    通过强行副本转换，彻底移除 nanobind 的 PyCapsule 残留
+    Force a deep copy to fully detach any nanobind PyCapsule backing from the array.
     """
     if arr is None:
         return torch.empty(0, dtype=dtype)
@@ -104,10 +104,11 @@ def dist_safe_tensor(arr, dtype):
     if np_arr.size == 0:
         return torch.empty(0, dtype=dtype)
 
-    # 这一步非常关键：np.array(..., copy=True) 会在 Python 堆上创建全新内存
+    # np.array(..., copy=True) allocates fresh memory on the Python heap,
+    # breaking any reference to nanobind-managed capsule memory
     np_safe = np.array(np_arr, copy=True)
 
-    # 转回 torch 后再 clone 并 contiguous 确保存储结构最简
+    # Clone and contiguous after converting back to torch ensures the simplest storage layout
     return torch.from_numpy(np_safe).to(dtype)
 
 
@@ -211,7 +212,7 @@ class NghSampler:
                 nid_np_safe, ts_np_safe, self.n_ngh
             )
 
-            # 在 NghSampler.sample 内部使用：
+            # Safely convert nanobind outputs to plain tensors
             n_tensor = dist_safe_tensor(ngh_nid, torch.int32).reshape(-1)
             e_tensor = dist_safe_tensor(ngh_eid, torch.int32).reshape(-1)
             t_tensor = dist_safe_tensor(ngh_ts, torch.float32).reshape(-1)

@@ -44,7 +44,7 @@ def load_graph(d: str) -> tuple[TemporalGraphType, pd.DataFrame, int, int]:
 
 
 def get_free_port() -> int:
-    """在 master 节点上获取一个空闲端口"""
+    """Find a free port on the master node."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("", 0))
     port = sock.getsockname()[1]

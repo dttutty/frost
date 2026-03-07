@@ -26,13 +26,13 @@ _TORCH_TO_NP = {
 
 def _patched_register(name, rtype):
     if rtype == "shared_memory":
-        return  # 拒绝注册共享内存，让 tracker 别管它
+        return  # Skip registering shared memory so the resource tracker ignores it
     return resource_tracker._resource_tracker.register(name, rtype)
 
 
 def _patched_unregister(name, rtype):
     if rtype == "shared_memory":
-        return  # 既然没注册，也不用注销
+        return  # Nothing was registered, so nothing to unregister
     return resource_tracker._resource_tracker.unregister(name, rtype)
 
 
@@ -40,8 +40,7 @@ resource_tracker.register = _patched_register
 resource_tracker.unregister = _patched_unregister
 
 if hasattr(resource_tracker, "_resource_tracker"):
-    # 同时也覆盖掉内部单例对象的方法
-    # for some version of python 3.10
+    # Also patch the internal singleton object's methods (required for Python 3.10)
     if resource_tracker._resource_tracker is not None:
         resource_tracker._resource_tracker.register = _patched_register
         resource_tracker._resource_tracker.unregister = _patched_unregister
@@ -81,7 +80,7 @@ def set_as_host():
 
 
 def _auto_cleanup():
-    # 进程退出时自动调用
+    # Registered via atexit; called automatically on process exit
     cleanup_all_shm(is_host=_IS_HOST_PROCESS)
 
 
@@ -111,7 +110,7 @@ def cleanup_all_shm(is_host: bool = True) -> None:
         try:
             shm.close()
             if is_host:
-                shm.unlink()  # 只有主节点执行物理删除
+                shm.unlink()  # Physical deletion is only performed by the host process
         except Exception:
             pass
         finally:
@@ -137,7 +136,7 @@ def create_shared_mem_array(
         shm = shared_memory.SharedMemory(name=name, create=True, size=num_bytes)
     _unregister_shm(shm.name)
 
-    # 关键修改：保存 shm 对象本身，防止被 GC 回收导致内存 unmap
+    # Keep a reference to the shm object to prevent GC from unmapping the memory
     _TRACKED_SHM_OBJECTS[shm.name] = shm
 
     np_arr = np.ndarray(shape, dtype=np_dtype, buffer=shm.buf)
@@ -157,7 +156,7 @@ def get_shared_mem_array(
     shm = shared_memory.SharedMemory(name=name)
     _unregister_shm(shm.name)
 
-    # 关键修改：保存 shm 对象本身
+    # Keep a reference to the shm object to prevent GC from unmapping the memory
     _TRACKED_SHM_OBJECTS[shm.name] = shm
 
     np_arr = np.ndarray(shape, dtype=np_dtype, buffer=shm.buf)
