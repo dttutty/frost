@@ -33,9 +33,8 @@ from frost.runtime.worker._dynamic_assembler import DynamicAssembler
 from frost.runtime.worker._host_to_device import H2D
 from frost.runtime.worker._receiver import Receiver as Receiver
 from frost.runtime.worker.p2p_syncer._box_handler import BoxTaskHandler
-from frost.runtime.worker.p2p_syncer._box_writer import BoxWriter
 from frost.runtime.worker.p2p_syncer._mem_handler import MemTaskHandler
-from frost.runtime.worker.p2p_syncer._mem_writer import MemWriter
+from frost.runtime.worker.p2p_syncer._writer import SharedMemWriter
 from frost.runtime.worker.p2p_syncer._p2p_q_handler import P2PQHandler
 from frost.shm.mem_mgr import MemBoxStore
 from frost.shm.ring_buf import RingBuf
@@ -78,9 +77,9 @@ class Worker:
     # --- Background threads (None when mem_box_store is absent) ---
     dy_asm: DynamicAssembler | None = None
     mem_handler: MemTaskHandler | None = None
-    mem_wr: MemWriter | None = None
+    mem_wr: SharedMemWriter | None = None
     box_handler: BoxTaskHandler | None = None
-    box_wr: BoxWriter | None = None
+    box_wr: SharedMemWriter | None = None
     p2p_q_handler: P2PQHandler | None = None
 
     model: AssembledModel | DDP
@@ -205,13 +204,14 @@ class Worker:
             device=self.device,
             mem_wr_q=self.mem_wr_q,
         )
-        self.mem_wr = MemWriter(
-            shared_mem=self.mem_box_store.mem,
-            shared_mem_ts=self.mem_box_store.mem_ts,
+        self.mem_wr = SharedMemWriter(
+            shared_data=self.mem_box_store.mem,
+            shared_ts=self.mem_box_store.mem_ts,
             h2d_sem=self.h2d_sem,
             stop_ev=self.stop_ev,
-            mem_wr_q=self.mem_wr_q,
+            wr_q=self.mem_wr_q,
             device=self.device,
+            name="mem_wr",
         )
         self.box_handler = BoxTaskHandler(
             h2d_sem=self.h2d_sem,
@@ -223,13 +223,14 @@ class Worker:
             box_wr_q=self.box_wr_q,
             postman=self.postman,
         )
-        self.box_wr = BoxWriter(
-            shared_box=self.mem_box_store.box,
-            shared_box_ts=self.mem_box_store.box_ts,
+        self.box_wr = SharedMemWriter(
+            shared_data=self.mem_box_store.box,
+            shared_ts=self.mem_box_store.box_ts,
             h2d_sem=self.h2d_sem,
             stop_ev=self.stop_ev,
-            box_wr_q=self.box_wr_q,
+            wr_q=self.box_wr_q,
             device=self.device,
+            name="box_wr",
         )
         self.p2p_q_handler = P2PQHandler(
             env=self.env,
