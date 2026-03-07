@@ -18,7 +18,7 @@ class Meta:
     """All information a worker needs to execute one training or evaluation step.
 
     Scattered from the host to each worker via ``scatter_object_list``.  The
-    ``graph`` and ``plan_set`` fields are populated by the H2D thread after the
+    ``graph`` field will be populated by the H2D thread after the
     host scatter.
 
     Attributes:
