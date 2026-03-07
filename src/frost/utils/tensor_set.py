@@ -1,12 +1,8 @@
 import logging
-import threading
 
 import torch
 
 logger = logging.getLogger(__name__)
-
-
-_SET_OP_LOCK = threading.Lock()
 
 
 class TensorSet:
