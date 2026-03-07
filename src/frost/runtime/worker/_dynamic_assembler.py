@@ -1,3 +1,16 @@
+"""Dynamic assembler thread for merging local and P2P memory/mailbox data.
+
+For each batch this thread performs a two-phase assembly of node memory and
+mailbox tensors:
+
+1. ``prepare_shared_features``: read the locally owned entries from the shared
+   CPU ``MemBoxStore`` and scatter them into the FlatGraph tensors on GPU.
+2. ``apply_delta_features``: once the P2P delta arrives via ``delta_q``, fill
+   the remaining (remotely owned) entries received from peer GPUs.
+
+The assembled ``(Meta, CudaEvent)`` is forwarded to ``full_q`` for the main
+training loop.
+"""
 from __future__ import annotations
 
 import logging
@@ -22,16 +35,29 @@ logger = logging.getLogger(__name__)
 
 @dataclass(kw_only=True)
 class MemAndBox:
+    """Container pairing a memory entry with its corresponding mailbox entry.
+
+    Attributes:
+        mem: Node memory entry (NID + data + timestamp).
+        box: Mailbox entry (NID + data + timestamp).
+    """
+
     mem: MemEntry
     box: BoxEntry
 
     @cached_property
     def is_mem_box_sorted(self) -> bool:
+        """Return True if both mem and box entries are sorted by NID."""
         assert self.mem is not None
         assert self.box is not None
         return self.mem.is_sorted and self.box.is_sorted
 
     def sort_mem_and_box(self) -> MemAndBox:
+        """Sort both mem and box entries by NID in-place and return self.
+
+        Returns:
+            The same ``MemAndBox`` instance with both entries sorted.
+        """
         if self.is_mem_box_sorted:
             return self
 
@@ -45,6 +71,23 @@ class MemAndBox:
 
 
 class DynamicAssembler(StreamThreadBase):
+    """Background thread that merges local shared memory and P2P delta into FlatGraph.
+
+    Receives partially-prepared batches from ``h2d_out_q``, fills locally
+    owned node memory / mailbox entries from ``MemBoxStore``, then waits for
+    the P2P delta from ``delta_q`` to fill remotely owned entries.  The
+    completed batch is forwarded to ``full_q``.
+
+    Args:
+        h2d_out_q: Input queue from the H2D thread.
+        delta_q: Queue carrying P2P delta tuples or the sentinel ``"nothing"``.
+        full_q: Output queue consumed by the main training loop.
+        stop_ev: Shared stop event.
+        device: Target CUDA device.
+        h2d_sem: Semaphore released by write-back threads to throttle the H2D pipeline.
+        mem_box_store: Shared CPU memory store for node memory and mailboxes.
+    """
+
     def __init__(
         self,
         h2d_out_q: H2DOutQ,
@@ -277,8 +320,20 @@ class DynamicAssembler(StreamThreadBase):
         graph: FlatGraph,
         plan: DynamicPlan | None,
     ) -> torch.Tensor:
-        """Positions that must be filled by delta:
-        graph.nid != -1 and not covered by local shared fetch.
+        """Compute a boolean mask for positions that must be filled from the P2P delta.
+
+        A position requires delta data when:
+        * ``graph.nid[i] != -1`` (valid node), AND
+        * the NID is not already covered by the local shared fetch.
+
+        Args:
+            graph: The current FlatGraph whose ``nid`` tensor is queried.
+            plan: The DynamicPlan holding locally fetched NIDs; if ``None`` all
+                valid positions are considered remote.
+
+        Returns:
+            Boolean tensor of shape ``[graph.nid.shape[0]]`` where ``True``
+            means the position must be filled from the delta.
         """
         graph_nid = graph.nid
         assert graph_nid.dim() == 1, "graph.nid must be 1D"
@@ -345,6 +400,18 @@ class DynamicAssembler(StreamThreadBase):
             )
 
     def logic(self) -> None:
+        """Main assembly loop: merge shared + delta data and forward to full_q.
+
+        For each incoming batch:
+
+        1. Waits for the H2D-ready CUDA event.
+        2. Acquires two H2D semaphore slots (one for mem write-back, one for
+           box write-back) to prevent the pipeline from over-running the writers.
+        3. Calls ``prepare_shared_features`` to fill local data from the store.
+        4. Blocks on ``delta_q`` for the P2P result, then calls
+           ``apply_delta_features`` to fill remote data.
+        5. Records a CUDA event and puts ``(meta, event)`` into ``full_q``.
+        """
         epoch_count = getattr(self, "epoch_count", 0)
 
         while not self.stop_ev.is_set():

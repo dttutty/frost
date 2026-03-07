@@ -1,3 +1,10 @@
+"""Worker engine for distributed Temporal GNN training.
+
+Implements the GPU-resident Worker process that drives the train/eval loop.
+Each Worker owns one GPU rank, a chain of pipeline threads (Receiver, H2D,
+optional DynamicAssembler), and optional P2P memory-sync threads when a
+MemBoxStore is configured.
+"""
 import logging
 import threading
 import time
@@ -32,8 +39,7 @@ from frost.protocols.postman_proto import PostmanProto
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
 from frost.runtime.worker._host_to_device import H2D
 from frost.runtime.worker._receiver import Receiver as Receiver
-from frost.runtime.worker.p2p_syncer._box_handler import BoxTaskHandler
-from frost.runtime.worker.p2p_syncer._mem_handler import MemTaskHandler
+from frost.runtime.worker.p2p_syncer._handlers import BoxTaskHandler, MemTaskHandler
 from frost.runtime.worker.p2p_syncer._writer import SharedMemWriter
 from frost.runtime.worker.p2p_syncer._p2p_q_handler import P2PQHandler
 from frost.shm.mem_mgr import MemBoxStore
@@ -61,6 +67,34 @@ class P2PGuardCommHook:
 
 
 class Worker:
+    """Distributed training worker that owns the GPU-side pipeline.
+
+    Each worker process corresponds to one GPU rank. It manages a chain of
+    background threads (Receiver → H2D → [DynamicAssembler] → main loop) and
+    optional P2P memory-sync threads (MemTaskHandler, BoxTaskHandler,
+    SharedMemWriter, P2PQHandler) when a ``MemBoxStore`` is present.
+
+    Attributes:
+        received_q: Queue carrying ``Meta`` objects freshly received from the host.
+        delta_q: Queue carrying P2P delta tuples; only used when mem_box_store is present.
+        h2d_out_q: Intermediate queue between H2D and DynamicAssembler.
+        full_q: Queue of fully-assembled ``(Meta, CudaEvent)`` tuples ready for the model.
+        mem_task_q: Queue of memory update tasks posted by AssembledModel.
+        box_task_q: Queue of mailbox update tasks posted by AssembledModel.
+        mem_p2p_q: Queue of P2P memory descriptors produced by MemTaskHandler.
+        box_p2p_q: Queue of P2P mailbox descriptors produced by BoxTaskHandler.
+        mem_wr_q: Queue of write-back requests for the node memory store.
+        box_wr_q: Queue of write-back requests for the mailbox store.
+        dy_asm: DynamicAssembler thread (memory-model path only).
+        mem_handler: MemTaskHandler thread (memory-model path only).
+        mem_wr: SharedMemWriter thread for node memory (memory-model path only).
+        box_handler: BoxTaskHandler thread (memory-model path only).
+        box_wr: SharedMemWriter thread for mailbox (memory-model path only).
+        p2p_q_handler: P2PQHandler thread (memory-model path only).
+        model: AssembledModel wrapped in DDP.
+        result_q: Single-element queue used to pass epoch results back to the Receiver.
+    """
+
     # --- Pipeline queues ---
     received_q: ReceivedQ
     delta_q: DeltaQ | None = None
@@ -308,6 +342,14 @@ class Worker:
         ).cuda()
 
     def on_train_epoch_end(self) -> Result:
+        """Aggregate per-epoch metrics across all ranks and return a Result.
+
+        Computes synchronized mean train loss, validation loss/AUC/AP, and test
+        AUC/AP via torchmetrics all-reduce, then resets all accumulators.
+
+        Returns:
+            Result dataclass containing the aggregated scalar metrics for this epoch.
+        """
         avg_s2s = self.train_start2start_ms.compute().item()
         self.train_start2start_ms.reset()
         logger.debug("Average train start->start (ms): %.2f", avg_s2s)
@@ -333,6 +375,15 @@ class Worker:
         return res
 
     def train(self, meta: Meta) -> None:
+        """Execute one training step for the given batch.
+
+        Runs a forward pass through the assembled model, computes loss, runs
+        backward, steps the optimizer, updates the running loss tracker, and
+        frees per-batch tensors immediately afterward.
+
+        Args:
+            meta: Batch metadata carrying the flat graph, labels, and plan set.
+        """
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         logits = self.model(
@@ -353,6 +404,16 @@ class Worker:
 
     @torch.no_grad()
     def eval(self, meta: Meta) -> None:
+        """Execute one evaluation step (val or test) for the given batch.
+
+        Runs a forward pass in no-grad mode, applies sigmoid, and feeds
+        predictions into the appropriate torchmetrics collectors.  For memory
+        models, acquires the P2P semaphore to ensure no concurrent P2P I/O
+        interferes with the eval state.
+
+        Args:
+            meta: Batch metadata; ``meta.split`` must be ``"val"`` or ``"test"``.
+        """
         assert meta.labels is not None
         self.model.eval()
 
@@ -392,6 +453,13 @@ class Worker:
         meta = None
 
     def start_all_threads(self) -> None:
+        """Start all background pipeline threads.
+
+        Must be called once before invoking ``run()``.  Threads are started in
+        dependency order: H2D and Receiver first, then the optional memory/box
+        sync threads (P2PQHandler, MemTaskHandler, BoxTaskHandler, writers,
+        DynamicAssembler) when a ``MemBoxStore`` is present.
+        """
         self.h2d.start()
         self.receiver.start()
         if self.mem_box_store is not None:
@@ -403,6 +471,12 @@ class Worker:
             self.dy_asm.start()
 
     def run(self) -> None:
+        """Main training loop: consume ``full_q`` and dispatch train/eval/epoch-end.
+
+        Primes the H2D pipeline semaphore (4 releases) and injects an initial
+        ``"nothing"`` token into ``delta_q`` for memory models before entering the
+        main loop.  The loop terminates when ``None`` is dequeued.
+        """
         self.start_all_threads()
         if self.mem_box_store is not None:
             # Pre-release 4 slots to prime the H2D pipeline (2 batches in flight)
@@ -529,6 +603,12 @@ class Worker:
                 break
 
     def cleanup(self) -> None:
+        """Join all background threads and tear down the distributed process group.
+
+        Calls ``join()`` on every thread in reverse dependency order, then
+        issues a ``dist.barrier()`` to synchronize all ranks before destroying
+        the process group.
+        """
         self.h2d.join()
         self.receiver.join()
         if self.mem_handler:
@@ -549,6 +629,14 @@ class Worker:
 
     # Public model save/load interface
     def save_model(self, path: str) -> None:
+        """Save the unwrapped model weights to disk (rank 0 only).
+
+        The DDP wrapper is stripped so the checkpoint can be loaded without
+        a distributed context.
+
+        Args:
+            path: File path where the state dict will be written.
+        """
         rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
 
         if rank == 0:
@@ -557,6 +645,15 @@ class Worker:
             torch.save(model.state_dict(), path)
 
     def load_model(self, path: str) -> None:
+        """Load model weights from a checkpoint and re-wrap with DDP.
+
+        A barrier before loading ensures the file is fully written by rank 0
+        before any rank reads it.  A second barrier after loading keeps all
+        ranks in sync.
+
+        Args:
+            path: File path to the state dict checkpoint.
+        """
         # Barrier ensures the file is fully written before any rank reads it
         if dist.is_available() and dist.is_initialized():
             dist.barrier(group=self.nccl)
@@ -576,5 +673,13 @@ class Worker:
             dist.barrier(group=self.nccl)
 
     def load_memory(self, memory_state: dict) -> None:
+        """Restore the model's in-memory state from a previously saved dict.
+
+        Delegates to ``AssembledModel.load_memory_state`` via the DDP module
+        unwrap.  No-op when ``mem_box_store`` is absent.
+
+        Args:
+            memory_state: Dict produced by a prior ``save_memory_state()`` call.
+        """
         if self.mem_box_store is not None:
             self.model.module.load_memory_state(memory_state)

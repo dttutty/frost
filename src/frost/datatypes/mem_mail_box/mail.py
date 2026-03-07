@@ -1,3 +1,5 @@
+"""Mail entry datatype representing aggregated messages destined for nodes."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,6 +10,20 @@ from torch import Tensor
 
 @dataclass(kw_only=True)
 class MailEntry:
+    """A batch of mail messages aggregated over source nodes for a single step.
+
+    Unlike ``BoxEntry``, ``MailEntry`` holds a single message per row (no
+    slot dimension).  It is typically produced by the postman and then
+    inserted into the mailbox via ``BoxEntry.merge_1_mail``.
+
+    Attributes:
+        nid: Destination node IDs, shape ``[N]``.
+        data: Message content tensor, shape ``[N, D]``.
+        ts: Timestamps of the messages, shape ``[N]``.
+        is_sorted: Whether ``nid`` is sorted in ascending order.
+        is_unique: Whether all entries in ``nid`` are distinct.
+    """
+
     nid: Tensor
     data: Tensor
     ts: Tensor

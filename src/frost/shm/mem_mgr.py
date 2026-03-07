@@ -1,3 +1,9 @@
+"""Shared-memory node-memory and mailbox store management.
+
+The host process allocates the shared-memory tensors for node memory states
+and mailboxes; worker processes attach to them via a distributed barrier
+handshake.  All tensors are zero-initialised and reset between epochs.
+"""
 from dataclasses import dataclass
 from typing import Optional
 
@@ -26,6 +32,24 @@ class MemBoxStore:
 
 
 class MemBoxStoreManager:
+    """Manages allocation and distribution of shared-memory node-memory and mailbox tensors.
+
+    The host calls :meth:`prepare` first (before the distributed barrier) to
+    create the shared-memory segments; each worker calls :meth:`prepare` after
+    the barrier to attach to them.  The resulting :class:`MemBoxStore` is
+    accessible via :attr:`state`.
+
+    Args:
+        env: Distributed environment descriptor (:class:`~frost.datatypes.env.Env`).
+        run_id: Unique string prefix used to name shared-memory segments.
+        n_nodes: Total number of nodes in the graph.
+        boxsize: Number of mailbox slots per node.
+        d_mem: Node-memory vector dimensionality (must equal ``final_emb_dim``
+            for identity-GNN models).
+        edim: Edge-feature dimensionality; used to compute ``d_mail``.
+        mdtype: PyTorch dtype for all memory / mailbox tensors.
+    """
+
     def __init__(
         self,
         env,

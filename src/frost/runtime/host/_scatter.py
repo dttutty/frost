@@ -16,6 +16,25 @@ logger = logging.getLogger(__name__)
 
 
 class Scatter(ThreadBase):
+    """Background thread that distributes batches to Worker ranks via collective ops.
+
+    Consumes MetaBundles (lists of ``Meta`` objects, one per GPU) from ``in_q``,
+    attaches per-GPU ``PlanSet`` data from the planner output queues, and uses
+    ``dist.scatter_object_list`` to push each ``Meta`` to its assigned Worker rank.
+    At end-of-epoch it also collects results from Workers via ``dist.gather_object``
+    and forwards them to ``result_q`` for the Host to consume.
+
+    The thread terminates cleanly when it receives a ``None`` sentinel from ``in_q``.
+
+    Attributes:
+        n_gpu: Number of Worker ranks (= world_size - 1).
+        in_q: Source queue fed by the Host main thread.
+        mem_plan_out_q: Optional queue of per-GPU DynamicPlan lists for memory.
+        mail_plan_out_q: Optional queue of per-GPU DynamicPlan lists for mailbox.
+        nfeat_plan_out_q: Optional queue of per-GPU StaticPlan lists for nfeat.
+        result_q: Queue where gathered epoch Results are placed for the Host.
+    """
+
     def __init__(
         self,
         n_gpu: int,
@@ -72,6 +91,13 @@ class Scatter(ThreadBase):
         return result
 
     def logic(self) -> None:
+        """Main loop: dequeue MetaBundles, attach plans, and scatter to Workers.
+
+        Handles three sentinel values from ``in_q``:
+        - ``None``: send shutdown signal to all Workers and exit.
+        - ``"end_of_epoch"``: broadcast the sentinel to Workers, gather results.
+        - A normal ``MetaBundle``: attach plan data and scatter per-GPU Metas.
+        """
         while not self.stop_ev.is_set():
             meta_2_scatter = self.in_q.get(block=True)
 

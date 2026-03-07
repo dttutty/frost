@@ -1,3 +1,8 @@
+"""Postman: routes root-node embeddings to 1-hop neighbors as mailbox entries.
+
+Used by the APAN model variant to propagate interaction signals to neighboring
+nodes after each training step.
+"""
 import logging
 
 import torch

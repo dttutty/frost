@@ -206,6 +206,16 @@ class DynamicPlanner(ThreadBase):
         self.pending: MetasDyNeed | None = None
 
     def logic(self) -> None:
+        """Main planning loop: consume (needs, updates, metas) tuples and emit DynamicPlans.
+
+        Uses a one-step lookahead: each incoming batch is held as ``pending`` until
+        the *next* batch arrives (or an end-of-epoch / shutdown sentinel), so that
+        fresh P2P transfers can be pre-computed based on what nodes the next batch
+        will need.  Sentinel handling:
+
+        - ``None``: forward ``None`` to the output queue and exit.
+        - ``"end_of_epoch"``: plan the pending batch with empty next-batch sets.
+        """
         while not self.stop_ev.is_set():
             in_q_data = self.in_q.get(block=True)
 

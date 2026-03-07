@@ -1,3 +1,10 @@
+"""Dataset loading and shared-memory feature distribution.
+
+The host process loads graph topology and node/edge features, places the
+features into POSIX shared-memory segments, and broadcasts lightweight
+metadata (shapes, dtypes, paths) to all worker ranks so they can attach to
+the same segments without re-loading from disk.
+"""
 import logging
 import os
 import socket
@@ -18,6 +25,22 @@ logger = logging.getLogger(__name__)
 
 
 def load_graph(d: str) -> tuple[TemporalGraphType, pd.DataFrame, int, int]:
+    """Load a temporal graph from pre-processed NPZ and CSV files.
+
+    Reads ``DATA/<d>/ext_full.npz`` (CSR topology) and ``DATA/<d>/edges.csv``
+    (edge list with metadata).  Node and edge counts are inferred from both
+    sources and asserted to be consistent.
+
+    Args:
+        d: Dataset name; used as a directory name under ``DATA/``.
+
+    Returns:
+        A four-tuple of:
+        - ``g``: :class:`~frost.seq_sampler.TemporalGraph` instance.
+        - ``df``: Edge-list :class:`~pandas.DataFrame`.
+        - ``n_nodes``: Total number of nodes.
+        - ``n_edges``: Total number of edges.
+    """
     npz = np.load(f"DATA/{d}/ext_full.npz")
 
     # Force arrays to be C-contiguous with correct dtypes
@@ -53,6 +76,24 @@ def get_free_port() -> int:
 
 
 class DatasetManager:
+    """Orchestrates dataset loading and feature sharing across distributed ranks.
+
+    The host process loads the graph and features then writes them into shared
+    memory; worker processes attach to the pre-populated segments after a
+    barrier.  A single call to :meth:`prepare` handles the full protocol for
+    whichever role the current rank plays.
+
+    Args:
+        env: Distributed environment descriptor.
+        run_id: Prefix string used to name shared-memory segments.
+        dataset_name: Name of the dataset directory under ``DATA/``.
+        target_ndim: Node-feature dimensionality override.
+            ``0`` disables node features; ``None`` loads from disk; ``>0``
+            generates random features of that size.
+        target_edim: Edge-feature dimensionality override (same semantics as
+            ``target_ndim``).
+    """
+
     def __init__(
         self,
         env: Env,
@@ -172,7 +213,7 @@ class DatasetManager:
             return None
         return gsm(f"{self.run_id}_{name}", shape, dtype=dtype)
 
-    def _get_save_path(self, dataset):
+    def _get_save_path(self, dataset: str) -> str:
         """Generate formatted path for model saving."""
         if not os.path.isdir("models"):
             os.makedirs("models", exist_ok=True)

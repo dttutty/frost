@@ -35,6 +35,22 @@ def _disable_tqdm_monitor_thread() -> None:
 
 
 class Host:
+    """Orchestrates the host-side pipeline for distributed Temporal GNN training.
+
+    The Host process drives the full data pipeline: it reads the edge DataFrame,
+    splits it into train/val/test, samples neighbors and negative destinations for
+    each macro-batch, optionally computes memory/nfeat access plans via
+    ``PlanRouter``, and scatters ``Meta`` bundles to Worker processes through the
+    ``Scatter`` thread.  Early stopping is evaluated after each epoch.
+
+    Attributes:
+        mem_plan_out_q: Output queue for memory DynamicPlan lists, or None.
+        mail_plan_out_q: Output queue for mailbox DynamicPlan lists, or None.
+        nfeat_plan_out_q: Output queue for node-feature StaticPlan lists, or None.
+        scatter_q: Queue of MetaBundles (or sentinels) consumed by Scatter.
+        plan_router: Optional PlanRouter managing sub-planner threads.
+    """
+
     mem_plan_out_q: DynamicPlanOutQ | None = None
     mail_plan_out_q: DynamicPlanOutQ | None = None
     nfeat_plan_out_q: StaticPlanOutQ | None = None
@@ -132,6 +148,15 @@ class Host:
         )
 
     def _init_dataset(self, df: pd.DataFrame) -> None:
+        """Preprocess the edge DataFrame and split into train/val/test subsets.
+
+        Timestamps are normalised to start at zero. The ``ext_roll`` column is
+        used to locate split boundaries (0 = train, 1 = val, >=2 = test).
+
+        Args:
+            df: Raw edge DataFrame with columns ``src``, ``dst``, ``time``,
+                ``ext_roll``.
+        """
         # preprocess dataframe
         df["src"] = df["src"].astype(np.int64)
         df["dst"] = df["dst"].astype(np.int64)
@@ -145,6 +170,11 @@ class Host:
         self.te_df = df[val_edge_end:]
 
     def handle_result_q(self) -> None:
+        """Block until a Result arrives from the Scatter thread and log epoch metrics.
+
+        The result is cached in ``self.last_epoch_result`` so that
+        ``early_stop_check`` can read it without a second queue pop.
+        """
         res = self.result_q.get(block=True)
 
         # Cache result so early_stop_check can read it
@@ -189,6 +219,7 @@ class Host:
         return False
 
     def start_all_threads(self) -> None:
+        """Start all background threads (currently only the Scatter thread)."""
         self.scatter.start()
 
     def run(self) -> None:
@@ -216,6 +247,19 @@ class Host:
     def _handle_a_split(
         self, df: pd.DataFrame, split: Literal["train", "val", "test"], cur_epoch: int
     ) -> None:
+        """Process all macro-batches for one data split in the current epoch.
+
+        Validates that the split's ``ext_roll`` values are consistent, applies
+        ``make_balance_plan`` to assign edges to GPUs, then iterates over
+        macro-batches: builds ``Meta``/``Access`` pairs, optionally dispatches
+        to ``PlanRouter``, and enqueues bundles into ``scatter_q``. On the final
+        test split, sends the end-of-epoch sentinel.
+
+        Args:
+            df: Edge DataFrame for the split (train, val, or test).
+            split: String label identifying the split.
+            cur_epoch: Zero-based epoch index.
+        """
         if "ext_roll" in df.columns:
             ext_roll = df["ext_roll"]
             is_valid_split = (
@@ -279,6 +323,7 @@ class Host:
             self._cleanup_per_epoch()
 
     def _cleanup_per_epoch(self) -> None:
+        """Signal end-of-epoch to the PlanRouter and Scatter, then increment counters."""
         if self.plan_router is not None:
             self.plan_router.signal_epoch_end()
         self.scatter_q.put("end_of_epoch")
@@ -296,6 +341,25 @@ class Host:
         batch_idx: int,
         gpu_id: int,
     ) -> tuple[Meta, Access | None]:
+        """Build a Meta descriptor and optionally an Access plan for one micro-batch.
+
+        Converts the raw edge rows into tensors, samples negative destinations,
+        runs the neighbor sampler, and calls the analyzer to compute the access
+        plan (which shared-memory nodes need to be fetched/updated).
+
+        Args:
+            edges: Rows of the edge DataFrame assigned to this GPU for this step.
+            cur_epoch: Zero-based epoch index.
+            cur_macro_of_split: Macro-batch index within the current split.
+            n_macro_of_split: Total number of macro-batches in the current split.
+            split: String label of the current split.
+            batch_idx: Global batch index across all splits and epochs.
+            gpu_id: Target GPU rank for this micro-batch.
+
+        Returns:
+            A (Meta, Access | None) tuple; Access is None when no analyzer is
+            configured (e.g. TGAT / no-memory models).
+        """
         # show edges["time"].values for debug
         # logger.info(f"Edge times: {edges['time'].values}")
         src = (
@@ -350,6 +414,7 @@ class Host:
         return meta, access
 
     def _cleanup(self) -> None:
+        """Shut down the PlanRouter and Scatter thread and log total elapsed time."""
         if self.plan_router is not None:
             self.plan_router.shutdown()
         self.scatter_q.put(None)

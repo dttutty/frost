@@ -1,3 +1,5 @@
+"""Batch metadata carrier passed from the host to worker processes."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,6 +15,32 @@ from .plan import PlanSet
 
 @dataclass(kw_only=True)
 class Meta:
+    """All information a worker needs to execute one training or evaluation step.
+
+    Scattered from the host to each worker via ``scatter_object_list``.  The
+    ``graph`` and ``plan_set`` fields are populated by the H2D thread after the
+    host scatter.
+
+    Attributes:
+        cur_epoch: Zero-based epoch index.
+        cur_macro_of_split: Zero-based index of this macro-batch within the
+            current data split (train / val / test).
+        n_macro_of_split: Total number of macro-batches in this split.
+        cur_macro_of_epoch: Zero-based macro-batch index within the full epoch
+            (across all splits).
+        split: Data split this batch belongs to.
+        n_src: Number of source nodes in this batch (before ``2 + n_neg``
+            expansion).
+        batch_idx: Global batch counter used to synchronise P2P memory writes.
+        flat_graph: Flat sampled subgraph received from the host; ``None`` for
+            the sentinel end-of-epoch signal.
+        buf_len: Number of valid rows in the ``flat_graph`` RingBuf slot.
+        graph: Inflated ``Graph`` produced by H2D; populated in-place by H2D.
+        plan_set: Memory / mailbox / nfeat access plans; set by the Planner.
+        labels: Binary link-prediction labels for this batch, or ``None``.
+        fanout: Fanout list forwarded from the config, or ``None``.
+    """
+
     cur_epoch: int
     cur_macro_of_split: int
     n_macro_of_split: int
@@ -29,6 +57,12 @@ class Meta:
 
     @cached_property
     def macro_position_of_split(self) -> str | None:
+        """Return the positional label of this batch within its data split.
+
+        Returns:
+            ``"first"`` for the first batch, ``"last"`` for the final batch,
+            or ``None`` for any batch in between.
+        """
         if self.cur_macro_of_split + 1 == self.n_macro_of_split:
             return "last"
         elif self.cur_macro_of_split == 0:
@@ -38,4 +72,5 @@ class Meta:
 
     @cached_property
     def is_last_macro_of_epoch(self) -> bool:
+        """Return ``True`` iff this is the final batch of the test split."""
         return self.macro_position_of_split == "last" and self.split == "test"

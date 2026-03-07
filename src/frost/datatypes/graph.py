@@ -1,3 +1,5 @@
+"""Graph datatypes used to carry sampled subgraph data through the pipeline."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,7 +10,28 @@ from torch import Tensor
 
 @dataclass(kw_only=True)
 class FlatGraph:
-    """Sequence sampling metadata."""
+    """Contiguous flat representation of a sampled subgraph stored in a RingBuf slot.
+
+    All node/edge tensors are concatenated in order: root nodes first, then
+    per-hop neighbor tiers.  Call ``unflatten`` to recover the hierarchical
+    ``Graph`` view before model forward passes.
+
+    Attributes:
+        nid: Concatenated node IDs for every tier.
+        eid: Concatenated edge IDs for every tier.
+        ts: Concatenated timestamps for every tier.
+        nfeat: Static node features loaded by H2D, or ``None``.
+        efeat: Static edge features loaded by H2D, or ``None``.
+        mem: Node memory vectors loaded by H2D, or ``None``.
+        mem_ts: Timestamps of the last memory update, or ``None``.
+        box: Mailbox slot tensors loaded by H2D, or ``None``.
+        box_ts: Timestamps of mailbox slots, or ``None``.
+        detached_mem: Post-update memory written by ``TransformerMemoryUpdater``
+            for downstream consumption; must be written to this field, not to
+            a module-level attribute.
+        detached_ts: Timestamps paired with ``detached_mem``.
+        detached_nid: Node IDs paired with ``detached_mem``.
+    """
 
     nid: Tensor  # Total length of all nids in SeqGraph
     eid: Tensor  # Total length of all eids in SeqGraph
@@ -24,6 +47,7 @@ class FlatGraph:
     detached_nid: Tensor | None = None
 
     def to(self, device: torch.device) -> FlatGraph:
+        """Return a new ``FlatGraph`` with all tensors moved to ``device``."""
         # discard detached_mem
         return FlatGraph(
             nid=self.nid.to(device),
@@ -129,6 +153,24 @@ class FlatGraph:
 
 @dataclass(kw_only=True)
 class NeighborOnHop:
+    """Sampled neighbors for a single hop in the multi-hop neighborhood.
+
+    The total number of rows equals the product of root count and all fanout
+    values up to this hop.  ``nid == -1`` indicates a padding entry and must
+    not be aggregated.
+
+    Attributes:
+        nid: Neighbor node IDs; shape ``[prev_tier_size * fanout[k]]``.
+        eid: Edge IDs connecting parent tier to these neighbors.
+        ts: Timestamps of the corresponding edges.
+        nfeat: Static node features for these neighbors, or ``None``.
+        efeat: Static edge features for the connecting edges, or ``None``.
+        mem: Memory vectors for these neighbors, or ``None``.
+        mem_ts: Timestamps of the last memory update, or ``None``.
+        box: Mailbox slot tensors for these neighbors, or ``None``.
+        box_ts: Timestamps of the mailbox slots, or ``None``.
+    """
+
     # For 1-hop neighbors, length = root_nid length * fanout[0]
     # For 2-hop neighbors, length = root_nid length * fanout[0] * fanout[1]
     # and so on.
@@ -145,7 +187,24 @@ class NeighborOnHop:
 
 @dataclass(kw_only=True)
 class Graph:
-    """Sequence sampling metadata."""
+    """Hierarchical sampled subgraph consumed by encoder modules.
+
+    Produced by ``FlatGraph.unflatten``.  Root nodes represent the
+    ``(src, pos_dst, neg_dst×n_neg)`` triplets; ``neighbors`` holds per-hop
+    ``NeighborOnHop`` objects indexed from 0 (1-hop) outward.
+
+    Attributes:
+        root_nid: Root node IDs, shape ``[n_src * (2 + n_neg)]``.
+            ``nid == -1`` marks padding rows that should not be aggregated.
+        root_ts: Timestamps of the root interaction events.
+        root_nfeat: Static node features for root nodes, or ``None``.
+        root_mem: Memory vectors for root nodes, or ``None``.
+        root_mem_ts: Timestamps of root nodes' last memory update, or ``None``.
+        root_box: Mailbox slot tensors for root nodes, or ``None``.
+        root_box_ts: Timestamps of root mailbox slots, or ``None``.
+        neighbors: Per-hop neighbor data; ``None`` for 0-hop (JODIE) models.
+        fanout: Fanout list used when sampling, e.g. ``[10]`` for 1-hop TGN.
+    """
 
     # If nid is -1, then eid is also -1, indicating padding that should not be aggregated.
     # Length is (1+n_neg)x number of src nodes = (src, pos, neg)

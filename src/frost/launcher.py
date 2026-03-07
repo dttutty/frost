@@ -25,6 +25,17 @@ faulthandler.enable()
 
 
 def launch(cfg: DictConfig):
+    """Initialize distributed training and launch Host or Worker processes.
+
+    Sets up the gloo process group, loads and prepares the dataset, builds shared
+    memory structures (RingBuf, MemBoxStoreManager), then forks behavior based on
+    rank: the highest rank becomes the Host (orchestrates sampling and scattering),
+    while all other ranks become Workers (run the training loop on GPU).
+
+    Args:
+        cfg: Hydra DictConfig containing all experiment hyperparameters including
+            dataset, model, sampler, optimizer, and runtime settings.
+    """
     dist.init_process_group(backend="gloo")
 
     env: Env = Env.initial()

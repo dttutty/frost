@@ -1,3 +1,10 @@
+"""Host-to-Device (H2D) transfer thread for the worker pipeline.
+
+Moves static features (nfeat, efeat) from shared CPU memory to the GPU for
+each incoming batch and constructs per-batch label tensors.  When a
+``MemBoxStore`` is absent the output queue feeds directly into ``full_q``;
+otherwise it feeds into the ``DynamicAssembler``.
+"""
 import logging
 import threading
 from queue import Queue as Q
@@ -15,6 +22,26 @@ logger = logging.getLogger(__name__)
 
 
 class H2D(StreamThreadBase):
+    """Background thread that transfers static features and labels from CPU to GPU.
+
+    Dequeues ``Meta`` objects from ``in_q``, fills edge features and (when
+    present) node features via ``StaticAssembler``, moves the flat graph to the
+    target device, constructs binary labels (ones for positives, zeros for
+    negatives), and enqueues the result together with a ``CudaEvent`` into
+    ``out_q``.
+
+    Args:
+        ring_buf: Shared ring buffer (not used for data here, kept for context).
+        nfeat: CPU tensor of node features, or ``None`` if the dataset has none.
+        efeat: CPU tensor of edge features, or ``None`` if the dataset has none.
+        in_q: Input queue producing ``Meta | "end_of_epoch" | None``.
+        out_q: Output queue consuming ``(Meta, CudaEvent) | "end_of_epoch" | None``.
+        stop_ev: Shared stop event.
+        device: Target CUDA device.
+        history: Number of historical hops (unused; reserved for future use).
+        n_neg: Number of negative samples per positive edge.
+    """
+
     def __init__(
         self,
         ring_buf: RingBuf,
@@ -44,6 +71,17 @@ class H2D(StreamThreadBase):
 
     @torch.no_grad()
     def logic(self) -> None:
+        """Main loop: transfer each batch from CPU to GPU and forward downstream.
+
+        For each ``Meta`` received from ``in_q``:
+
+        1. Fills edge features if ``efeat`` is configured.
+        2. Zeros out negative-edge IDs to prevent label leakage.
+        3. Moves the flat graph to the GPU.
+        4. Constructs binary label tensor (1 per positive, 0 per negative).
+        5. Fills node features if ``nfeat`` is configured.
+        6. Records a CUDA event and enqueues ``(meta, event)`` into ``out_q``.
+        """
         # batch_count = 0
 
         while not self.stop_ev.is_set():

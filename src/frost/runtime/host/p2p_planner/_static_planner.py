@@ -48,6 +48,7 @@ class StaticPlanner(ThreadBase):
         ]
 
     def run(self) -> None:
+        """Execute ``logic()`` and handle crashes by logging, setting stop event, and exiting."""
         try:
             self.logic()
         except Exception:
@@ -57,6 +58,16 @@ class StaticPlanner(ThreadBase):
             os._exit(1)
 
     def logic(self) -> None:
+        """Main planning loop for static node features.
+
+        Uses a one-batch lookahead: each incoming per-GPU nfeat need set is held as
+        ``pending`` until the next batch arrives so that the planner can decide which
+        features from the current batch to keep in cache (``to_cache``) versus which
+        new features the next batch must fetch from CPU (``fetch``).  Sentinel handling:
+
+        - ``None``: forward ``None`` to the output queue and exit.
+        - ``"end_of_epoch"``: plan the pending batch with empty next-batch need sets.
+        """
         batch_count = 0
 
         while not self.stop_ev.is_set():

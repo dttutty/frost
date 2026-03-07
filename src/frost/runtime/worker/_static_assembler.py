@@ -1,3 +1,9 @@
+"""Static feature assembler for the H2D pipeline.
+
+Manages the incremental transfer of node and edge features from shared CPU
+memory to GPU.  Node features are cached across batches via a rolling delta
+(``nfeat_delta``) so that only newly required features are fetched each step.
+"""
 import logging
 
 import torch
@@ -35,6 +41,22 @@ class StaticAssembler:
         nfeat_plan: "StaticPlan",
         meta: "Meta",
     ) -> "NodeFeatNid":
+        """Build a sorted ``NodeFeatNid`` lookup table for the current batch.
+
+        Uses the ``StaticPlan`` produced by the host planner:
+
+        * If ``plan.fetch`` is empty, all required features are already in the
+          ``nfeat_delta`` cache from the previous batch.
+        * Otherwise, fetches the missing rows from ``shared_nfeat``, merges
+          them with the cached delta, and updates the cache.
+
+        Args:
+            nfeat_plan: Plan specifying which NIDs to fetch vs. cache.
+            meta: Batch metadata (used for debugging context).
+
+        Returns:
+            Sorted ``NodeFeatNid`` containing all features needed for this batch.
+        """
         assert self.shared_nfeat is not None
         to_cache, fetch = nfeat_plan.to_cache.data, nfeat_plan.fetch.data
 
@@ -81,6 +103,20 @@ class StaticAssembler:
         nfeat_nid: "NodeFeatNid",
         meta: "Meta",
     ) -> FlatGraph:
+        """Scatter node features into ``flat_graph.nfeat`` using binary search.
+
+        Assigns the feature vector from ``nfeat_nid`` to every valid (non-``-1``)
+        NID in ``flat_graph.nid``.  Raises ``ValueError`` if any NID is absent
+        from the lookup table.
+
+        Args:
+            flat_graph: The FlatGraph to annotate; modified in-place.
+            nfeat_nid: Sorted lookup table mapping NID → feature vector.
+            meta: Batch metadata (used for debugging context).
+
+        Returns:
+            The same ``flat_graph`` with ``nfeat`` populated.
+        """
         assert self.shared_nfeat is not None
         assert nfeat_nid is not None
         assert nfeat_nid.is_sorted
@@ -135,6 +171,20 @@ class StaticAssembler:
         n_src: int,
         meta: "Meta",
     ) -> FlatGraph:
+        """Gather edge features from shared CPU storage into ``flat_graph.efeat``.
+
+        Only source-edge positions (EID != ``-1``, excluding dst/neg positions
+        ``n_src:3*n_src``) are filled.  Raises ``ValueError`` if no valid edges
+        are found or if any EID is out of bounds.
+
+        Args:
+            flat_graph: The FlatGraph to annotate; modified in-place.
+            n_src: Number of source nodes in this batch.
+            meta: Batch metadata (used for debugging context).
+
+        Returns:
+            The same ``flat_graph`` with ``efeat`` populated.
+        """
         # Handle efeat reuse for all versions
         assert self.shared_efeat is not None
         # Assign shared_efeat to a local variable for clarity
