@@ -22,8 +22,12 @@ class Postman:
 
     def deliver(self, graph: "Graph", mail_data: torch.Tensor) -> "MailEntry":
         """
-        Deliver mails from the first 2/3 of root nodes to their 1-hop neighbors
-        AND to themselves (self-delivery).
+        Deliver mails from the first 2/3 of root nodes to their 1-hop neighbors.
+
+        Each source/destination node's mail is broadcast to its sampled neighbors
+        (padding entries ``-1`` are skipped).  Root nodes do **not** receive their
+        own mail via this path; their memory is updated directly by the memory
+        updater.
 
         Args:
             graph: SeqGraph containing the batch structure.
@@ -72,16 +76,11 @@ class Postman:
         expanded_ts = sender_ts.unsqueeze(1).expand(target_len, S)
         nbr_new_ts = expanded_ts[valid_mask]  # Shape: [K]
 
-        # 8. Self-delivery: root nodes also receive their own mail
-        new_nids = torch.cat([sender_nids, nbr_new_nids], dim=0)
-        new_mail_data = torch.cat([mail_data, nbr_new_mail_data], dim=0)
-        new_ts = torch.cat([sender_ts, nbr_new_ts], dim=0)
-
-        # 9. Return the final MailEntry
+        # 8. Return the final MailEntry (neighbors only; roots are not written here)
         return MailEntry(
-            nid=new_nids,
-            data=new_mail_data,
-            ts=new_ts,
+            nid=nbr_new_nids,
+            data=nbr_new_mail_data,
+            ts=nbr_new_ts,
             is_sorted=False,
             is_unique=False,
         )
