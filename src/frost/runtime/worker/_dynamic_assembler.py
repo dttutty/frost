@@ -315,6 +315,32 @@ class DynamicAssembler(StreamThreadBase):
                 valid_mask,
             )
 
+            # ----- APAN optimization: pre-fill box for delta nodes -----
+            # For boxsize > 1, delta nodes will need old ring-buffer contents
+            # on GPU so that _apply_box_mail_delta can do a pure GPU scatter.
+            # Pre-load them here (async H2D) instead of synchronous CPU→GPU
+            # inside the delta path.
+            if self.boxsize > 1:
+                box_delta_mask = self._build_delta_mask(graph, box_plan)
+                delta_nids_gpu = graph.nid[box_delta_mask]
+                if delta_nids_gpu.numel() > 0:
+                    delta_nids_cpu = delta_nids_gpu.cpu().long()
+                    # Batch H2D: old ring-buffer contents
+                    graph.box[box_delta_mask] = (
+                        self.shared.box[delta_nids_cpu].to(self.device)
+                    )
+                    graph.box_ts[box_delta_mask] = (
+                        self.shared.box_ts[delta_nids_cpu].to(self.device)
+                    )
+                    # Cache ring-buffer write positions on GPU for later
+                    graph._box_pos_delta = (
+                        self.shared.box_pos[delta_nids_cpu].to(self.device)
+                    )
+                    graph._box_delta_mask = box_delta_mask
+                else:
+                    graph._box_pos_delta = None
+                    graph._box_delta_mask = None
+
     def _build_delta_mask(
         self,
         graph: FlatGraph,
@@ -371,52 +397,57 @@ class DynamicAssembler(StreamThreadBase):
         graph: FlatGraph,
         box_delta_mask: torch.Tensor,
     ) -> None:
-        """Insert P2P delta mail (boxsize=1) into full box for nodes with boxsize > 1.
+        """Insert P2P delta mail (boxsize=1) into pre-filled box on GPU.
 
-        For delta nodes (not covered by CPU fetch), reads the old box from CPU
-        shared memory and inserts the P2P mail at the ring-buffer write position.
+        Relies on ``prepare_shared_features`` having already loaded the old
+        ring-buffer contents and ``box_pos`` for delta nodes into
+        ``graph.box`` / ``graph._box_pos_delta``.  This method performs
+        only GPU-local scatter—no CPU↔GPU transfers on the critical path.
         """
         if delta_box.nid.numel() == 0:
             return
 
-        valid_nids = graph.nid[box_delta_mask]
-        if valid_nids.numel() == 0:
-            return
+        # Use the pre-cached delta mask and box_pos from prepare_shared_features
+        cached_mask = getattr(graph, "_box_delta_mask", None)
+        cached_pos = getattr(graph, "_box_pos_delta", None)
+        if cached_mask is not None and cached_pos is not None:
+            # Fast path: graph.box already has old ring-buffer contents.
+            valid_nids = graph.nid[cached_mask]
+            if valid_nids.numel() == 0:
+                return
 
-        pos = torch.searchsorted(delta_box.nid, valid_nids)
-        in_bound = pos < delta_box.nid.numel()
-        pos_safe = pos.clamp(max=delta_box.nid.numel() - 1)
-        found_mask = in_bound & (delta_box.nid[pos_safe] == valid_nids)
+            pos = torch.searchsorted(delta_box.nid, valid_nids)
+            in_bound = pos < delta_box.nid.numel()
+            pos_safe = pos.clamp(max=delta_box.nid.numel() - 1)
+            found_mask = in_bound & (delta_box.nid[pos_safe] == valid_nids)
 
-        if not found_mask.any():
-            return
+            if not found_mask.any():
+                return
 
-        global_positions = torch.nonzero(box_delta_mask, as_tuple=False).squeeze(-1)[
-            found_mask
-        ]
-        local_positions = pos_safe[found_mask]
-        matched_nids = delta_box.nid[local_positions]
+            global_positions = torch.nonzero(
+                cached_mask, as_tuple=False
+            ).squeeze(-1)[found_mask]
+            local_positions = pos_safe[found_mask]
 
-        # Read old box from CPU shared memory for these nodes
-        nids_cpu = matched_nids.cpu().long()
-        old_box_data = self.shared.box[nids_cpu].to(self.device)  # [M, boxsize, d_mail]
-        old_box_ts = self.shared.box_ts[nids_cpu].to(self.device)  # [M, boxsize]
+            # Ring-buffer write position (already on GPU)
+            write_pos = (cached_pos[found_mask] - 1) % self.boxsize
 
-        # Ring-buffer position: write_mail already wrote at (box_pos - 1) % boxsize
-        # and advanced box_pos.  Overwrite that slot with the P2P data (freshest).
-        ring_pos = self.shared.box_pos[nids_cpu].to(self.device)  # [M]
-        write_pos = (ring_pos - 1) % self.boxsize  # [M]
+            # delta_box.data is [N, 1, d_mail] → squeeze to [M, d_mail]
+            mail_data = delta_box.data[local_positions].squeeze(1)
+            mail_ts = delta_box.ts[local_positions].squeeze(1)
 
-        # delta_box.data is [N, 1, d_mail] → squeeze to [M, d_mail]
-        mail_data = delta_box.data[local_positions].squeeze(1)
-        mail_ts = delta_box.ts[local_positions].squeeze(1)
+            # Pure GPU scatter into the pre-filled ring buffer
+            arange = torch.arange(mail_data.shape[0], device=self.device)
+            graph.box[global_positions, write_pos] = mail_data
+            graph.box_ts[global_positions, write_pos] = mail_ts
 
-        arange = torch.arange(mail_data.shape[0], device=self.device)
-        old_box_data[arange, write_pos] = mail_data
-        old_box_ts[arange, write_pos] = mail_ts
-
-        graph.box[global_positions] = old_box_data
-        graph.box_ts[global_positions] = old_box_ts
+            # Clean up cached attributes
+            del graph._box_pos_delta
+            del graph._box_delta_mask
+        else:
+            # Fallback: pre-fill was skipped (no delta nodes).
+            # Nothing to do—graph.box is already complete from plan fetch.
+            pass
 
     def apply_delta_features(
         self,
