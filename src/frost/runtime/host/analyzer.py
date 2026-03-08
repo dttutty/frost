@@ -29,8 +29,10 @@ class APANAnalyzer:
     """Combined analyzer + planner for the APAN model (1-hop, sample_4_neg=False).
 
     Uses ``APANDynamicPlanner`` for mail planning. The box update set includes
-    root nodes (src+dst, self-delivery) plus their valid 1-hop neighbors,
-    matching what ``Postman.deliver()`` produces at runtime.
+    only the valid 1-hop neighbors of src+dst, matching what
+    ``Postman.deliver()`` produces at runtime.  Root nodes (src, dst) are
+    **not** written to the mailbox by the postman; their state is updated
+    directly through the memory updater.
     """
 
     def __init__(self, n_neg: int):
@@ -54,14 +56,14 @@ class APANAnalyzer:
 
         pos_root = TensorSet(torch.cat([src, dst], dim=0))
         all_nodes_set = TensorSet(all_nid)
-        box_update_ts = pos_root | TensorSet(pos_ngh)
+        box_update = TensorSet(pos_ngh)
 
         return Access(
             required_mem=all_nodes_set,
             mem_update=pos_root,
             all_nodes_in_graph=all_nodes_set,
             pos_seed_need=pos_root,
-            box_update=box_update_ts,
+            box_update=box_update,
             required_nfeat=all_nodes_set,
         )
 

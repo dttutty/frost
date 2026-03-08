@@ -13,7 +13,7 @@ defaults:
   - ring_buf: base # don't change this, current version only support base ring_buf
   - _self_
 
-epoch: 3
+epoch: 50
 batch_size: 4000 # local batch_size
 patience: 50
 dropout: 0.2
@@ -30,5 +30,5 @@ fanout: [10]
 lr: 0.0001
 n_neg: 1
 handle_stale: false
-compile: false
+compile: true
 tf32: true
