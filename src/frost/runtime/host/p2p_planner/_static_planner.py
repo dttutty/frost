@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from frost.aliases.host import MetasStNeed
-from frost.datatypes.plan import StPlan
+from frost.datatypes.plan import StaticPlan
 from frost.runtime._thread_base import ThreadBase
 from frost.utils.tensor_set import TensorSet
 
@@ -18,24 +18,19 @@ logger = logging.getLogger(__name__)
 
 class StaticPlanner(ThreadBase):
     """
-    这个是对那种mailbox_update=mem_update的planner
+    Planner for static node features (nfeat), where each batch's access set
+    is determined solely by which nodes appear in that batch (no P2P needed).
     """
 
     def __init__(
         self,
         gpus_distance: np.ndarray,
         in_q: Queue[MetasStNeed | None | Literal["end_of_epoch"]],
-        out_q: Queue[list[StPlan] | None],
+        out_q: Queue[list[StaticPlan] | None],
         stop_ev: threading.Event,
     ) -> None:
         super().__init__(name="static_planner", stop_ev=stop_ev)
-        """
-        初始化规划器。
-
-        Args:
-            gpus_distance: GPU 距离矩阵，用于计算距离。
-        """
-        # 1. 存储静态配置 (解决痛点 1 和 4)
+        # Store configuration
         self.gpus_distance = gpus_distance
         self.n_gpus = len(self.gpus_distance)
 
@@ -47,13 +42,13 @@ class StaticPlanner(ThreadBase):
         # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         device = torch.device("cpu")
 
-        # 将原来的 list[set[int]] 改为 list[TensorSet]
         self.fetch: list[TensorSet] = [
             TensorSet(torch.tensor([], dtype=torch.long, device=device))
             for _ in range(self.n_gpus)
         ]
 
     def run(self) -> None:
+        """Execute ``logic()`` and handle crashes by logging, setting stop event, and exiting."""
         try:
             self.logic()
         except Exception:
@@ -63,6 +58,16 @@ class StaticPlanner(ThreadBase):
             os._exit(1)
 
     def logic(self) -> None:
+        """Main planning loop for static node features.
+
+        Uses a one-batch lookahead: each incoming per-GPU nfeat need set is held as
+        ``pending`` until the next batch arrives so that the planner can decide which
+        features from the current batch to keep in cache (``to_cache``) versus which
+        new features the next batch must fetch from CPU (``fetch``).  Sentinel handling:
+
+        - ``None``: forward ``None`` to the output queue and exit.
+        - ``"end_of_epoch"``: plan the pending batch with empty next-batch need sets.
+        """
         batch_count = 0
 
         while not self.stop_ev.is_set():
@@ -75,7 +80,7 @@ class StaticPlanner(ThreadBase):
             if need == "end_of_epoch":  # None
                 assert self.pending is not None
                 avails = self.pending
-                # 没有下一个 batch 了，next_needs 为空
+                # Last batch of the epoch: next_needs is empty
                 next_needs: list[TensorSet] = [
                     TensorSet(
                         torch.tensor([], dtype=torch.long, device=torch.device("cpu"))
@@ -106,15 +111,12 @@ class StaticPlanner(ThreadBase):
         self,
         avails_of_1: list[TensorSet],
         needs_of_2: list[TensorSet],
-    ) -> list[StPlan]:
-        """规划内存（Memory）的P2P、CPU预取和CPU写回。"""
+    ) -> list[StaticPlan]:
+        """Compute per-GPU StaticPlan: what to cache from batch 1 and what to fetch for batch 2."""
 
         n_gpus = self.n_gpus
-        # fetchs_of_2 need to be filled
-
         device = torch.device("cpu")
 
-        # 将原来的 list[set[int]] 改为 list[TensorSet]
         fetchs_of_2: list[TensorSet] = [
             TensorSet(torch.tensor([], dtype=torch.long, device=device))
             for _ in range(n_gpus)
@@ -126,7 +128,7 @@ class StaticPlanner(ThreadBase):
 
         for n in range(n_gpus):
             to_cache_of_1 = avails_of_1[n] & needs_of_2[n]
-            plan_of_1 = StPlan(
+            plan_of_1 = StaticPlan(
                 to_cache=to_cache_of_1,
                 fetch=self.fetchs[n],
             )

@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from queue import Queue as Q  # 这是给多线程用的
+from queue import Queue as Q
 from typing import Literal
 
 import numpy as np
@@ -9,14 +9,20 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from frost.aliases.host import DyPlanOutQ, MataBatcherInQ, MetaBundleQ, StPlanOutQ
+from frost.aliases.host import (
+    AccessBundle,
+    DynamicPlanOutQ,
+    MetaBundle,
+    StaticPlanOutQ,
+)
+from frost.datatypes.access import Access
 from frost.datatypes.env import Env
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.protocols.analyzer_proto import AnalyzerProto
 from frost.protocols.ngh_sampler_proto import NghSamplerProto
-from frost.runtime.host import MetaBatcher, Planner, Scatter
-from frost.runtime.host._df_split import make_balance_plan
+from frost.runtime.host import PlanRouter, Scatter
+from frost.runtime.host._batch_balance import make_balance_plan
 from frost.sampling.neg_sampler import NegLinkSampler
 
 logger = logging.getLogger(__name__)
@@ -29,15 +35,28 @@ def _disable_tqdm_monitor_thread() -> None:
 
 
 class Host:
-    meta_in_q: MataBatcherInQ
-    mem_plan_out_q: DyPlanOutQ | None = None
-    mail_plan_out_q: DyPlanOutQ | None = None
-    nfeat_plan_out_q: StPlanOutQ | None = None
+    """Orchestrates the host-side pipeline for distributed Temporal GNN training.
 
-    meta_bundle_q: MetaBundleQ
-    scatter_q: MetaBundleQ
+    The Host process drives the full data pipeline: it reads the edge DataFrame,
+    splits it into train/val/test, samples neighbors and negative destinations for
+    each macro-batch, optionally computes memory/nfeat access plans via
+    ``PlanRouter``, and scatters ``Meta`` bundles to Worker processes through the
+    ``Scatter`` thread.  Early stopping is evaluated after each epoch.
 
-    planner: Planner | None = None
+    Attributes:
+        mem_plan_out_q: Output queue for memory DynamicPlan lists, or None.
+        mail_plan_out_q: Output queue for mailbox DynamicPlan lists, or None.
+        nfeat_plan_out_q: Output queue for node-feature StaticPlan lists, or None.
+        scatter_q: Queue of MetaBundles (or sentinels) consumed by Scatter.
+        plan_router: Optional PlanRouter managing sub-planner threads.
+    """
+
+    mem_plan_out_q: DynamicPlanOutQ | None = None
+    mail_plan_out_q: DynamicPlanOutQ | None = None
+    nfeat_plan_out_q: StaticPlanOutQ | None = None
+
+    scatter_q: Q[MetaBundle | None | Literal["end_of_epoch"]]
+    plan_router: PlanRouter | None = None
 
     def __init__(
         self,
@@ -50,15 +69,13 @@ class Host:
         ngh_sampler: NghSamplerProto,
         env: Env,
         start_time: float,
-        analyzer: AnalyzerProto,
-        gpu_topo: list[int],
+        planner: AnalyzerProto,
+        gpu_topo: list,
         batch_size: int,
         n_epoch: int,
         patience: int,
+        handle_stale: bool = False,
     ) -> None:
-        """
-        initialize the host with configuration, graph data, edge dataframe, and environment settings
-        """
         self.neg_sampler = neg_sampler
         self.ngh_sampler = ngh_sampler
         self.start_time = start_time
@@ -67,59 +84,12 @@ class Host:
         self.has_mem = has_mem
         self.mail_same_plan_as_mem = mail_same_plan_as_mem
         self.n_gpu = env.n_gpu
-        self.batch_size = batch_size  # tcfg 会在 run_epoch 中被修改，所以拷贝一份
-        self.analyzer = analyzer
+        self.batch_size = batch_size
+        self.analyzer = planner
 
-        # 1. 初始化通信器
         self.stop_ev = threading.Event()
-
-        self.meta_in_q = Q(maxsize=4 if not self.has_mem else 2)
-        self.meta_bundle_q = Q(maxsize=1)
-        self.scatter_q = Q(maxsize=2 if not self.has_mem else 1)
         self.cur_macro_of_epoch = 0
-
-        if self.has_mem:
-            self.mem_plan_out_q = Q(maxsize=1)
-            self.mail_plan_out_q = Q(maxsize=1)
-        if self.has_nfeat:
-            self.nfeat_plan_out_q = Q(maxsize=1)
-
-        if self.has_nfeat or self.has_mem:
-            self.meta_batcher = MetaBatcher(
-                n_gpu=env.n_gpu,
-                meta_in_q=self.meta_in_q,
-                dest_q=self.meta_bundle_q,
-                stop_ev=self.stop_ev,
-            )
-
-            self.planner = Planner(
-                gpu_topo=gpu_topo,
-                in_q=self.meta_bundle_q,
-                out_q=self.scatter_q,
-                mem_plan_out_q=self.mem_plan_out_q,
-                mail_plan_out_q=self.mail_plan_out_q,
-                nfeat_plan_out_q=self.nfeat_plan_out_q,
-                stop_ev=self.stop_ev,
-            )
-        else:
-            self.meta_batcher = MetaBatcher(
-                n_gpu=env.n_gpu,
-                meta_in_q=self.meta_in_q,
-                dest_q=self.scatter_q,
-                stop_ev=self.stop_ev,
-            )
-
-        self.result_q: Q[Result] = Q(maxsize=10)
-        self.scatter = Scatter(
-            n_gpu=env.n_gpu,
-            in_q=self.scatter_q,
-            mem_plan_out_q=self.mem_plan_out_q,
-            mail_plan_out_q=self.mail_plan_out_q,
-            nfeat_plan_out_q=self.nfeat_plan_out_q,
-            env=env,
-            result_q=self.result_q,
-            stop_ev=self.stop_ev,
-        )
+        self.batch_idx = 0
         self.curr_epoch = 0
         self.best_ap_epoch: int = -1
         self.best_ap_result: Result = Result(
@@ -130,19 +100,64 @@ class Host:
             test_auc=0.0,
             test_ap=0.0,
         )
-
         self.total_epoch = n_epoch
-
-        self.patience = patience  # 默认 50
+        self.patience = patience
         self.patience_counter = 0
         self.last_epoch_result: Result | None = None
-        self.batch_idx = 0
 
-        # 3rd module: scatter sender
-        # 3. 初始化采样器
+        self._init_pipeline(env, gpu_topo, handle_stale)
         self._init_dataset(df)
 
+    def _init_pipeline(self, env: Env, gpu_topo: list, handle_stale: bool) -> None:
+        """Fixed linear pipeline: main thread → [PlanRouter.dispatch() →] scatter_q → Scatter.
+
+        The main thread accumulates n_gpu metas per macro-batch, optionally dispatches to
+        sub-planner threads via PlanRouter.dispatch(), then puts MetaBundle into scatter_q.
+        No dedicated thread for routing — it is inlined into the main thread.
+        """
+        has_planner = self.has_nfeat or self.has_mem
+
+        self.result_q: Q[Result] = Q(maxsize=10)
+        self.scatter_q = Q(maxsize=2)
+
+        if has_planner:
+            if self.has_mem:
+                self.mem_plan_out_q = Q(maxsize=1)
+                self.mail_plan_out_q = Q(maxsize=1)
+            if self.has_nfeat:
+                self.nfeat_plan_out_q = Q(maxsize=1)
+
+            self.plan_router = PlanRouter(
+                gpu_topo=gpu_topo,
+                planner=self.analyzer,
+                mem_plan_out_q=self.mem_plan_out_q,
+                mail_plan_out_q=self.mail_plan_out_q,
+                nfeat_plan_out_q=self.nfeat_plan_out_q,
+                stop_ev=self.stop_ev,
+                handle_stale=handle_stale,
+            )
+
+        self.scatter = Scatter(
+            n_gpu=env.n_gpu,
+            in_q=self.scatter_q,
+            mem_plan_out_q=self.mem_plan_out_q,
+            mail_plan_out_q=self.mail_plan_out_q,
+            nfeat_plan_out_q=self.nfeat_plan_out_q,
+            env=env,
+            result_q=self.result_q,
+            stop_ev=self.stop_ev,
+        )
+
     def _init_dataset(self, df: pd.DataFrame) -> None:
+        """Preprocess the edge DataFrame and split into train/val/test subsets.
+
+        Timestamps are normalised to start at zero. The ``ext_roll`` column is
+        used to locate split boundaries (0 = train, 1 = val, >=2 = test).
+
+        Args:
+            df: Raw edge DataFrame with columns ``src``, ``dst``, ``time``,
+                ``ext_roll``.
+        """
         # preprocess dataframe
         df["src"] = df["src"].astype(np.int64)
         df["dst"] = df["dst"].astype(np.int64)
@@ -156,12 +171,17 @@ class Host:
         self.te_df = df[val_edge_end:]
 
     def handle_result_q(self) -> None:
+        """Block until a Result arrives from the Scatter thread and log epoch metrics.
+
+        The result is cached in ``self.last_epoch_result`` so that
+        ``early_stop_check`` can read it without a second queue pop.
+        """
         res = self.result_q.get(block=True)
 
-        # 将结果存下来，供 early_stop_check 使用
+        # Cache result so early_stop_check can read it
         self.last_epoch_result = res
 
-        # 打印日志 (Host 端统一打印，Worker 端就可以静默了)
+        # Host prints the epoch summary; workers stay silent
         print(
             f"[Epoch {self.curr_epoch}] "
             f"Train Loss: {res.train_loss:.4f} | Val Loss: {res.val_loss:.4f} | "
@@ -171,26 +191,25 @@ class Host:
 
     def early_stop_check(self, cur_epoch: int) -> bool:
         """
-        检查是否触发早停，并更新最佳模型记录。
-        返回: True 表示需要停止训练，False 表示继续。
+        Check whether early stopping should be triggered and update the best-model record.
+        Returns True if training should stop, False to continue.
         """
         res = self.last_epoch_result
         if res is None:
             return False
 
-        # --- 更新最佳指标 (AUC 和 AP 分别记录) ---
         is_best = False
 
-        # 1. 检查 AP (仅记录，不影响早停，除非你以 AP 为准)
+        # Check AP improvement
         if res.val_ap > self.best_ap_result.val_ap if self.best_ap_result else -1:
             self.best_ap_epoch = cur_epoch
             self.best_ap_result = res
-            is_best = True  # 标记为有好结果
+            is_best = True
         if is_best:
             self.patience_counter = 0
         else:
             self.patience_counter += 1
-        # --- 早停判断 ---
+        # Early stopping check
         if self.patience_counter >= self.patience:
             logger.info(
                 f"🛑 Early stopping triggered at epoch {cur_epoch}. "
@@ -201,19 +220,11 @@ class Host:
         return False
 
     def start_all_threads(self) -> None:
-        """
-        启动 Host 相关的所有线程
-        """
-        if self.has_nfeat or self.has_mem:
-            self.meta_batcher.start()
-            if self.planner is not None:
-                self.planner.start()
+        """Start all background threads (currently only the Scatter thread)."""
         self.scatter.start()
 
     def run(self) -> None:
-        """
-        公共的训练入口方法
-        """
+        """Main training entry point."""
         _disable_tqdm_monitor_thread()
         self.start_all_threads()
         for e in range(self.total_epoch):
@@ -225,7 +236,7 @@ class Host:
             if self.early_stop_check(e):
                 break
 
-        # 打印最佳AP对应的Test结果
+        # Print final test results for the best-AP checkpoint
         print(
             f"Best Val AP: {self.best_ap_result.val_ap:.4f} @ Epoch {self.best_ap_epoch} | "
             f"Test AP: {self.best_ap_result.test_ap:.4f} | "
@@ -237,6 +248,19 @@ class Host:
     def _handle_a_split(
         self, df: pd.DataFrame, split: Literal["train", "val", "test"], cur_epoch: int
     ) -> None:
+        """Process all macro-batches for one data split in the current epoch.
+
+        Validates that the split's ``ext_roll`` values are consistent, applies
+        ``make_balance_plan`` to assign edges to GPUs, then iterates over
+        macro-batches: builds ``Meta``/``Access`` pairs, optionally dispatches
+        to ``PlanRouter``, and enqueues bundles into ``scatter_q``. On the final
+        test split, sends the end-of-epoch sentinel.
+
+        Args:
+            df: Edge DataFrame for the split (train, val, or test).
+            split: String label identifying the split.
+            cur_epoch: Zero-based epoch index.
+        """
         if "ext_roll" in df.columns:
             ext_roll = df["ext_roll"]
             is_valid_split = (
@@ -275,9 +299,11 @@ class Host:
             desc=step_desc_map[split],
         ):
             assert isinstance(cur_macro_of_split, int)
+            meta_bundle: MetaBundle = []
+            access_bundle: AccessBundle = []
             for gpu, edges in step_df.groupby("gpu_id", sort=False):
                 assert isinstance(gpu, int)
-                self._add_to_td_list(
+                meta, access = self._add_to_td_list(
                     edges,
                     cur_epoch,
                     cur_macro_of_split,
@@ -286,14 +312,22 @@ class Host:
                     self.batch_idx,
                     gpu,
                 )
+                meta_bundle.append(meta)
+                access_bundle.append(access)
                 self.batch_idx += 1
+            if self.plan_router is not None:
+                self.plan_router.dispatch(meta_bundle, access_bundle)
+            self.scatter_q.put(meta_bundle)
             self.cur_macro_of_epoch += 1
 
         if split == "test":
             self._cleanup_per_epoch()
 
     def _cleanup_per_epoch(self) -> None:
-        self.meta_in_q.put("end_of_epoch")
+        """Signal end-of-epoch to the PlanRouter and Scatter, then increment counters."""
+        if self.plan_router is not None:
+            self.plan_router.signal_epoch_end()
+        self.scatter_q.put("end_of_epoch")
 
         self.cur_macro_of_epoch = 0
         self.curr_epoch += 1
@@ -307,23 +341,32 @@ class Host:
         split: Literal["train", "val", "test"],
         batch_idx: int,
         gpu_id: int,
-    ) -> None:
+    ) -> tuple[Meta, Access | None]:
+        """Build a Meta descriptor and optionally an Access plan for one micro-batch.
+
+        Converts the raw edge rows into tensors, samples negative destinations,
+        runs the neighbor sampler, and calls the analyzer to compute the access
+        plan (which shared-memory nodes need to be fetched/updated).
+
+        Args:
+            edges: Rows of the edge DataFrame assigned to this GPU for this step.
+            cur_epoch: Zero-based epoch index.
+            cur_macro_of_split: Macro-batch index within the current split.
+            n_macro_of_split: Total number of macro-batches in the current split.
+            split: String label of the current split.
+            batch_idx: Global batch index across all splits and epochs.
+            gpu_id: Target GPU rank for this micro-batch.
+
+        Returns:
+            A (Meta, Access | None) tuple; Access is None when no analyzer is
+            configured (e.g. TGAT / no-memory models).
+        """
         # show edges["time"].values for debug
         # logger.info(f"Edge times: {edges['time'].values}")
-        src = (
-            torch.as_tensor(edges["src"].values, dtype=torch.long).clone().contiguous()
-        )
-        dst = (
-            torch.as_tensor(edges["dst"].values, dtype=torch.long).clone().contiguous()
-        )
-        ts = (
-            torch.as_tensor(edges["time"].values, dtype=torch.float32)
-            .clone()
-            .contiguous()
-        )
-        eid = (
-            torch.as_tensor(edges["eid"].values, dtype=torch.long).clone().contiguous()
-        )
+        src = torch.from_numpy(edges["src"].to_numpy(copy=True)).to(torch.long)
+        dst = torch.from_numpy(edges["dst"].to_numpy(copy=True)).to(torch.long)
+        ts = torch.from_numpy(edges["time"].to_numpy(copy=True)).to(torch.float32)
+        eid = torch.from_numpy(edges["eid"].to_numpy(copy=True)).to(torch.long)
         # show ts content for debug
 
         # sample neg destination nodes
@@ -349,25 +392,23 @@ class Host:
             cur_epoch=cur_epoch,
             split=split,
             cur_macro_of_split=cur_macro_of_split,
-            cur_macro_of_epoch=self.cur_macro_of_epoch,  # 这里直接用 macro_of_split 来当 macro_of_epoch，因为我们是按照 split 来划分的
+            cur_macro_of_epoch=self.cur_macro_of_epoch,
             n_macro_of_split=n_macro_of_split,
-            flat_graph=None,  # 这个在 Host 端不需要构建，Worker 端会根据采样结果构建
+            flat_graph=None,
             n_src=src.shape[0],
             batch_idx=batch_idx,
             plan_set=None,
-            access=access,
             buf_len=len,
             fanout=self.ngh_sampler.fanout,
         )
 
-        self.meta_in_q.put(meta)
+        return meta, access
 
     def _cleanup(self) -> None:
-        self.meta_in_q.put(None)
-        self.meta_batcher.join()
-        if self.planner is not None:
-            self.planner.join()
-        print("MetaBatcher and Planner threads have been joined.")
+        """Shut down the PlanRouter and Scatter thread and log total elapsed time."""
+        if self.plan_router is not None:
+            self.plan_router.shutdown()
+        self.scatter_q.put(None)
         self.scatter.join()
         print("All threads have been joined. Host cleanup complete.")
         end = time.time()

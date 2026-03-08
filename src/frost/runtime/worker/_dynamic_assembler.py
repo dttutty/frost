@@ -1,3 +1,16 @@
+"""Dynamic assembler thread for merging local and P2P memory/mailbox data.
+
+For each batch this thread performs a two-phase assembly of node memory and
+mailbox tensors:
+
+1. ``prepare_shared_features``: read the locally owned entries from the shared
+   CPU ``MemBoxStore`` and scatter them into the FlatGraph tensors on GPU.
+2. ``apply_delta_features``: once the P2P delta arrives via ``delta_q``, fill
+   the remaining (remotely owned) entries received from peer GPUs.
+
+The assembled ``(Meta, CudaEvent)`` is forwarded to ``full_q`` for the main
+training loop.
+"""
 from __future__ import annotations
 
 import logging
@@ -8,11 +21,11 @@ from typing import cast
 
 import torch
 
-from frost.aliases.worker import DeltaQ, FullQ, H2DOutQ
+from frost.aliases.worker import AssembledQ, DeltaQ, H2DOutQ
 from frost.datatypes.graph import FlatGraph
-from frost.datatypes.mem_mail_box.box import BoxTsNid
-from frost.datatypes.mem_mail_box.mem import MemTsNid
-from frost.datatypes.plan import DyPlan
+from frost.datatypes.mem_mail_box.box import BoxEntry
+from frost.datatypes.mem_mail_box.mem import MemEntry
+from frost.datatypes.plan import DynamicPlan
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase
 from frost.shm.mem_mgr import MemBoxStore
@@ -21,18 +34,31 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True)
-class MemNBox:
-    mem: MemTsNid
-    box: BoxTsNid
+class MemAndBox:
+    """Container pairing a memory entry with its corresponding mailbox entry.
+
+    Attributes:
+        mem: Node memory entry (NID + data + timestamp).
+        box: Mailbox entry (NID + data + timestamp).
+    """
+
+    mem: MemEntry
+    box: BoxEntry
 
     @cached_property
-    def is_mem_mail_sorted(self) -> bool:
+    def is_mem_box_sorted(self) -> bool:
+        """Return True if both mem and box entries are sorted by NID."""
         assert self.mem is not None
         assert self.box is not None
         return self.mem.is_sorted and self.box.is_sorted
 
-    def sort_mem_and_mail(self) -> MemNBox:
-        if self.is_mem_mail_sorted:
+    def sort_mem_and_box(self) -> MemAndBox:
+        """Sort both mem and box entries by NID in-place and return self.
+
+        Returns:
+            The same ``MemAndBox`` instance with both entries sorted.
+        """
+        if self.is_mem_box_sorted:
             return self
 
         if self.mem is not None:
@@ -44,12 +70,29 @@ class MemNBox:
         return self
 
 
-class DyAssembler(StreamThreadBase):
+class DynamicAssembler(StreamThreadBase):
+    """Background thread that merges local shared memory and P2P delta into FlatGraph.
+
+    Receives partially-prepared batches from ``h2d_out_q``, fills locally
+    owned node memory / mailbox entries from ``MemBoxStore``, then waits for
+    the P2P delta from ``delta_q`` to fill remotely owned entries.  The
+    completed batch is forwarded to ``full_q``.
+
+    Args:
+        h2d_out_q: Input queue from the H2D thread.
+        delta_q: Queue carrying P2P delta tuples or the sentinel ``"nothing"``.
+        full_q: Output queue consumed by the main training loop.
+        stop_ev: Shared stop event.
+        device: Target CUDA device.
+        h2d_sem: Semaphore released by write-back threads to throttle the H2D pipeline.
+        mem_box_store: Shared CPU memory store for node memory and mailboxes.
+    """
+
     def __init__(
         self,
         h2d_out_q: H2DOutQ,
         delta_q: DeltaQ,
-        full_q: FullQ,
+        full_q: AssembledQ,
         stop_ev: threading.Event,
         device: torch.device,
         h2d_sem: threading.Semaphore,  # Optional semaphore for H2D synchronization
@@ -68,7 +111,7 @@ class DyAssembler(StreamThreadBase):
 
     def _fill_from_shared(
         self,
-        plan: DyPlan,
+        plan: DynamicPlan,
         shared_data: torch.Tensor,
         shared_ts: torch.Tensor,
         target_data: torch.Tensor,
@@ -215,8 +258,8 @@ class DyAssembler(StreamThreadBase):
 
         return global_positions, local_positions
 
-    def prep_shared_features(
-        self, graph: FlatGraph, mem_plan: DyPlan, box_plan: DyPlan
+    def prepare_shared_features(
+        self, graph: FlatGraph, mem_plan: DynamicPlan, box_plan: DynamicPlan
     ) -> None:
         """Step 1: Initialize tensors and fill local shared memory data."""
         num_nodes = graph.nid.shape[0]
@@ -272,13 +315,51 @@ class DyAssembler(StreamThreadBase):
                 valid_mask,
             )
 
+            # ----- APAN optimization: pre-fill box for delta nodes -----
+            # For boxsize > 1, delta nodes will need old ring-buffer contents
+            # on GPU so that _apply_box_mail_delta can do a pure GPU scatter.
+            # Pre-load them here (async H2D) instead of synchronous CPU→GPU
+            # inside the delta path.
+            if self.boxsize > 1:
+                box_delta_mask = self._build_delta_mask(graph, box_plan)
+                delta_nids_gpu = graph.nid[box_delta_mask]
+                if delta_nids_gpu.numel() > 0:
+                    delta_nids_cpu = delta_nids_gpu.cpu().long()
+                    # Batch H2D: old ring-buffer contents
+                    graph.box[box_delta_mask] = (
+                        self.shared.box[delta_nids_cpu].to(self.device)
+                    )
+                    graph.box_ts[box_delta_mask] = (
+                        self.shared.box_ts[delta_nids_cpu].to(self.device)
+                    )
+                    # Cache ring-buffer write positions on GPU for later
+                    graph._box_pos_delta = (
+                        self.shared.box_pos[delta_nids_cpu].to(self.device)
+                    )
+                    graph._box_delta_mask = box_delta_mask
+                else:
+                    graph._box_pos_delta = None
+                    graph._box_delta_mask = None
+
     def _build_delta_mask(
         self,
         graph: FlatGraph,
-        plan: DyPlan | None,
+        plan: DynamicPlan | None,
     ) -> torch.Tensor:
-        """Positions that must be filled by delta:
-        graph.nid != -1 and not covered by local shared fetch.
+        """Compute a boolean mask for positions that must be filled from the P2P delta.
+
+        A position requires delta data when:
+        * ``graph.nid[i] != -1`` (valid node), AND
+        * the NID is not already covered by the local shared fetch.
+
+        Args:
+            graph: The current FlatGraph whose ``nid`` tensor is queried.
+            plan: The DynamicPlan holding locally fetched NIDs; if ``None`` all
+                valid positions are considered remote.
+
+        Returns:
+            Boolean tensor of shape ``[graph.nid.shape[0]]`` where ``True``
+            means the position must be filled from the delta.
         """
         graph_nid = graph.nid
         assert graph_nid.dim() == 1, "graph.nid must be 1D"
@@ -310,12 +391,70 @@ class DyAssembler(StreamThreadBase):
         delta_mask[torch.nonzero(base_mask, as_tuple=False).squeeze(-1)] = ~in_shared
         return delta_mask
 
+    def _apply_box_mail_delta(
+        self,
+        delta_box: BoxEntry,
+        graph: FlatGraph,
+        box_delta_mask: torch.Tensor,
+    ) -> None:
+        """Insert P2P delta mail (boxsize=1) into pre-filled box on GPU.
+
+        Relies on ``prepare_shared_features`` having already loaded the old
+        ring-buffer contents and ``box_pos`` for delta nodes into
+        ``graph.box`` / ``graph._box_pos_delta``.  This method performs
+        only GPU-local scatter—no CPU↔GPU transfers on the critical path.
+        """
+        if delta_box.nid.numel() == 0:
+            return
+
+        # Use the pre-cached delta mask and box_pos from prepare_shared_features
+        cached_mask = getattr(graph, "_box_delta_mask", None)
+        cached_pos = getattr(graph, "_box_pos_delta", None)
+        if cached_mask is not None and cached_pos is not None:
+            # Fast path: graph.box already has old ring-buffer contents.
+            valid_nids = graph.nid[cached_mask]
+            if valid_nids.numel() == 0:
+                return
+
+            pos = torch.searchsorted(delta_box.nid, valid_nids)
+            in_bound = pos < delta_box.nid.numel()
+            pos_safe = pos.clamp(max=delta_box.nid.numel() - 1)
+            found_mask = in_bound & (delta_box.nid[pos_safe] == valid_nids)
+
+            if not found_mask.any():
+                return
+
+            global_positions = torch.nonzero(
+                cached_mask, as_tuple=False
+            ).squeeze(-1)[found_mask]
+            local_positions = pos_safe[found_mask]
+
+            # Ring-buffer write position (already on GPU)
+            write_pos = (cached_pos[found_mask] - 1) % self.boxsize
+
+            # delta_box.data is [N, 1, d_mail] → squeeze to [M, d_mail]
+            mail_data = delta_box.data[local_positions].squeeze(1)
+            mail_ts = delta_box.ts[local_positions].squeeze(1)
+
+            # Pure GPU scatter into the pre-filled ring buffer
+            arange = torch.arange(mail_data.shape[0], device=self.device)
+            graph.box[global_positions, write_pos] = mail_data
+            graph.box_ts[global_positions, write_pos] = mail_ts
+
+            # Clean up cached attributes
+            del graph._box_pos_delta
+            del graph._box_delta_mask
+        else:
+            # Fallback: pre-fill was skipped (no delta nodes).
+            # Nothing to do—graph.box is already complete from plan fetch.
+            pass
+
     def apply_delta_features(
         self,
         graph: FlatGraph,
-        delta: MemNBox,
-        mem_plan: DyPlan | None,
-        box_plan: DyPlan | None,
+        delta: MemAndBox,
+        mem_plan: DynamicPlan | None,
+        box_plan: DynamicPlan | None,
     ) -> None:
         """Step 2: Apply network delta data to positions not covered by local shared."""
         assert graph.mem is not None
@@ -330,7 +469,12 @@ class DyAssembler(StreamThreadBase):
             delta.mem, graph.mem, graph.mem_ts, graph, mem_delta_mask
         )
 
-        if (
+        # P2P delta box now always has boxsize=1 (single mail).
+        # For boxsize > 1 (APAN), merge P2P mail into the full box from CPU.
+        delta_box_slots = delta.box.data.shape[1] if delta.box.data.dim() == 3 else 1
+        if self.boxsize > 1 and delta_box_slots == 1:
+            self._apply_box_mail_delta(delta.box, graph, box_delta_mask)
+        elif (
             global_pos is not None
             and delta.box.nid.numel() > 0
             and torch.equal(mem_delta_mask, box_delta_mask)
@@ -345,6 +489,18 @@ class DyAssembler(StreamThreadBase):
             )
 
     def logic(self) -> None:
+        """Main assembly loop: merge shared + delta data and forward to full_q.
+
+        For each incoming batch:
+
+        1. Waits for the H2D-ready CUDA event.
+        2. Acquires two H2D semaphore slots (one for mem write-back, one for
+           box write-back) to prevent the pipeline from over-running the writers.
+        3. Calls ``prepare_shared_features`` to fill local data from the store.
+        4. Blocks on ``delta_q`` for the P2P result, then calls
+           ``apply_delta_features`` to fill remote data.
+        5. Records a CUDA event and puts ``(meta, event)`` into ``full_q``.
+        """
         epoch_count = getattr(self, "epoch_count", 0)
 
         while not self.stop_ev.is_set():
@@ -366,22 +522,22 @@ class DyAssembler(StreamThreadBase):
             # ==========================================================
             assert meta.flat_graph is not None
             assert meta.plan_set is not None
-            assert meta.plan_set.mem is not None
-            assert meta.plan_set.box is not None
+            assert meta.plan_set.mem_plan is not None
+            assert meta.plan_set.box_plan is not None
             self.h2d_sem.acquire()
             self.h2d_sem.acquire()
 
-            self.prep_shared_features(
+            self.prepare_shared_features(
                 graph=meta.flat_graph,
-                mem_plan=meta.plan_set.mem,
-                box_plan=meta.plan_set.box,
+                mem_plan=meta.plan_set.mem_plan,
+                box_plan=meta.plan_set.box_plan,
             )
 
             # Now block and wait for network data
             delta_tuple = self.delta_q.get(block=True)
 
             logger.debug(
-                f"DyAssembler received delta for batch {meta.batch_idx}, epoch {epoch_count}"
+                f"DynamicAssembler received delta for batch {meta.batch_idx}, epoch {epoch_count}"
             )
 
             if delta_tuple != "nothing":
@@ -396,12 +552,12 @@ class DyAssembler(StreamThreadBase):
 
                 box_data = box.data2recv
 
-                delta_mem = MemTsNid(
-                    nid=mem.nid2recv, data=mem.data2recv, ts=mem.ts2recv
+                delta_mem = MemEntry(
+                    nid=mem.recv_nid, data=mem.data2recv, ts=mem.ts2recv
                 )
-                delta_box = BoxTsNid(nid=box.nid2recv, data=box_data, ts=box.ts2recv)
-                delta = MemNBox(mem=delta_mem, box=delta_box)
-                delta = delta.sort_mem_and_mail()
+                delta_box = BoxEntry(nid=box.recv_nid, data=box_data, ts=box.ts2recv)
+                delta = MemAndBox(mem=delta_mem, box=delta_box)
+                delta = delta.sort_mem_and_box()
 
                 # ==========================================================
                 # Apply the received delta to the already partially-filled graph
@@ -409,8 +565,8 @@ class DyAssembler(StreamThreadBase):
                 self.apply_delta_features(
                     graph=meta.flat_graph,
                     delta=delta,
-                    mem_plan=meta.plan_set.mem,
-                    box_plan=meta.plan_set.box,
+                    mem_plan=meta.plan_set.mem_plan,
+                    box_plan=meta.plan_set.box_plan,
                 )
 
             # Push to the next queue
@@ -418,5 +574,5 @@ class DyAssembler(StreamThreadBase):
             ready_event.record(torch.cuda.current_stream())
             self.full_q.put((meta, ready_event), block=True)
             logger.debug(
-                f"DyAssembler put full meta for batch {meta.batch_idx}, epoch {epoch_count} into full_q"
+                f"DynamicAssembler put full meta for batch {meta.batch_idx}, epoch {epoch_count} into full_q"
             )

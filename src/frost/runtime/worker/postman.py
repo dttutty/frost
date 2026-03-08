@@ -1,9 +1,14 @@
+"""Postman: routes root-node embeddings to 1-hop neighbors as mailbox entries.
+
+Used by the APAN model variant to propagate interaction signals to neighboring
+nodes after each training step.
+"""
 import logging
 
 import torch
 
 from frost.datatypes.graph import Graph
-from frost.datatypes.mem_mail_box.mail import MailTsNid
+from frost.datatypes.mem_mail_box.mail import MailEntry
 
 logger = logging.getLogger(__name__)
 
@@ -15,9 +20,14 @@ class Postman:
     ):
         self.n_neg = n_neg  # from hydra config
 
-    def deliver(self, graph: "Graph", mail_data: torch.Tensor) -> "MailTsNid":
+    def deliver(self, graph: "Graph", mail_data: torch.Tensor) -> "MailEntry":
         """
         Deliver mails from the first 2/3 of root nodes to their 1-hop neighbors.
+
+        Each source/destination node's mail is broadcast to its sampled neighbors
+        (padding entries ``-1`` are skipped).  Root nodes do **not** receive their
+        own mail via this path; their memory is updated directly by the memory
+        updater.
 
         Args:
             graph: SeqGraph containing the batch structure.
@@ -38,13 +48,14 @@ class Postman:
                 f"mail_data length {mail_data.size(0)} does not match target_len {target_len}."
             )
 
-        # 2. Extract sender timestamps
+        # 2. Extract sender timestamps and root NIDs
         sender_ts = graph.root_ts[:target_len]
+        sender_nids = graph.root_nid[:target_len]
 
         # 3. Reshape neighbor NIDs to [target_len, S]
         # Neighbors are only sampled for src + pos_dst (target_len nodes),
         # so the tensor has target_len * S elements, not N_total * S.
-        S = graph.sampling_config[0]
+        S = graph.fanout[0]
         nbr_nids = graph.neighbors[0].nid.view(target_len, S)
         target_nbr_nids = nbr_nids  # Shape: [target_len, S]
 
@@ -52,24 +63,24 @@ class Postman:
         valid_mask = target_nbr_nids != -1  # Shape: [target_len, S]
 
         # 5. Extract valid destination NIDs using the mask (automatically flattens to 1D)
-        new_nids = target_nbr_nids[valid_mask]  # Shape: [K]
+        nbr_new_nids = target_nbr_nids[valid_mask]  # Shape: [K]
 
         # 6. Broadcast mail_data to neighbors
         # [target_len, D] -> [target_len, S, D] -> Apply Mask -> [K, D]
         D = mail_data.size(-1)
         expanded_mail_data = mail_data.unsqueeze(1).expand(target_len, S, D)
-        new_mail_data = expanded_mail_data[valid_mask]  # Shape: [K, D]
+        nbr_new_mail_data = expanded_mail_data[valid_mask]  # Shape: [K, D]
 
         # 7. Broadcast sender timestamps to neighbors
         # [target_len] -> [target_len, S] -> Apply Mask -> [K]
         expanded_ts = sender_ts.unsqueeze(1).expand(target_len, S)
-        new_ts = expanded_ts[valid_mask]  # Shape: [K]
+        nbr_new_ts = expanded_ts[valid_mask]  # Shape: [K]
 
-        # 8. Return the final MailTsNid
-        return MailTsNid(
-            nid=new_nids,
-            data=new_mail_data,
-            ts=new_ts,
+        # 8. Return the final MailEntry (neighbors only; roots are not written here)
+        return MailEntry(
+            nid=nbr_new_nids,
+            data=nbr_new_mail_data,
+            ts=nbr_new_ts,
             is_sorted=False,
             is_unique=False,
         )

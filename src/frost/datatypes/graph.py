@@ -1,28 +1,53 @@
+"""Graph datatypes used to carry sampled subgraph data through the pipeline."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import torch
+from torch import Tensor
 
 
 @dataclass(kw_only=True)
 class FlatGraph:
-    """Sequence sampling metadata."""
+    """Contiguous flat representation of a sampled subgraph stored in a RingBuf slot.
 
-    nid: torch.Tensor  # 数量是SeqGraph所有nid的长度
-    eid: torch.Tensor  # 数量是SeqGraph所有nid的长度
-    ts: torch.Tensor  # 数量是SeqGraph所有nid的长度
-    nfeat: torch.Tensor | None = None
-    efeat: torch.Tensor | None = None
-    mem: torch.Tensor | None = None
-    mem_ts: torch.Tensor | None = None
-    box: torch.Tensor | None = None
-    box_ts: torch.Tensor | None = None
-    detached_mem: torch.Tensor | None = None
-    detached_ts: torch.Tensor | None = None
-    detached_nid: torch.Tensor | None = None
+    All node/edge tensors are concatenated in order: root nodes first, then
+    per-hop neighbor tiers.  Call ``unflatten`` to recover the hierarchical
+    ``Graph`` view before model forward passes.
+
+    Attributes:
+        nid: Concatenated node IDs for every tier.
+        eid: Concatenated edge IDs for every tier.
+        ts: Concatenated timestamps for every tier.
+        nfeat: Static node features loaded by H2D, or ``None``.
+        efeat: Static edge features loaded by H2D, or ``None``.
+        mem: Node memory vectors loaded by H2D, or ``None``.
+        mem_ts: Timestamps of the last memory update, or ``None``.
+        box: Mailbox slot tensors loaded by H2D, or ``None``.
+        box_ts: Timestamps of mailbox slots, or ``None``.
+        detached_mem: Post-update memory written by ``TransformerMemoryUpdater``
+            for downstream consumption; must be written to this field, not to
+            a module-level attribute.
+        detached_ts: Timestamps paired with ``detached_mem``.
+        detached_nid: Node IDs paired with ``detached_mem``.
+    """
+
+    nid: Tensor  # Total length of all nids in SeqGraph
+    eid: Tensor  # Total length of all eids in SeqGraph
+    ts: Tensor  # Total length of all timestamps in SeqGraph
+    nfeat: Tensor | None = None
+    efeat: Tensor | None = None
+    mem: Tensor | None = None
+    mem_ts: Tensor | None = None
+    box: Tensor | None = None
+    box_ts: Tensor | None = None
+    detached_mem: Tensor | None = None
+    detached_ts: Tensor | None = None
+    detached_nid: Tensor | None = None
 
     def to(self, device: torch.device) -> FlatGraph:
+        """Return a new ``FlatGraph`` with all tensors moved to ``device``."""
         # discard detached_mem
         return FlatGraph(
             nid=self.nid.to(device),
@@ -45,7 +70,7 @@ class FlatGraph:
             else None,
         )
 
-    def inflate(
+    def unflatten(
         self,
         n_src: int,
         n_neg: int,
@@ -78,7 +103,7 @@ class FlatGraph:
                 sizes.append(current_size)
 
         # Helper function to split tensors safely
-        def _split(t: torch.Tensor | None) -> tuple:
+        def _split(t: Tensor | None) -> tuple:
             if t is None:
                 return tuple([None] * len(sizes))
             return torch.split(t, sizes, dim=0)
@@ -112,9 +137,9 @@ class FlatGraph:
             neighbors.append(nbr)
 
         # 5. Build and return the final SeqGraph
+        # remove root_eid to prevent info leakage,
         return Graph(
             root_nid=nids[0],
-            root_eid=eids[0],
             root_ts=tss[0],
             root_nfeat=nfeats[0],
             root_mem=mems[0],
@@ -122,46 +147,76 @@ class FlatGraph:
             root_box=boxs[0],
             root_box_ts=box_tss[0],
             neighbors=neighbors if neighbors else None,
-            sampling_config=fanout,
+            fanout=fanout,
         )
 
 
 @dataclass(kw_only=True)
 class NeighborOnHop:
-    # 如果是第一层邻居, 长度是root_nid数量的n_neighbor_0倍
-    # 如果是第二层邻居,长度是root_nid数量的n_neighbor_0倍的n_neighbor_1倍
-    nid: torch.Tensor  #
-    eid: torch.Tensor
-    ts: torch.Tensor  #
-    nfeat: torch.Tensor | None = None  #
-    efeat: torch.Tensor | None = None  #
-    mem: torch.Tensor | None = None  #
-    mem_ts: torch.Tensor | None = None
-    box: torch.Tensor | None = None
-    box_ts: torch.Tensor | None = None
+    """Sampled neighbors for a single hop in the multi-hop neighborhood.
+
+    The total number of rows equals the product of root count and all fanout
+    values up to this hop.  ``nid == -1`` indicates a padding entry and must
+    not be aggregated.
+
+    Attributes:
+        nid: Neighbor node IDs; shape ``[prev_tier_size * fanout[k]]``.
+        eid: Edge IDs connecting parent tier to these neighbors.
+        ts: Timestamps of the corresponding edges.
+        nfeat: Static node features for these neighbors, or ``None``.
+        efeat: Static edge features for the connecting edges, or ``None``.
+        mem: Memory vectors for these neighbors, or ``None``.
+        mem_ts: Timestamps of the last memory update, or ``None``.
+        box: Mailbox slot tensors for these neighbors, or ``None``.
+        box_ts: Timestamps of the mailbox slots, or ``None``.
+    """
+
+    # For 1-hop neighbors, length = root_nid length * fanout[0]
+    # For 2-hop neighbors, length = root_nid length * fanout[0] * fanout[1]
+    # and so on.
+    nid: Tensor
+    eid: Tensor
+    ts: Tensor
+    nfeat: Tensor | None = None
+    efeat: Tensor | None = None
+    mem: Tensor | None = None
+    mem_ts: Tensor | None = None
+    box: Tensor | None = None
+    box_ts: Tensor | None = None
 
 
 @dataclass(kw_only=True)
 class Graph:
-    """Sequence sampling metadata."""
+    """Hierarchical sampled subgraph consumed by encoder modules.
 
-    # 如果nid为-1,那么对应的eid肯定也为-1,表示这个位置是padding的,不需要参与聚合
+    Produced by ``FlatGraph.unflatten``.  Root nodes represent the
+    ``(src, pos_dst, neg_dst×n_neg)`` triplets; ``neighbors`` holds per-hop
+    ``NeighborOnHop`` objects indexed from 0 (1-hop) outward.
 
-    root_nid: torch.Tensor  # 长度是src数量3倍
-    root_eid: torch.Tensor  # 长度是src数量3倍
-    root_ts: torch.Tensor  # 长度是src数量3倍
+    Attributes:
+        root_nid: Root node IDs, shape ``[n_src * (2 + n_neg)]``.
+            ``nid == -1`` marks padding rows that should not be aggregated.
+        root_ts: Timestamps of the root interaction events.
+        root_nfeat: Static node features for root nodes, or ``None``.
+        root_mem: Memory vectors for root nodes, or ``None``.
+        root_mem_ts: Timestamps of root nodes' last memory update, or ``None``.
+        root_box: Mailbox slot tensors for root nodes, or ``None``.
+        root_box_ts: Timestamps of root mailbox slots, or ``None``.
+        neighbors: Per-hop neighbor data; ``None`` for 0-hop (JODIE) models.
+        fanout: Fanout list used when sampling, e.g. ``[10]`` for 1-hop TGN.
+    """
 
-    root_nfeat: torch.Tensor | None = None  # 长度是src数量3倍
+    # If nid is -1, then eid is also -1, indicating padding that should not be aggregated.
+    # Length is (1+n_neg)x number of src nodes = (src, pos, neg)
+    root_nid: Tensor
+    root_ts: Tensor
+    root_nfeat: Tensor | None = None
+    root_mem: Tensor | None = None
+    root_mem_ts: Tensor | None = None
+    root_box: Tensor | None = None
+    root_box_ts: Tensor | None = None
 
-    root_mem: torch.Tensor | None = None  # 长度是root_nid数量的n_neighbor倍_0倍
-    root_mem_ts: torch.Tensor | None = None  # 长度是root_nid数量的n_neighbor倍_0倍
-    root_box: torch.Tensor | None = None  # 长度是root_nid数量的n_neighbor倍_0倍_0倍
-    root_box_ts: torch.Tensor | None = None  # 长度是root_nid数量的n_neighbor倍_0倍
-
-    # 下面是1层邻居, n_neighbor是一个[10 25]这样的list,目前TGN不支持多层邻居,但是TGAT支持多层邻居
+    # Multi-hop neighbors. n_neighbor is a list like [10, 25].
+    # Currently TGN only supports 1 hop, while TGAT supports multiple hops.
     neighbors: list[NeighborOnHop] | None = None
-
-    # sampling_config类似于这样的[10] 或者[10,25]
-    sampling_config: list
-
-    root_efeat: torch.Tensor | None = None  # 长度是src数量1倍
+    fanout: list[int] | None = None

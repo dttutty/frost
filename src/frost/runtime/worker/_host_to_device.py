@@ -1,3 +1,10 @@
+"""Host-to-Device (H2D) transfer thread for the worker pipeline.
+
+Moves static features (nfeat, efeat) from shared CPU memory to the GPU for
+each incoming batch and constructs per-batch label tensors.  When a
+``MemBoxStore`` is absent the output queue feeds directly into ``full_q``;
+otherwise it feeds into the ``DynamicAssembler``.
+"""
 import logging
 import threading
 from queue import Queue as Q
@@ -8,13 +15,33 @@ import torch
 from frost.datatypes.meta import Meta
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase
-from frost.runtime.worker._st_asm import StAssembler
+from frost.runtime.worker._static_assembler import StaticAssembler
 from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
 
 
 class H2D(StreamThreadBase):
+    """Background thread that transfers static features and labels from CPU to GPU.
+
+    Dequeues ``Meta`` objects from ``in_q``, fills edge features and (when
+    present) node features via ``StaticAssembler``, moves the flat graph to the
+    target device, constructs binary labels (ones for positives, zeros for
+    negatives), and enqueues the result together with a ``CudaEvent`` into
+    ``out_q``.
+
+    Args:
+        ring_buf: Shared ring buffer (not used for data here, kept for context).
+        nfeat: CPU tensor of node features, or ``None`` if the dataset has none.
+        efeat: CPU tensor of edge features, or ``None`` if the dataset has none.
+        in_q: Input queue producing ``Meta | "end_of_epoch" | None``.
+        out_q: Output queue consuming ``(Meta, CudaEvent) | "end_of_epoch" | None``.
+        stop_ev: Shared stop event.
+        device: Target CUDA device.
+        history: Number of historical hops (unused; reserved for future use).
+        n_neg: Number of negative samples per positive edge.
+    """
+
     def __init__(
         self,
         ring_buf: RingBuf,
@@ -37,13 +64,24 @@ class H2D(StreamThreadBase):
         self.ring_buf = ring_buf
         self.history = history
         self.n_neg = n_neg
-        self.st_asm = StAssembler(
+        self.st_asm = StaticAssembler(
             shared_nfeat=nfeat, shared_efeat=efeat, device=self.device
         )
         self.seen_root_nids = torch.tensor([], dtype=torch.long, device="cpu")
 
     @torch.no_grad()
     def logic(self) -> None:
+        """Main loop: transfer each batch from CPU to GPU and forward downstream.
+
+        For each ``Meta`` received from ``in_q``:
+
+        1. Fills edge features if ``efeat`` is configured.
+        2. Zeros out negative-edge IDs to prevent label leakage.
+        3. Moves the flat graph to the GPU.
+        4. Constructs binary label tensor (1 per positive, 0 per negative).
+        5. Fills node features if ``nfeat`` is configured.
+        6. Records a CUDA event and enqueues ``(meta, event)`` into ``out_q``.
+        """
         # batch_count = 0
 
         while not self.stop_ev.is_set():
@@ -63,9 +101,13 @@ class H2D(StreamThreadBase):
 
             # can run no matter has nfeat or not
             if self.efeat is not None:
-                meta.flat_graph = self.st_asm.fill_mfg_with_efeat(
+                meta.flat_graph = self.st_asm.fill_efeat(
                     meta.flat_graph, n_src=meta.n_src, meta=meta
                 )
+
+            meta.flat_graph.eid[
+                0 : meta.n_src * self.n_neg
+            ] = -1  # set negative edge id to -1 to prevent info leakage
 
             # move gnn_mfgs to gpu
             meta.flat_graph = meta.flat_graph.to(self.device)
@@ -76,17 +118,17 @@ class H2D(StreamThreadBase):
             zero_labels = torch.zeros(meta.n_src * self.n_neg, device=self.device)
             meta.labels = torch.cat([one_labels, zero_labels])
 
-            # move plan to gpu
-
             # move nfeat and efeat to gpu
             if self.nfeat is not None:
                 # prepare if has n_feat
-                assert meta.plan_set is not None and meta.plan_set.nfeat is not None
+                assert (
+                    meta.plan_set is not None and meta.plan_set.nfeat_plan is not None
+                )
                 nfeat = self.st_asm.prepare_nfeat_cache(
-                    nfeat_plan=meta.plan_set.nfeat, meta=meta
+                    nfeat_plan=meta.plan_set.nfeat_plan, meta=meta
                 )
 
-                meta.flat_graph = self.st_asm.fill_mfg_with_nfeat(
+                meta.flat_graph = self.st_asm.fill_nfeat(
                     flat_graph=meta.flat_graph,
                     nfeat_nid=nfeat,
                     meta=meta,

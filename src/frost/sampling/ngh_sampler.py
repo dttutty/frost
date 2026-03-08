@@ -1,3 +1,16 @@
+"""Temporal neighborhood samplers for the FROST host process.
+
+Three sampler implementations are provided:
+
+- :class:`NoSampler` — 0-hop; only seeds (src, dst, neg) are written.
+- :class:`NghSampler` — single-hop historical neighbor sampling backed by the
+  nanobind ``SeqSampler`` C++ extension.
+- :class:`MultiHopNghSampler` — multi-hop variant that iteratively expands
+  each neighbor tier.
+
+All samplers share the same :meth:`sample` interface and write sampled data
+into a :class:`~frost.shm.ring_buf.RingBuf` slot before committing it.
+"""
 from __future__ import annotations
 
 import logging
@@ -41,6 +54,22 @@ def _ensure_seq_sampler_stable_mode() -> None:
 
 
 class NoSampler:
+    """Zero-hop sampler that writes only seed nodes into the ring buffer.
+
+    Implements the :class:`~frost.protocols.ngh_sampler_proto.NghSamplerProto`
+    interface.  ``fanout`` is always ``None`` regardless of any configuration
+    value passed at construction time; downstream code treats ``None`` as an
+    empty neighbor list.
+
+    Args:
+        graph: Temporal graph (not used; kept for interface compatibility).
+        ring_buf: Shared-memory ring buffer used to pass data to workers.
+        n_neg: Number of negative destination nodes per source edge.
+        fanout: Ignored; stored as ``None``.
+        sample_4_neg: Stored for layout compatibility; no neighbors are
+            sampled regardless.
+    """
+
     def __init__(
         self,
         graph: TemporalGraphType,
@@ -61,6 +90,22 @@ class NoSampler:
         pos_eid: torch.Tensor,
         gpu_id: int,
     ) -> tuple[TensorSet, int, torch.Tensor]:
+        """Write seed nodes to a ring-buffer slot and return access metadata.
+
+        Args:
+            nid: Concatenated node IDs ``[src | pos_dst | neg_dst×n_neg]``
+                of shape ``[n_src * (2 + n_neg)]``.
+            ts: Source-edge timestamps of shape ``[n_src]``.
+            pos_eid: Positive edge IDs of shape ``[n_src]``.
+            gpu_id: Target worker GPU index.
+
+        Returns:
+            A three-tuple of:
+            - ``valid_nid``: :class:`~frost.utils.tensor_set.TensorSet` of
+              unique valid (non-padding) node IDs.
+            - ``length``: Total number of entries written into the slot.
+            - ``valid_nid_raw``: Raw node-ID slice before deduplication.
+        """
         n_src = len(nid) // (2 + self.n_neg)
         num_seeds = n_src * (2 + self.n_neg)
 
@@ -92,7 +137,7 @@ class NoSampler:
 
 def dist_safe_tensor(arr, dtype):
     """
-    通过强行副本转换，彻底移除 nanobind 的 PyCapsule 残留
+    Force a deep copy to fully detach any nanobind PyCapsule backing from the array.
     """
     if arr is None:
         return torch.empty(0, dtype=dtype)
@@ -104,14 +149,33 @@ def dist_safe_tensor(arr, dtype):
     if np_arr.size == 0:
         return torch.empty(0, dtype=dtype)
 
-    # 这一步非常关键：np.array(..., copy=True) 会在 Python 堆上创建全新内存
+    # np.array(..., copy=True) allocates fresh memory on the Python heap,
+    # breaking any reference to nanobind-managed capsule memory
     np_safe = np.array(np_arr, copy=True)
 
-    # 转回 torch 后再 clone 并 contiguous 确保存储结构最简
+    # Clone and contiguous after converting back to torch ensures the simplest storage layout
     return torch.from_numpy(np_safe).to(dtype)
 
 
 class NghSampler:
+    """Single-hop historical neighbor sampler backed by the C++ ``SeqSampler``.
+
+    For each root node the sampler queries up to ``fanout[0]`` temporally
+    valid neighbors from the CSR temporal graph using the configured strategy.
+    Results are written into the ring buffer alongside the seed nodes.
+
+    Args:
+        graph: Compiled temporal graph used by the C++ sampler.
+        fanout: One-element list containing the per-hop neighbor count.
+        ring_buf: Shared-memory ring buffer for host-to-worker transfer.
+        sample_4_neg: When ``True`` neighbors are sampled for all root nodes
+            (src, pos_dst, neg_dst).  When ``False`` only src and pos_dst
+            are expanded.
+        n_neg: Number of negative samples per source edge.
+        strategy: Sampling strategy — ``"uniform"`` or ``"recent"``.
+        seed: Optional RNG seed for reproducible sampling.
+    """
+
     def __init__(
         self,
         graph: TemporalGraphType,
@@ -158,6 +222,22 @@ class NghSampler:
         pos_eid: torch.Tensor,
         gpu_id: int,
     ) -> tuple[TensorSet, int, torch.Tensor]:
+        """Sample one-hop neighbors and write the full subgraph into a ring-buffer slot.
+
+        Args:
+            nid: Root node IDs ``[src | pos_dst | neg_dst×n_neg]``,
+                shape ``[n_src * (2 + n_neg)]``.
+            ts: Source-edge timestamps, shape ``[n_src]``.
+            pos_eid: Positive edge IDs, shape ``[n_src]``.
+            gpu_id: Target worker GPU index.
+
+        Returns:
+            A three-tuple of:
+            - ``valid_nid``: :class:`~frost.utils.tensor_set.TensorSet` of
+              unique valid node IDs (seeds + sampled neighbors).
+            - ``length``: Total entries written into the slot.
+            - ``valid_nid_raw``: Raw node-ID slice before deduplication.
+        """
         n_src = nid.shape[0] // (2 + self.n_neg)
         num_seeds = n_src * (2 + self.n_neg)
 
@@ -211,7 +291,7 @@ class NghSampler:
                 nid_np_safe, ts_np_safe, self.n_ngh
             )
 
-            # 在 NghSampler.sample 内部使用：
+            # Safely convert nanobind outputs to plain tensors
             n_tensor = dist_safe_tensor(ngh_nid, torch.int32).reshape(-1)
             e_tensor = dist_safe_tensor(ngh_eid, torch.int32).reshape(-1)
             t_tensor = dist_safe_tensor(ngh_ts, torch.float32).reshape(-1)
@@ -236,8 +316,26 @@ class NghSampler:
 
 
 class MultiHopNghSampler:
-    """
-    Not support memory based sampling
+    """Multi-hop historical neighbor sampler for non-memory-based models.
+
+    Iteratively expands each tier of neighbors by calling the ``SeqSampler``
+    C++ backend for each hop in ``fanout``.  Padding nodes (``-1``) are
+    skipped during sampling but retained in the output layout for positional
+    consistency.
+
+    Note:
+        Memory-based encoders (TGN, JODIE, APAN) are not supported because the
+        multi-hop layout conflicts with their ``box_update`` accounting.
+
+    Args:
+        graph: Compiled temporal graph used by the C++ sampler.
+        fanout: Per-hop neighbor counts, e.g. ``[10, 5]`` for 2-hop sampling.
+        ring_buf: Shared-memory ring buffer for host-to-worker transfer.
+        n_neg: Number of negative samples per source edge.
+        strategy: Sampling strategy — ``"uniform"`` or ``"recent"``.
+        seed: Optional RNG seed for reproducibility.
+        sample_4_neg: When ``True`` (default) negative nodes are also expanded
+            at the first hop.
     """
 
     padding_node_id: int

@@ -1,35 +1,33 @@
 import logging
-from typing import TypeVar
 
 import numpy
 import torch
 
-from frost.datatypes.mem_mail_box.box import BoxTsNid
-from frost.datatypes.mem_mail_box.mail import MailTsNid
-from frost.datatypes.mem_mail_box.mem import MemTsNid
-from frost.datatypes.plan import DyPlan
+from frost.aliases.syncer import AllType
+from frost.datatypes.plan import DynamicPlan
 from frost.datatypes.tasks import P2PTask
 
-AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
 logger = logging.getLogger(__name__)
 
 
 def make_p2p_task(
     data_td_nid: AllType,
-    plan: DyPlan,
+    plan: DynamicPlan,
     device: torch.device,
 ) -> P2PTask:
     """
-    这一步之前,必须确保data_td_nid里面的数据全部是unique的
-    如果是mem,需要确保已经是保留最新的(last),或者平均的(mean,带ct)
-    如果是mail,需要确保只保留更新过的节点(pos_src,pos_dst).....另外保留最新last,平均的(mean,带ct),或者全部(dim变大)
-    如果是mailbox,需要所有节点的mailbox
-    如果是feat,需要所有节点的feat
+    Build a P2PTask from a local data entry and a DynamicPlan.
+
+    Preconditions on data_td_nid:
+    - All nids must be unique.
+    - For memory: keep only the latest (keep_last) or averaged (keep_mean) entry per node.
+    - For mail: keep only updated nodes (pos_src, pos_dst), deduplicated via keep_last/keep_mean.
+    - For mailbox: include all nodes' mailboxes.
+    - For features: include all nodes' features.
     """
     p2p = plan.p2p
-    rec_cts = plan.rec_cts
-    send_cts = plan.send_cts
+    recv_counts = plan.recv_counts
+    send_counts = plan.send_counts
 
     nid = data_td_nid.nid
     data = data_td_nid.data
@@ -57,20 +55,20 @@ def make_p2p_task(
     send_data = torch.cat(buckets_data, dim=0)
     send_ts = torch.cat(buckets_ts, dim=0)
 
-    total_recv = sum(rec_cts)
+    total_recv = sum(recv_counts)
     recv_nid = torch.empty(total_recv, dtype=nid.dtype, device=device)
     recv_data = torch.empty(total_recv, x_dim, dtype=data.dtype, device=device)
     recv_ts = torch.empty(total_recv, dtype=ts.dtype, device=device)
 
-    assert numpy.array_equal(sizes, send_cts)
+    assert numpy.array_equal(sizes, send_counts)
 
     return P2PTask(
-        nid2send=send_nid,
-        nid2recv=recv_nid,
+        send_nid=send_nid,
+        recv_nid=recv_nid,
         data2send=send_data,
         data2recv=recv_data,
         ts2send=send_ts,
         ts2recv=recv_ts,
-        rec_cts=rec_cts,
-        send_cts=send_cts,
+        recv_counts=recv_counts,
+        send_counts=send_counts,
     )

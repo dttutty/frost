@@ -1,3 +1,5 @@
+"""Plan datatypes that describe per-batch memory and feature fetch/writeback schedules."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,121 +12,145 @@ from frost.utils.tensor_set import TensorSet
 
 @dataclass(kw_only=True)
 class PlanSet:
-    """
-    统一的 PlanSet，直接持有 DyPlan 和 StPlan。
-    """
+    """Unified container holding the DynamicPlan and StaticPlan for one batch."""
 
-    mem: DyPlan | None = None
-    box: DyPlan | None = None
-    nfeat: StPlan | None = None
+    mem_plan: DynamicPlan | None = None
+    box_plan: DynamicPlan | None = None
+    nfeat_plan: StaticPlan | None = None
 
     def __repr__(self) -> str:
-        return f"PlanSet(mem={self.mem}, box={self.box}, nfeat={self.nfeat})"
+        return f"PlanSet(mem={self.mem_plan}, box={self.box_plan}, nfeat={self.nfeat_plan})"
 
     def to(self, device: torch.device) -> PlanSet:
-        """
-        递归地将所有子 Plan 移动到指定设备。
-        增加了 non_blocking 参数以支持异步传输。
-        """
+        """Recursively move all child plans to the target device."""
         return PlanSet(
-            # 假设你的 DyPlan/StPlan 的 .to() 方法也能接收 non_blocking 参数
-            mem=self.mem.to(device) if self.mem is not None else None,
-            box=self.box.to(device) if self.box is not None else None,
-            nfeat=self.nfeat.to(device) if self.nfeat is not None else None,
+            mem_plan=self.mem_plan.to(device) if self.mem_plan is not None else None,
+            box_plan=self.box_plan.to(device) if self.box_plan is not None else None,
+            nfeat_plan=self.nfeat_plan.to(device)
+            if self.nfeat_plan is not None
+            else None,
         )
 
 
 @dataclass(kw_only=True)
-class DyPlan:
+class DynamicPlan:
+    """Fetch/writeback schedule for dynamic state (memory or mailbox).
+
+    Produced by the Planner thread on the host and consumed by the worker's
+    H2D and P2P syncer threads.
+
+    Attributes:
+        p2p: Per-peer lists of node IDs that must be exchanged via P2P
+            all-to-all communication.  ``p2p[i]`` holds IDs to send to / recv
+            from peer worker ``i``.
+        fetch: Node IDs whose state must be fetched from the CPU shared-memory
+            store by this worker.
+        recv_counts: 1-D int array of shape ``[n_gpu]`` – number of node IDs
+            to receive from each peer in the P2P exchange.
+        send_counts: 1-D int array of shape ``[n_gpu]`` – number of node IDs
+            to send to each peer.
+        writeback: Node IDs whose updated state must be written back to the
+            CPU store after the forward/backward pass; ``None`` if no writeback
+            is needed.
+        fetch_on_gpu: GPU copy of ``fetch.data`` for fast index lookups during
+            ``DynamicAssembler`` assembly; populated by ``DynamicPlan.to()``.
+    """
+
     p2p: list[TensorSet]
     fetch: TensorSet
-    rec_cts: NDArray
-    send_cts: NDArray
+    recv_counts: NDArray
+    send_counts: NDArray
     writeback: TensorSet | None = None
     fetch_on_gpu: torch.Tensor | None = (
-        None  # 仅在 GPU 上使用，存储 fetch 的 data 部分以加速访问
+        None  # GPU-side copy of fetch.data for fast access during assembly
     )
 
-    def clone(self) -> DyPlan:
+    def clone(self) -> DynamicPlan:
         """
-        深复制 DyPlan，包括内部的 TensorSet。
-        注意：TensorSet 是不可变的，所以我们可以直接复用它们。
+        Shallow-clone DynamicPlan. TensorSets are immutable so they can be shared.
+        numpy arrays are copied to avoid aliasing.
         """
-        return DyPlan(
-            p2p=self.p2p.copy(),  # list 的浅复制足够，因为 TensorSet 是不可变的
-            fetch=self.fetch,  # 直接复用同一个 TensorSet 对象
-            rec_cts=self.rec_cts.copy(),  # numpy array 需要复制
-            send_cts=self.send_cts.copy(),  # numpy array 需要复制
-            writeback=self.writeback,  # 直接复用同一个 TensorSet 对象（如果存在）
-            fetch_on_gpu=self.fetch_on_gpu,  # 直接复用同一个 tensor 对象（如果存在）
+        return DynamicPlan(
+            p2p=self.p2p.copy(),  # shallow list copy is sufficient; TensorSets are immutable
+            fetch=self.fetch,  # reuse the same TensorSet object
+            recv_counts=self.recv_counts.copy(),  # numpy arrays must be copied
+            send_counts=self.send_counts.copy(),  # numpy arrays must be copied
+            writeback=self.writeback,  # reuse the same TensorSet object (if present)
+            fetch_on_gpu=self.fetch_on_gpu,  # reuse the same tensor object (if present)
         )
 
     def __repr__(self) -> str:
         return (
-            f"DyPlan(p2p={[ts.data.shape for ts in self.p2p]}, "
+            f"DynamicPlan(p2p={[ts.data.shape for ts in self.p2p]}, "
             f"fetch={self.fetch.data.shape}, "
-            f"rec_cts={self.rec_cts.shape}, "
-            f"send_cts={self.send_cts.shape}, "
+            f"recv_counts={self.recv_counts.shape}, "
+            f"send_counts={self.send_counts.shape}, "
             f"writeback={self.writeback.data.shape if self.writeback is not None else None}, "
             f"fetch_on_gpu={self.fetch_on_gpu.shape if self.fetch_on_gpu is not None else None})"
         )
 
-    def to(self, device: torch.device) -> DyPlan:
+    def to(self, device: torch.device) -> DynamicPlan:
         """
-        递归地将内部的 TensorSet 移动到指定设备。
-        注意：这会创建新的 TensorSet 对象（因为 TensorSet 是不可变的）
+        Move internal TensorSets to the target device.
+        Creates new TensorSet objects (TensorSets are immutable).
         """
 
-        # 辅助函数：快速根据 data 创建新 Set，跳过 unique/sort 检查以提速
+        # Helper: move underlying tensor without re-sorting (device move preserves order)
         def _move(ts: TensorSet) -> TensorSet:
-            # 直接操作底层 data 移动，然后 wrap 回 TensorSet
-            # 假设 TensorSet 有一个能接受 tensor 的构造器
-            # 我们利用 sort_now=False 避免重排序，因为移动设备不改变顺序
             return TensorSet(ts.data.to(device), sort_now=False)
 
-        return DyPlan(
+        return DynamicPlan(
             p2p=[_move(ts) for ts in self.p2p],
-            fetch=self.fetch,  # fetch should not be moved to cuda
-            rec_cts=self.rec_cts,  # numpy array 不随 torch device 移动
-            send_cts=self.send_cts,  # numpy array 不随 torch device 移动
+            fetch=self.fetch,  # fetch stays on CPU
+            recv_counts=self.recv_counts,  # numpy arrays are device-agnostic
+            send_counts=self.send_counts,  # numpy arrays are device-agnostic
             writeback=_move(self.writeback) if self.writeback is not None else None,
             fetch_on_gpu=self.fetch.data.to(device) if self.fetch is not None else None,
         )
 
     @property
     def device(self) -> torch.device:
+        """Device on which the ``fetch`` TensorSet resides."""
         return self.fetch.data.device
 
-    def sort(self) -> DyPlan:
+    def sort(self) -> DynamicPlan:
         """
-        TensorSet 默认保持内部有序 (sorted invariant)，
-        所以这里不需要做任何操作，直接返回 self 即可。
+        TensorSet maintains a sorted invariant internally,
+        so no action is needed here.
         """
         return self
 
 
 @dataclass(kw_only=True)
-class StPlan:
+class StaticPlan:
+    """Fetch and cache schedule for static node features.
+
+    Attributes:
+        to_cache: Node IDs whose features should be stored in the worker's
+            local GPU cache after loading.
+        fetch: Node IDs whose features must be loaded from shared memory for
+            this batch (super-set of ``to_cache`` for the first encounter).
+    """
+
     to_cache: TensorSet
     fetch: TensorSet
 
-    def clone(self) -> StPlan:
+    def clone(self) -> StaticPlan:
         """
-        深复制 StPlan，包括内部的 TensorSet。
-        注意：TensorSet 是不可变的，所以我们可以直接复用它们。
+        Shallow-clone StaticPlan. TensorSets are immutable so they can be shared.
         """
-        return StPlan(
-            to_cache=self.to_cache,  # 直接复用同一个 TensorSet 对象
-            fetch=self.fetch,  # 直接复用同一个 TensorSet 对象
+        return StaticPlan(
+            to_cache=self.to_cache,  # reuse the same TensorSet object
+            fetch=self.fetch,  # reuse the same TensorSet object
         )
 
     def __repr__(self) -> str:
         return (
-            f"StPlan(to_cache={self.to_cache.data.shape}, "
+            f"StaticPlan(to_cache={self.to_cache.data.shape}, "
             f"fetch={self.fetch.data.shape})"
         )
 
-    def to(self, device: torch.device) -> StPlan:
+    def to(self, device: torch.device) -> StaticPlan:
         """
         Move internal TensorSets to the target device.
         """
@@ -133,15 +159,21 @@ class StPlan:
         def _move(ts: TensorSet) -> TensorSet:
             return TensorSet(ts.data.to(device), sort_now=False)
 
-        return StPlan(
+        return StaticPlan(
             to_cache=_move(self.to_cache),
-            fetch=self.fetch,  # fetch should not be moved to cuda
+            fetch=self.fetch,  # fetch stays on CPU
         )
 
-    def sort(self) -> StPlan:
+    def sort(self) -> StaticPlan:
+        """No-op: TensorSet maintains sorted order internally.
+
+        Returns:
+            ``self`` unchanged.
+        """
         return self
 
     @property
     def device(self) -> torch.device:
+        """Device on which the ``to_cache`` TensorSet resides."""
         # Access .data to get the underlying tensor's device
         return self.to_cache.data.device

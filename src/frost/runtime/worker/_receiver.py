@@ -1,3 +1,9 @@
+"""Receiver thread for the worker-side pipeline.
+
+Receives ``Meta`` objects scattered by the host via ``dist.scatter_object_list``
+and forwards them into the ``received_q`` for downstream H2D processing.
+Epoch-end results are gathered back to the host via ``dist.gather_object``.
+"""
 import logging
 import threading
 from queue import Queue as Q
@@ -17,6 +23,26 @@ logger = logging.getLogger(__name__)
 
 
 class Receiver(ThreadBase):
+    """Background thread that receives batches scattered from the host process.
+
+    On each iteration it calls ``dist.scatter_object_list`` to receive the
+    next message from the host:
+
+    * ``Meta`` object → assembles a ``FlatGraph`` from the shared ring buffer
+      and forwards the annotated ``Meta`` to ``received_q``.
+    * ``"end_of_epoch"`` → forwards the sentinel downstream, then blocks to
+      gather the epoch ``Result`` and sends it back to the host.
+    * ``None`` → forwards the shutdown sentinel and exits.
+
+    Args:
+        env: Distributed environment (rank/device info).
+        received_q: Output queue consumed by the H2D thread.
+        result_q: Single-element queue that carries the epoch ``Result`` from
+            the main loop back to this thread for the gather call.
+        stop_ev: Shared stop event; set by the main process on shutdown.
+        ring_buf: Shared-memory ring buffer used to retrieve raw graph data.
+    """
+
     def __init__(
         self,
         env: Env,
@@ -36,6 +62,12 @@ class Receiver(ThreadBase):
 
     @torch.no_grad()
     def logic(self) -> None:
+        """Main loop: receive messages from host and route them into the pipeline.
+
+        Runs until a ``None`` sentinel is received from the host or ``stop_ev``
+        is set.  Performs strict sanity checks on ``FlatGraph`` NID/EID layout
+        when running in debug mode (``__debug__`` is True).
+        """
         batch_count = 0
 
         while not self.stop_ev.is_set():
@@ -70,7 +102,6 @@ class Receiver(ThreadBase):
                         f"Ring buffer returned None for meta with batch_id {meta.batch_idx}"
                     )
                 buf_len = meta.buf_len
-                meta.access = None  # 这里不需要传递 access 信息了，receiver 只负责接收 flat_graph 和其他基本信息，access 由 host 端分析器计算并传递给 worker
                 if __debug__:
                     # --- Strict sanity checks ---
                     nid_slice = buf["NID"][:buf_len]
@@ -90,7 +121,7 @@ class Receiver(ThreadBase):
                             f"Invalid meta.n_src={n_src}: need 3*n_src={need} <= buf_len={eid_slice.numel()} for EID checks."
                         )
 
-                    # 1) nid[:3*n_src] 不允许出现 -1
+                    # 1) nid[:3*n_src] must not contain -1
                     nid_head = nid_slice[:need]
                     if (nid_head == -1).any():
                         bad_pos = torch.nonzero(nid_head == -1, as_tuple=False).squeeze(
@@ -102,7 +133,7 @@ class Receiver(ThreadBase):
                             f"(n_src={n_src}, range=[0, {need})). First {len(preview_pos)} positions: {preview_pos}"
                         )
 
-                    # 2) eid[:n_src] 不允许出现 -1
+                    # 2) eid[:n_src] must not contain -1
                     eid_head = eid_slice[:n_src]
                     if (eid_head == -1).any():
                         bad_pos = torch.nonzero(eid_head == -1, as_tuple=False).squeeze(
@@ -114,7 +145,7 @@ class Receiver(ThreadBase):
                             f"First {len(preview_pos)} positions: {preview_pos}"
                         )
 
-                    # 3) eid[n_src:3*n_src] 必须全是 -1
+                    # 3) eid[n_src:3*n_src] must be all -1 (dst and neg have no edge IDs)
                     eid_mid = eid_slice[n_src : 3 * n_src]
                     if eid_mid.numel() > 0 and not (eid_mid == -1).all():
                         bad_pos = torch.nonzero(eid_mid != -1, as_tuple=False).squeeze(

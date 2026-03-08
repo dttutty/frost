@@ -1,14 +1,14 @@
 import logging
 import threading
 from queue import Queue as Q
-from typing import Literal
+from typing import Literal, cast
 
 import torch.distributed as dist
 
 from frost.aliases.host import MetaBundle
 from frost.datatypes.env import Env
 from frost.datatypes.meta import Meta
-from frost.datatypes.plan import DyPlan, PlanSet, StPlan
+from frost.datatypes.plan import DynamicPlan, PlanSet, StaticPlan
 from frost.datatypes.result import Result
 from frost.runtime._thread_base import ThreadBase
 
@@ -16,17 +16,35 @@ logger = logging.getLogger(__name__)
 
 
 class Scatter(ThreadBase):
+    """Background thread that distributes batches to Worker ranks via collective ops.
+
+    Consumes MetaBundles (lists of ``Meta`` objects, one per GPU) from ``in_q``,
+    attaches per-GPU ``PlanSet`` data from the planner output queues, and uses
+    ``dist.scatter_object_list`` to push each ``Meta`` to its assigned Worker rank.
+    At end-of-epoch it also collects results from Workers via ``dist.gather_object``
+    and forwards them to ``result_q`` for the Host to consume.
+
+    The thread terminates cleanly when it receives a ``None`` sentinel from ``in_q``.
+
+    Attributes:
+        n_gpu: Number of Worker ranks (= world_size - 1).
+        in_q: Source queue fed by the Host main thread.
+        mem_plan_out_q: Optional queue of per-GPU DynamicPlan lists for memory.
+        mail_plan_out_q: Optional queue of per-GPU DynamicPlan lists for mailbox.
+        nfeat_plan_out_q: Optional queue of per-GPU StaticPlan lists for nfeat.
+        result_q: Queue where gathered epoch Results are placed for the Host.
+    """
+
     def __init__(
         self,
         n_gpu: int,
         in_q: Q[MetaBundle | None | Literal["end_of_epoch"]],
-        mem_plan_out_q: Q[list[DyPlan] | None] | None,
-        mail_plan_out_q: Q[list[DyPlan] | None] | None,
-        nfeat_plan_out_q: Q[list[StPlan] | None] | None,
+        mem_plan_out_q: Q[list[DynamicPlan] | None] | None,
+        mail_plan_out_q: Q[list[DynamicPlan] | None] | None,
+        nfeat_plan_out_q: Q[list[StaticPlan] | None] | None,
         env: Env,
         result_q: Q[Result],
         stop_ev: threading.Event,
-        ring_buf=None,
     ) -> None:
         super().__init__(name="scatter", stop_ev=stop_ev)
         self.n_gpu = n_gpu
@@ -69,10 +87,17 @@ class Scatter(ThreadBase):
         # Return result from worker rank 0
         worker_ranks = [r for r in range(self.world_size) if r != self.host_rank]
         result = gather_list[worker_ranks[0]]
-        assert isinstance(result, Result), "Worker 返回的对象必须是 Result"
+        assert isinstance(result, Result), "Object gathered from worker must be a Result"
         return result
 
     def logic(self) -> None:
+        """Main loop: dequeue MetaBundles, attach plans, and scatter to Workers.
+
+        Handles three sentinel values from ``in_q``:
+        - ``None``: send shutdown signal to all Workers and exit.
+        - ``"end_of_epoch"``: broadcast the sentinel to Workers, gather results.
+        - A normal ``MetaBundle``: attach plan data and scatter per-GPU Metas.
+        """
         while not self.stop_ev.is_set():
             meta_2_scatter = self.in_q.get(block=True)
 
@@ -90,6 +115,9 @@ class Scatter(ThreadBase):
                 continue
 
             else:
+                mem_plan: list[DynamicPlan] | None = None
+                mail_plan: list[DynamicPlan] | None = None
+                nfeat_plan: list[StaticPlan] | None = None
                 if self.mem_plan_out_q is not None:
                     mem_plan = self.mem_plan_out_q.get(block=True)
                 if self.mail_plan_out_q is not None:
@@ -97,12 +125,12 @@ class Scatter(ThreadBase):
                 if self.nfeat_plan_out_q is not None:
                     nfeat_plan = self.nfeat_plan_out_q.get(block=True)
                 for i, m in enumerate(meta_2_scatter):
-                    safe_mem = mem_plan[i] if self.mem_plan_out_q else None
-                    safe_mail = mail_plan[i] if self.mail_plan_out_q else None
-                    safe_nfeat = nfeat_plan[i] if self.nfeat_plan_out_q else None
+                    safe_mem = mem_plan[i] if mem_plan is not None else None
+                    safe_mail = mail_plan[i] if mail_plan is not None else None
+                    safe_nfeat = nfeat_plan[i] if nfeat_plan is not None else None
                     m.plan_set = PlanSet(
-                        mem=safe_mem,
-                        box=safe_mail,
-                        nfeat=safe_nfeat,
+                        mem_plan=safe_mem,
+                        box_plan=safe_mail,
+                        nfeat_plan=safe_nfeat,
                     )
-                self._scatter_to_workers(meta_2_scatter)
+                self._scatter_to_workers(cast(list[Meta | str | None], meta_2_scatter))

@@ -5,13 +5,13 @@ from typing import Any
 
 
 def _get_level_from_env() -> int:
-    # 优先读 LOG_LEVEL，其次读 APP_ENV
+    # Prefer LOG_LEVEL, fall back to APP_ENV
     lvl = os.getenv("LOG_LEVEL", "").upper()
     if lvl:
         return getattr(logging, lvl, logging.WARNING)
 
     env_str = os.getenv("APP_ENV", "production").lower()
-    return logging.DEBUG if env_str == "dev" else logging.WARNING  # 生产默认 WARNING
+    return logging.DEBUG if env_str == "dev" else logging.WARNING  # default WARNING in production
 
 
 def init_logging(local_rank: int, is_host: bool) -> logging.Logger:
@@ -27,7 +27,7 @@ def init_logging(local_rank: int, is_host: bool) -> logging.Logger:
 
     root = logging.getLogger()
 
-    # 只让 host 打到终端，且等级跟随 level
+    # Only the host process logs to the console, at the configured level
     # if is_host:
     #     console = logging.StreamHandler()
     #     console.setLevel(level)
@@ -41,9 +41,9 @@ def init_logging(local_rank: int, is_host: bool) -> logging.Logger:
 
 class FastLogger:
     """
-    一个高性能的 Logger 包装器。
-    在 python -O 模式下，debug 方法会被优化成空操作，
-    完全避免 f-string 的字符串拼接和参数计算开销。
+    A high-performance logger wrapper.
+    In python -O mode, the debug method is optimized to a no-op,
+    completely avoiding f-string concatenation and argument evaluation overhead.
     """
 
     def __init__(self, logger: logging.Logger):
@@ -51,13 +51,13 @@ class FastLogger:
 
     def debug(self, msg_provider: Callable[[], str]) -> None:
         """
-        使用 lambda 延迟求值。
-        只有在非优化模式且日志级别允许时，才会执行 lambda 生成字符串。
+        Uses a lambda for lazy evaluation.
+        The lambda is only called when not in optimized mode and the log level permits it.
         """
         if __debug__ and self._logger.isEnabledFor(logging.DEBUG):
             self._logger.debug(msg_provider())
 
-    # 为了兼容普通用法，也可以保留一个直接传 str 的方法，虽然这不如 lambda 快
+    # Kept for compatibility with callers that pass a plain string rather than a lambda
     def debug_raw(self, msg: str) -> None:
         if __debug__:
             self._logger.debug(msg)
@@ -72,6 +72,6 @@ class FastLogger:
         self._logger.error(msg, *args, **kwargs)
 
 
-# 全局辅助函数，方便替换
+# Global helper; replace with a custom implementation if needed
 def get_logger(name: str) -> FastLogger:
     return FastLogger(logging.getLogger(name))

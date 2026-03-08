@@ -1,3 +1,5 @@
+"""Mail entry datatype representing aggregated messages destined for nodes."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,7 +9,21 @@ from torch import Tensor
 
 
 @dataclass(kw_only=True)
-class MailTsNid:
+class MailEntry:
+    """A batch of mail messages aggregated over source nodes for a single step.
+
+    Unlike ``BoxEntry``, ``MailEntry`` holds a single message per row (no
+    slot dimension).  It is typically produced by the postman and then
+    inserted into the mailbox via ``BoxEntry.merge_1_mail``.
+
+    Attributes:
+        nid: Destination node IDs, shape ``[N]``.
+        data: Message content tensor, shape ``[N, D]``.
+        ts: Timestamps of the messages, shape ``[N]``.
+        is_sorted: Whether ``nid`` is sorted in ascending order.
+        is_unique: Whether all entries in ``nid`` are distinct.
+    """
+
     nid: Tensor
     data: Tensor
     ts: Tensor
@@ -16,12 +32,12 @@ class MailTsNid:
 
     def __repr__(self) -> str:
         return (
-            f"MailTsNid(nid={self.nid.shape}, data={self.data.shape}, "
+            f"MailEntry(nid={self.nid.shape}, data={self.data.shape}, "
             f"ts={self.ts.shape}, is_sorted={self.is_sorted}, is_unique={self.is_unique})"
         )
 
-    def clone(self) -> MailTsNid:
-        return MailTsNid(
+    def clone(self) -> MailEntry:
+        return MailEntry(
             nid=self.nid.clone(),
             data=self.data.clone(),
             ts=self.ts.clone(),
@@ -29,13 +45,13 @@ class MailTsNid:
             is_unique=self.is_unique,
         )
 
-    def _ensure_sorted_unique_nid(self) -> MailTsNid:
+    def _ensure_sorted_unique_nid(self) -> MailEntry:
         from ._data_ops import _ensure_sorted_unique_nid
 
         return _ensure_sorted_unique_nid(self)
 
-    def cuda(self) -> MailTsNid:
-        return MailTsNid(
+    def cuda(self) -> MailEntry:
+        return MailEntry(
             nid=self.nid.cuda(),
             data=self.data.cuda(),
             ts=self.ts.cuda(),
@@ -43,12 +59,12 @@ class MailTsNid:
             is_unique=self.is_unique,
         )
 
-    def merge_with_priority(self, other: MailTsNid) -> MailTsNid:
+    def merge_with_priority(self, other: MailEntry) -> MailEntry:
         from ._data_ops import merge_with_priority
 
         return merge_with_priority(self, other)
 
-    def sort_by_nid(self) -> MailTsNid:
+    def sort_by_nid(self) -> MailEntry:
         if self.is_sorted:
             return self
         sorted_indices = torch.argsort(self.nid)

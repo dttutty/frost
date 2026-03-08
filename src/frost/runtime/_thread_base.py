@@ -10,6 +10,18 @@ logger = logging.getLogger(__name__)
 
 
 class ThreadBase(threading.Thread):
+    """Base class for non-CUDA daemon threads in the FROST runtime.
+
+    Subclasses override ``logic()`` to implement their work loop. On any
+    unhandled exception ``run()`` prints a formatted crash report including the
+    class name, thread name, and distributed rank, sets the shared stop event,
+    and calls ``os._exit(1)`` to hard-terminate the process group.
+
+    Attributes:
+        logger: Logger named after the thread.
+        stop_ev: Shared event used to signal all threads to stop.
+    """
+
     def __init__(
         self,
         name: str,
@@ -23,9 +35,11 @@ class ThreadBase(threading.Thread):
         self.stop_ev = stop_ev
 
     def logic(self) -> None:
+        """Main work loop to be implemented by subclasses."""
         pass
 
     def run(self) -> None:
+        """Execute ``logic()`` and handle uncaught exceptions with a crash report."""
         try:
             self.logic()
         except Exception:
@@ -52,6 +66,19 @@ class ThreadBase(threading.Thread):
 
 
 class StreamThreadBase(threading.Thread):
+    """Base class for threads that execute their logic inside a dedicated CUDA stream.
+
+    Similar crash-handling semantics to ``ThreadBase``: any uncaught exception
+    triggers a crash report, sets the stop event, and calls ``os._exit(1)``.
+    The CUDA stream is created at construction and activated via a context manager
+    in ``run()``, so all CUDA operations in ``logic()`` are enqueued on the same
+    stream.
+
+    Attributes:
+        stream: A dedicated ``torch.cuda.Stream`` for this thread.
+        stop_ev: Shared event used to signal all threads to stop.
+    """
+
     def __init__(
         self,
         name: str,
@@ -62,9 +89,11 @@ class StreamThreadBase(threading.Thread):
         self.stop_ev = stop_ev
 
     def logic(self) -> None:
+        """Main work loop to be implemented by subclasses."""
         pass
 
     def run(self) -> None:
+        """Execute ``logic()`` inside the thread's CUDA stream, with crash handling."""
         try:
             with torch.cuda.stream(self.stream):
                 self.logic()

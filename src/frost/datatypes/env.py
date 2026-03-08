@@ -1,3 +1,5 @@
+"""Distributed process-group environment descriptor."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,6 +13,21 @@ Role = Literal["worker", "host"]
 
 @dataclass(frozen=True, kw_only=True)
 class Env:
+    """Immutable snapshot of the distributed environment for the current process.
+
+    Created once via ``Env.initial()`` after ``dist.init_process_group`` and
+    shared throughout the process lifetime.
+
+    Attributes:
+        local_rank: Rank of the current process within the process group.
+        world_size: Total number of processes in the group.
+        role: Either ``"worker"`` (GPU trainer) or ``"host"`` (data pipeline).
+        is_host: ``True`` iff this process is the host/master.
+        is_worker: ``True`` iff this process is a GPU worker.
+        n_gpu: Number of GPU worker processes (``world_size - 1``).
+        host_rank: Rank of the host process (always ``world_size - 1``).
+    """
+
     local_rank: int
     world_size: int
     role: Literal["worker", "host"]
@@ -21,6 +38,17 @@ class Env:
 
     @classmethod
     def initial(cls) -> Env:
+        """Construct an ``Env`` from the already-initialised process group.
+
+        Assigns the highest rank as the host and all lower ranks as workers.
+        Also calls ``torch.cuda.set_device`` for worker processes.
+
+        Returns:
+            A fully populated, frozen ``Env`` instance.
+
+        Raises:
+            AssertionError: If ``dist.init_process_group`` has not been called.
+        """
         assert dist.is_initialized()
         world_size = dist.get_world_size()
         local_rank = dist.get_rank()

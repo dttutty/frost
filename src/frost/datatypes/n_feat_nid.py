@@ -1,3 +1,5 @@
+"""Paired node-ID / node-feature container with sorting and merging utilities."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,13 +10,25 @@ from frost.utils.tensor_set_fn import TensorSetFn
 
 
 @dataclass(kw_only=True)
-class NFeatNid:
+class NodeFeatNid:
+    """Pairs node IDs with their corresponding static node-feature rows.
+
+    Attributes:
+        nid: 1-D integer tensor of node IDs.
+        nfeat: 2-D float tensor of shape ``[len(nid), ndim]``.
+        is_sorted: Whether ``nid`` is already sorted in ascending order.
+    """
+
     nid: torch.Tensor
     nfeat: torch.Tensor
-    is_zipped: bool = True
     is_sorted: bool = False
 
-    def sort_by_nid(self) -> NFeatNid:
+    def sort_by_nid(self) -> NodeFeatNid:
+        """Sort ``nid`` and ``nfeat`` in ascending order of node ID in-place.
+
+        Returns:
+            ``self`` after sorting (idempotent if already sorted).
+        """
         if self.is_sorted:
             return self
 
@@ -28,7 +42,19 @@ class NFeatNid:
         self.is_sorted = True
         return self
 
-    def merge(self, other: NFeatNid) -> NFeatNid:
+    def merge(self, other: NodeFeatNid) -> NodeFeatNid:
+        """Concatenate two non-overlapping ``NodeFeatNid`` instances in-place.
+
+        Args:
+            other: Another ``NodeFeatNid`` whose node IDs must not intersect
+                with ``self.nid``.
+
+        Returns:
+            ``self`` after appending ``other``'s data.
+
+        Raises:
+            AssertionError: If the two instances share any node IDs.
+        """
         assert TensorSetFn.intersection(self.nid, other.nid).numel() == 0, (
             "NID overlap between RootX instances."
         )
@@ -38,11 +64,20 @@ class NFeatNid:
         self.nfeat = torch.cat((self.nfeat, other.nfeat), dim=0)
         return self
 
-    def filter_by_nid(self, nid: torch.Tensor) -> NFeatNid:
+    def filter_by_nid(self, nid: torch.Tensor) -> NodeFeatNid:
+        """Return a new ``NodeFeatNid`` containing only rows whose IDs are in ``nid``.
+
+        Args:
+            nid: 1-D tensor of node IDs to retain.
+
+        Returns:
+            A new ``NodeFeatNid`` with rows filtered to the given node IDs.
+        """
         mask = torch.isin(self.nid, nid)
         nid = self.nid[mask]
         nfeat = self.nfeat[mask]
         return self.__class__(nid=nid, nfeat=nfeat)
 
-    def cuda(self) -> NFeatNid:
-        return NFeatNid(nid=self.nid.cuda(), nfeat=self.nfeat.cuda())
+    def cuda(self) -> NodeFeatNid:
+        """Return a new ``NodeFeatNid`` with all tensors moved to the default CUDA device."""
+        return NodeFeatNid(nid=self.nid.cuda(), nfeat=self.nfeat.cuda())

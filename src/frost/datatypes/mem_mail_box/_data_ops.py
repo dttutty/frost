@@ -1,24 +1,21 @@
 from __future__ import annotations
 
 import logging
-from typing import TypeVar
 
 import torch
-from torch_scatter import scatter_max, scatter_sum
 
-from .box import BoxTsNid
-from .mail import MailTsNid
-from .mem import MemTsNid
+from frost.aliases.syncer import Mem_or_Mail
 
-AllType = TypeVar("AllType", MemTsNid, MailTsNid, BoxTsNid)
-Mem_or_Mail = TypeVar("Mem_or_Mail", "MemTsNid", "MailTsNid")
+from .box import BoxEntry
+from .mail import MailEntry
+
 logger = logging.getLogger(__name__)
 
 
-def box_to_mail(box_ts_nid) -> MailTsNid:
-    from .mail import MailTsNid
+def box_to_mail(box_ts_nid) -> MailEntry:
+    from .mail import MailEntry
 
-    return MailTsNid(
+    return MailEntry(
         nid=box_ts_nid.nid,
         data=box_ts_nid.data.squeeze(1),
         ts=box_ts_nid.ts.squeeze(1),
@@ -27,8 +24,8 @@ def box_to_mail(box_ts_nid) -> MailTsNid:
     )
 
 
-def mail_to_box(mem_ts_nid) -> BoxTsNid:
-    return BoxTsNid(
+def mail_to_box(mem_ts_nid) -> BoxEntry:
+    return BoxEntry(
         nid=mem_ts_nid.nid,
         data=mem_ts_nid.data.unsqueeze(1),
         ts=mem_ts_nid.ts.unsqueeze(1),
@@ -43,7 +40,10 @@ def compute_last_indices(nid: torch.Tensor, ts: torch.Tensor) -> torch.Tensor:
 
     unique_nids, compact_idx = torch.unique(nid, return_inverse=True)
     M = unique_nids.numel()
-    _, argmax = scatter_max(ts, compact_idx, dim=0, dim_size=M)
+    # Sort by ts ascending so the largest-ts entry is written last (scatter_ last-write-wins)
+    order = torch.argsort(ts)
+    argmax = torch.empty(M, dtype=torch.long, device=ts.device)
+    argmax.scatter_(0, compact_idx[order], order)
     return argmax
 
 
@@ -56,13 +56,13 @@ def keep_last(data: Mem_or_Mail) -> Mem_or_Mail:
         data.data = data.data[indices]
         data.ts = data.ts[indices]
 
-    # compute_last_indices 依赖 unique 的组顺序（默认按 nid 排序）
+    # compute_last_indices relies on unique's group order (sorted by nid by default)
     data.is_sorted = True
     data.is_unique = True
     return data
 
 
-def merge_1_mail(box: BoxTsNid, mail: MailTsNid) -> BoxTsNid:
+def merge_1_mail(box: BoxEntry, mail: MailEntry) -> BoxEntry:
     """Insert one new mail per node into the circular mailbox buffer (shift-left FIFO).
 
     Mirrors TGL_ORIGINAL's ``MailBox.update_mailbox`` circular-buffer write for
@@ -76,14 +76,14 @@ def merge_1_mail(box: BoxTsNid, mail: MailTsNid) -> BoxTsNid:
     the new mail is written into the last slot (index ``boxsize - 1``).
 
     Args:
-        box : BoxTsNid – current mailbox loaded from the flat graph.
+        box : BoxEntry – current mailbox loaded from the flat graph.
                          ``nid``  shape [N_all] – may contain -1 padding and
                          duplicate node IDs (same node can appear multiple times
                          in the flat graph; all copies carry identical data from
                          shared memory).
                          ``data`` shape [N_all, boxsize, D]
                          ``ts``   shape [N_all, boxsize]
-        mail: MailTsNid – new mail per destination node, already de-duplicated
+        mail: MailEntry – new mail per destination node, already de-duplicated
                          by ``keep_last()`` / ``keep_mean()`` so ``nid`` is
                          unique and sorted.
                          ``nid``  shape [M]
@@ -91,7 +91,7 @@ def merge_1_mail(box: BoxTsNid, mail: MailTsNid) -> BoxTsNid:
                          ``ts``   shape [M]
 
     Returns:
-        BoxTsNid  nid=[M], data=[M, boxsize, D], ts=[M, boxsize].
+        BoxEntry  nid=[M], data=[M, boxsize, D], ts=[M, boxsize].
         The caller (BoxWriter) writes this back to the shared-memory mailbox.
     """
     M = mail.nid.numel()
@@ -104,7 +104,7 @@ def merge_1_mail(box: BoxTsNid, mail: MailTsNid) -> BoxTsNid:
     out_ts = torch.zeros(M, boxsize, dtype=box.ts.dtype, device=device)
 
     if M == 0:
-        return BoxTsNid(
+        return BoxEntry(
             nid=mail.nid,
             data=out_data,
             ts=out_ts,
@@ -158,7 +158,7 @@ def merge_1_mail(box: BoxTsNid, mail: MailTsNid) -> BoxTsNid:
     out_data[:, boxsize - 1, :] = mail.data
     out_ts[:, boxsize - 1] = mail.ts
 
-    return BoxTsNid(
+    return BoxEntry(
         nid=mail.nid,
         data=out_data,
         ts=out_ts,
@@ -169,9 +169,9 @@ def merge_1_mail(box: BoxTsNid, mail: MailTsNid) -> BoxTsNid:
 
 def keep_mean(data: Mem_or_Mail) -> Mem_or_Mail:
     """
-    无 ct 版本：
-    - 对重复 nid：对 data、ts 做普通均值（权重恒为 1）
-    - 原地修改
+    Deduplicate by nid using a uniform-weight mean (no count tensor).
+    - Duplicate nids: data and ts are averaged with equal weights.
+    - Modifies data in place.
     """
     assert data.ts is not None, "TS must be provided for keep_mean"
     if data.nid.numel() == 0:
@@ -182,24 +182,20 @@ def keep_mean(data: Mem_or_Mail) -> Mem_or_Mail:
     unique_nids, compact_idx = torch.unique(data.nid, return_inverse=True)
     M = unique_nids.numel()
 
-    # 每组计数
-    ones = torch.ones_like(data.ts, dtype=torch.float32)
-    ct = scatter_sum(ones, compact_idx, dim=0, dim_size=M)  # [M]
+    # Count per group
+    ct = torch.zeros(M, dtype=data.ts.dtype, device=data.ts.device)
+    ct.scatter_reduce_(0, compact_idx, torch.ones_like(data.ts), reduce="sum", include_self=False)
 
-    # data 求和（建议转 float32 更稳）
-    sum_data = scatter_sum(data.data.to(torch.float32), compact_idx, dim=0, dim_size=M)
-
-    # ts 求和
-    sum_ts = scatter_sum(data.ts.to(torch.float32), compact_idx, dim=0, dim_size=M)
-
-    new_data = sum_data / ct.unsqueeze(-1)
-    new_ts = sum_ts / ct
+    # Sum data and timestamps
+    idx_data = compact_idx.unsqueeze(-1).expand_as(data.data)
+    sum_data = torch.zeros(M, data.data.shape[1], dtype=data.data.dtype, device=data.data.device)
+    sum_data.scatter_reduce_(0, idx_data, data.data, reduce="sum", include_self=False)
+    sum_ts = torch.zeros(M, dtype=data.ts.dtype, device=data.ts.device)
+    sum_ts.scatter_reduce_(0, compact_idx, data.ts, reduce="sum", include_self=False)
 
     data.nid = unique_nids
-    data.data = new_data.to(
-        dtype=data.data.dtype
-    )  # 如你想强制输出 float32，可删掉这一行 cast
-    data.ts = new_ts.to(dtype=data.ts.dtype)
+    data.data = sum_data / ct.unsqueeze(-1)
+    data.ts = sum_ts / ct
 
     data.is_sorted = True
     data.is_unique = True
@@ -208,8 +204,8 @@ def keep_mean(data: Mem_or_Mail) -> Mem_or_Mail:
 
 def _ensure_sorted_unique_nid(x: Mem_or_Mail) -> Mem_or_Mail:
     """
-    确保 x.nid 升序且去重（无 ct 版本）。
-    注意：这里是就地修改 x（和你当前风格一致）。
+    Ensure x.nid is sorted in ascending order and contains no duplicates.
+    Modifies x in place.
     """
     if not getattr(x, "is_sorted", False):
         x = x.sort_by_nid()
@@ -248,8 +244,9 @@ def merge_with_priority(
     high_priority_data: Mem_or_Mail, low_priority_data: Mem_or_Mail
 ) -> Mem_or_Mail:
     """
-    无 ct 版本（且双方都保证 ts 存在）：
-    - 优先保留 high；low 中 nid 若出现在 high 中则丢弃
+    Merge two entries, preferring high_priority_data on conflict.
+    Any nid in low_priority_data that also appears in high_priority_data is discarded.
+    Both inputs must have ts. No count tensor required.
     """
     if low_priority_data.nid.numel() == 0:
         return type(high_priority_data)(
@@ -268,10 +265,10 @@ def merge_with_priority(
             is_unique=low_priority_data.is_unique,
         )
 
-    # 关键前提：high 必须 sorted+unique（就地处理/或返回新对象取决于你的实现）
+    # Precondition: high must be sorted + unique
     high = _ensure_sorted_unique_nid(high_priority_data)
 
-    # low 不需要排序，直接 membership test
+    # low does not need to be sorted; membership test handles it directly
     mask_keep_low = _mask_not_in_sorted_unique(high.nid, low_priority_data.nid)
 
     ret = type(high)(
