@@ -156,6 +156,9 @@ def launch(cfg: DictConfig):
             host.run()
         finally:
             cleanup_all_shm(is_host=True)
+            if dist.is_available() and dist.is_initialized():
+                # Host rank also owns a process-group handle and must tear it down.
+                dist.destroy_process_group()
 
     else:
         # Launch worker process
@@ -196,4 +199,6 @@ def launch(cfg: DictConfig):
         finally:
             from frost.shm._core import cleanup_all_shm
 
+            # Ensure receiver/H2D/P2P threads are joined and dist groups are destroyed.
+            worker.cleanup()
             cleanup_all_shm(is_host=False)
