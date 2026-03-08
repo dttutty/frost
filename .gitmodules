@@ -4,9 +4,6 @@
 [submodule "third_party/DyGLib"]
 	path = third_party/DyGLib
 	url = https://github.com/dttutty/DyGLib.git
-[submodule "paper"]
-	path = paper
-	url = https://github.com/dttutty/frost_paper.git
 [submodule "third_party/PipeTGL"]
 	path = third_party/PipeTGL
 	url = https://github.com/dttutty/PipeTGL.git
@@ -19,3 +16,6 @@
 [submodule "third_party/MSPipe"]
 	path = third_party/MSPipe
 	url = https://github.com/dttutty/MSPipe.git
+[submodule "overleaf"]
+	path = overleaf
+	url = https://git@git.overleaf.com/69abe775311880098389ebd8
