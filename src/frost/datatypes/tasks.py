@@ -8,7 +8,6 @@ from numpy.typing import NDArray
 from torch import Tensor
 
 from frost.datatypes.graph import Graph
-from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.plan import DynamicPlan
 
@@ -47,8 +46,6 @@ class BoxTask:
         box_plan: DynamicPlan carrying node IDs and P2P routing for the
             mailbox update.
         is_last: ``True`` iff this is the final batch of the current epoch.
-        old_box: The existing mailbox state read from shared memory, used to
-            compute the shift-left FIFO update.
         graph: Inflated ``Graph`` for this batch; used by the postman to
             determine which neighbor mailboxes to update.
     """
@@ -58,7 +55,6 @@ class BoxTask:
     batch_idx: int
     box_plan: DynamicPlan
     is_last: bool
-    old_box: BoxEntry
     graph: Graph | None
 
     def __repr__(self) -> str:

@@ -69,7 +69,7 @@ class Host:
         ngh_sampler: NghSamplerProto,
         env: Env,
         start_time: float,
-        analyzer: AnalyzerProto,
+        planner: AnalyzerProto,
         gpu_topo: list,
         batch_size: int,
         n_epoch: int,
@@ -85,7 +85,7 @@ class Host:
         self.mail_same_plan_as_mem = mail_same_plan_as_mem
         self.n_gpu = env.n_gpu
         self.batch_size = batch_size
-        self.analyzer = analyzer
+        self.analyzer = planner
 
         self.stop_ev = threading.Event()
         self.cur_macro_of_epoch = 0
@@ -129,6 +129,7 @@ class Host:
 
             self.plan_router = PlanRouter(
                 gpu_topo=gpu_topo,
+                planner=self.analyzer,
                 mem_plan_out_q=self.mem_plan_out_q,
                 mail_plan_out_q=self.mail_plan_out_q,
                 nfeat_plan_out_q=self.nfeat_plan_out_q,
@@ -362,20 +363,10 @@ class Host:
         """
         # show edges["time"].values for debug
         # logger.info(f"Edge times: {edges['time'].values}")
-        src = (
-            torch.as_tensor(edges["src"].values, dtype=torch.long).clone().contiguous()
-        )
-        dst = (
-            torch.as_tensor(edges["dst"].values, dtype=torch.long).clone().contiguous()
-        )
-        ts = (
-            torch.as_tensor(edges["time"].values, dtype=torch.float32)
-            .clone()
-            .contiguous()
-        )
-        eid = (
-            torch.as_tensor(edges["eid"].values, dtype=torch.long).clone().contiguous()
-        )
+        src = torch.from_numpy(edges["src"].to_numpy(copy=True)).to(torch.long)
+        dst = torch.from_numpy(edges["dst"].to_numpy(copy=True)).to(torch.long)
+        ts = torch.from_numpy(edges["time"].to_numpy(copy=True)).to(torch.float32)
+        eid = torch.from_numpy(edges["eid"].to_numpy(copy=True)).to(torch.long)
         # show ts content for debug
 
         # sample neg destination nodes

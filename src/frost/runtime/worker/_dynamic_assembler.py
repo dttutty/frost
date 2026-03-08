@@ -365,6 +365,59 @@ class DynamicAssembler(StreamThreadBase):
         delta_mask[torch.nonzero(base_mask, as_tuple=False).squeeze(-1)] = ~in_shared
         return delta_mask
 
+    def _apply_box_mail_delta(
+        self,
+        delta_box: BoxEntry,
+        graph: FlatGraph,
+        box_delta_mask: torch.Tensor,
+    ) -> None:
+        """Insert P2P delta mail (boxsize=1) into full box for nodes with boxsize > 1.
+
+        For delta nodes (not covered by CPU fetch), reads the old box from CPU
+        shared memory and inserts the P2P mail at the ring-buffer write position.
+        """
+        if delta_box.nid.numel() == 0:
+            return
+
+        valid_nids = graph.nid[box_delta_mask]
+        if valid_nids.numel() == 0:
+            return
+
+        pos = torch.searchsorted(delta_box.nid, valid_nids)
+        in_bound = pos < delta_box.nid.numel()
+        pos_safe = pos.clamp(max=delta_box.nid.numel() - 1)
+        found_mask = in_bound & (delta_box.nid[pos_safe] == valid_nids)
+
+        if not found_mask.any():
+            return
+
+        global_positions = torch.nonzero(box_delta_mask, as_tuple=False).squeeze(-1)[
+            found_mask
+        ]
+        local_positions = pos_safe[found_mask]
+        matched_nids = delta_box.nid[local_positions]
+
+        # Read old box from CPU shared memory for these nodes
+        nids_cpu = matched_nids.cpu().long()
+        old_box_data = self.shared.box[nids_cpu].to(self.device)  # [M, boxsize, d_mail]
+        old_box_ts = self.shared.box_ts[nids_cpu].to(self.device)  # [M, boxsize]
+
+        # Ring-buffer position: write_mail already wrote at (box_pos - 1) % boxsize
+        # and advanced box_pos.  Overwrite that slot with the P2P data (freshest).
+        ring_pos = self.shared.box_pos[nids_cpu].to(self.device)  # [M]
+        write_pos = (ring_pos - 1) % self.boxsize  # [M]
+
+        # delta_box.data is [N, 1, d_mail] → squeeze to [M, d_mail]
+        mail_data = delta_box.data[local_positions].squeeze(1)
+        mail_ts = delta_box.ts[local_positions].squeeze(1)
+
+        arange = torch.arange(mail_data.shape[0], device=self.device)
+        old_box_data[arange, write_pos] = mail_data
+        old_box_ts[arange, write_pos] = mail_ts
+
+        graph.box[global_positions] = old_box_data
+        graph.box_ts[global_positions] = old_box_ts
+
     def apply_delta_features(
         self,
         graph: FlatGraph,
@@ -385,7 +438,12 @@ class DynamicAssembler(StreamThreadBase):
             delta.mem, graph.mem, graph.mem_ts, graph, mem_delta_mask
         )
 
-        if (
+        # P2P delta box now always has boxsize=1 (single mail).
+        # For boxsize > 1 (APAN), merge P2P mail into the full box from CPU.
+        delta_box_slots = delta.box.data.shape[1] if delta.box.data.dim() == 3 else 1
+        if self.boxsize > 1 and delta_box_slots == 1:
+            self._apply_box_mail_delta(delta.box, graph, box_delta_mask)
+        elif (
             global_pos is not None
             and delta.box.nid.numel() > 0
             and torch.equal(mem_delta_mask, box_delta_mask)

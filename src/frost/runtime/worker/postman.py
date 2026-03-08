@@ -22,7 +22,8 @@ class Postman:
 
     def deliver(self, graph: "Graph", mail_data: torch.Tensor) -> "MailEntry":
         """
-        Deliver mails from the first 2/3 of root nodes to their 1-hop neighbors.
+        Deliver mails from the first 2/3 of root nodes to their 1-hop neighbors
+        AND to themselves (self-delivery).
 
         Args:
             graph: SeqGraph containing the batch structure.
@@ -43,8 +44,9 @@ class Postman:
                 f"mail_data length {mail_data.size(0)} does not match target_len {target_len}."
             )
 
-        # 2. Extract sender timestamps
+        # 2. Extract sender timestamps and root NIDs
         sender_ts = graph.root_ts[:target_len]
+        sender_nids = graph.root_nid[:target_len]
 
         # 3. Reshape neighbor NIDs to [target_len, S]
         # Neighbors are only sampled for src + pos_dst (target_len nodes),
@@ -57,20 +59,25 @@ class Postman:
         valid_mask = target_nbr_nids != -1  # Shape: [target_len, S]
 
         # 5. Extract valid destination NIDs using the mask (automatically flattens to 1D)
-        new_nids = target_nbr_nids[valid_mask]  # Shape: [K]
+        nbr_new_nids = target_nbr_nids[valid_mask]  # Shape: [K]
 
         # 6. Broadcast mail_data to neighbors
         # [target_len, D] -> [target_len, S, D] -> Apply Mask -> [K, D]
         D = mail_data.size(-1)
         expanded_mail_data = mail_data.unsqueeze(1).expand(target_len, S, D)
-        new_mail_data = expanded_mail_data[valid_mask]  # Shape: [K, D]
+        nbr_new_mail_data = expanded_mail_data[valid_mask]  # Shape: [K, D]
 
         # 7. Broadcast sender timestamps to neighbors
         # [target_len] -> [target_len, S] -> Apply Mask -> [K]
         expanded_ts = sender_ts.unsqueeze(1).expand(target_len, S)
-        new_ts = expanded_ts[valid_mask]  # Shape: [K]
+        nbr_new_ts = expanded_ts[valid_mask]  # Shape: [K]
 
-        # 8. Return the final MailEntry
+        # 8. Self-delivery: root nodes also receive their own mail
+        new_nids = torch.cat([sender_nids, nbr_new_nids], dim=0)
+        new_mail_data = torch.cat([mail_data, nbr_new_mail_data], dim=0)
+        new_ts = torch.cat([sender_ts, nbr_new_ts], dim=0)
+
+        # 9. Return the final MailEntry
         return MailEntry(
             nid=new_nids,
             data=new_mail_data,

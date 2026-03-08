@@ -38,6 +38,12 @@ def launch(cfg: DictConfig):
     """
     dist.init_process_group(backend="gloo")
 
+    # Control TF32 globally so experiments can isolate TF32 vs compile speedups.
+    tf32_enabled = bool(cfg.get("tf32", True))
+    torch.backends.cuda.matmul.allow_tf32 = tf32_enabled
+    torch.backends.cudnn.allow_tf32 = tf32_enabled
+    torch.set_float32_matmul_precision("high" if tf32_enabled else "highest")
+
     env: Env = Env.initial()
     init_logging(env.local_rank, env.is_host)
     run_id = broadcast_data(
@@ -123,7 +129,7 @@ def launch(cfg: DictConfig):
             ring_buf=ring_buf,
             fanout=fanout,
         )
-        analyzer: AnalyzerProto = instantiate(cfg.get("analyzer"))
+        planner: AnalyzerProto = instantiate(cfg.get("analyzer"))
         assert isinstance(df, pd.DataFrame)
         has_nfeat = ndim > 0
         has_efeat = edim > 0
@@ -137,7 +143,7 @@ def launch(cfg: DictConfig):
             df=df,
             env=env,
             start_time=start,
-            analyzer=analyzer,
+            planner=planner,
             batch_size=cfg.batch_size,
             neg_sampler=neg_sampler,
             ngh_sampler=ngh_sampler,
@@ -183,6 +189,7 @@ def launch(cfg: DictConfig):
             optimizer=cfg.optimizer,
             lr=cfg.lr,
             mail_combine=cfg.get("mail_combine"),
+            compile_model=cfg.get("compile", True),
         )
         try:
             worker.run()

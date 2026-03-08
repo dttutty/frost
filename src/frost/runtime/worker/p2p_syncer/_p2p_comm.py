@@ -24,7 +24,7 @@ class P2PQHandler(StreamThreadBase):
         delta_q: DeltaQ,
         device: torch.device,
     ) -> None:
-        super().__init__(name="p2p_q_handler", stop_ev=stop_ev)
+        super().__init__(name="p2p_comm", stop_ev=stop_ev)
         self.device = device
         self.mem_p2p_q = mem_p2p_q
         self.box_p2p_q = box_p2p_q

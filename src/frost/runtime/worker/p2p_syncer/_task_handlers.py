@@ -62,23 +62,22 @@ class MemTaskHandler(StreamThreadBase):
                     device=self.device,
                     batch_idx=batch_idx,
                 )
-
-                ready_event_1: CudaEvent = cast(CudaEvent, torch.cuda.Event())
-                ready_event_1.record(torch.cuda.current_stream())
-                self.mem_p2p_q.put((p2p_task, ready_event_1))
+                p2p_event: CudaEvent = cast(CudaEvent, torch.cuda.Event())
+                p2p_event.record(torch.cuda.current_stream())
+                self.mem_p2p_q.put((p2p_task, p2p_event))
             else:
                 self.mem_p2p_q.put("nothing_to_p2p")
 
-            ready_event_2: CudaEvent = cast(CudaEvent, torch.cuda.Event())
-            ready_event_2.record(torch.cuda.current_stream())
+            writeback_event: CudaEvent = cast(CudaEvent, torch.cuda.Event())
+            writeback_event.record(torch.cuda.current_stream())
             if mem_task.mem_plan.writeback is not None:
                 to_writeback = mem_task.mem_plan.writeback.data
-                self.mem_wr_q.put((to_writeback, batch_idx, mem_ts_nid, ready_event_2))
+                self.mem_wr_q.put((to_writeback, batch_idx, mem_ts_nid, writeback_event))
             else:
-                self.mem_wr_q.put((None, batch_idx, mem_ts_nid, ready_event_2))
+                self.mem_wr_q.put((None, batch_idx, mem_ts_nid, writeback_event))
 
 
-class BoxTaskHandler(StreamThreadBase):
+class MessageHandler(StreamThreadBase):
     def __init__(
         self,
         box_task_q: BoxTaskQ,
@@ -90,7 +89,7 @@ class BoxTaskHandler(StreamThreadBase):
         h2d_sem: threading.Semaphore,
         postman: Postman | None,
     ) -> None:
-        super().__init__(name="box_handler", stop_ev=stop_ev)
+        super().__init__(name="msg_handler", stop_ev=stop_ev)
 
         self.device = device
         self.box_task_q = box_task_q
@@ -101,13 +100,24 @@ class BoxTaskHandler(StreamThreadBase):
         self.box_wr_q = box_wr_q
         self.h2d_sem = h2d_sem
 
-    def handle_small_box(
+    def _process_messages(
         self,
         new_mail: MailEntry,
         mail_combine: Literal["last", "mean"],
         box_task: BoxTask,
     ) -> tuple[P2PTask, BoxEntry]:
+        """Aggregate and route messages, producing a boxsize=1 BoxEntry for P2P.
+
+        For models with a postman (e.g. APAN), routes mail to neighbors first.
+        The CPU writeback uses MemBoxStore.write_mail() (ring buffer).
+        """
         box_plan = box_task.box_plan
+
+        # For APAN: route mail to 1-hop neighbors via postman
+        if self.postman is not None:
+            graph = box_task.graph
+            assert graph is not None, "BoxTask.graph must not be None when postman is set"
+            new_mail = self.postman.deliver(graph, mail_data=new_mail.data)
 
         if mail_combine == "last":
             new_mail = keep_last(new_mail)
@@ -115,53 +125,16 @@ class BoxTaskHandler(StreamThreadBase):
             assert mail_combine == "mean"
             new_mail = keep_mean(new_mail)
 
-        # disable stale state p2p for speed
-        # box = box_task.old_box
-        # old_mail = box_to_mail(box)
-        # new_mail = new_mail.merge_with_priority(old_mail)
+        box_entry = mail_to_box(new_mail)
 
-        box_ts_nid = mail_to_box(new_mail)
-
-        # box_ts_nid.data[:] = box_ts_nid.nid.view(-1, 1, 1).to(box_ts_nid.data.dtype)
         p2p_task = make_p2p_task(
-            entry=box_ts_nid,
+            entry=box_entry,
             plan=box_plan,
             device=self.device,
             batch_idx=box_task.batch_idx,
         )
 
-        return p2p_task, box_ts_nid
-
-    def handle_large_box(
-        self,
-        new_mail: MailEntry,
-        mail_combine: Literal["last", "mean"],
-        box_task: BoxTask,
-    ) -> tuple[P2PTask, BoxEntry]:
-        assert self.postman is not None, "Postman is required for handling large boxes"
-        graph = box_task.graph
-        assert graph is not None, "BoxTask.graph must not be None for large boxes"
-        # disable stale state p2p for speed
-        box = box_task.old_box
-        box_plan = box_task.box_plan
-
-        delivered_mails = self.postman.deliver(graph, mail_data=new_mail.data)
-        new_mail = delivered_mails
-
-        if mail_combine == "last":
-            new_mail = keep_last(new_mail)
-            box_ts_nid = box.merge_1_mail(new_mail)
-        elif mail_combine == "mean":
-            new_mail = keep_mean(new_mail)
-            box_ts_nid = box.merge_1_mail(new_mail)
-
-        p2p_task = make_p2p_task(
-            entry=box_ts_nid,
-            plan=box_plan,
-            device=self.device,
-            batch_idx=box_task.batch_idx,
-        )
-        return p2p_task, box_ts_nid
+        return p2p_task, box_entry
 
     @torch.no_grad()
     def logic(self) -> None:
@@ -184,44 +157,27 @@ class BoxTaskHandler(StreamThreadBase):
                 box_task.pos_efeat,
             )
 
-            if self.postman is None:
-                # No postman means this is a simple mailbox model (e.g. TGN/JODIE); no neighbor routing needed
-                p2p_task, box_ts_nid = self.handle_small_box(
-                    new_mail, self.mail_combine, box_task
-                )
-                if box_task.is_last is True:
-                    # Last macro-batch of the epoch: no P2P needed, just write back
-                    p2p_task = None
-            else:
-                p2p_task, box_ts_nid = self.handle_large_box(
-                    new_mail, self.mail_combine, box_task
-                )
-                if box_task.is_last is True:
-                    # Last macro-batch of the epoch: no P2P needed, just write back
-                    p2p_task = None
+            p2p_task, box_entry = self._process_messages(
+                new_mail, self.mail_combine, box_task
+            )
 
             if box_task.is_last is False:
-                assert p2p_task is not None
-                ready_event_1 = cast(CudaEvent, torch.cuda.Event())
-                ready_event_1.record(torch.cuda.current_stream())
-                # torch.cuda.current_stream().synchronize()
-                self.box_p2p_q.put((p2p_task, ready_event_1))
+                p2p_event = cast(CudaEvent, torch.cuda.Event())
+                p2p_event.record(torch.cuda.current_stream())
+                self.box_p2p_q.put((p2p_task, p2p_event))
             else:
-                assert p2p_task is None
                 self.box_p2p_q.put("nothing_to_p2p")
 
-            ready_event_2 = cast(CudaEvent, torch.cuda.Event())
-            ready_event_2.record(torch.cuda.current_stream())
+            writeback_event = cast(CudaEvent, torch.cuda.Event())
+            writeback_event.record(torch.cuda.current_stream())
             if box_task.box_plan.writeback is not None:
-                assert box_ts_nid is not None
                 self.box_wr_q.put(
                     (
                         box_task.box_plan.writeback.data,
                         box_task.batch_idx,
-                        box_ts_nid,
-                        ready_event_2,
+                        box_entry,
+                        writeback_event,
                     )
                 )
             else:
-                assert box_ts_nid is not None
-                self.box_wr_q.put((None, box_task.batch_idx, box_ts_nid, ready_event_2))
+                self.box_wr_q.put((None, box_task.batch_idx, box_entry, writeback_event))

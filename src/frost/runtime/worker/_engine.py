@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 from queue import Queue as Q
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 import torch.distributed as dist
@@ -39,9 +39,9 @@ from frost.protocols.postman_proto import PostmanProto
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
 from frost.runtime.worker._host_to_device import H2D
 from frost.runtime.worker._receiver import Receiver as Receiver
-from frost.runtime.worker.p2p_syncer._handlers import BoxTaskHandler, MemTaskHandler
-from frost.runtime.worker.p2p_syncer._writer import SharedMemWriter
-from frost.runtime.worker.p2p_syncer._p2p_q_handler import P2PQHandler
+from frost.runtime.worker.p2p_syncer._task_handlers import MemTaskHandler, MessageHandler
+from frost.runtime.worker.p2p_syncer._writer import BoxMailWriter, SharedMemWriter
+from frost.runtime.worker.p2p_syncer._p2p_comm import P2PQHandler
 from frost.shm.mem_mgr import MemBoxStore
 from frost.shm.ring_buf import RingBuf
 
@@ -71,7 +71,7 @@ class Worker:
 
     Each worker process corresponds to one GPU rank. It manages a chain of
     background threads (Receiver → H2D → [DynamicAssembler] → main loop) and
-    optional P2P memory-sync threads (MemTaskHandler, BoxTaskHandler,
+    optional P2P memory-sync threads (MemTaskHandler, MessageHandler,
     SharedMemWriter, P2PQHandler) when a ``MemBoxStore`` is present.
 
     Attributes:
@@ -82,13 +82,13 @@ class Worker:
         mem_task_q: Queue of memory update tasks posted by AssembledModel.
         box_task_q: Queue of mailbox update tasks posted by AssembledModel.
         mem_p2p_q: Queue of P2P memory descriptors produced by MemTaskHandler.
-        box_p2p_q: Queue of P2P mailbox descriptors produced by BoxTaskHandler.
+        box_p2p_q: Queue of P2P mailbox descriptors produced by MessageHandler.
         mem_wr_q: Queue of write-back requests for the node memory store.
         box_wr_q: Queue of write-back requests for the mailbox store.
         dy_asm: DynamicAssembler thread (memory-model path only).
         mem_handler: MemTaskHandler thread (memory-model path only).
         mem_wr: SharedMemWriter thread for node memory (memory-model path only).
-        box_handler: BoxTaskHandler thread (memory-model path only).
+        box_handler: MessageHandler thread (memory-model path only).
         box_wr: SharedMemWriter thread for mailbox (memory-model path only).
         p2p_q_handler: P2PQHandler thread (memory-model path only).
         model: AssembledModel wrapped in DDP.
@@ -112,7 +112,7 @@ class Worker:
     dy_asm: DynamicAssembler | None = None
     mem_handler: MemTaskHandler | None = None
     mem_wr: SharedMemWriter | None = None
-    box_handler: BoxTaskHandler | None = None
+    box_handler: MessageHandler | None = None
     box_wr: SharedMemWriter | None = None
     p2p_q_handler: P2PQHandler | None = None
 
@@ -138,6 +138,7 @@ class Worker:
         optimizer: Literal["adam", "sgd"],
         lr: float,
         mail_combine: Literal["last", "mean"] | None,
+        compile_model: bool = True,
     ) -> None:
         # --- Basic config ---
         self.ring_buf = ring_buf
@@ -151,6 +152,7 @@ class Worker:
         self.nccl_p2p = nccl_p2p
         self.device = torch.device(f"cuda:{env.local_rank}")
         self.mail_combine = mail_combine
+        self.compile_model = compile_model
         self.lr = lr
         self.curr_epoch = 0
         self.local_best_auc = 0.0
@@ -163,7 +165,8 @@ class Worker:
 
         self._init_pipeline(ring_buf, nfeat, efeat)
         self._init_model(
-            encoder, mem_updater, predictor, postman, criterion, optimizer, ring_buf
+            encoder, mem_updater, predictor, postman, criterion, optimizer, ring_buf,
+            compile_model=self.compile_model,
         )
         self._init_metrics()
 
@@ -247,7 +250,7 @@ class Worker:
             device=self.device,
             name="mem_wr",
         )
-        self.box_handler = BoxTaskHandler(
+        self.box_handler = MessageHandler(
             h2d_sem=self.h2d_sem,
             box_task_q=self.box_task_q,
             box_p2p_q=self.box_p2p_q,
@@ -257,9 +260,8 @@ class Worker:
             box_wr_q=self.box_wr_q,
             postman=self.postman,
         )
-        self.box_wr = SharedMemWriter(
-            shared_data=self.mem_box_store.box,
-            shared_ts=self.mem_box_store.box_ts,
+        self.box_wr = BoxMailWriter(
+            mem_box_store=self.mem_box_store,
             h2d_sem=self.h2d_sem,
             stop_ev=self.stop_ev,
             wr_q=self.box_wr_q,
@@ -286,6 +288,7 @@ class Worker:
         criterion: torch.nn.Module,
         optimizer: Literal["adam", "sgd"],
         ring_buf: RingBuf,
+        compile_model: bool = True,
     ) -> None:
         """Create model, optimizer, and wrap with DDP."""
         self.model = AssembledModel(
@@ -315,6 +318,15 @@ class Worker:
             return _guard(state, bucket)
 
         self.model.register_comm_hook(state=self.nccl, hook=p2p_guard_comm_hook)
+        if compile_model:
+            # Compile only the pure-compute submodules (encoder, mem_updater, header).
+            # AssembledModel.forward has too many non-tensor operations (Queue puts,
+            # CUDA events, dataclass access) that cause graph breaks and recompilation.
+            bare = self.model.module
+            bare.encoder = torch.compile(bare.encoder)
+            if bare.mem_updater is not None:
+                bare.mem_updater = torch.compile(bare.mem_updater)
+            bare.header = torch.compile(bare.header)
         self.criterion = criterion
 
     def _init_metrics(self) -> None:
@@ -457,7 +469,7 @@ class Worker:
 
         Must be called once before invoking ``run()``.  Threads are started in
         dependency order: H2D and Receiver first, then the optional memory/box
-        sync threads (P2PQHandler, MemTaskHandler, BoxTaskHandler, writers,
+        sync threads (P2PQHandler, MemTaskHandler, MessageHandler, writers,
         DynamicAssembler) when a ``MemBoxStore`` is present.
         """
         self.h2d.start()
@@ -625,7 +637,21 @@ class Worker:
         if self.dy_asm:
             self.dy_asm.join()
         dist.barrier()
+        # Reset dynamo/triton compiled state before destroying the process group
+        # to avoid C++ destructor ordering issues (SIGABRT on exit).
+        torch._dynamo.reset()
         dist.destroy_process_group()
+
+    def _unwrap_model(self) -> AssembledModel:
+        """Return the bare AssembledModel, stripping torch.compile and DDP wrappers."""
+        model = self.model
+        # torch.compile wraps the model in an OptimizedModule
+        if hasattr(model, "_orig_mod"):
+            model = model._orig_mod
+        # DDP wraps the model in a DistributedDataParallel
+        if isinstance(model, DDP):
+            model = model.module
+        return cast(AssembledModel, model)
 
     # Public model save/load interface
     def save_model(self, path: str) -> None:
@@ -640,9 +666,7 @@ class Worker:
         rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
 
         if rank == 0:
-            # Save the unwrapped model weights so the checkpoint can be loaded without DDP
-            model = self.model.module if isinstance(self.model, DDP) else self.model
-            torch.save(model.state_dict(), path)
+            torch.save(self._unwrap_model().state_dict(), path)
 
     def load_model(self, path: str) -> None:
         """Load model weights from a checkpoint and re-wrap with DDP.
@@ -660,14 +684,17 @@ class Worker:
 
         state = torch.load(path, map_location="cpu")
 
-        # Unwrap DDP before loading because the checkpoint was saved from the bare model
-        model = self.model.module if isinstance(self.model, DDP) else self.model
-        model.load_state_dict(state, strict=True)
+        bare_model = self._unwrap_model()
+        bare_model.load_state_dict(state, strict=True)
+        bare_model = bare_model.to(self.device)
 
-        model = model.to(self.device)
-
-        # Re-wrap with DDP
-        self.model = DDP(model, device_ids=[0])
+        self.model = DDP(bare_model, device_ids=[0])
+        if self.compile_model:
+            inner = self.model.module
+            inner.encoder = torch.compile(inner.encoder)
+            if inner.mem_updater is not None:
+                inner.mem_updater = torch.compile(inner.mem_updater)
+            inner.header = torch.compile(inner.header)
 
         if dist.is_available() and dist.is_initialized():
             dist.barrier(group=self.nccl)
@@ -682,4 +709,4 @@ class Worker:
             memory_state: Dict produced by a prior ``save_memory_state()`` call.
         """
         if self.mem_box_store is not None:
-            self.model.module.load_memory_state(memory_state)
+            self._unwrap_model().load_memory_state(memory_state)

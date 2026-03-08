@@ -26,7 +26,8 @@ class Access:
 
     required_mem: TensorSet | None = None
     mem_update: TensorSet | None = None
-    required_box: TensorSet | None = None
+    all_nodes_in_graph: TensorSet | None = None
+    pos_seed_need: TensorSet | None = None
     box_update: TensorSet | None = None
     required_nfeat: TensorSet | None = None
 
@@ -35,7 +36,7 @@ class Access:
         return (
             f"Access(mem_needed={self.required_mem.data.shape}, "
             f"mem_updated={self.mem_update.data.shape}, "
-            f"box_needed={self.required_box.data.shape if self.required_box is not None else None}, "
-            f"box_updated={self.box_update.data.shape if self.box_update is not None else None}, "
+            f"box_needed={self.all_nodes_in_graph.data.shape if self.all_nodes_in_graph is not None else None}, "
+            f"box_updated={self.pos_seed_need.data.shape if self.pos_seed_need is not None else None}, "
             f"nfeat_needed={self.required_nfeat.data.shape})"
         )

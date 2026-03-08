@@ -225,10 +225,10 @@ class DynamicPlanner(ThreadBase):
 
             elif in_q_data == "end_of_epoch":
                 assert self.pending is not None
-                needs, updates, metas = self.pending
+                all_needs, all_pos_seed, metas = self.pending
 
-                if needs and len(needs) > 0:
-                    ref_t = needs[0].data
+                if all_needs and len(all_needs) > 0:
+                    ref_t = all_needs[0].data
                     empty_tensor = torch.tensor(
                         [], dtype=ref_t.dtype, device=ref_t.device
                     )
@@ -240,18 +240,22 @@ class DynamicPlanner(ThreadBase):
                 next_needs: list[TensorSet] = [empty_ts for _ in range(self.n_gpus)]
                 next_updates: list[TensorSet] = [empty_ts for _ in range(self.n_gpus)]
 
-                plan = self._plan(needs, updates, next_needs, next_updates, metas)
+                plan = self._plan(
+                    all_needs, all_pos_seed, next_needs, next_updates, metas
+                )
                 self.out_q.put(plan)
                 self.pending = None
                 continue
 
             if self.pending is None:
-                needs, updates, metas = in_q_data
+                all_needs, all_pos_seed, metas = in_q_data
                 self.pending = in_q_data
-                self.fetch = needs  # first batch: fetch everything from CPU
+                self.fetch = all_needs  # first batch: fetch everything from CPU
             else:
-                needs, updates, metas = self.pending
-                plan = self._plan(needs, updates, in_q_data[0], in_q_data[1], metas)
+                all_needs, all_pos_seed, metas = self.pending
+                plan = self._plan(
+                    all_needs, all_pos_seed, in_q_data[0], in_q_data[1], metas
+                )
                 self.out_q.put(plan)
                 self.pending = in_q_data
 
@@ -337,4 +341,133 @@ class DynamicPlanner(ThreadBase):
             )
 
         self.fetch = next_prefetch
+        return plans
+
+
+class APANDynamicPlanner(ThreadBase):
+    gpus_distance: np.ndarray
+    n_gpus: int
+
+    def __init__(
+        self,
+        gpus_distance: np.ndarray,
+        in_q: DynamicPlanInQ,
+        out_q: DynamicPlanOutQ,
+        stop_ev: threading.Event,
+        handle_stale: bool = False,
+    ) -> None:
+        super().__init__(name="dynamic_planner", stop_ev=stop_ev)
+        self.gpus_distance = gpus_distance
+        self.n_gpus = len(self.gpus_distance)
+        self.in_q = in_q
+        self.out_q = out_q
+        self.stop_ev = stop_ev
+        self.handle_stale = handle_stale
+        self.pending: MetasDyNeed | None = None
+
+    def logic(self) -> None:
+        """Main planning loop: consume (box_fetch, box_update, metas) tuples and emit DynamicPlans.
+
+        Uses a one-step lookahead: each incoming batch is held as ``pending`` until
+        the *next* batch arrives (or an end-of-epoch / shutdown sentinel), so that
+        fresh P2P transfers can be pre-computed based on what nodes the next batch
+        will need.  Sentinel handling:
+
+        - ``None``: forward ``None`` to the output queue and exit.
+        - ``"end_of_epoch"``: plan the pending batch with empty next-batch sets.
+        """
+        while not self.stop_ev.is_set():
+            in_q_data = self.in_q.get(block=True)
+
+            if in_q_data is None:
+                self.out_q.put(None)
+                break
+
+            elif in_q_data == "end_of_epoch":
+                assert self.pending is not None
+                box_fetch, box_update, metas = self.pending
+
+                if box_fetch and len(box_fetch) > 0:
+                    ref_t = box_fetch[0].data
+                    empty_tensor = torch.tensor(
+                        [], dtype=ref_t.dtype, device=ref_t.device
+                    )
+                else:
+                    empty_tensor = torch.tensor([], dtype=torch.long)
+                empty_ts = TensorSet(empty_tensor)
+
+                # Last batch of the epoch: no next-batch needs or updates.
+                next_fetch: list[TensorSet] = [empty_ts for _ in range(self.n_gpus)]
+                next_updates: list[TensorSet] = [empty_ts for _ in range(self.n_gpus)]
+
+                plan = self._plan(
+                    box_fetch,
+                    box_update,
+                    next_fetch,
+                    next_updates,
+                    metas,
+                )
+                self.out_q.put(plan)
+                self.pending = None
+                continue
+
+            if self.pending is None:
+                box_fetch, box_update, metas = in_q_data
+                self.pending = in_q_data
+                self.fetch = box_fetch  # first batch: fetch everything from CPU
+            else:
+                box_fetch, box_update, metas = self.pending
+                plan = self._plan(
+                    box_fetch,
+                    box_update,
+                    in_q_data[0],
+                    in_q_data[1],
+                    metas,
+                )
+                self.out_q.put(plan)
+                self.pending = in_q_data
+
+    def _plan(
+        self,
+        box_fetch_list: list[TensorSet],
+        box_update_list: list[TensorSet],
+        next_box_fetch_list: list[TensorSet],
+        next_box_update_list: list[TensorSet],
+        metas: MetaBundle,
+    ) -> list[DynamicPlan]:
+        n_gpus = self.n_gpus
+
+        # 1. Deduplicate: each updated node is owned by exactly one GPU.
+        # box_update_list = nodes that postman delivers mail to (src+dst + their neighbors)
+        deduplicate_update_list, all_update = deduplicate_updates(
+            box_update_list
+        )
+
+        # 2. Fresh P2P: send this batch's updates to GPUs that need them next batch.
+        # next_box_fetch_list = next batch's pos_seed_need (src+dst that need box read)
+        _, p2p = compute_p2p_transfer_plan(
+            next_box_fetch_list, deduplicate_update_list
+        )
+
+        # 3. Writeback all updated nodes to keep ring buffer state consistent on CPU.
+        writeback_list = deduplicate_update_list
+
+        # 4. Build per-GPU count matrix and plans.
+        p2p_cts = np.zeros((n_gpus, n_gpus), dtype=np.int32)
+        for src in range(n_gpus):
+            for dst in range(n_gpus):
+                p2p_cts[src, dst] = len(p2p[src][dst])
+
+        plans = []
+        for src in range(n_gpus):
+            plans.append(
+                DynamicPlan(
+                    p2p=p2p[src],
+                    fetch=box_fetch_list[src],
+                    writeback=writeback_list[src],
+                    recv_counts=p2p_cts[:, src],
+                    send_counts=p2p_cts[src, :],
+                )
+            )
+
         return plans

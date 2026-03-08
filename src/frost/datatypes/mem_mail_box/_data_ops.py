@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 
 import torch
-from torch_scatter import scatter_max, scatter_sum
 
 from frost.aliases.syncer import Mem_or_Mail
 
@@ -41,7 +40,10 @@ def compute_last_indices(nid: torch.Tensor, ts: torch.Tensor) -> torch.Tensor:
 
     unique_nids, compact_idx = torch.unique(nid, return_inverse=True)
     M = unique_nids.numel()
-    _, argmax = scatter_max(ts, compact_idx, dim=0, dim_size=M)
+    # Sort by ts ascending so the largest-ts entry is written last (scatter_ last-write-wins)
+    order = torch.argsort(ts)
+    argmax = torch.empty(M, dtype=torch.long, device=ts.device)
+    argmax.scatter_(0, compact_idx[order], order)
     return argmax
 
 
@@ -181,11 +183,15 @@ def keep_mean(data: Mem_or_Mail) -> Mem_or_Mail:
     M = unique_nids.numel()
 
     # Count per group
-    ct = scatter_sum(torch.ones_like(data.ts), compact_idx, dim=0, dim_size=M)  # [M]
+    ct = torch.zeros(M, dtype=data.ts.dtype, device=data.ts.device)
+    ct.scatter_reduce_(0, compact_idx, torch.ones_like(data.ts), reduce="sum", include_self=False)
 
     # Sum data and timestamps
-    sum_data = scatter_sum(data.data, compact_idx, dim=0, dim_size=M)
-    sum_ts = scatter_sum(data.ts, compact_idx, dim=0, dim_size=M)
+    idx_data = compact_idx.unsqueeze(-1).expand_as(data.data)
+    sum_data = torch.zeros(M, data.data.shape[1], dtype=data.data.dtype, device=data.data.device)
+    sum_data.scatter_reduce_(0, idx_data, data.data, reduce="sum", include_self=False)
+    sum_ts = torch.zeros(M, dtype=data.ts.dtype, device=data.ts.device)
+    sum_ts.scatter_reduce_(0, compact_idx, data.ts, reduce="sum", include_self=False)
 
     data.nid = unique_nids
     data.data = sum_data / ct.unsqueeze(-1)

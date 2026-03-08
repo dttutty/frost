@@ -14,6 +14,7 @@ from frost.aliases.host import (
     StaticPlanOutQ,
 )
 from frost.datatypes.access import Access
+from frost.protocols.analyzer_proto import AnalyzerProto
 from frost.runtime.host.p2p_planner._dynamic_planner import DynamicPlanner
 from frost.runtime.host.p2p_planner._static_planner import StaticPlanner
 from frost.utils.tensor_set import TensorSet
@@ -78,11 +79,15 @@ class PlanRouter:
     macro-batch, keeping the routing logic in the hot path while the actual plan
     computation runs in parallel sub-threads.
 
+    The ``planner`` object (from Hydra config) provides both the mail planner
+    thread factory and the field-extraction logic, so PlanRouter doesn't need
+    model-specific branching.
+
     Args:
         gpu_topo:     flat or nested list of GPU IDs encoding NVLink topology.
-        handle_stale: forwarded to both DynamicPlanner instances.  When True,
-                      unfulfilled next-batch needs are served from stale GPU memory
-                      before falling back to CPU fetch.
+        planner:      combined analyzer/planner object with ``create_mail_planner()``
+                      and ``get_mail_plan_inputs()`` methods.
+        handle_stale: forwarded to DynamicPlanner instances.
     """
 
     mem_plan_in_q: DynamicPlanInQ | None
@@ -92,6 +97,7 @@ class PlanRouter:
     def __init__(
         self,
         gpu_topo: list,
+        planner: AnalyzerProto,
         mem_plan_out_q: DynamicPlanOutQ | None,
         mail_plan_out_q: DynamicPlanOutQ | None,
         nfeat_plan_out_q: StaticPlanOutQ | None,
@@ -101,6 +107,7 @@ class PlanRouter:
         self.gpu_dist = build_gpu_distance_matrix(gpu_topo)
         self.n_gpus = len(self.gpu_dist)
         self.stop_ev = stop_ev
+        self.planner = planner
 
         self.mem_plan_in_q: DynamicPlanInQ | None = None
         if mem_plan_out_q:
@@ -116,8 +123,8 @@ class PlanRouter:
         self.mail_plan_in_q: DynamicPlanInQ | None = None
         if mail_plan_out_q:
             self.mail_plan_in_q = Q()
-            self.mail_planner = DynamicPlanner(
-                gpus_distance=self.gpu_dist,
+            self.mail_planner = planner.create_mail_planner(
+                gpu_dist=self.gpu_dist,
                 in_q=self.mail_plan_in_q,
                 out_q=mail_plan_out_q,
                 stop_ev=stop_ev,
@@ -142,25 +149,27 @@ class PlanRouter:
             self.nfeat_planner.start()
 
     def dispatch(self, metas: MetaBundle, access_list: AccessBundle) -> None:
-        """Route one macro-batch to sub-planners. Called inline from the main thread.
-
-        When memory planning is active every entry in ``access_list`` is guaranteed
-        non-None (the analyzer always returns a full Access for memory models).
-        """
+        """Route one macro-batch to sub-planners. Called inline from the main thread."""
         assert len(metas) == self.n_gpus
 
         if self.mem_plan_in_q is not None:
-            mem_needs = [cast(TensorSet, cast(Access, io).required_mem) for io in access_list]
-            mem_updates = [cast(TensorSet, cast(Access, io).mem_update) for io in access_list]
+            mem_needs = [
+                cast(TensorSet, cast(Access, io).required_mem) for io in access_list
+            ]
+            mem_updates = [
+                cast(TensorSet, cast(Access, io).mem_update) for io in access_list
+            ]
             self.mem_plan_in_q.put((mem_needs, mem_updates, metas))
 
         if self.mail_plan_in_q is not None:
-            box_needs = [cast(TensorSet, cast(Access, io).required_box) for io in access_list]
-            box_updates = [cast(TensorSet, cast(Access, io).box_update) for io in access_list]
+            access_objs = [cast(Access, io) for io in access_list]
+            box_needs, box_updates = self.planner.get_mail_plan_inputs(access_objs)
             self.mail_plan_in_q.put((box_needs, box_updates, metas))
 
         if self.nfeat_plan_in_q is not None:
-            nfeat_needs = [cast(TensorSet, cast(Access, io).required_nfeat) for io in access_list]
+            nfeat_needs = [
+                cast(TensorSet, cast(Access, io).required_nfeat) for io in access_list
+            ]
             self.nfeat_plan_in_q.put(nfeat_needs)
 
     def signal_epoch_end(self) -> None:
