@@ -50,11 +50,11 @@ class Postman:
 
         # 2. Extract sender timestamps and root NIDs
         sender_ts = graph.root_ts[:target_len]
-        sender_nids = graph.root_nid[:target_len]
 
         # 3. Reshape neighbor NIDs to [target_len, S]
         # Neighbors are only sampled for src + pos_dst (target_len nodes),
         # so the tensor has target_len * S elements, not N_total * S.
+        assert graph.fanout is not None
         S = graph.fanout[0]
         nbr_nids = graph.neighbors[0].nid.view(target_len, S)
         target_nbr_nids = nbr_nids  # Shape: [target_len, S]

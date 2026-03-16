@@ -113,7 +113,7 @@ class Worker:
     mem_handler: MemTaskHandler | None = None
     mem_wr: SharedMemWriter | None = None
     box_handler: MessageHandler | None = None
-    box_wr: SharedMemWriter | None = None
+    box_wr: BoxMailWriter | None = None
     p2p_q_handler: P2PQHandler | None = None
 
     model: AssembledModel | DDP
@@ -157,6 +157,11 @@ class Worker:
         self.curr_epoch = 0
         self.local_best_auc = 0.0
         self._last_train_start_t: float | None = None
+
+        # Throughput tracking (skip first 4 batches as warm-up)
+        self._throughput_batch_count = 0
+        self._throughput_events = 0
+        self._throughput_start_time: float | None = None
 
         # --- Synchronization primitives ---
         self.stop_ev = threading.Event()
@@ -259,6 +264,8 @@ class Worker:
             device=self.device,
             box_wr_q=self.box_wr_q,
             postman=self.postman,
+            n_neg=self.n_neg,
+            fanout=self.ring_buf.fanout,
         )
         self.box_wr = BoxMailWriter(
             mem_box_store=self.mem_box_store,
@@ -267,6 +274,8 @@ class Worker:
             wr_q=self.box_wr_q,
             device=self.device,
             name="box_wr",
+            n_neg=self.n_neg,
+            fanout=self.ring_buf.fanout,
         )
         self.p2p_q_handler = P2PQHandler(
             env=self.env,
@@ -462,7 +471,6 @@ class Worker:
         meta.plan_set = None
         meta.labels = None
         meta.graph = None
-        meta = None
 
     def start_all_threads(self) -> None:
         """Start all background pipeline threads.
@@ -475,6 +483,12 @@ class Worker:
         self.h2d.start()
         self.receiver.start()
         if self.mem_box_store is not None:
+            assert self.p2p_q_handler is not None
+            assert self.mem_handler is not None
+            assert self.box_handler is not None
+            assert self.box_wr is not None
+            assert self.mem_wr is not None
+            assert self.dy_asm is not None
             self.p2p_q_handler.start()
             self.mem_handler.start()
             self.box_handler.start()
@@ -516,9 +530,6 @@ class Worker:
 
         # Number of steps captured in the target epoch
         epoch2_steps_recorded = 0
-        # Guard flag to prevent duplicate profiler start/stop
-        profiling_done = False
-
         total_wait_ms = 0.0
         wait_steps = 0
         while self.stop_ev.is_set() is False:
@@ -541,7 +552,15 @@ class Worker:
                 meta, ready_event = full
                 torch.cuda.current_stream().wait_event(ready_event)
                 if meta.split == "train":  # if training
-                    # should_profile = self.curr_epoch == 1 and not profiling_done
+                    # Throughput tracking: count events before train() releases labels
+                    assert meta.labels is not None
+                    self._throughput_batch_count += 1
+                    if self._throughput_batch_count == 5:
+                        self._throughput_start_time = time.perf_counter()
+                    if self._throughput_batch_count >= 5:
+                        self._throughput_events += meta.labels.numel() // (1 + self.n_neg)
+
+                    # Profiling remains disabled by default.
                     should_profile = False
                     if should_profile:
                         # Start profiler on the first captured step of the target epoch
@@ -564,7 +583,6 @@ class Worker:
                         # Stop and save after capturing 100 batches
                         if epoch2_steps_recorded >= 100:
                             prof.stop()
-                            profiling_done = True
 
                 elif meta.split in ["val", "test"]:  # if evaluating
                     self._last_train_start_t = None
@@ -605,6 +623,15 @@ class Worker:
                 if self.mem_box_store:
                     self.mem_box_store.reset()
             if full is None:
+                if self._throughput_start_time is not None and self._throughput_events > 0:
+                    elapsed = time.perf_counter() - self._throughput_start_time
+                    throughput = self._throughput_events / elapsed
+                    print(
+                        f"[GPU {self.env.local_rank}] Training throughput: "
+                        f"{throughput:.1f} events/sec "
+                        f"({self._throughput_events} events in {elapsed:.1f}s, "
+                        f"excluding first 4 warm-up batches)"
+                    )
                 if self.mem_box_store is not None:
                     assert self.box_task_q is not None
                     assert self.mem_task_q is not None

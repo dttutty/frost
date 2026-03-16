@@ -93,6 +93,9 @@ class PlanRouter:
     mem_plan_in_q: DynamicPlanInQ | None
     mail_plan_in_q: DynamicPlanInQ | None
     nfeat_plan_in_q: StaticPlanInQ | None
+    mem_planner: threading.Thread | None
+    mail_planner: threading.Thread | None
+    nfeat_planner: threading.Thread | None
 
     def __init__(
         self,
@@ -108,6 +111,9 @@ class PlanRouter:
         self.n_gpus = len(self.gpu_dist)
         self.stop_ev = stop_ev
         self.planner = planner
+        self.mem_planner = None
+        self.mail_planner = None
+        self.nfeat_planner = None
 
         self.mem_plan_in_q: DynamicPlanInQ | None = None
         if mem_plan_out_q:
@@ -141,11 +147,11 @@ class PlanRouter:
                 stop_ev=stop_ev,
             )
 
-        if mem_plan_out_q:
+        if self.mem_planner is not None:
             self.mem_planner.start()
-        if mail_plan_out_q:
+        if self.mail_planner is not None:
             self.mail_planner.start()
-        if nfeat_plan_out_q:
+        if self.nfeat_planner is not None:
             self.nfeat_planner.start()
 
     def dispatch(self, metas: MetaBundle, access_list: AccessBundle) -> None:
@@ -190,9 +196,9 @@ class PlanRouter:
         if self.nfeat_plan_in_q is not None:
             self.nfeat_plan_in_q.put(None)
 
-        if self.mem_plan_in_q is not None:
+        if self.mem_plan_in_q is not None and self.mem_planner is not None:
             self.mem_planner.join()
-        if self.mail_plan_in_q is not None:
+        if self.mail_plan_in_q is not None and self.mail_planner is not None:
             self.mail_planner.join()
-        if self.nfeat_plan_in_q is not None:
+        if self.nfeat_plan_in_q is not None and self.nfeat_planner is not None:
             self.nfeat_planner.join()

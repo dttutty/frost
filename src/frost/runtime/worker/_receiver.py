@@ -159,11 +159,13 @@ class Receiver(ThreadBase):
                             f"First {len(preview_pos)} offending positions (local): {preview_pos}, values: {bad_vals}"
                         )
                 # --- end checks ---
+                cpu_nid = buf["NID"][:buf_len].clone()
                 meta.flat_graph = FlatGraph(
-                    nid=buf["NID"][:buf_len].clone(),
+                    nid=cpu_nid,
                     eid=buf["EID"][:buf_len].clone(),
                     ts=buf["TS"][:buf_len].clone(),
                 )
+                meta.flat_nid_cpu = cpu_nid.clone()  # APAN: keep CPU copy for writeback
                 buf = None
                 self.ring_buf.release()
 

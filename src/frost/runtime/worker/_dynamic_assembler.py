@@ -265,7 +265,7 @@ class DynamicAssembler(StreamThreadBase):
         num_nodes = graph.nid.shape[0]
 
         # Initialize attributes with zeros only once
-        if getattr(graph, "mem", None) is None:
+        if graph.mem is None:
             graph.mem = torch.zeros(
                 (num_nodes, self.shared.mem.shape[1]),
                 dtype=self.shared.mem.dtype,
@@ -275,7 +275,7 @@ class DynamicAssembler(StreamThreadBase):
                 num_nodes, dtype=self.shared.mem_ts.dtype, device=self.device
             )
 
-        if getattr(graph, "box", None) is None:
+        if graph.box is None:
             graph.box = torch.zeros(
                 (num_nodes, self.boxsize, self.d_mail),
                 dtype=self.shared.box.dtype,
@@ -408,8 +408,8 @@ class DynamicAssembler(StreamThreadBase):
             return
 
         # Use the pre-cached delta mask and box_pos from prepare_shared_features
-        cached_mask = getattr(graph, "_box_delta_mask", None)
-        cached_pos = getattr(graph, "_box_pos_delta", None)
+        cached_mask = graph._box_delta_mask
+        cached_pos = graph._box_pos_delta
         if cached_mask is not None and cached_pos is not None:
             # Fast path: graph.box already has old ring-buffer contents.
             valid_nids = graph.nid[cached_mask]
@@ -437,13 +437,14 @@ class DynamicAssembler(StreamThreadBase):
             mail_ts = delta_box.ts[local_positions].squeeze(1)
 
             # Pure GPU scatter into the pre-filled ring buffer
-            arange = torch.arange(mail_data.shape[0], device=self.device)
+            assert graph.box is not None
+            assert graph.box_ts is not None
             graph.box[global_positions, write_pos] = mail_data
             graph.box_ts[global_positions, write_pos] = mail_ts
 
             # Clean up cached attributes
-            del graph._box_pos_delta
-            del graph._box_delta_mask
+            graph._box_pos_delta = None
+            graph._box_delta_mask = None
         else:
             # Fallback: pre-fill was skipped (no delta nodes).
             # Nothing to do—graph.box is already complete from plan fetch.

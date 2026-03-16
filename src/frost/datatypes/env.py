@@ -30,7 +30,7 @@ class Env:
 
     local_rank: int
     world_size: int
-    role: Literal["worker", "host"]
+    role: Role
     is_host: bool
     is_worker: bool
     n_gpu: int
@@ -56,7 +56,7 @@ class Env:
             # os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank)
             # torch.cuda.set_device(0)
             torch.cuda.set_device(local_rank)
-        role = "host" if local_rank == world_size - 1 else "worker"
+        role: Role = "host" if local_rank == world_size - 1 else "worker"
         is_host = role == "host"
         is_worker = role == "worker"
         n_gpu = world_size - 1

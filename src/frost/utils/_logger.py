@@ -25,8 +25,6 @@ def init_logging(local_rank: int, is_host: bool) -> logging.Logger:
         force=True,
     )
 
-    root = logging.getLogger()
-
     # Only the host process logs to the console, at the configured level
     # if is_host:
     #     console = logging.StreamHandler()

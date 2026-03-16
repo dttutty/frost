@@ -23,7 +23,7 @@
   },
   "cmake.configureSettings": {
     "Python_EXECUTABLE": "/home/sqp17/miniforge3/envs/frost/bin/python",
-    "nanobind_DIR": "/home/sqp17/miniforge3/envs/frost/lib/python3.10/site-packages/nanobind/cmake"
+    "nanobind_DIR": "/home/sqp17/miniforge3/envs/frost/lib/python3.12/site-packages/nanobind/cmake"
   },
   "python.analysis.extraPaths": ["./src"],
   "python.autoComplete.extraPaths": ["./src"],

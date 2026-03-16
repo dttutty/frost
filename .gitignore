@@ -77,3 +77,4 @@ datasets/
 slurm/
 scripts/
 hydralance/
+*.cvs

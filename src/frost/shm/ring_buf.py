@@ -101,6 +101,7 @@ class RingBuf:
         self.ndtype = ndtype
         self.edtype = edtype
         self.sample_4_neg = sample_4_neg
+        self.fanout = fanout  # store for downstream use (e.g. APAN writeback)
 
         total = cal_max_buf_size(max_batch_size, fanout, n_neg, sample_4_neg)
 

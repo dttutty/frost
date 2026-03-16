@@ -14,6 +14,7 @@ def make_p2p_task(
     data_td_nid: AllType,
     plan: DynamicPlan,
     device: torch.device,
+    batch_idx: int,
 ) -> P2PTask:
     """
     Build a P2PTask from a local data entry and a DynamicPlan.
@@ -71,4 +72,5 @@ def make_p2p_task(
         ts2recv=recv_ts,
         recv_counts=recv_counts,
         send_counts=send_counts,
+        batch_idx=batch_idx,
     )

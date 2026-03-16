@@ -23,7 +23,7 @@ pytest tests/ -v
 ## Project Structure
 
 ```
-lei_pipe/
+frost/
 ├── run.py                          # Entry point (Hydra @hydra.main)
 ├── configs/                        # Hydra YAML configs
 │   ├── config.yaml                 # Global defaults

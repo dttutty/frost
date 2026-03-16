@@ -54,6 +54,7 @@ class Meta:
     plan_set: PlanSet | None = None
     labels: torch.Tensor | None = None
     fanout: list[int] | None = None
+    flat_nid_cpu: torch.Tensor | None = None  # CPU nids for APAN writeback
 
     @cached_property
     def macro_position_of_split(self) -> str | None:

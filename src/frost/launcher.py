@@ -74,10 +74,10 @@ def launch(cfg: DictConfig):
     else:
         fanout = list(raw_fanout)
 
+    with open_dict(cfg):
+        cfg.ndim = ndim
+        cfg.edim = edim
     if env.is_host:
-        with open_dict(cfg):
-            cfg.ndim = ndim
-            cfg.edim = edim
         cfg_dict = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False)
         print(cfg_dict)
 
@@ -157,7 +157,10 @@ def launch(cfg: DictConfig):
         finally:
             cleanup_all_shm(is_host=True)
             if dist.is_available() and dist.is_initialized():
-                # Host rank also owns a process-group handle and must tear it down.
+                # Sync with workers before tearing down: workers call dist.barrier()
+                # in their cleanup(); if host destroys the group first the barrier
+                # in the workers sees "connection closed by peer".
+                dist.barrier()
                 dist.destroy_process_group()
 
     else:

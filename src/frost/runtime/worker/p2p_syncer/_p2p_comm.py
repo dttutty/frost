@@ -46,8 +46,6 @@ class P2PQHandler(StreamThreadBase):
                 # )
                 break
             # logger.debug(f"[Rank {self.env.local_rank}] Got Mem P2P task: {mem_p2p_tuple}")
-            mem_wait_ms = 0.0
-
             # Fast path: no P2P work this step, pass through
             if mem_p2p_tuple == "nothing_to_p2p":
                 box_p2p_tuple = self.box_p2p_q.get(block=True)
@@ -68,7 +66,6 @@ class P2PQHandler(StreamThreadBase):
             mem_p2p, mem_event = mem_p2p_tuple
             # A mem task implies a corresponding box task
             box_p2p_tuple = self.box_p2p_q.get(block=True)
-            box_wait_ms = 0.0
             # if total_wait > 2.0:
             #     logger.debug(
             #         f"[Rank {self.env.local_rank}] P2P Blocked! Total: {total_wait:.2f}ms | Mem: {mem_wait_ms:.2f}ms | Box: {box_wait_ms:.2f}ms"

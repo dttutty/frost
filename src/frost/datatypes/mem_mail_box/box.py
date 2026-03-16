@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
+
+if TYPE_CHECKING:
+    from .mail import MailEntry
 
 
 @dataclass(kw_only=True)
@@ -122,7 +126,7 @@ class BoxEntry:
             is_unique=self.is_unique,
         )
 
-    def merge_1_mail(self, mail: "MailEntry") -> BoxEntry:
+    def merge_1_mail(self, mail: MailEntry) -> BoxEntry:
         """Insert one new mail per node into the circular FIFO mailbox buffer.
 
         Delegates to ``_data_ops.merge_1_mail``.

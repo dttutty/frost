@@ -32,7 +32,7 @@ pip install pytest pytest-cov ruff
 pip install scikit-build-core nanobind
 
 # Install frost in editable mode (builds C++ extension)
-cd /home/sqp17/Projects/lei_pipe
+cd /home/sqp17/Projects/frost
 pip install -e .
 
 echo ""

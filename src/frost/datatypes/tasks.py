@@ -56,6 +56,7 @@ class BoxTask:
     box_plan: DynamicPlan
     is_last: bool
     graph: Graph | None
+    flat_nid_cpu: Tensor | None = None  # CPU nids for APAN writeback
 
     def __repr__(self) -> str:
         # if data is tensor, show its shape

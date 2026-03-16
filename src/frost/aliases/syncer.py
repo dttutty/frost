@@ -16,7 +16,8 @@ BoxTaskQ: TypeAlias = Queue[tuple[BoxTask, CudaEvent] | None]
 MemP2PQ: TypeAlias = Queue[tuple[P2PTask, CudaEvent] | Literal["nothing_to_p2p"] | None]
 BoxP2PQ: TypeAlias = Queue[tuple[P2PTask, CudaEvent] | Literal["nothing_to_p2p"]]
 MemWrQ: TypeAlias = Queue[tuple[torch.Tensor | None, int, MemEntry, CudaEvent] | None]
-BoxWrQ: TypeAlias = Queue[tuple[torch.Tensor | None, int, BoxEntry, CudaEvent] | None]
+BoxWriteEntry: TypeAlias = BoxEntry | tuple[MailEntry, torch.Tensor]
+BoxWrQ: TypeAlias = Queue[tuple[torch.Tensor | None, int, BoxWriteEntry, CudaEvent] | None]
 
 AllType = TypeVar("AllType", MemEntry, MailEntry, BoxEntry)
 Mem_or_Mail = TypeVar("Mem_or_Mail", "MemEntry", "MailEntry")

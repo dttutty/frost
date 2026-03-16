@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, Sequence
+from typing import Literal, Sequence, TypeAlias
 
 import numpy as np
 import numpy.typing as npt
@@ -8,19 +8,19 @@ import numpy.typing as npt
 NeighborStrategy = Literal["recent", "uniform"]
 
 # Define 32-bit arrays
-Int32Array1D = npt.NDArray[np.int32]
-Int32Array2D = npt.NDArray[np.int32]
-Int32Array3D = npt.NDArray[np.int32]
+Int32Array1D: TypeAlias = npt.NDArray[np.int32]
+Int32Array2D: TypeAlias = npt.NDArray[np.int32]
+Int32Array3D: TypeAlias = npt.NDArray[np.int32]
 
 # Define 64-bit arrays
-Int64Array1D = npt.NDArray[np.int64]
-Int64Array2D = npt.NDArray[np.int64]
-Int64Array3D = npt.NDArray[np.int64]
+Int64Array1D: TypeAlias = npt.NDArray[np.int64]
+Int64Array2D: TypeAlias = npt.NDArray[np.int64]
+Int64Array3D: TypeAlias = npt.NDArray[np.int64]
 
 # Time arrays
-Float32Array1D = npt.NDArray[np.float32]
-Float32Array2D = npt.NDArray[np.float32]
-Float32Array3D = npt.NDArray[np.float32]
+Float32Array1D: TypeAlias = npt.NDArray[np.float32]
+Float32Array2D: TypeAlias = npt.NDArray[np.float32]
+Float32Array3D: TypeAlias = npt.NDArray[np.float32]
 
 class TemporalGraph_32_32:
     """Temporal graph stored in CSR-like format.

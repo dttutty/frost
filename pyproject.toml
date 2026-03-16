@@ -22,8 +22,6 @@ dependencies = [
     # Utilities
     "tqdm>=4.60",
     "PyYAML>=6.0",
-    # C++ extension runtime (Intel TBB, linked by seq_sampler)
-    "tbb",
     "scikit-learn>=1.0",
 ]
 
@@ -32,8 +30,20 @@ dependencies = [
 test = ["pytest", "pytest-cov"]
 dev = [
     "pytest",
+    "mypy",
     "ruff",
+    "types-PyYAML",
 ]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+mypy_path = "src"
+namespace_packages = true
+explicit_package_bases = true
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_unused_configs = true
 
 [tool.scikit-build]
 cmake.build-type = "RelWithDebInfo"

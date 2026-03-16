@@ -33,10 +33,13 @@ class Access:
 
     def __repr__(self) -> str:
         """Return a concise string showing tensor shapes for each field."""
+        def _shape(ts: TensorSet | None) -> object:
+            return ts.data.shape if ts is not None else None
+
         return (
-            f"Access(mem_needed={self.required_mem.data.shape}, "
-            f"mem_updated={self.mem_update.data.shape}, "
-            f"box_needed={self.all_nodes_in_graph.data.shape if self.all_nodes_in_graph is not None else None}, "
-            f"box_updated={self.pos_seed_need.data.shape if self.pos_seed_need is not None else None}, "
-            f"nfeat_needed={self.required_nfeat.data.shape})"
+            f"Access(mem_needed={_shape(self.required_mem)}, "
+            f"mem_updated={_shape(self.mem_update)}, "
+            f"box_needed={_shape(self.all_nodes_in_graph)}, "
+            f"box_updated={_shape(self.pos_seed_need)}, "
+            f"nfeat_needed={_shape(self.required_nfeat)})"
         )

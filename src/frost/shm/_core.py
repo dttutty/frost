@@ -11,6 +11,7 @@ import logging
 import signal
 import sys
 from multiprocessing import resource_tracker, shared_memory
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -62,14 +63,14 @@ def _patched_unregister(name, rtype):
     return resource_tracker._resource_tracker.unregister(name, rtype)
 
 
-resource_tracker.register = _patched_register
-resource_tracker.unregister = _patched_unregister
+cast(Any, resource_tracker).register = _patched_register
+cast(Any, resource_tracker).unregister = _patched_unregister
 
 if hasattr(resource_tracker, "_resource_tracker"):
     # Also patch the internal singleton object's methods (required for Python 3.10)
     if resource_tracker._resource_tracker is not None:
-        resource_tracker._resource_tracker.register = _patched_register
-        resource_tracker._resource_tracker.unregister = _patched_unregister
+        cast(Any, resource_tracker._resource_tracker).register = _patched_register
+        cast(Any, resource_tracker._resource_tracker).unregister = _patched_unregister
 
 _TRACKED_SHM_OBJECTS: dict[str, shared_memory.SharedMemory] = {}
 _IS_HOST_PROCESS = False
