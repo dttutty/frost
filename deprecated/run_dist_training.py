@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------- Threads & NCCL safety BEFORE importing torch ----------
-# 放在最前，确保底层库读取到
+# Set before importing torch so underlying libraries pick up these values
 os.environ.setdefault("OMP_NUM_THREADS", "8")
 os.environ.setdefault("MKL_NUM_THREADS", "8")
 os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")

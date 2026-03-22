@@ -6,6 +6,7 @@ optional DynamicAssembler), and optional P2P memory-sync threads when a
 MemBoxStore is configured.
 """
 import logging
+import os
 import threading
 import time
 from queue import Queue as Q
@@ -413,7 +414,10 @@ class Worker:
             box_task_q=self.box_task_q,
         )
 
-        loss = self.criterion(logits.squeeze(-1), meta.labels)
+        logits_flat = logits.squeeze(-1)
+        n_pos = meta.n_src
+        loss = self.criterion(logits_flat[:n_pos], meta.labels[:n_pos]) + \
+            self.criterion(logits_flat[n_pos:], meta.labels[n_pos:])
         if self.mem_box_store is not None:
             self.p2p_guard.arm()  # Arm guard: wait for P2P before the first AllReduce
         loss.backward()
@@ -449,7 +453,10 @@ class Worker:
         y_pred = logits.sigmoid().squeeze(-1)
 
         if meta.split == "val":
-            loss = self.criterion(logits.squeeze(-1), meta.labels)
+            logits_flat = logits.squeeze(-1)
+            n_pos = meta.n_src
+            loss = self.criterion(logits_flat[:n_pos], meta.labels[:n_pos]) + \
+                self.criterion(logits_flat[n_pos:], meta.labels[n_pos:])
 
             # MeanMetric expects 'value'; classification metrics expect 'preds' and 'target'
             self.val_metrics.update(
@@ -615,7 +622,7 @@ class Worker:
                     self.local_best_auc = val_auc
                     # Save asynchronously so rank-0 disk I/O doesn't stall the loop
                     threading.Thread(
-                        target=self.save_model, args=("best.ckpt",), daemon=True
+                        target=self.save_model, args=(os.path.join(self.save_to, "best.ckpt"),), daemon=True
                     ).start()
                 # dist.barrier() is redundant: on_train_epoch_end() compute() calls
                 # already performed 7 NCCL all-reduces that synchronize all ranks.

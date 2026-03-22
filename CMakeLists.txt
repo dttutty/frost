@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.15...3.27)
 project(seq_sampler_module)
 
-# 查找所需的包
-find_package(Python REQUIRED COMPONENTS Interpreter Development)
+# Building a Python extension only needs the interpreter plus module headers.
+find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(nanobind CONFIG REQUIRED)
 
 # 创建 nanobind 模块
@@ -26,7 +26,6 @@ target_link_options(_core PRIVATE -fopenmp)
 target_include_directories(_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp)
 
 install(TARGETS _core DESTINATION frost/seq_sampler)
-
 
 
 

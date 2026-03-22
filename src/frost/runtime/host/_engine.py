@@ -75,6 +75,7 @@ class Host:
         n_epoch: int,
         patience: int,
         handle_stale: bool = False,
+        show_tqdm: bool = False,
     ) -> None:
         self.neg_sampler = neg_sampler
         self.ngh_sampler = ngh_sampler
@@ -86,6 +87,7 @@ class Host:
         self.n_gpu = env.n_gpu
         self.batch_size = batch_size
         self.analyzer = planner
+        self.show_tqdm = show_tqdm
 
         self.stop_ev = threading.Event()
         self.cur_macro_of_epoch = 0
@@ -129,7 +131,7 @@ class Host:
 
             self.plan_router = PlanRouter(
                 gpu_topo=gpu_topo,
-                planner=self.analyzer,
+                analyzer=self.analyzer,
                 mem_plan_out_q=self.mem_plan_out_q,
                 mail_plan_out_q=self.mail_plan_out_q,
                 nfeat_plan_out_q=self.nfeat_plan_out_q,
@@ -297,6 +299,7 @@ class Host:
             df_out.groupby("step_id", sort=False),
             total=n_macro_of_split,
             desc=step_desc_map[split],
+            disable=not self.show_tqdm,
         ):
             assert isinstance(cur_macro_of_split, int)
             meta_bundle: MetaBundle = []

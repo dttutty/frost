@@ -8,7 +8,7 @@ from typing import Literal
 
 import torch
 
-from frost.datatypes.graph import FlatGraph, Graph
+from frost.datatypes.graph import FlatGraph, SeqGraph
 
 from .plan import PlanSet
 
@@ -50,7 +50,7 @@ class Meta:
     batch_idx: int
     flat_graph: FlatGraph | None
     buf_len: int
-    graph: Graph | None = None
+    graph: SeqGraph | None = None
     plan_set: PlanSet | None = None
     labels: torch.Tensor | None = None
     fanout: list[int] | None = None

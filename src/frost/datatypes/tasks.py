@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from numpy.typing import NDArray
 from torch import Tensor
 
-from frost.datatypes.graph import Graph
+from frost.datatypes.graph import SeqGraph
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.plan import DynamicPlan
 
@@ -55,7 +55,7 @@ class BoxTask:
     batch_idx: int
     box_plan: DynamicPlan
     is_last: bool
-    graph: Graph | None
+    graph: SeqGraph | None
     flat_nid_cpu: Tensor | None = None  # CPU nids for APAN writeback
 
     def __repr__(self) -> str:

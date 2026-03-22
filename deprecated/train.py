@@ -90,8 +90,7 @@ if args.batch_size is not None:
     train_param.batch_size = args.batch_size
 train_edge_end = df[df["ext_roll"].gt(0)].index[0]
 val_edge_end = df[df["ext_roll"].gt(1)].index[0]
-# ext_roll有三种 0 1 2
-# 0: train, 1: val, 2: test
+# ext_roll has three values: 0 = train, 1 = val, 2 = test
 
 
 def get_inductive_links(

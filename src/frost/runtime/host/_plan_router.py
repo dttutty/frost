@@ -100,7 +100,7 @@ class PlanRouter:
     def __init__(
         self,
         gpu_topo: list,
-        planner: AnalyzerProto,
+        analyzer: AnalyzerProto,
         mem_plan_out_q: DynamicPlanOutQ | None,
         mail_plan_out_q: DynamicPlanOutQ | None,
         nfeat_plan_out_q: StaticPlanOutQ | None,
@@ -110,7 +110,7 @@ class PlanRouter:
         self.gpu_dist = build_gpu_distance_matrix(gpu_topo)
         self.n_gpus = len(self.gpu_dist)
         self.stop_ev = stop_ev
-        self.planner = planner
+        self.analyzer = analyzer
         self.mem_planner = None
         self.mail_planner = None
         self.nfeat_planner = None
@@ -129,7 +129,7 @@ class PlanRouter:
         self.mail_plan_in_q: DynamicPlanInQ | None = None
         if mail_plan_out_q:
             self.mail_plan_in_q = Q()
-            self.mail_planner = planner.create_mail_planner(
+            self.mail_planner = analyzer.create_mail_planner(
                 gpu_dist=self.gpu_dist,
                 in_q=self.mail_plan_in_q,
                 out_q=mail_plan_out_q,
@@ -169,7 +169,7 @@ class PlanRouter:
 
         if self.mail_plan_in_q is not None:
             access_objs = [cast(Access, io) for io in access_list]
-            box_needs, box_updates = self.planner.get_mail_plan_inputs(access_objs)
+            box_needs, box_updates = self.analyzer.get_mail_plan_inputs(access_objs)
             self.mail_plan_in_q.put((box_needs, box_updates, metas))
 
         if self.nfeat_plan_in_q is not None:

@@ -13,16 +13,16 @@ defaults:
   - ring_buf: base # don't change this, current version only support base ring_buf
   - _self_
 
-epoch: 1
-batch_size: 4000 # local batch_size
-patience: 50
+epoch: 100
+batch_size: 600 # local batch_size
+patience: 100
 dropout: 0.2
-seed: null
+seed: 42
 d_time: 128
 final_emb_dim: 128
 dataset: "LASTFM"
 ndim: null # set null for default
-edim: null # set null for default
+edim: 128 # set null for default
 mail_combine: null
 optimizer: "adam"
 gpu_topo: [0, 1]
@@ -32,3 +32,4 @@ n_neg: 1
 handle_stale: false
 compile: true
 tf32: true
+tqdm: false

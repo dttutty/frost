@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import torch; print\\(torch.__version__\\); print\\(torch.version.cuda\\)\")",
+      "Bash(nvidia-smi)",
+      "Bash(grep -r \"target_dim\\\\|target_ndim\\\\|target_edim\" /home/sqp17/Projects/frost/src/ --include=*.py -A 3 -B 1)",
+      "Bash(ls -la /home/sqp17/Projects/frost/third_party/tgl/*.py)",
+      "Read(//home/sqp17/Projects/frost/NR>1 {sum+=$13; n++} END {printf \"\"\"\"n=%d, avg test_ap=%.4f\\\\n\"\"\"\", n, sum/**)",
+      "Bash(ls /home/sqp17/Projects/frost/overleaf/*.pdf)",
+      "Bash(mv traditional.pdf stale_vs_exact_pipeline.pdf)",
+      "Bash(mv flow.pdf tgnn_training_workflow.pdf)",
+      "Bash(mv host_worker.pdf frost_architecture.pdf)",
+      "Bash(mv frost_pipeline.pdf frost_pipeline_staging.pdf)",
+      "Bash(mv throughput/TGN_LASTFM_throughput.pdf tgn_lastfm_throughput.pdf)"
+    ]
+  }
+}

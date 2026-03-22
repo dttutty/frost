@@ -5,6 +5,7 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf, open_dict
 
@@ -45,7 +46,10 @@ def launch(cfg: DictConfig):
     torch.set_float32_matmul_precision("high" if tf32_enabled else "highest")
 
     env: Env = Env.initial()
-    init_logging(env.local_rank, env.is_host)
+    if cfg.seed is not None:
+        set_seed(cfg.seed)
+    output_dir = HydraConfig.get().runtime.output_dir
+    init_logging(env.local_rank, env.is_host, output_dir)
     run_id = broadcast_data(
         f"run_{int(time.time())}" if env.is_host else None, src=env.host_rank
     )
@@ -62,7 +66,6 @@ def launch(cfg: DictConfig):
         edtype,
         nfeat,
         efeat,
-        save_to,
         port,
     ) = dataset_mgr.prepare()
     raw_fanout = OmegaConf.to_container(cfg.fanout, resolve=True)
@@ -97,8 +100,6 @@ def launch(cfg: DictConfig):
         edtype=idx_dtype,
         fanout=fanout,
     )
-    if cfg.seed is not None:
-        set_seed(cfg.seed)
 
     shared = None
     if cfg.get("mem_box_store") is not None:
@@ -151,6 +152,7 @@ def launch(cfg: DictConfig):
             patience=cfg.patience,
             gpu_topo=OmegaConf.to_container(cfg.gpu_topo, resolve=True),
             handle_stale=handle_stale,
+            show_tqdm=bool(cfg.get("tqdm", False)),
         )
         try:
             host.run()
@@ -181,7 +183,7 @@ def launch(cfg: DictConfig):
             n_neg=cfg.neg_sampler.n_neg,
             mem_box_store=shared,
             ring_buf=ring_buf,
-            save_to=save_to,
+            save_to=output_dir,
             nfeat=nfeat,
             efeat=efeat,
             env=env,

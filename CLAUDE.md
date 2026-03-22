@@ -5,30 +5,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Run
 
 ```bash
-# Install package (builds C++ seq_sampler extension via scikit-build-core + nanobind)
-pip install -e .
+# Sync the uv-managed project environment (builds the C++ seq_sampler extension)
+uv sync --locked
 
 # Run training — nproc_per_node = n_gpu_workers + 1 (host process)
-torchrun --nproc_per_node=3 run.py \
+uv run torchrun --nproc_per_node=3 run.py \
   analyzer=tgn dataset=LASTFM encoder=tgn \
   mem_box_store=base mem_updater=tgn \
   ngh_sampler=1_hop mail_combine=last
 
 # Run tests
-pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 ## Model Commands
 
 | Model | Command |
 |-------|---------|
-| TGN | `torchrun --nproc_per_node=3 run.py analyzer=tgn dataset=LASTFM encoder=tgn mem_box_store=base mem_updater=tgn ngh_sampler=1_hop mail_combine=last` |
-| JODIE | `torchrun --nproc_per_node=3 run.py analyzer=jodie dataset=LASTFM encoder=jodie mem_box_store=base mem_updater=jodie ngh_sampler=0_hop mail_combine=last` |
-| APAN | `torchrun --nproc_per_node=3 run.py analyzer=apan dataset=LASTFM encoder=apan mem_box_store=base mem_updater=apan ngh_sampler=1_hop ngh_sampler.sample_4_neg=False postman=apan mail_combine=last` |
-| TGAT | `torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=tgat ngh_sampler=2_hop` |
-| DyGFormer | `torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=dygformer ngh_sampler=1_hop fanout=[32]` |
-| GraphMixer | `torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=graph_mixer ngh_sampler=1_hop fanout=[20]` |
-| EdgeBank | `python eval_edgebank.py --dataset LASTFM` |
+| TGN | `uv run torchrun --nproc_per_node=3 run.py analyzer=tgn dataset=LASTFM encoder=tgn mem_box_store=base mem_updater=tgn ngh_sampler=1_hop mail_combine=last` |
+| JODIE | `uv run torchrun --nproc_per_node=3 run.py analyzer=jodie dataset=LASTFM encoder=jodie mem_box_store=base mem_updater=jodie ngh_sampler=0_hop mail_combine=last` |
+| APAN | `uv run torchrun --nproc_per_node=3 run.py analyzer=apan dataset=LASTFM encoder=apan mem_box_store=base mem_updater=apan ngh_sampler=1_hop ngh_sampler.sample_4_neg=False postman=apan mail_combine=last` |
+| TGAT | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=tgat ngh_sampler=2_hop` |
+| DyGFormer | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=dygformer ngh_sampler=1_hop fanout=[32]` |
+| GraphMixer | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=graph_mixer ngh_sampler=1_hop fanout=[20]` |
+| EdgeBank | `uv run python eval_edgebank.py --dataset LASTFM` |
 
 **Config defaults** (`configs/config.yaml`): `analyzer=no_mem`, `mem_updater=null`, `mem_box_store=null`, `ngh_sampler=1_hop`, `fanout=[10]`, `n_neg=1`, `batch_size=4000`, `final_emb_dim=128`, `d_time=128`.
 

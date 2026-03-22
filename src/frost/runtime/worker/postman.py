@@ -3,11 +3,12 @@
 Used by the APAN model variant to propagate interaction signals to neighboring
 nodes after each training step.
 """
+
 import logging
 
 import torch
 
-from frost.datatypes.graph import Graph
+from frost.datatypes.graph import SeqGraph
 from frost.datatypes.mem_mail_box.mail import MailEntry
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ class Postman:
     ):
         self.n_neg = n_neg  # from hydra config
 
-    def deliver(self, graph: "Graph", mail_data: torch.Tensor) -> "MailEntry":
+    def deliver(self, graph: "SeqGraph", mail_data: torch.Tensor) -> "MailEntry":
         """
         Deliver mails from the first 2/3 of root nodes to their 1-hop neighbors.
 

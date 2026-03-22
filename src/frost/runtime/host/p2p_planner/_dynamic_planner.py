@@ -225,7 +225,7 @@ class DynamicPlanner(ThreadBase):
 
             elif in_q_data == "end_of_epoch":
                 assert self.pending is not None
-                all_needs, all_pos_seed, metas = self.pending
+                all_needs, all_pos_root, metas = self.pending
 
                 if all_needs and len(all_needs) > 0:
                     ref_t = all_needs[0].data
@@ -241,20 +241,20 @@ class DynamicPlanner(ThreadBase):
                 next_updates: list[TensorSet] = [empty_ts for _ in range(self.n_gpus)]
 
                 plan = self._plan(
-                    all_needs, all_pos_seed, next_needs, next_updates, metas
+                    all_needs, all_pos_root, next_needs, next_updates, metas
                 )
                 self.out_q.put(plan)
                 self.pending = None
                 continue
 
             if self.pending is None:
-                all_needs, all_pos_seed, metas = in_q_data
+                all_needs, all_pos_root, metas = in_q_data
                 self.pending = in_q_data
                 self.fetch = all_needs  # first batch: fetch everything from CPU
             else:
-                all_needs, all_pos_seed, metas = self.pending
+                all_needs, all_pos_root, metas = self.pending
                 plan = self._plan(
-                    all_needs, all_pos_seed, in_q_data[0], in_q_data[1], metas
+                    all_needs, all_pos_root, in_q_data[0], in_q_data[1], metas
                 )
                 self.out_q.put(plan)
                 self.pending = in_q_data
@@ -444,7 +444,7 @@ class APANDynamicPlanner(ThreadBase):
         )
 
         # 2. Fresh P2P: send this batch's updates to GPUs that need them next batch.
-        # next_box_fetch_list = next batch's pos_seed_need (src+dst that need box read)
+        # next_box_fetch_list = next batch's pos_root_need (src+dst that need box read)
         _, p2p = compute_p2p_transfer_plan(
             next_box_fetch_list, deduplicate_update_list
         )

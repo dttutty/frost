@@ -116,7 +116,7 @@ class DatasetManager:
         # Local variable initialization
         graph = df = nfeat = efeat = None
         n_nodes = n_edges = ndim = edim = 0
-        ndtype = edtype = save_to = port = None
+        ndtype = edtype = port = None
         metadata = None
 
         if self.env.is_host:
@@ -136,9 +136,8 @@ class DatasetManager:
             efeat = self._create_shm("efeat", edge_np, [n_edges, edim])
 
             # Prepare metadata for broadcasting
-            save_to = self._get_save_path(self.dataset)
             port = get_free_port()
-            metadata = (n_nodes, n_edges, ndim, edim, ndtype, edtype, save_to, port)
+            metadata = (n_nodes, n_edges, ndim, edim, ndtype, edtype, port)
 
         # Synchronize across all ranks
         dist.barrier()
@@ -147,7 +146,7 @@ class DatasetManager:
         metadata = broadcast_data(metadata, src=self.env.host_rank)
 
         # Unpack metadata on all ranks (including workers)
-        (n_nodes, n_edges, ndim, edim, ndtype, edtype, save_to, port) = metadata
+        (n_nodes, n_edges, ndim, edim, ndtype, edtype, port) = metadata
 
         if not self.env.is_host:
             # Attach shared memory on workers using broadcasted metadata
@@ -167,7 +166,6 @@ class DatasetManager:
             edtype,
             nfeat,  # Accessible on all ranks (via SHM)
             efeat,  # Accessible on all ranks (via SHM)
-            save_to,
             port,
         )
 
@@ -213,9 +211,3 @@ class DatasetManager:
             return None
         return gsm(f"{self.run_id}_{name}", shape, dtype=dtype)
 
-    def _get_save_path(self, dataset: str) -> str:
-        """Generate formatted path for model saving."""
-        if not os.path.isdir("models"):
-            os.makedirs("models", exist_ok=True)
-        timestamp = time.strftime("%m%d_%H%M")
-        return f"models/{dataset}_{timestamp}.pkl"

@@ -62,7 +62,7 @@ class APANAnalyzer:
             required_mem=all_nodes_set,
             mem_update=pos_root,
             all_nodes_in_graph=all_nodes_set,
-            pos_seed_need=pos_root,
+            pos_root_need=pos_root,
             box_update=box_update,
             required_nfeat=all_nodes_set,
         )
@@ -86,8 +86,8 @@ class APANAnalyzer:
     def get_mail_plan_inputs(
         self, access_list: list[Access]
     ) -> tuple[list[TensorSet], list[TensorSet]]:
-        # APAN: needs = pos_seed_need (src+dst need box read for assembly)
-        needs = [cast(TensorSet, a.pos_seed_need) for a in access_list]
+        # APAN: needs = pos_root_need (src+dst need box read for assembly)
+        needs = [cast(TensorSet, a.pos_root_need) for a in access_list]
         updates = [cast(TensorSet, a.box_update) for a in access_list]
         return needs, updates
 
@@ -156,7 +156,7 @@ class TGNAnalyzer:
             required_mem=all_nodes_set,
             mem_update=pos_root,
             all_nodes_in_graph=all_nodes_set,
-            pos_seed_need=pos_root,
+            pos_root_need=pos_root,
             box_update=pos_root,
             required_nfeat=all_nodes_set,
         )
@@ -211,7 +211,7 @@ class JODIEAnalyzer:
             required_mem=all_nodes_set,
             mem_update=pos_root,
             all_nodes_in_graph=all_nodes_set,
-            pos_seed_need=pos_root,
+            pos_root_need=pos_root,
             box_update=pos_root,
             required_nfeat=all_nodes_set,
         )

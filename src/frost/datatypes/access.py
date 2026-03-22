@@ -27,7 +27,7 @@ class Access:
     required_mem: TensorSet | None = None
     mem_update: TensorSet | None = None
     all_nodes_in_graph: TensorSet | None = None
-    pos_seed_need: TensorSet | None = None
+    pos_root_need: TensorSet | None = None
     box_update: TensorSet | None = None
     required_nfeat: TensorSet | None = None
 
@@ -40,6 +40,6 @@ class Access:
             f"Access(mem_needed={_shape(self.required_mem)}, "
             f"mem_updated={_shape(self.mem_update)}, "
             f"box_needed={_shape(self.all_nodes_in_graph)}, "
-            f"box_updated={_shape(self.pos_seed_need)}, "
+            f"box_updated={_shape(self.pos_root_need)}, "
             f"nfeat_needed={_shape(self.required_nfeat)})"
         )
