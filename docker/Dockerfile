@@ -1,6 +1,6 @@
 FROM ghcr.io/astral-sh/uv:0.10.12 AS uv
 
-FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -40,13 +40,33 @@ COPY --from=uv /uv /uvx /bin/
 
 WORKDIR /workspace/frost
 
-COPY pyproject.toml uv.lock .python-version readme.md /workspace/frost/
+FROM base AS deps
 
+COPY pyproject.toml uv.lock .python-version README.md /workspace/frost/
 RUN uv sync --frozen --no-install-project --python 3.12
+
+FROM deps AS dev
 
 COPY . /workspace/frost
 
 RUN uv sync --frozen --python 3.12
+
+ENV PATH=/workspace/frost/.venv/bin:${PATH}
+
+CMD ["/bin/bash"]
+
+FROM base AS runtime
+
+COPY pyproject.toml uv.lock .python-version README.md /workspace/frost/
+
+RUN uv sync --frozen --no-dev --no-install-project --python 3.12
+
+COPY CMakeLists.txt eval_edgebank.py run.py /workspace/frost/
+COPY configs /workspace/frost/configs
+COPY src /workspace/frost/src
+COPY third_party /workspace/frost/third_party
+
+RUN uv sync --frozen --no-dev --python 3.12
 
 ENV PATH=/workspace/frost/.venv/bin:${PATH}
 

@@ -93,7 +93,7 @@ class MemBoxStoreManager:
         run_id: Unique string prefix used to name shared-memory segments.
         n_nodes: Total number of nodes in the graph.
         boxsize: Number of mailbox slots per node.
-        d_mem: Node-memory vector dimensionality (must equal ``final_emb_dim``
+        d_mem: Node-memory vector dimensionality (typically tied to ``encoder.out_dim``
             for identity-GNN models).
         edim: Edge-feature dimensionality; used to compute ``d_mail``.
         mdtype: PyTorch dtype for all memory / mailbox tensors.
@@ -108,10 +108,12 @@ class MemBoxStoreManager:
         d_mem: int,  # from hydra config
         edim: int,  # from hydra config
         mdtype: torch.dtype,
+        tdtype: torch.dtype,
     ):
         self.env = env
         self.run_id = run_id
         self.mdtype = mdtype
+        self.tdtype = tdtype
         self.n_nodes = n_nodes
         self.boxsize = boxsize
         self.d_mem = d_mem
@@ -137,9 +139,9 @@ class MemBoxStoreManager:
 
         if self.env.is_host:
             mem = csm(f"{self.run_id}_mem", [n_nodes, d_mem], self.mdtype)
-            mem_ts = csm(f"{self.run_id}_mem_ts", [n_nodes], self.mdtype)
+            mem_ts = csm(f"{self.run_id}_mem_ts", [n_nodes], self.tdtype)
             box = csm(f"{self.run_id}_box", mail_shape, self.mdtype)
-            box_ts = csm(f"{self.run_id}_box_ts", [n_nodes, boxsize], self.mdtype)
+            box_ts = csm(f"{self.run_id}_box_ts", [n_nodes, boxsize], self.tdtype)
             box_pos = csm(f"{self.run_id}_box_pos", [n_nodes], torch.int64)
 
             # Initialize memory states to zero
@@ -153,9 +155,9 @@ class MemBoxStoreManager:
 
         if not self.env.is_host:
             mem = gsm(f"{self.run_id}_mem", [n_nodes, d_mem], self.mdtype)
-            mem_ts = gsm(f"{self.run_id}_mem_ts", [n_nodes], self.mdtype)
+            mem_ts = gsm(f"{self.run_id}_mem_ts", [n_nodes], self.tdtype)
             box = gsm(f"{self.run_id}_box", mail_shape, self.mdtype)
-            box_ts = gsm(f"{self.run_id}_box_ts", [n_nodes, boxsize], self.mdtype)
+            box_ts = gsm(f"{self.run_id}_box_ts", [n_nodes, boxsize], self.tdtype)
             box_pos = gsm(f"{self.run_id}_box_pos", [n_nodes], torch.int64)
 
         # Store the dataclass as an instance attribute

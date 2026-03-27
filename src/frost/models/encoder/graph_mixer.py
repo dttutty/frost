@@ -126,7 +126,7 @@ class GraphMixer(nn.Module):
         ndim: int,  # node feature dim   (${ndim})
         edim: int,  # edge feature dim   (${edim})
         d_time: int,  # time encoding dim  (${d_time})
-        d_out: int,  # output dim         (${final_emb_dim})
+        d_out: int,  # output dim         (${encoder.out_dim})
         num_tokens: int = 20,
         num_channels: int = 100,
         num_layers: int = 2,
@@ -224,11 +224,8 @@ class GraphMixer(nn.Module):
         ]  # [n_root, use_K, ndim]
 
         # Build mask: valid neighbors get 0, padding gets -1e10 (avoids nan from softmax)
-        logits = torch.where(
-            pad_mask,
-            torch.full_like(dt[:, :use_K], -1e10),
-            torch.zeros_like(dt[:, :use_K]),
-        )
+        logits = torch.zeros((n_root, use_K), device=dt.device, dtype=torch.float32)
+        logits = logits.masked_fill(pad_mask, -1e10)
         scores = torch.softmax(logits, dim=1)  # [n_root, use_K]
 
         # Weighted mean over neighbor features

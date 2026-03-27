@@ -99,7 +99,7 @@ class TCL(nn.Module):
         ndim: int,  # node feature dim   (${ndim})
         edim: int,  # edge feature dim   (${edim})
         d_time: int,  # time encoding dim  (${d_time})
-        d_out: int,  # output dim         (${final_emb_dim})
+        d_out: int,  # output dim         (${encoder.out_dim})
         num_depths: int = 21,  # K+1; should match fanout[0]+1
         num_layers: int = 2,
         num_heads: int = 2,

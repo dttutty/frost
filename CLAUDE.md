@@ -10,9 +10,8 @@ uv sync --locked
 
 # Run training — nproc_per_node = n_gpu_workers + 1 (host process)
 uv run torchrun --nproc_per_node=3 run.py \
-  analyzer=tgn dataset=LASTFM encoder=tgn \
-  mem_box_store=base mem_updater=tgn \
-  ngh_sampler=1_hop mail_combine=last
+  access_analyzer=tgn dataset=LASTFM encoder=tgn \
+  mem_updater=tgn
 
 # Run tests
 uv run pytest tests/ -v
@@ -22,15 +21,15 @@ uv run pytest tests/ -v
 
 | Model | Command |
 |-------|---------|
-| TGN | `uv run torchrun --nproc_per_node=3 run.py analyzer=tgn dataset=LASTFM encoder=tgn mem_box_store=base mem_updater=tgn ngh_sampler=1_hop mail_combine=last` |
-| JODIE | `uv run torchrun --nproc_per_node=3 run.py analyzer=jodie dataset=LASTFM encoder=jodie mem_box_store=base mem_updater=jodie ngh_sampler=0_hop mail_combine=last` |
-| APAN | `uv run torchrun --nproc_per_node=3 run.py analyzer=apan dataset=LASTFM encoder=apan mem_box_store=base mem_updater=apan ngh_sampler=1_hop ngh_sampler.sample_4_neg=False postman=apan mail_combine=last` |
-| TGAT | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=tgat ngh_sampler=2_hop` |
-| DyGFormer | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=dygformer ngh_sampler=1_hop fanout=[32]` |
-| GraphMixer | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=graph_mixer ngh_sampler=1_hop fanout=[20]` |
+| TGN | `uv run torchrun --nproc_per_node=3 run.py access_analyzer=tgn dataset=LASTFM encoder=tgn mem_updater=tgn` |
+| JODIE | `uv run torchrun --nproc_per_node=3 run.py access_analyzer=jodie dataset=LASTFM encoder=jodie mem_updater=jodie` |
+| APAN | `uv run torchrun --nproc_per_node=3 run.py access_analyzer=apan dataset=LASTFM encoder=apan mem_updater=apan` |
+| TGAT | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=tgat` |
+| DyGFormer | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=dygformer` |
+| GraphMixer | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=graph_mixer` |
 | EdgeBank | `uv run python eval_edgebank.py --dataset LASTFM` |
 
-**Config defaults** (`configs/config.yaml`): `analyzer=no_mem`, `mem_updater=null`, `mem_box_store=null`, `ngh_sampler=1_hop`, `fanout=[10]`, `n_neg=1`, `batch_size=4000`, `final_emb_dim=128`, `d_time=128`.
+**Config defaults** (`configs/config.yaml`): `access_analyzer` omitted on non-memory runs, `mem_updater=null`, `n_neg=1`, `ring_buf_size=32`, `batch_size=4000`, `d_time=128`.
 
 ## Architecture Overview
 
@@ -64,7 +63,7 @@ FROST is a distributed Temporal GNN training framework. Rank assignment: workers
 - `ring_buf.py` — `RingBuf`: circular shared-memory sampling buffer
 - `mem_mgr.py` — `MemBoxStoreManager`: node memory + mailbox
 - `dataset_n_feat.py` — `DatasetManager`: loads nfeat/efeat into `/dev/shm`
-- `ngh_sampler.py` — `NoSampler` (0-hop), `NghSampler` (1/2-hop), `MultiHopNghSampler`
+- `ngh_sampler.py` — `NoSampler` (0-hop), `NghSampler` (1-hop), `MultiHopNghSampler` (multi-hop)
 
 ### Data types (`src/frost/datatypes/`)
 - `meta.py` — `Meta`: batch metadata carrier
@@ -81,7 +80,7 @@ Host process
  └─ scatter_object_list → Workers
                            ├─ Receiver (scatter_object_list)
                            ├─ H2D (load nfeat/efeat/mem/box → GPU)
-                           ├─ [DynamicAssembler if mem_box_store]
+                           ├─ [DynamicAssembler if mem_updater]
                            └─ AssembledModel.forward(meta)
                               ├─ mem_updater(flat_graph)
                               ├─ flat_graph.inflate(fanout, n_neg, sample_4_neg)
@@ -99,7 +98,9 @@ Host process
 ## Key Invariants
 
 ### Dimension alignment
-- `d_mem` in `mem_updater/*.yaml` **must equal** `${final_emb_dim}` for identity-GNN models (JODIE, APAN).
+- `d_mem` in `mem_updater/*.yaml` **must equal** `${encoder.out_dim}` for identity-GNN models (JODIE, APAN).
+- APAN's effective 1-hop fanout is `mem_updater.mail_recipients`; all other models derive fanout from `encoder.fanout`.
+- APAN's neighborhood sampling strategy is `mem_updater.postman_delivery_strategy`; all other models derive it from `encoder.ngh_sampler_strategy`.
 - `d_mail = 2*d_mem + edim` — computed in `launcher.py`; mailbox slot size and `TransformerMemoryUpdater` key/value dim must agree.
 - `GraphMixer`/`TCL`: `num_tokens` should equal `fanout[0]`; `TCL num_depths = fanout[0] + 1`.
 
@@ -110,7 +111,7 @@ Host process
 3. `box_update = TensorSet(pos_ngh)` only — roots are not written by postman
 
 ### Sampler invariants
-- `NoSampler.fanout` is always `None` regardless of `cfg.fanout`; `_assembled_model.py` treats `None` as `[]`.
+- `NoSampler.fanout` is always `None` regardless of `encoder.fanout`; `_assembled_model.py` treats `None` as `[]`.
 - `MultiHopNghSampler.sample()` receives `ts` of shape `[n_src]`; must expand to `ts.repeat(2 + n_neg)` before calling C++ `get_historical_neighbors()` (positional-only args).
 
 ### Memory model detached states
@@ -135,19 +136,19 @@ For memory models, `full_q=1` is intentional: `DynamicAssembler` must wait for P
        def forward(self, graph: Graph) -> torch.Tensor:
            # graph.root_mem, root_mem_ts, root_ts, root_nfeat, root_nid
            # graph.neighbors[0].nid/ts/mem/efeat  (if 1-hop)
-           return h  # shape [n_root, final_emb_dim]
+           return h  # shape [n_root, encoder.out_dim]
    ```
 2. Create `configs/encoder/my_model.yaml`:
    ```yaml
    _target_: frost.models.encoder.my_model.MyEncoder
-   d_mem: ${final_emb_dim}
+   out_dim: 128
    d_time: ${d_time}
    ndim: ${ndim}
    edim: ${edim}
    ```
 3. Run with `run.py encoder=my_model`.
 
-For memory encoders, implement `MemoryUpdaterProto` and set `d_mem: ${final_emb_dim}`.
+For memory encoders, implement `MemoryUpdaterProto` and set `d_mem: ${encoder.out_dim}`.
 
 ## Adding a New Analyzer
 
@@ -164,11 +165,11 @@ class MyAnalyzer:
         )
 ```
 
-Config: `configs/analyzer/my_analyzer.yaml` with `_target_` and `n_neg: ${n_neg}`.
+Config: `configs/access_analyzer/my_analyzer.yaml` with `_target_` and `n_neg: ${n_neg}`.
 
 ## Datasets
 
-Stored in `DATA/<DATASET>/`. Loaded by `DatasetManager` from `configs/dataset_mgr/base.yaml`. Expected files: `edges.csv` (columns: `src`, `dst`, `time`, `ext_roll`, `Unnamed: 0`), optional `node_features.pt`, `edge_features.pt`.
+Stored in `DATA/<DATASET>/`. Loaded directly by `DatasetManager`. Expected files: `edges.csv` (columns: `src`, `dst`, `time`, `default_split`, `Unnamed: 0`), optional `node_features.pt`, `edge_features.pt`.
 
 ## Environment Variables (Performance)
 

@@ -1,1 +1,0 @@
-cloc . --exclude-dir=.git,__pycache__,build,dist,data,logs,deprecated,DATA,sampler_core.egg-info,.vscode,.mypy_cache,third_party,third_party_papers,overleaf,outputs

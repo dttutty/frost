@@ -1,5 +1,4 @@
 # Data & model artifacts
-DATA/
 /models/
 checkpoints/
 data/
@@ -75,3 +74,8 @@ temp/
 traces/
 *.png
 *.cvs
+
+DATA/DGB*
+DATA/.temp
+DATA/TGL*
+TGL_DATA/

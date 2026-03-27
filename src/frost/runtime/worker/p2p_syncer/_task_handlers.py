@@ -11,7 +11,7 @@ from frost.datatypes.mem_mail_box.mail import MailEntry
 from frost.datatypes.tasks import BoxTask, P2PTask
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.protocols.postman_proto import PostmanProto
-from frost.runtime._thread_base import StreamThreadBase
+from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
 
 from .utils._interaction_ops import generate_interaction_mails
 from .utils._p2p_task_maker import make_p2p_task
@@ -42,7 +42,7 @@ class MemTaskHandler(StreamThreadBase):
         while self.stop_ev.is_set() is False:
             mem_task_tuple = self.mem_task_q.get(block=True)
             if mem_task_tuple is None:
-                self.mem_wr_q.put(None)  # Sentinel for MemWriter
+                put_shutdown_sentinel(self.mem_wr_q, None)
                 break
 
             mem_task, ready_event = mem_task_tuple
@@ -53,14 +53,14 @@ class MemTaskHandler(StreamThreadBase):
             # skip stale memory for speed
             # mem_ts_nid = merge_with_priority(root_new_mem, mem_task.old_mem_ts_nid)
             mem_ts_nid = root_new_mem
-            batch_idx = mem_task.batch_idx
+            mini_batch_idx = mem_task.mini_batch_idx
 
             if mem_task.is_last is False:
                 p2p_task = make_p2p_task(
                     entry=mem_ts_nid,
                     plan=mem_plan,
                     device=self.device,
-                    batch_idx=batch_idx,
+                    mini_batch_idx=mini_batch_idx,
                 )
                 p2p_event: CudaEvent = cast(CudaEvent, torch.cuda.Event())
                 p2p_event.record(torch.cuda.current_stream())
@@ -72,9 +72,11 @@ class MemTaskHandler(StreamThreadBase):
             writeback_event.record(torch.cuda.current_stream())
             if mem_task.mem_plan.writeback is not None:
                 to_writeback = mem_task.mem_plan.writeback.data
-                self.mem_wr_q.put((to_writeback, batch_idx, mem_ts_nid, writeback_event))
+                self.mem_wr_q.put(
+                    (to_writeback, mini_batch_idx, mem_ts_nid, writeback_event)
+                )
             else:
-                self.mem_wr_q.put((None, batch_idx, mem_ts_nid, writeback_event))
+                self.mem_wr_q.put((None, mini_batch_idx, mem_ts_nid, writeback_event))
 
 
 class MessageHandler(StreamThreadBase):
@@ -135,7 +137,9 @@ class MessageHandler(StreamThreadBase):
                 is_unique=new_mail.is_unique,
             )
             graph = box_task.graph
-            assert graph is not None, "BoxTask.graph must not be None when postman is set"
+            assert graph is not None, (
+                "BoxTask.graph must not be None when postman is set"
+            )
             new_mail = self.postman.deliver(graph, mail_data=new_mail.data)
 
         if mail_combine == "last":
@@ -150,7 +154,7 @@ class MessageHandler(StreamThreadBase):
             entry=box_entry,
             plan=box_plan,
             device=self.device,
-            batch_idx=box_task.batch_idx,
+            mini_batch_idx=box_task.mini_batch_idx,
         )
 
         return p2p_task, box_entry, seed_mail_cpu
@@ -163,7 +167,7 @@ class MessageHandler(StreamThreadBase):
             box_task_tuple = self.box_task_q.get(block=True)
 
             if box_task_tuple is None:
-                self.box_wr_q.put(None)  # Sentinel for BoxWriter
+                put_shutdown_sentinel(self.box_wr_q, None)
                 break
 
             batch_count += 1
@@ -195,7 +199,7 @@ class MessageHandler(StreamThreadBase):
                     self.box_wr_q.put(
                         (
                             box_task.box_plan.writeback.data,
-                            box_task.batch_idx,
+                            box_task.mini_batch_idx,
                             (seed_mail_cpu, box_task.flat_nid_cpu),
                             writeback_event,
                         )
@@ -204,10 +208,12 @@ class MessageHandler(StreamThreadBase):
                     self.box_wr_q.put(
                         (
                             box_task.box_plan.writeback.data,
-                            box_task.batch_idx,
+                            box_task.mini_batch_idx,
                             box_entry,
                             writeback_event,
                         )
                     )
             else:
-                self.box_wr_q.put((None, box_task.batch_idx, box_entry, writeback_event))
+                self.box_wr_q.put(
+                    (None, box_task.mini_batch_idx, box_entry, writeback_event)
+                )

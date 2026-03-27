@@ -47,7 +47,7 @@ class Meta:
     cur_macro_of_epoch: int
     split: Literal["train", "val", "test"]
     n_src: int
-    batch_idx: int
+    mini_batch_idx: int
     flat_graph: FlatGraph | None
     buf_len: int
     graph: SeqGraph | None = None

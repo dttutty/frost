@@ -120,10 +120,22 @@ class Scatter(ThreadBase):
                 nfeat_plan: list[StaticPlan] | None = None
                 if self.mem_plan_out_q is not None:
                     mem_plan = self.mem_plan_out_q.get(block=True)
+                    if mem_plan is None and self.stop_ev.is_set():
+                        self._scatter_to_workers([None] * self.n_gpu)
+                        break
                 if self.mail_plan_out_q is not None:
                     mail_plan = self.mail_plan_out_q.get(block=True)
+                    if mail_plan is None and self.stop_ev.is_set():
+                        self._scatter_to_workers([None] * self.n_gpu)
+                        break
                 if self.nfeat_plan_out_q is not None:
                     nfeat_plan = self.nfeat_plan_out_q.get(block=True)
+                    if nfeat_plan is None and self.stop_ev.is_set():
+                        self._scatter_to_workers([None] * self.n_gpu)
+                        break
+                if self.stop_ev.is_set():
+                    self._scatter_to_workers([None] * self.n_gpu)
+                    break
                 for i, m in enumerate(meta_2_scatter):
                     safe_mem = mem_plan[i] if mem_plan is not None else None
                     safe_mail = mail_plan[i] if mail_plan is not None else None

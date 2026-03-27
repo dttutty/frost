@@ -1,5 +1,4 @@
-index: "int32"    # 可选: int32, int64
-time: "float32"   # 可选: float32, float64
-efeat: "float32"
-nfeat: "float32"
-mem: "float32"
+index: "int64"    # 只能是 int64
+time_for_preprocessing: "int64"   # 只能是 int64
+time_for_encoder: "float32"
+efeat_nfeat_mem_mailbox: "float32" # 只能float32

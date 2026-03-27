@@ -1,7 +1,5 @@
 import logging
-import os
 import threading
-import traceback
 from queue import Queue
 from typing import Literal
 
@@ -10,7 +8,7 @@ import torch
 
 from frost.aliases.host import MetasStNeed
 from frost.datatypes.plan import StaticPlan
-from frost.runtime._thread_base import ThreadBase
+from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 from frost.utils.tensor_set import TensorSet
 
 logger = logging.getLogger(__name__)
@@ -47,16 +45,6 @@ class StaticPlanner(ThreadBase):
             for _ in range(self.n_gpus)
         ]
 
-    def run(self) -> None:
-        """Execute ``logic()`` and handle crashes by logging, setting stop event, and exiting."""
-        try:
-            self.logic()
-        except Exception:
-            logger.error("!!! StaticPlanner Thread Crashed !!!")
-            traceback.print_exc()
-            self.stop_ev.set()
-            os._exit(1)
-
     def logic(self) -> None:
         """Main planning loop for static node features.
 
@@ -74,7 +62,7 @@ class StaticPlanner(ThreadBase):
             need = self.in_q.get(block=True)
 
             if need is None:
-                self.out_q.put(None)
+                put_shutdown_sentinel(self.out_q, None)
                 break
 
             if need == "end_of_epoch":  # None

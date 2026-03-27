@@ -4,6 +4,7 @@ This module wires together all model components (memory updater, GNN encoder,
 optional APAN postman, and link predictor header) into a single forward pass
 used by the worker during training and evaluation.
 """
+
 import logging
 from queue import Queue
 from typing import cast
@@ -95,7 +96,7 @@ class AssembledModel(nn.Module):
             Logit tensor of shape ``[n_src * (1 + n_neg), 1]`` containing
             concatenated positive and negative edge scores.
         """
-        logger.debug(f"Processing meta with meta.batch_idx={meta.batch_idx}")
+        logger.debug(f"Processing meta with meta.batch_idx={meta.mini_batch_idx}")
 
         # 1. Update memory using the flattened ZipSeqGraph
 
@@ -120,7 +121,7 @@ class AssembledModel(nn.Module):
                 n_neg=self.n_neg,
                 sample_4_neg=self.sample_4_neg,
             )
-            # Retrieve detached states for global sync
+            # Retrieve detached states for p2p sync
 
             with torch.no_grad():
                 # Construct MemTsNid directly from detached states
@@ -130,30 +131,25 @@ class AssembledModel(nn.Module):
                     data=meta.flat_graph.detached_mem,
                 )
 
-                mu_ready_event = cast(CudaEvent, torch.cuda.Event())
-
-                mu_ready_event.record(stream=torch.cuda.current_stream())
-
                 plan_set = meta.plan_set
 
                 assert plan_set is not None
                 assert plan_set.box_plan is not None
                 assert plan_set.mem_plan is not None
+                root_new_mem_clone = root_new_mem.clone()
 
-                box_ready_event = cast(CudaEvent, torch.cuda.Event())
-
-                box_ready_event.record(stream=torch.cuda.current_stream())
+                ready_event = cast(CudaEvent, torch.cuda.Event())
+                ready_event.record(stream=torch.cuda.current_stream())
 
                 # Handle mem sync
                 mem_task = MemTask(
-                    batch_idx=meta.cur_macro_of_epoch,
+                    mini_batch_idx=meta.mini_batch_idx,
                     root_new_mem=root_new_mem,
                     mem_plan=plan_set.mem_plan,
                     is_last=meta.is_last_macro_of_epoch,
                 )
-                root_new_mem_clone = root_new_mem.clone()
                 # Avoid in-place modification issues
-                mem_task_q.put((mem_task, mu_ready_event))
+                mem_task_q.put((mem_task, ready_event))
 
                 assert meta.flat_graph.box is not None
                 assert meta.flat_graph.box_ts is not None
@@ -164,13 +160,13 @@ class AssembledModel(nn.Module):
                     if meta.flat_graph.efeat is not None
                     else None,
                     root_new_mem=root_new_mem_clone,
-                    batch_idx=meta.batch_idx,
+                    mini_batch_idx=meta.mini_batch_idx,
                     box_plan=plan_set.box_plan,
                     is_last=meta.is_last_macro_of_epoch,
                     graph=meta.graph if self.postman else None,
                     flat_nid_cpu=meta.flat_nid_cpu if self.postman else None,
                 )
-                box_task_q.put((box_task, box_ready_event))
+                box_task_q.put((box_task, ready_event))
         else:
             meta.graph = meta.flat_graph.unflatten(
                 n_src=n_src,

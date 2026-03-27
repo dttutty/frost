@@ -110,7 +110,7 @@ class MemoryUpdater(nn.Module):
         flat_graph.mem = self.rnn(rnn_input, flat_graph.mem)
         assert flat_graph.mem is not None
 
-        # Cache detached states for the Root nodes (assumes roots are at the top)
+        # Cache detached states for Positive Root nodes (assumes roots are at the left)
         flat_graph.detached_mem = flat_graph.mem[:n_target_nodes].detach().clone()
         flat_graph.detached_ts = flat_graph.ts[:n_target_nodes].detach().clone()
         flat_graph.detached_nid = flat_graph.nid[:n_target_nodes].detach().clone()

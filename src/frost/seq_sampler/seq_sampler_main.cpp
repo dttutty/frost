@@ -38,4 +38,5 @@ NB_MODULE(_core, m) {
     // 自动生成两套完整的方法和类
     bind_samplers<int32_t, float>(m, "32_32");
     bind_samplers<int64_t, float>(m, "64_32");
+    bind_samplers<int64_t, int64_t>(m, "64_64");
 }

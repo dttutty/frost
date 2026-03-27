@@ -26,7 +26,7 @@ class MemTask:
             signals the writer to flush and reset state.
     """
 
-    batch_idx: int
+    mini_batch_idx: int
     root_new_mem: MemEntry
     mem_plan: DynamicPlan
     is_last: bool
@@ -52,7 +52,7 @@ class BoxTask:
 
     pos_efeat: Tensor | None
     root_new_mem: MemEntry
-    batch_idx: int
+    mini_batch_idx: int
     box_plan: DynamicPlan
     is_last: bool
     graph: SeqGraph | None
@@ -61,7 +61,7 @@ class BoxTask:
     def __repr__(self) -> str:
         # if data is tensor, show its shape
         return (
-            f"BoxTask(batch_idx={self.batch_idx}, "
+            f"BoxTask(batch_idx={self.mini_batch_idx}, "
             f"box_plan={self.box_plan}, "
             f"is_last={self.is_last}, "
             f"graph={self.graph})"
@@ -86,7 +86,7 @@ class P2PTask:
         ts2recv: Pre-allocated buffer for received timestamps.
         recv_counts: Number of elements to receive from each peer worker.
         send_counts: Number of elements to send to each peer worker.
-        batch_idx: Global batch counter for ordering P2P exchanges.
+        mini_batch_idx: Global batch counter for ordering P2P exchanges.
     """
 
     send_nid: Tensor
@@ -97,7 +97,7 @@ class P2PTask:
     ts2recv: Tensor
     recv_counts: NDArray
     send_counts: NDArray
-    batch_idx: int
+    mini_batch_idx: int
 
     def __repr__(self) -> str:
         # if data is tensor, show its shape
@@ -110,7 +110,7 @@ class P2PTask:
             f"ts2recv_shape={self.ts2recv.shape}, "
             f"recv_counts={self.recv_counts}, "
             f"send_counts={self.send_counts}, "
-            f"batch_idx={self.batch_idx})"
+            f"batch_idx={self.mini_batch_idx})"
         )
 
     def clone(self) -> P2PTask:
@@ -124,5 +124,5 @@ class P2PTask:
             ts2recv=self.ts2recv.clone(),
             recv_counts=self.recv_counts.copy(),
             send_counts=self.send_counts.copy(),
-            batch_idx=self.batch_idx,
+            mini_batch_idx=self.mini_batch_idx,
         )

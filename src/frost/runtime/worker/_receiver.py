@@ -4,8 +4,10 @@ Receives ``Meta`` objects scattered by the host via ``dist.scatter_object_list``
 and forwards them into the ``received_q`` for downstream H2D processing.
 Epoch-end results are gathered back to the host via ``dist.gather_object``.
 """
+
 import logging
 import threading
+from queue import Empty
 from queue import Queue as Q
 
 import torch
@@ -16,7 +18,7 @@ from frost.datatypes.env import Env
 from frost.datatypes.graph import FlatGraph
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
-from frost.runtime._thread_base import ThreadBase
+from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
@@ -82,11 +84,18 @@ class Receiver(ThreadBase):
             self._recv_seq += 1
 
             if msg is None:
-                self.received_q.put(None, block=True)
+                put_shutdown_sentinel(self.received_q, None)
                 break
             elif msg == "end_of_epoch":
                 self.received_q.put("end_of_epoch", block=True)
-                result = self.result_q.get(block=True)
+                while not self.stop_ev.is_set():
+                    try:
+                        result = self.result_q.get(timeout=0.1)
+                        break
+                    except Empty:
+                        continue
+                else:
+                    break
 
                 self._gather_seq += 1
                 # Send result back via collective gather
@@ -99,7 +108,7 @@ class Receiver(ThreadBase):
                 buf = self.ring_buf.get(meta.buf_len, block=True)
                 if buf is None:
                     raise RuntimeError(
-                        f"Ring buffer returned None for meta with batch_id {meta.batch_idx}"
+                        f"Ring buffer returned None for meta with batch_id {meta.mini_batch_idx}"
                     )
                 buf_len = meta.buf_len
                 if __debug__:

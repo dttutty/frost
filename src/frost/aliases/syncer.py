@@ -14,7 +14,7 @@ from frost.protocols.cuda_event_proto import CudaEvent
 MemTaskQ: TypeAlias = Queue[tuple[MemTask, CudaEvent] | None]
 BoxTaskQ: TypeAlias = Queue[tuple[BoxTask, CudaEvent] | None]
 MemP2PQ: TypeAlias = Queue[tuple[P2PTask, CudaEvent] | Literal["nothing_to_p2p"] | None]
-BoxP2PQ: TypeAlias = Queue[tuple[P2PTask, CudaEvent] | Literal["nothing_to_p2p"]]
+BoxP2PQ: TypeAlias = Queue[tuple[P2PTask, CudaEvent] | Literal["nothing_to_p2p"] | None]
 MemWrQ: TypeAlias = Queue[tuple[torch.Tensor | None, int, MemEntry, CudaEvent] | None]
 BoxWriteEntry: TypeAlias = BoxEntry | tuple[MailEntry, torch.Tensor]
 BoxWrQ: TypeAlias = Queue[tuple[torch.Tensor | None, int, BoxWriteEntry, CudaEvent] | None]

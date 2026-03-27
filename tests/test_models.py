@@ -70,6 +70,13 @@ class TestTimeEncoder:
         out = enc(t)
         assert out.shape == (5, 3, 64)
 
+    def test_int64_input_casts_to_float32_features(self):
+        enc = TimeEncoder(dim=32)
+        t = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int64)
+        out = enc(t)
+        assert out.dtype == torch.float32
+        assert out.shape == (2, 3, 32)
+
     def test_output_range(self):
         """Cosine output should be in [-1, 1]."""
         enc = TimeEncoder(dim=32)

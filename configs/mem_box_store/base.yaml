@@ -1,4 +1,0 @@
-_target_: frost.shm.mem_mgr.MemBoxStoreManager
-boxsize: ${mem_updater.boxsize}
-d_mem: ${mem_updater.d_mem}
-edim: ${edim}

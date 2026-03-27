@@ -37,6 +37,7 @@ from frost.datatypes.result import Result
 from frost.models._assembled_model import AssembledModel
 from frost.protocols.mem_updater_proto import MemoryUpdaterProto
 from frost.protocols.postman_proto import PostmanProto
+from frost.runtime._thread_base import destroy_process_group, join_thread, put_shutdown_sentinel
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
 from frost.runtime.worker._host_to_device import H2D
 from frost.runtime.worker._receiver import Receiver as Receiver
@@ -139,6 +140,7 @@ class Worker:
         optimizer: Literal["adam", "sgd"],
         lr: float,
         mail_combine: Literal["last", "mean"] | None,
+        use_shm_instead: bool = False,
         compile_model: bool = True,
     ) -> None:
         # --- Basic config ---
@@ -153,6 +155,7 @@ class Worker:
         self.nccl_p2p = nccl_p2p
         self.device = torch.device(f"cuda:{env.local_rank}")
         self.mail_combine = mail_combine
+        self.use_shm_instead = use_shm_instead
         self.compile_model = compile_model
         self.lr = lr
         self.curr_epoch = 0
@@ -163,6 +166,7 @@ class Worker:
         self._throughput_batch_count = 0
         self._throughput_events = 0
         self._throughput_start_time: float | None = None
+        self._shutdown_done = False
 
         # --- Synchronization primitives ---
         self.stop_ev = threading.Event()
@@ -208,6 +212,7 @@ class Worker:
                 stop_ev=self.stop_ev,
                 device=self.device,
                 h2d_sem=self.h2d_sem,
+                use_shm_instead=self.use_shm_instead,
             )
             self._init_mem_box_threads()
             h2d_dest_q = self.h2d_out_q
@@ -287,6 +292,7 @@ class Worker:
             stop_ev=self.stop_ev,
             delta_q=self.delta_q,
             device=self.device,
+            use_shm_instead=self.use_shm_instead,
         )
 
     def _init_model(
@@ -648,33 +654,82 @@ class Worker:
                     self.mem_p2p_q.put(None)
                 break
 
-    def cleanup(self) -> None:
-        """Join all background threads and tear down the distributed process group.
+    def _request_thread_shutdown(self) -> None:
+        put_shutdown_sentinel(self.received_q, None)
+        put_shutdown_sentinel(self.full_q, None)
 
-        Calls ``join()`` on every thread in reverse dependency order, then
-        issues a ``dist.barrier()`` to synchronize all ranks before destroying
-        the process group.
-        """
-        self.h2d.join()
-        self.receiver.join()
-        if self.mem_handler:
-            self.mem_handler.join()
-        if self.mem_wr:
-            self.mem_wr.join()
-        if self.box_wr:
-            self.box_wr.join()
+        if self.h2d_out_q is not None:
+            put_shutdown_sentinel(self.h2d_out_q, None)
+        if self.delta_q is not None:
+            put_shutdown_sentinel(self.delta_q, None)
+        if self.mem_task_q is not None:
+            put_shutdown_sentinel(self.mem_task_q, None)
+        if self.box_task_q is not None:
+            put_shutdown_sentinel(self.box_task_q, None)
+        if self.mem_p2p_q is not None:
+            put_shutdown_sentinel(self.mem_p2p_q, None)
+        if self.box_p2p_q is not None:
+            put_shutdown_sentinel(self.box_p2p_q, None)
+        if self.mem_wr_q is not None:
+            put_shutdown_sentinel(self.mem_wr_q, None)
+        if self.box_wr_q is not None:
+            put_shutdown_sentinel(self.box_wr_q, None)
 
-        if self.box_handler:
-            self.box_handler.join()
-        if self.p2p_q_handler:
-            self.p2p_q_handler.join()
-        if self.dy_asm:
-            self.dy_asm.join()
-        dist.barrier()
-        # Reset dynamo/triton compiled state before destroying the process group
-        # to avoid C++ destructor ordering issues (SIGABRT on exit).
+    def _join_pipeline_threads(self, timeout_s: float) -> None:
+        join_thread(self.h2d, timeout_s, logger)
+        join_thread(self.receiver, timeout_s, logger)
+        join_thread(self.mem_handler, timeout_s, logger)
+        join_thread(self.mem_wr, timeout_s, logger)
+        join_thread(self.box_wr, timeout_s, logger)
+        join_thread(self.box_handler, timeout_s, logger)
+        join_thread(self.p2p_q_handler, timeout_s, logger)
+        join_thread(self.dy_asm, timeout_s, logger)
+
+    def cleanup(self, graceful: bool = True, join_timeout_s: float = 5.0) -> None:
+        """Best-effort worker shutdown for both normal and aborted runs."""
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+        self.stop_ev.set()
+        self._request_thread_shutdown()
+
+        # Reset dynamo/triton compiled state before distributed teardown to avoid
+        # C++ destructor ordering issues on exit.
         torch._dynamo.reset()
-        dist.destroy_process_group()
+
+        pg_destroyed = False
+        if not graceful:
+            destroy_process_group(sync=False, logger_=logger)
+            pg_destroyed = True
+
+        self._join_pipeline_threads(join_timeout_s)
+
+        alive_threads = [
+            thread
+            for thread in (
+                self.h2d,
+                self.receiver,
+                self.mem_handler,
+                self.mem_wr,
+                self.box_wr,
+                self.box_handler,
+                self.p2p_q_handler,
+                self.dy_asm,
+            )
+            if thread is not None and thread.is_alive()
+        ]
+        if alive_threads and not pg_destroyed:
+            logger.warning(
+                "Forcing process-group teardown because worker threads are still alive: %s",
+                [thread.name for thread in alive_threads],
+            )
+            destroy_process_group(sync=False, logger_=logger)
+            pg_destroyed = True
+            self._join_pipeline_threads(1.0)
+
+        if not pg_destroyed:
+            destroy_process_group(sync=graceful, logger_=logger)
+
 
     def _unwrap_model(self) -> AssembledModel:
         """Return the bare AssembledModel, stripping torch.compile and DDP wrappers."""

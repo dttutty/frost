@@ -1,5 +1,7 @@
 _target_: frost.models.mem_updater.MemoryUpdater
 d_time: ${d_time}
 cell: 'gru'
-d_mem: 512
+d_mem: ${encoder.out_dim}
 boxsize: 1
+mail_recipients: 0
+mail_combine: last

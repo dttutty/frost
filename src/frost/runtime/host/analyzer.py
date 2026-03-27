@@ -1,20 +1,34 @@
-"""Combined access-counting + mail-planner factories for each model family.
+"""Planner-input factories for each model family.
 
 Each class provides:
-- ``count_access()``: compute per-batch Access (which nodes need mem/box/nfeat).
+- ``get_mem_plan_inputs()``: compute per-batch memory planner inputs.
 - ``create_mail_planner()``: factory that returns the correct DynamicPlanner thread.
-- ``get_mail_plan_inputs()``: extract (needs, updates) from Access for dispatch.
+- ``get_mail_plan_inputs()``: compute per-batch mailbox planner inputs.
+- ``get_feat_plan_inputs()``: compute per-batch node-feature planner inputs.
+
+Legacy Access-field semantics, translated from the removed ``Access`` dataclass:
+- ``mem_needed``: For TGN and JODIE, all sampled nodes. For APAN,
+  ``src + pos_dst + neg_dst`` only, excluding neighbors.
+- ``mem_update``: For TGN, JODIE, and APAN, only ``src + pos_dst``.
+- ``box_needed``: For TGN and JODIE, all sampled nodes. For APAN,
+  ``src + pos_dst + neg_dst`` plus sampled neighbors when mailbox state must be
+  forwarded to peer GPUs.
+- ``box_update``: For TGN and JODIE, only ``src + pos_dst``. For APAN,
+  ``src + pos_dst`` plus the sampled neighbors of ``src`` and ``pos_dst``.
+- ``required_nfeat``: For TGN and JODIE, all sampled nodes. For APAN,
+  ``src + pos_dst + neg_dst`` only, excluding neighbors.
+
+The current APAN mailbox planner remains aligned with the runtime mailbox write
+path, so its concrete mail inputs are defined by ``APANAnalyzer`` below.
 """
 
 import logging
 import threading
-from typing import cast
 
 import numpy as np
-import torch
 
 from frost.aliases.host import DynamicPlanInQ, DynamicPlanOutQ
-from frost.datatypes.access import Access
+from frost.datatypes.sampled_layout import SampledLayoutView
 from frost.runtime._thread_base import ThreadBase
 from frost.runtime.host.p2p_planner._dynamic_planner import (
     APANDynamicPlanner,
@@ -23,6 +37,73 @@ from frost.runtime.host.p2p_planner._dynamic_planner import (
 from frost.utils.tensor_set import TensorSet
 
 logger = logging.getLogger(__name__)
+
+
+def _unzip_dynamic_inputs(
+    inputs: list[tuple[TensorSet, TensorSet]],
+) -> tuple[list[TensorSet], list[TensorSet]]:
+    if not inputs:
+        return [], []
+    needs, updates = zip(*inputs)
+    return list(needs), list(updates)
+
+
+class _RootMailboxAnalyzer:
+    """Shared planner-input policy for models where only positive roots update state."""
+
+    def __init__(self, n_neg: int):
+        self.n_neg = n_neg
+
+    def _mem_plan_input(self, layout: SampledLayoutView) -> tuple[TensorSet, TensorSet]:
+        pos_root = TensorSet(layout.pos_roots)
+        all_nodes_set = TensorSet(layout.valid_nid)
+        return all_nodes_set, pos_root
+
+    def _mail_plan_input(
+        self, layout: SampledLayoutView
+    ) -> tuple[TensorSet, TensorSet]:
+        pos_root = TensorSet(layout.pos_roots)
+        all_nodes_set = TensorSet(layout.valid_nid)
+        return all_nodes_set, pos_root
+
+    def _feat_plan_input(self, layout: SampledLayoutView) -> TensorSet:
+        return TensorSet(layout.valid_nid)
+
+    def get_mem_plan_inputs(
+        self, layouts: list[SampledLayoutView]
+    ) -> tuple[list[TensorSet], list[TensorSet]]:
+        return _unzip_dynamic_inputs(
+            [self._mem_plan_input(layout) for layout in layouts]
+        )
+
+    def create_mail_planner(
+        self,
+        gpu_dist: np.ndarray,
+        in_q: DynamicPlanInQ,
+        out_q: DynamicPlanOutQ,
+        stop_ev: threading.Event,
+        handle_stale: bool,
+        output_dir: str | None,
+    ) -> ThreadBase:
+        return DynamicPlanner(
+            gpus_distance=gpu_dist,
+            in_q=in_q,
+            out_q=out_q,
+            stop_ev=stop_ev,
+            handle_stale=handle_stale,
+            output_dir=output_dir,
+            plan_kind="mail",
+        )
+
+    def get_mail_plan_inputs(
+        self, layouts: list[SampledLayoutView]
+    ) -> tuple[list[TensorSet], list[TensorSet]]:
+        return _unzip_dynamic_inputs(
+            [self._mail_plan_input(layout) for layout in layouts]
+        )
+
+    def get_feat_plan_inputs(self, layouts: list[SampledLayoutView]) -> list[TensorSet]:
+        return [self._feat_plan_input(layout) for layout in layouts]
 
 
 class APANAnalyzer:
@@ -38,33 +119,35 @@ class APANAnalyzer:
     def __init__(self, n_neg: int):
         self.n_neg = n_neg
 
-    def count_access(
-        self,
-        src: torch.Tensor,
-        dst: torch.Tensor,
-        all_nid: torch.Tensor,
-        fanout: list[int] | None,
-        valid_all: torch.Tensor | None = None,
-    ) -> Access:
-        assert valid_all is not None, "APAN requires valid_all for access counting"
-        assert fanout is not None, "APAN requires fanout for neighbor sampling"
-        assert len(fanout) == 1, "APAN only supports 1-hop sampling"
-        n_src = src.shape[0]
-        ngh_start = n_src * (2 + self.n_neg)
-        pos_ngh_raw = valid_all[ngh_start : (ngh_start + fanout[0] * n_src * 2)]
-        pos_ngh = pos_ngh_raw[pos_ngh_raw != -1]
+    def _validate_layout(self, layout: SampledLayoutView) -> None:
+        assert layout.fanout is not None, "APAN requires fanout for neighbor sampling"
+        assert len(layout.fanout) == 1, "APAN only supports 1-hop sampling"
+        assert not layout.sample_4_neg, "APAN expects sample_4_neg=False layouts"
 
-        pos_root = TensorSet(torch.cat([src, dst], dim=0))
-        all_nodes_set = TensorSet(all_nid)
-        box_update = TensorSet(pos_ngh)
+    def _mem_plan_input(self, layout: SampledLayoutView) -> tuple[TensorSet, TensorSet]:
+        self._validate_layout(layout)
 
-        return Access(
-            required_mem=all_nodes_set,
-            mem_update=pos_root,
-            all_nodes_in_graph=all_nodes_set,
-            pos_root_need=pos_root,
-            box_update=box_update,
-            required_nfeat=all_nodes_set,
+        pos_root = TensorSet(layout.pos_roots)
+        all_root = TensorSet(layout.roots)
+        return all_root, pos_root
+
+    def _mail_plan_input(
+        self, layout: SampledLayoutView
+    ) -> tuple[TensorSet, TensorSet]:
+        self._validate_layout(layout)
+        pos_root = TensorSet(layout.pos_roots)
+        box_update = TensorSet(layout.filter_valid(layout.apan_pos_ngh))
+        return pos_root, box_update
+
+    def _feat_plan_input(self, layout: SampledLayoutView) -> TensorSet:
+        self._validate_layout(layout)
+        return TensorSet(layout.roots)
+
+    def get_mem_plan_inputs(
+        self, layouts: list[SampledLayoutView]
+    ) -> tuple[list[TensorSet], list[TensorSet]]:
+        return _unzip_dynamic_inputs(
+            [self._mem_plan_input(layout) for layout in layouts]
         )
 
     def create_mail_planner(
@@ -74,6 +157,7 @@ class APANAnalyzer:
         out_q: DynamicPlanOutQ,
         stop_ev: threading.Event,
         handle_stale: bool,
+        output_dir: str | None,
     ) -> ThreadBase:
         return APANDynamicPlanner(
             gpus_distance=gpu_dist,
@@ -81,15 +165,19 @@ class APANAnalyzer:
             out_q=out_q,
             stop_ev=stop_ev,
             handle_stale=handle_stale,
+            output_dir=output_dir,
+            plan_kind="mail",
         )
 
     def get_mail_plan_inputs(
-        self, access_list: list[Access]
+        self, layouts: list[SampledLayoutView]
     ) -> tuple[list[TensorSet], list[TensorSet]]:
-        # APAN: needs = pos_root_need (src+dst need box read for assembly)
-        needs = [cast(TensorSet, a.pos_root_need) for a in access_list]
-        updates = [cast(TensorSet, a.box_update) for a in access_list]
-        return needs, updates
+        return _unzip_dynamic_inputs(
+            [self._mail_plan_input(layout) for layout in layouts]
+        )
+
+    def get_feat_plan_inputs(self, layouts: list[SampledLayoutView]) -> list[TensorSet]:
+        return [self._feat_plan_input(layout) for layout in layouts]
 
 
 class NoMemAnalyzer:
@@ -102,17 +190,10 @@ class NoMemAnalyzer:
     def __init__(self, n_neg: int):
         self.n_neg = n_neg
 
-    def count_access(
-        self,
-        src: torch.Tensor,
-        dst: torch.Tensor,
-        all_nid: torch.Tensor,
-        fanout: list[int] | None,
-        valid_all: torch.Tensor | None = None,
-    ) -> Access:
-        all_nid = all_nid.clone()
-        all_nodes_set = TensorSet(all_nid)
-        return Access(required_nfeat=all_nodes_set)
+    def get_mem_plan_inputs(
+        self, layouts: list[SampledLayoutView]
+    ) -> tuple[list[TensorSet], list[TensorSet]]:
+        return [], []
 
     def create_mail_planner(
         self,
@@ -121,120 +202,33 @@ class NoMemAnalyzer:
         out_q: DynamicPlanOutQ,
         stop_ev: threading.Event,
         handle_stale: bool,
+        output_dir: str | None,
     ) -> None:
         return None
 
     def get_mail_plan_inputs(
-        self, access_list: list[Access]
+        self, layouts: list[SampledLayoutView]
     ) -> tuple[list[TensorSet], list[TensorSet]]:
         return [], []
 
+    def get_feat_plan_inputs(self, layouts: list[SampledLayoutView]) -> list[TensorSet]:
+        return [TensorSet(layout.valid_nid) for layout in layouts]
 
-class TGNAnalyzer:
+
+class TGNAnalyzer(_RootMailboxAnalyzer):
     """Combined analyzer + planner for TGN.
 
     Uses ``DynamicPlanner`` for mail planning. All sampled nodes need
     memory/mailbox/nfeat; only src+dst update memory and mailbox.
     """
 
-    def __init__(self, n_neg: int):
-        self.n_neg = n_neg
-
-    def count_access(
-        self,
-        src: torch.Tensor,
-        dst: torch.Tensor,
-        all_nid: torch.Tensor,
-        fanout: list[int] | None,
-        valid_all: torch.Tensor | None = None,
-    ) -> Access:
-        all_nid = all_nid.clone()
-        pos_root = TensorSet(torch.cat([src, dst], dim=0))
-        all_nodes_set = TensorSet(all_nid)
-
-        return Access(
-            required_mem=all_nodes_set,
-            mem_update=pos_root,
-            all_nodes_in_graph=all_nodes_set,
-            pos_root_need=pos_root,
-            box_update=pos_root,
-            required_nfeat=all_nodes_set,
-        )
-
-    def create_mail_planner(
-        self,
-        gpu_dist: np.ndarray,
-        in_q: DynamicPlanInQ,
-        out_q: DynamicPlanOutQ,
-        stop_ev: threading.Event,
-        handle_stale: bool,
-    ) -> ThreadBase:
-        return DynamicPlanner(
-            gpus_distance=gpu_dist,
-            in_q=in_q,
-            out_q=out_q,
-            stop_ev=stop_ev,
-            handle_stale=handle_stale,
-        )
-
-    def get_mail_plan_inputs(
-        self, access_list: list[Access]
-    ) -> tuple[list[TensorSet], list[TensorSet]]:
-        # TGN: needs = all_nodes_in_graph (all nodes need box read)
-        needs = [cast(TensorSet, a.all_nodes_in_graph) for a in access_list]
-        updates = [cast(TensorSet, a.box_update) for a in access_list]
-        return needs, updates
+    pass
 
 
-class JODIEAnalyzer:
+class JODIEAnalyzer(_RootMailboxAnalyzer):
     """Combined analyzer + planner for JODIE (0-hop memory model).
 
     Same planning logic as TGN.
     """
 
-    def __init__(self, n_neg: int):
-        self.n_neg = n_neg
-
-    def count_access(
-        self,
-        src: torch.Tensor,
-        dst: torch.Tensor,
-        all_nid: torch.Tensor,
-        fanout: list[int] | None,
-        valid_all: torch.Tensor | None = None,
-    ) -> Access:
-        all_nid = all_nid.clone()
-        pos_root = TensorSet(torch.cat([src, dst], dim=0))
-        all_nodes_set = TensorSet(all_nid)
-
-        return Access(
-            required_mem=all_nodes_set,
-            mem_update=pos_root,
-            all_nodes_in_graph=all_nodes_set,
-            pos_root_need=pos_root,
-            box_update=pos_root,
-            required_nfeat=all_nodes_set,
-        )
-
-    def create_mail_planner(
-        self,
-        gpu_dist: np.ndarray,
-        in_q: DynamicPlanInQ,
-        out_q: DynamicPlanOutQ,
-        stop_ev: threading.Event,
-        handle_stale: bool,
-    ) -> ThreadBase:
-        return DynamicPlanner(
-            gpus_distance=gpu_dist,
-            in_q=in_q,
-            out_q=out_q,
-            stop_ev=stop_ev,
-            handle_stale=handle_stale,
-        )
-
-    def get_mail_plan_inputs(
-        self, access_list: list[Access]
-    ) -> tuple[list[TensorSet], list[TensorSet]]:
-        needs = [cast(TensorSet, a.all_nodes_in_graph) for a in access_list]
-        updates = [cast(TensorSet, a.box_update) for a in access_list]
-        return needs, updates
+    pass

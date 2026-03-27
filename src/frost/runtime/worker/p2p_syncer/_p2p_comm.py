@@ -23,6 +23,7 @@ class P2PQHandler(StreamThreadBase):
         stop_ev: threading.Event,
         delta_q: DeltaQ,
         device: torch.device,
+        use_shm_instead: bool = False,
     ) -> None:
         super().__init__(name="p2p_comm", stop_ev=stop_ev)
         self.device = device
@@ -33,6 +34,7 @@ class P2PQHandler(StreamThreadBase):
         self.stop_ev = stop_ev
         self.delta_q = delta_q
         self.nccl_p2p = nccl_p2p
+        self.use_shm_instead = use_shm_instead
 
         self.count = 0
 
@@ -49,6 +51,8 @@ class P2PQHandler(StreamThreadBase):
             # Fast path: no P2P work this step, pass through
             if mem_p2p_tuple == "nothing_to_p2p":
                 box_p2p_tuple = self.box_p2p_q.get(block=True)
+                if box_p2p_tuple is None:
+                    break
                 assert box_p2p_tuple == "nothing_to_p2p"
                 self.delta_q.put("nothing")
                 # Keep semaphore balanced so the next step doesn't block after no-op P2P.
@@ -66,6 +70,8 @@ class P2PQHandler(StreamThreadBase):
             mem_p2p, mem_event = mem_p2p_tuple
             # A mem task implies a corresponding box task
             box_p2p_tuple = self.box_p2p_q.get(block=True)
+            if box_p2p_tuple is None:
+                break
             # if total_wait > 2.0:
             #     logger.debug(
             #         f"[Rank {self.env.local_rank}] P2P Blocked! Total: {total_wait:.2f}ms | Mem: {mem_wait_ms:.2f}ms | Box: {box_wait_ms:.2f}ms"
@@ -137,6 +143,16 @@ class P2PQHandler(StreamThreadBase):
                 f"Rank {self.env.local_rank} starting P2P communication, count={self.count}"
             )
             self.count += 1
+            if self.use_shm_instead:
+                self.p2p_sem.release()
+                self.delta_q.put((None, None, []))
+                logger.debug(
+                    "Rank %s skipped NCCL P2P and posted empty delta via shared memory, count=%s",
+                    self.env.local_rank,
+                    self.count,
+                )
+                continue
+
             for _, (name, recv_t, send_t, recv_counts, send_counts) in enumerate(
                 p2p_ops
             ):

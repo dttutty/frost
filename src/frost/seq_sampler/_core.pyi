@@ -21,6 +21,9 @@ Int64Array3D: TypeAlias = npt.NDArray[np.int64]
 Float32Array1D: TypeAlias = npt.NDArray[np.float32]
 Float32Array2D: TypeAlias = npt.NDArray[np.float32]
 Float32Array3D: TypeAlias = npt.NDArray[np.float32]
+Int64TimeArray1D: TypeAlias = npt.NDArray[np.int64]
+Int64TimeArray2D: TypeAlias = npt.NDArray[np.int64]
+Int64TimeArray3D: TypeAlias = npt.NDArray[np.int64]
 
 class TemporalGraph_32_32:
     """Temporal graph stored in CSR-like format.
@@ -127,3 +130,34 @@ class SeqSampler_64_32:
         ts: Sequence[float],
         n_ngh: int = 20,
     ) -> tuple[Int64Array2D, Int64Array2D, Float32Array2D]: ...
+
+class TemporalGraph_64_64:
+    """Temporal graph stored in CSR-like format with int64 timestamps."""
+
+    indptr: Int64Array1D
+    indices: Int64Array1D
+    eid: Int64Array1D
+    ts: Int64TimeArray1D
+    def __init__(
+        self,
+        indptr: Int64Array1D,
+        indices: Int64Array1D,
+        eid: Int64Array1D,
+        ts: Int64TimeArray1D,
+    ) -> None: ...
+
+class SeqSampler_64_64:
+    """Continuous-time sequence sampler operating on int64 timestamps."""
+
+    def __init__(
+        self,
+        graph: TemporalGraph_64_64,
+        sample_neighbor_strategy: NeighborStrategy = "recent",
+        seed: int | None = None,
+    ) -> None: ...
+    def get_historical_neighbors(
+        self,
+        nid: Sequence[int],
+        ts: Sequence[int],
+        n_ngh: int = 20,
+    ) -> tuple[Int64Array2D, Int64Array2D, Int64TimeArray2D]: ...

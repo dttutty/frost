@@ -195,7 +195,10 @@ def keep_mean(data: Mem_or_Mail) -> Mem_or_Mail:
 
     data.nid = unique_nids
     data.data = sum_data / ct.unsqueeze(-1)
-    data.ts = sum_ts / ct
+    mean_ts = sum_ts / ct
+    if not torch.is_floating_point(data.ts):
+        mean_ts = mean_ts.round().to(data.ts.dtype)
+    data.ts = mean_ts
 
     data.is_sorted = True
     data.is_unique = True

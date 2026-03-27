@@ -11,13 +11,14 @@ mailbox tensors:
 The assembled ``(Meta, CudaEvent)`` is forwarded to ``full_q`` for the main
 training loop.
 """
+
 from __future__ import annotations
 
 import logging
 import threading
 from dataclasses import dataclass
 from functools import cached_property
-from typing import cast
+from typing import Literal, cast
 
 import torch
 
@@ -27,7 +28,7 @@ from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.plan import DynamicPlan
 from frost.protocols.cuda_event_proto import CudaEvent
-from frost.runtime._thread_base import StreamThreadBase
+from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
 from frost.shm.mem_mgr import MemBoxStore
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,7 @@ class DynamicAssembler(StreamThreadBase):
         device: torch.device,
         h2d_sem: threading.Semaphore,  # Optional semaphore for H2D synchronization
         mem_box_store: MemBoxStore,  # Pass shared memory instance here
+        use_shm_instead: bool = False,
     ) -> None:
         super().__init__(name="dy_assembler", stop_ev=stop_ev)
         self.in_q = h2d_out_q
@@ -108,6 +110,7 @@ class DynamicAssembler(StreamThreadBase):
         self.stop_ev = stop_ev
         self.boxsize = mem_box_store.box.shape[1]
         self.d_mail = mem_box_store.box.shape[2]
+        self.use_shm_instead = use_shm_instead
 
     def _fill_from_shared(
         self,
@@ -201,6 +204,54 @@ class DynamicAssembler(StreamThreadBase):
         target_data[global_positions] = unique_data_gpu[local_positions]
         target_ts[global_positions] = unique_ts_gpu[local_positions]
 
+    def _fill_from_shm(
+        self,
+        kind: Literal["mem", "box"],
+        target_data: torch.Tensor,
+        target_ts: torch.Tensor,
+        graph: FlatGraph,
+        valid_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
+        """Fill remote positions directly from shared memory when delta payload is skipped."""
+        assert valid_mask.dtype == torch.bool, "valid_mask must be a bool tensor"
+
+        valid_nids = graph.nid[valid_mask]
+        if valid_nids.numel() == 0:
+            return None, None
+
+        if kind == "mem":
+            shared_data = self.shared.mem
+            shared_ts = self.shared.mem_ts
+        else:
+            shared_data = self.shared.box
+            shared_ts = self.shared.box_ts
+
+        if __debug__:
+            table_size = shared_data.shape[0]
+            max_id = valid_nids.max().item()
+            min_id = valid_nids.min().item()
+            if min_id < 0 or max_id >= table_size:
+                bad_mask = (valid_nids < 0) | (valid_nids >= table_size)
+                bad_ids = torch.unique(valid_nids[bad_mask])
+                preview = bad_ids[:20].tolist()
+                raise IndexError(
+                    f"graph.nid contains out-of-bounds node ids for shared {kind}. "
+                    f"Valid range: [0, {table_size - 1}], "
+                    f"actual min={min_id}, max={max_id}. "
+                    f"First {len(preview)} bad ids: {preview}"
+                )
+
+        fetch_nids = valid_nids.cpu().long()
+        global_positions = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
+
+        target_data[global_positions] = shared_data[fetch_nids].to(self.device)
+        target_ts[global_positions] = shared_ts[fetch_nids].to(self.device)
+
+        local_positions = torch.arange(
+            global_positions.numel(), device=global_positions.device
+        )
+        return global_positions, local_positions
+
     def _fill_from_delta(
         self,
         delta_source,
@@ -208,8 +259,18 @@ class DynamicAssembler(StreamThreadBase):
         target_ts: torch.Tensor,
         graph: FlatGraph,
         valid_mask: torch.Tensor,
+        kind: Literal["mem", "box"],
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
         """Fill target tensors with delta data received from P2P network strictly."""
+        if self.use_shm_instead:
+            return self._fill_from_shm(
+                kind=kind,
+                target_data=target_data,
+                target_ts=target_ts,
+                graph=graph,
+                valid_mask=valid_mask,
+            )
+
         if delta_source is None:
             return None, None
 
@@ -320,21 +381,21 @@ class DynamicAssembler(StreamThreadBase):
             # on GPU so that _apply_box_mail_delta can do a pure GPU scatter.
             # Pre-load them here (async H2D) instead of synchronous CPU→GPU
             # inside the delta path.
-            if self.boxsize > 1:
+            if self.boxsize > 1 and not self.use_shm_instead:
                 box_delta_mask = self._build_delta_mask(graph, box_plan)
                 delta_nids_gpu = graph.nid[box_delta_mask]
                 if delta_nids_gpu.numel() > 0:
                     delta_nids_cpu = delta_nids_gpu.cpu().long()
                     # Batch H2D: old ring-buffer contents
-                    graph.box[box_delta_mask] = (
-                        self.shared.box[delta_nids_cpu].to(self.device)
+                    graph.box[box_delta_mask] = self.shared.box[delta_nids_cpu].to(
+                        self.device
                     )
-                    graph.box_ts[box_delta_mask] = (
-                        self.shared.box_ts[delta_nids_cpu].to(self.device)
-                    )
+                    graph.box_ts[box_delta_mask] = self.shared.box_ts[
+                        delta_nids_cpu
+                    ].to(self.device)
                     # Cache ring-buffer write positions on GPU for later
-                    graph._box_pos_delta = (
-                        self.shared.box_pos[delta_nids_cpu].to(self.device)
+                    graph._box_pos_delta = self.shared.box_pos[delta_nids_cpu].to(
+                        self.device
                     )
                     graph._box_delta_mask = box_delta_mask
                 else:
@@ -424,9 +485,9 @@ class DynamicAssembler(StreamThreadBase):
             if not found_mask.any():
                 return
 
-            global_positions = torch.nonzero(
-                cached_mask, as_tuple=False
-            ).squeeze(-1)[found_mask]
+            global_positions = torch.nonzero(cached_mask, as_tuple=False).squeeze(-1)[
+                found_mask
+            ]
             local_positions = pos_safe[found_mask]
 
             # Ring-buffer write position (already on GPU)
@@ -453,7 +514,7 @@ class DynamicAssembler(StreamThreadBase):
     def apply_delta_features(
         self,
         graph: FlatGraph,
-        delta: MemAndBox,
+        delta: MemAndBox | None,
         mem_plan: DynamicPlan | None,
         box_plan: DynamicPlan | None,
     ) -> None:
@@ -466,8 +527,28 @@ class DynamicAssembler(StreamThreadBase):
         mem_delta_mask = self._build_delta_mask(graph, mem_plan)
         box_delta_mask = self._build_delta_mask(graph, box_plan)
 
+        if self.use_shm_instead:
+            self._fill_from_delta(
+                None,
+                graph.mem,
+                graph.mem_ts,
+                graph,
+                mem_delta_mask,
+                kind="mem",
+            )
+            self._fill_from_delta(
+                None,
+                graph.box,
+                graph.box_ts,
+                graph,
+                box_delta_mask,
+                kind="box",
+            )
+            return
+
+        assert delta is not None, "delta must be provided when use_shm_instead is False"
         global_pos, local_pos = self._fill_from_delta(
-            delta.mem, graph.mem, graph.mem_ts, graph, mem_delta_mask
+            delta.mem, graph.mem, graph.mem_ts, graph, mem_delta_mask, kind="mem"
         )
 
         # P2P delta box now always has boxsize=1 (single mail).
@@ -486,7 +567,7 @@ class DynamicAssembler(StreamThreadBase):
             graph.box_ts[global_pos] = delta.box.ts[local_pos]
         else:
             self._fill_from_delta(
-                delta.box, graph.box, graph.box_ts, graph, box_delta_mask
+                delta.box, graph.box, graph.box_ts, graph, box_delta_mask, kind="box"
             )
 
     def logic(self) -> None:
@@ -508,7 +589,7 @@ class DynamicAssembler(StreamThreadBase):
             in_data = self.in_q.get(block=True)
 
             if in_data is None:
-                self.full_q.put(None, block=True)
+                put_shutdown_sentinel(self.full_q, None)
                 break
             elif in_data == "end_of_epoch":
                 self.full_q.put("end_of_epoch", block=True)
@@ -536,29 +617,34 @@ class DynamicAssembler(StreamThreadBase):
 
             # Now block and wait for network data
             delta_tuple = self.delta_q.get(block=True)
+            if delta_tuple is None:
+                put_shutdown_sentinel(self.full_q, None)
+                break
 
             logger.debug(
-                f"DynamicAssembler received delta for batch {meta.batch_idx}, epoch {epoch_count}"
+                f"DynamicAssembler received delta for batch {meta.mini_batch_idx}, epoch {epoch_count}"
             )
 
             if delta_tuple != "nothing":
-                mem, box, works = delta_tuple
+                delta = None
+                if not self.use_shm_instead:
+                    mem, box, works = delta_tuple
+                    assert mem is not None
+                    assert box is not None
 
-                # Wait for P2P network streams to finish receiving
-                for work in works:
-                    work.wait()
+                    # Wait for P2P network streams to finish receiving
+                    for work in works:
+                        work.wait()
 
-                # mem = mem.clone()
-                # box = box.clone()
-
-                box_data = box.data2recv
-
-                delta_mem = MemEntry(
-                    nid=mem.recv_nid, data=mem.data2recv, ts=mem.ts2recv
-                )
-                delta_box = BoxEntry(nid=box.recv_nid, data=box_data, ts=box.ts2recv)
-                delta = MemAndBox(mem=delta_mem, box=delta_box)
-                delta = delta.sort_mem_and_box()
+                    box_data = box.data2recv
+                    delta_mem = MemEntry(
+                        nid=mem.recv_nid, data=mem.data2recv, ts=mem.ts2recv
+                    )
+                    delta_box = BoxEntry(
+                        nid=box.recv_nid, data=box_data, ts=box.ts2recv
+                    )
+                    delta = MemAndBox(mem=delta_mem, box=delta_box)
+                    delta = delta.sort_mem_and_box()
 
                 # ==========================================================
                 # Apply the received delta to the already partially-filled graph
@@ -575,5 +661,5 @@ class DynamicAssembler(StreamThreadBase):
             ready_event.record(torch.cuda.current_stream())
             self.full_q.put((meta, ready_event), block=True)
             logger.debug(
-                f"DynamicAssembler put full meta for batch {meta.batch_idx}, epoch {epoch_count} into full_q"
+                f"DynamicAssembler put full meta for batch {meta.mini_batch_idx}, epoch {epoch_count} into full_q"
             )

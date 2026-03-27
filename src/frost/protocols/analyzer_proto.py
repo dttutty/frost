@@ -4,10 +4,9 @@ import threading
 from typing import Protocol, runtime_checkable
 
 import numpy as np
-import torch
 
 from frost.aliases.host import DynamicPlanInQ, DynamicPlanOutQ
-from frost.datatypes.access import Access
+from frost.datatypes.sampled_layout import SampledLayoutView
 from frost.runtime._thread_base import ThreadBase
 from frost.utils.tensor_set import TensorSet
 
@@ -16,14 +15,9 @@ from frost.utils.tensor_set import TensorSet
 class AnalyzerProto(Protocol):
     n_neg: int
 
-    def count_access(
-        self,
-        src: torch.Tensor,
-        dst: torch.Tensor,
-        all_nid: torch.Tensor,
-        fanout: list[int] | None,
-        valid_all: torch.Tensor | None = None,
-    ) -> Access: ...
+    def get_mem_plan_inputs(
+        self, layouts: list[SampledLayoutView]
+    ) -> tuple[list[TensorSet], list[TensorSet]]: ...
 
     def create_mail_planner(
         self,
@@ -32,8 +26,13 @@ class AnalyzerProto(Protocol):
         out_q: DynamicPlanOutQ,
         stop_ev: threading.Event,
         handle_stale: bool,
+        output_dir: str | None,
     ) -> ThreadBase | None: ...
 
     def get_mail_plan_inputs(
-        self, access_list: list[Access]
+        self, layouts: list[SampledLayoutView]
     ) -> tuple[list[TensorSet], list[TensorSet]]: ...
+
+    def get_feat_plan_inputs(
+        self, layouts: list[SampledLayoutView]
+    ) -> list[TensorSet]: ...

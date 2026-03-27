@@ -1,5 +1,8 @@
 _target_: frost.models.encoder.dyrep.DyRep
+out_dim: 128
+fanout: null
+ngh_sampler_strategy: recent
 ndim: ${ndim}
-d_mem: ${final_emb_dim}
-d_out: ${final_emb_dim}
+d_mem: ${mem_updater.d_mem}
+d_out: ${.out_dim}
 dropout: ${dropout}

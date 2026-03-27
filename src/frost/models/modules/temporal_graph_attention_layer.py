@@ -95,7 +95,7 @@ class TemporalGraphAttentionLayer(nn.Module):
         if self.time_enc is not None:
             time_feat = self.time_enc(dt)  # [N, S, dim_time]
             zero_time_feat = self.time_enc(
-                torch.zeros(N, device=dt.device)
+                torch.zeros(N, device=dt.device, dtype=dt.dtype)
             )  # [N, dim_time]
         else:
             time_feat = None

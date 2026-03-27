@@ -91,6 +91,7 @@ class RingBuf:
         max_size: int,  # from hydra config
         ndtype: torch.dtype,
         edtype: torch.dtype,
+        tsdtype: torch.dtype,
     ) -> None:
         self.env = env
         self.n_gpu = env.n_gpu
@@ -100,6 +101,7 @@ class RingBuf:
         self.gpu_id = env.local_rank if not env.is_host else None
         self.ndtype = ndtype
         self.edtype = edtype
+        self.tsdtype = tsdtype
         self.sample_4_neg = sample_4_neg
         self.fanout = fanout  # store for downstream use (e.g. APAN writeback)
 
@@ -107,7 +109,7 @@ class RingBuf:
 
         self.schema = {
             "NID": ((total,), ndtype),
-            "TS": ((total,), torch.float32),
+            "TS": ((total,), tsdtype),
             "EID": ((total,), edtype),
         }
 

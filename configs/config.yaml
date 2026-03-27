@@ -1,35 +1,25 @@
 defaults:
-  - analyzer: no_mem
-  - dataset_mgr: base
+  - optional access_analyzer: null
   - encoder: tgn
   - loss_fn: bce  # no need to change mostly
-  - mem_box_store: null
   - mem_updater: null
   - neg_sampler: base # don't change this unless you implement a new neg_sampler
-  - ngh_sampler: 1_hop
-  - postman: null
   - precision: base # no need to change mostly
   - predictor: link # don't change this, current version only support link prediction
-  - ring_buf: base # don't change this, current version only support base ring_buf
   - _self_
 
 epoch: 100
-batch_size: 600 # local batch_size
+batch_size: 4000 # local batch_size
 patience: 100
 dropout: 0.2
 seed: 42
 d_time: 128
-final_emb_dim: 128
 dataset: "LASTFM"
-ndim: null # set null for default
-edim: 128 # set null for default
-mail_combine: null
 optimizer: "adam"
-gpu_topo: [0, 1]
-fanout: [10]
 lr: 0.0001
 n_neg: 1
+ring_buf_size: 32
 handle_stale: false
-compile: true
-tf32: true
-tqdm: false
+compile: false
+tf32: false
+tqdm: true

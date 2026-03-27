@@ -1,7 +1,10 @@
 _target_: frost.models.encoder.tgn.TGN
+out_dim: 128
+fanout: [10]
+ngh_sampler_strategy: recent
 heads: 2
 d_time: ${d_time}
-d_hid: ${final_emb_dim}
+d_hid: ${.out_dim}
 dropout: ${dropout}
 d_mem: ${mem_updater.d_mem}
 ndim: ${ndim}

@@ -1,140 +1,70 @@
 {
   "version": "0.2.0",
   "configurations": [
-
     {
-      "name": "TGN",
+      "name": "FROST Debug",
       "type": "debugpy",
       "request": "launch",
-      "module": "torch.distributed.run",
+      "program": "${workspaceFolder}/scripts/train_preset.py",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": false,
-      "envFile": "${workspaceFolder}/.env",
+      "subProcess": true,
+      "envFile": "${workspaceFolder}/.env.debug",
       "args": [
-        "--nproc_per_node=3",
-        "--master_addr=127.0.0.1",
-        "--master_port=29505",
-        "run.py",
-        "analyzer=tgn",
-        "dataset=LASTFM",
-        "encoder=tgn",
-        "mem_box_store=base",
-        "mem_updater=tgn",
-        "ngh_sampler=1_hop",
-        "mail_combine=last"
+        "${input:frostModelPreset}",
+        "dataset=${input:frostDataset}",
+        "tqdm=true",
+        "compile=false",
+        "batch_size=20"
       ]
     },
-
     {
-      "name": "APAN",
+      "name": "FROST Bench",
       "type": "debugpy",
       "request": "launch",
-      "module": "torch.distributed.run",
+      "program": "${workspaceFolder}/scripts/train_preset.py",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": false,
-      "envFile": "${workspaceFolder}/.env",
+      "subProcess": true,
+      "envFile": "${workspaceFolder}/.env.bench",
       "args": [
-        "--nproc_per_node=3",
-        "--master_addr=127.0.0.1",
-        "--master_port=29505",
-        "run.py",
-        "analyzer=apan",
-        "dataset=LASTFM",
-        "encoder=apan",
-        "mem_box_store=base",
-        "mem_updater=apan",
-        "ngh_sampler=1_hop",
-        "ngh_sampler.sample_4_neg=False",
-        "postman=apan",
-        "mail_combine=last"
-      ]
-    },
-
-    {
-      "name": "JODIE",
-      "type": "debugpy",
-      "request": "launch",
-      "module": "torch.distributed.run",
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "justMyCode": false,
-      "envFile": "${workspaceFolder}/.env",
-      "args": [
-        "--nproc_per_node=3",
-        "--master_addr=127.0.0.1",
-        "--master_port=29505",
-        "run.py",
-        "analyzer=jodie",
-        "dataset=LASTFM",
-        "encoder=jodie",
-        "mem_box_store=base",
-        "mem_updater=jodie",
-        "neg_sampler=0_hop",
-        "mail_combine=last"
-      ]
-    },
-
-    {
-      "name": "TGAT",
-      "type": "debugpy",
-      "request": "launch",
-      "module": "torch.distributed.run",
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "justMyCode": false,
-      "envFile": "${workspaceFolder}/.env",
-      "args": [
-        "--nproc_per_node=3",
-        "--master_addr=127.0.0.1",
-        "--master_port=29505",
-        "run.py",
-        "dataset=LASTFM",
-        "encoder=tgat",
-        "ngh_sampler=2_hop"
-      ]
-    },
-
-    {
-      "name": "DyGFormer",
-      "type": "debugpy",
-      "request": "launch",
-      "module": "torch.distributed.run",
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "justMyCode": false,
-      "envFile": "${workspaceFolder}/.env",
-      "args": [
-        "--nproc_per_node=3",
-        "--master_addr=127.0.0.1",
-        "--master_port=29505",
-        "run.py",
-        "dataset=LASTFM",
-        "encoder=dygformer",
-        "ngh_sampler=1_hop"
-      ]
-    },
-
-    {
-      "name": "GraphMixer",
-      "type": "debugpy",
-      "request": "launch",
-      "module": "torch.distributed.run",
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "justMyCode": false,
-      "envFile": "${workspaceFolder}/.env",
-      "args": [
-        "--nproc_per_node=3",
-        "--master_addr=127.0.0.1",
-        "--master_port=29505",
-        "run.py",
-        "dataset=LASTFM",
-        "encoder=graphmixer",
-        "ngh_sampler=1_hop"
+        "${input:frostModelPreset}",
+        "dataset=${input:frostDataset}"
       ]
     }
-
+  ],
+  "inputs": [
+    {
+      "id": "frostModelPreset",
+      "type": "pickString",
+      "description": "Choose the training preset",
+      "default": "tgn",
+      "options": [
+        "tgn",
+        "apan",
+        "jodie",
+        "dyrep",
+        "tgat",
+        "graph_mixer",
+        "tcl",
+        "dygformer"
+      ]
+    },
+    {
+      "id": "frostDataset",
+      "type": "pickString",
+      "description": "Choose the dataset",
+      "default": "LASTFM",
+      "options": [
+        "LASTFM",
+        "MOOC",
+        "REDDIT",
+        "WIKI",
+        "GDELT",
+        "MAG"
+      ]
+    }
   ]
 }

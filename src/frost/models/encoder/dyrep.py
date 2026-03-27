@@ -43,7 +43,7 @@ class DyRep(nn.Module):
 
     Key differences from TGN encoder:
         - No graph attention on neighbors
-        - No neighbor sampling needed  (use ngh_sampler=0_hop)
+        - No neighbor sampling needed  (use fanout=null)
 
     Note on mail approximation
     --------------------------
@@ -62,8 +62,8 @@ class DyRep(nn.Module):
     def __init__(
         self,
         ndim: int,  # node feature dim  (${ndim})
-        d_mem: int,  # memory dim        (${final_emb_dim}, must match mem_updater.d_mem)
-        d_out: int,  # output dim        (${final_emb_dim})
+        d_mem: int,  # memory dim        (${encoder.out_dim}, must match mem_updater.d_mem)
+        d_out: int,  # output dim        (${encoder.out_dim})
         dropout: float = 0.1,
     ) -> None:
         """

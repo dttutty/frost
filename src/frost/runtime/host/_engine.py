@@ -10,17 +10,22 @@ import torch
 from tqdm import tqdm
 
 from frost.aliases.host import (
-    AccessBundle,
     DynamicPlanOutQ,
+    LayoutBundle,
     MetaBundle,
     StaticPlanOutQ,
 )
-from frost.datatypes.access import Access
 from frost.datatypes.env import Env
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
+from frost.datatypes.sampled_layout import SampledLayoutView
 from frost.protocols.analyzer_proto import AnalyzerProto
 from frost.protocols.ngh_sampler_proto import NghSamplerProto
+from frost.runtime._thread_base import (
+    destroy_process_group,
+    join_thread,
+    put_shutdown_sentinel,
+)
 from frost.runtime.host import PlanRouter, Scatter
 from frost.runtime.host._batch_balance import make_balance_plan
 from frost.sampling.neg_sampler import NegLinkSampler
@@ -32,6 +37,34 @@ def _disable_tqdm_monitor_thread() -> None:
     """Disable tqdm's monitor thread to avoid debugger/threading instability."""
     if getattr(tqdm, "monitor_interval", 0) != 0:
         tqdm.monitor_interval = 0
+
+
+def _prepare_sampler_inputs(
+    roots: torch.Tensor,
+    ts: torch.Tensor,
+    n_neg: int,
+    sample_4_neg: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build the explicit sampler inputs from the full root layout.
+
+    ``roots`` always keeps the canonical RingBuf root layout
+    ``[src | pos_dst | neg_dst×n_neg]``. This helper derives the subset that
+    should actually be expanded by the sampler together with the already-aligned
+    timestamp tensor.
+    """
+    root_width = 2 + n_neg
+    if roots.shape[0] % root_width != 0:
+        raise ValueError(
+            f"roots length must be divisible by {root_width}, got {roots.shape[0]}"
+        )
+    n_src = roots.shape[0] // root_width
+    if ts.shape[0] != n_src:
+        raise ValueError(f"ts length must equal n_src={n_src}, got {ts.shape[0]}")
+
+    if sample_4_neg:
+        return roots, ts.repeat(root_width)
+
+    return roots[: n_src * 2], ts.repeat(2)
 
 
 class Host:
@@ -72,10 +105,12 @@ class Host:
         planner: AnalyzerProto,
         gpu_topo: list,
         batch_size: int,
+        time_dtype: torch.dtype,
         n_epoch: int,
         patience: int,
         handle_stale: bool = False,
         show_tqdm: bool = False,
+        output_dir: str | None = None,
     ) -> None:
         self.neg_sampler = neg_sampler
         self.ngh_sampler = ngh_sampler
@@ -88,10 +123,11 @@ class Host:
         self.batch_size = batch_size
         self.analyzer = planner
         self.show_tqdm = show_tqdm
+        self.time_dtype = time_dtype
 
         self.stop_ev = threading.Event()
         self.cur_macro_of_epoch = 0
-        self.batch_idx = 0
+        self.mini_batch_idx = 0
         self.curr_epoch = 0
         self.best_ap_epoch: int = -1
         self.best_ap_result: Result = Result(
@@ -106,11 +142,18 @@ class Host:
         self.patience = patience
         self.patience_counter = 0
         self.last_epoch_result: Result | None = None
+        self._shutdown_done = False
 
-        self._init_pipeline(env, gpu_topo, handle_stale)
+        self._init_pipeline(env, gpu_topo, handle_stale, output_dir)
         self._init_dataset(df)
 
-    def _init_pipeline(self, env: Env, gpu_topo: list, handle_stale: bool) -> None:
+    def _init_pipeline(
+        self,
+        env: Env,
+        gpu_topo: list,
+        handle_stale: bool,
+        output_dir: str | None,
+    ) -> None:
         """Fixed linear pipeline: main thread → [PlanRouter.dispatch() →] scatter_q → Scatter.
 
         The main thread accumulates n_gpu metas per macro-batch, optionally dispatches to
@@ -137,6 +180,7 @@ class Host:
                 nfeat_plan_out_q=self.nfeat_plan_out_q,
                 stop_ev=self.stop_ev,
                 handle_stale=handle_stale,
+                output_dir=output_dir,
             )
 
         self.scatter = Scatter(
@@ -153,21 +197,21 @@ class Host:
     def _init_dataset(self, df: pd.DataFrame) -> None:
         """Preprocess the edge DataFrame and split into train/val/test subsets.
 
-        Timestamps are normalised to start at zero. The ``ext_roll`` column is
+        Timestamps are normalised to start at zero. The ``default_split`` column is
         used to locate split boundaries (0 = train, 1 = val, >=2 = test).
 
         Args:
-            df: Raw edge DataFrame with columns ``src``, ``dst``, ``time``,
-                ``ext_roll``.
+            df: Raw edge DataFrame with columns ``eid``, ``src``, ``dst``,
+                ``time``, ``default_split``.
         """
         # preprocess dataframe
         df["src"] = df["src"].astype(np.int64)
         df["dst"] = df["dst"].astype(np.int64)
         t_min = df["time"].min()
-        df["time"] = (df["time"] - t_min).astype(np.float32)
+        df["time"] = (df["time"] - t_min).astype(np.int64)
 
-        train_edge_end = df[df["ext_roll"].gt(0)].index[0]
-        val_edge_end = df[df["ext_roll"].gt(1)].index[0]
+        train_edge_end = df[df["default_split"].gt(0)].index[0]
+        val_edge_end = df[df["default_split"].gt(1)].index[0]
         self.tr_df = df[:train_edge_end]
         self.va_df = df[train_edge_end:val_edge_end]
         self.te_df = df[val_edge_end:]
@@ -182,13 +226,16 @@ class Host:
 
         # Cache result so early_stop_check can read it
         self.last_epoch_result = res
+        val_ap_label = (
+            "Val AP(New high)" if res.val_ap > self.best_ap_result.val_ap else "Val AP"
+        )
 
         # Host prints the epoch summary; workers stay silent
         print(
             f"[Epoch {self.curr_epoch}] "
-            f"Train Loss: {res.train_loss:.4f} | Val Loss: {res.val_loss:.4f} | "
-            f"Val AUC: {res.val_auc:.4f} | Val AP: {res.val_ap:.4f} | "
-            f"Test AUC: {res.test_auc:.4f} | Test AP: {res.test_ap:.4f}"
+            f"Train Loss: {res.train_loss:.4f} | "
+            f"{val_ap_label}: {res.val_ap:.4f} | "
+            f"Test AP: {res.test_ap:.4f}"
         )
 
     def early_stop_check(self, cur_epoch: int) -> bool:
@@ -204,7 +251,7 @@ class Host:
 
         # Check AP improvement
         if res.val_ap > self.best_ap_result.val_ap if self.best_ap_result else -1:
-            self.best_ap_epoch = cur_epoch
+            self.best_ap_epoch = cur_epoch + 1
             self.best_ap_result = res
             is_best = True
         if is_best:
@@ -214,7 +261,7 @@ class Host:
         # Early stopping check
         if self.patience_counter >= self.patience:
             logger.info(
-                f"🛑 Early stopping triggered at epoch {cur_epoch}. "
+                f"🛑 Early stopping triggered at epoch {cur_epoch + 1}. "
                 f"Best AP was {self.best_ap_result.val_ap:.4f} at epoch {self.best_ap_epoch}."
             )
             return True
@@ -241,10 +288,11 @@ class Host:
         # Print final test results for the best-AP checkpoint
         print(
             f"Best Val AP: {self.best_ap_result.val_ap:.4f} @ Epoch {self.best_ap_epoch} | "
+            f"Val AUC: {self.best_ap_result.val_auc:.4f} | "
             f"Test AP: {self.best_ap_result.test_ap:.4f} | "
             f"Test AUC: {self.best_ap_result.test_auc:.4f}"
         )
-        self._cleanup()
+        self.shutdown(graceful=True)
         # wandb.finish()
 
     def _handle_a_split(
@@ -252,9 +300,9 @@ class Host:
     ) -> None:
         """Process all macro-batches for one data split in the current epoch.
 
-        Validates that the split's ``ext_roll`` values are consistent, applies
+        Validates that the split's ``default_split`` values are consistent, applies
         ``make_balance_plan`` to assign edges to GPUs, then iterates over
-        macro-batches: builds ``Meta``/``Access`` pairs, optionally dispatches
+        macro-batches: builds ``Meta``/``SampledLayoutView`` pairs, optionally dispatches
         to ``PlanRouter``, and enqueues bundles into ``scatter_q``. On the final
         test split, sends the end-of-epoch sentinel.
 
@@ -263,21 +311,19 @@ class Host:
             split: String label identifying the split.
             cur_epoch: Zero-based epoch index.
         """
-        if "ext_roll" in df.columns:
-            ext_roll = df["ext_roll"]
+        if "default_split" in df.columns:
+            default_split = df["default_split"]
             is_valid_split = (
-                (split == "train" and ext_roll.eq(0).all())
-                or (split == "val" and ext_roll.eq(1).all())
-                or (split == "test" and ext_roll.ge(2).all())
+                (split == "train" and default_split.eq(0).all())
+                or (split == "val" and default_split.eq(1).all())
+                or (split == "test" and default_split.ge(2).all())
             )
             if not is_valid_split:
-                found_rolls = sorted(ext_roll.dropna().unique().tolist())
+                found_rolls = sorted(default_split.dropna().unique().tolist())
                 raise ValueError(
                     f"Split contamination detected for split={split}. "
-                    f"Found ext_roll values: {found_rolls}"
+                    f"Found default_split values: {found_rolls}"
                 )
-
-        df = df.reset_index(names=["eid"])
 
         if len(df) == 0:
             return
@@ -303,23 +349,23 @@ class Host:
         ):
             assert isinstance(cur_macro_of_split, int)
             meta_bundle: MetaBundle = []
-            access_bundle: AccessBundle = []
+            layout_bundle: LayoutBundle = []
             for gpu, edges in step_df.groupby("gpu_id", sort=False):
                 assert isinstance(gpu, int)
-                meta, access = self._add_to_td_list(
+                meta, layout = self._add_to_td_list(
                     edges,
                     cur_epoch,
                     cur_macro_of_split,
                     n_macro_of_split,
                     split,
-                    self.batch_idx,
+                    self.mini_batch_idx,
                     gpu,
                 )
                 meta_bundle.append(meta)
-                access_bundle.append(access)
-                self.batch_idx += 1
+                layout_bundle.append(layout)
+                self.mini_batch_idx += 1
             if self.plan_router is not None:
-                self.plan_router.dispatch(meta_bundle, access_bundle)
+                self.plan_router.dispatch(meta_bundle, layout_bundle)
             self.scatter_q.put(meta_bundle)
             self.cur_macro_of_epoch += 1
 
@@ -342,14 +388,15 @@ class Host:
         cur_macro_of_split: int,
         n_macro_of_split: int,
         split: Literal["train", "val", "test"],
-        batch_idx: int,
+        mini_batch_idx: int,
         gpu_id: int,
-    ) -> tuple[Meta, Access | None]:
-        """Build a Meta descriptor and optionally an Access plan for one micro-batch.
+    ) -> tuple[Meta, SampledLayoutView]:
+        """Build a Meta descriptor and sampled-layout sidecar for one micro-batch.
 
         Converts the raw edge rows into tensors, samples negative destinations,
-        runs the neighbor sampler, and calls the analyzer to compute the access
-        plan (which shared-memory nodes need to be fetched/updated).
+        and runs the neighbor sampler. The resulting ``SampledLayoutView`` stays
+        on the host side and is consumed by ``PlanRouter`` to derive mem/mail/
+        nfeat planner inputs.
 
         Args:
             edges: Rows of the edge DataFrame assigned to this GPU for this step.
@@ -357,18 +404,17 @@ class Host:
             cur_macro_of_split: Macro-batch index within the current split.
             n_macro_of_split: Total number of macro-batches in the current split.
             split: String label of the current split.
-            batch_idx: Global batch index across all splits and epochs.
+            mini_batch_idx: Global batch index across all splits and epochs.
             gpu_id: Target GPU rank for this micro-batch.
 
         Returns:
-            A (Meta, Access | None) tuple; Access is None when no analyzer is
-            configured (e.g. TGAT / no-memory models).
+            A ``(Meta, SampledLayoutView)`` tuple.
         """
         # show edges["time"].values for debug
         # logger.info(f"Edge times: {edges['time'].values}")
         src = torch.from_numpy(edges["src"].to_numpy(copy=True)).to(torch.long)
         dst = torch.from_numpy(edges["dst"].to_numpy(copy=True)).to(torch.long)
-        ts = torch.from_numpy(edges["time"].to_numpy(copy=True)).to(torch.float32)
+        ts = torch.from_numpy(edges["time"].to_numpy(copy=True)).to(self.time_dtype)
         eid = torch.from_numpy(edges["eid"].to_numpy(copy=True)).to(torch.long)
         # show ts content for debug
 
@@ -377,19 +423,27 @@ class Host:
 
         # handle different model types
         roots = torch.cat([src, dst, neg_dst])
-        uniq_all, len, valid_all = self.ngh_sampler.sample(
-            nid=roots, ts=ts, pos_eid=eid, gpu_id=gpu_id
+        sample_nid, sample_ts = _prepare_sampler_inputs(
+            roots=roots,
+            ts=ts,
+            n_neg=self.neg_sampler.n_neg,
+            sample_4_neg=self.ngh_sampler.sample_4_neg,
         )
-
-        access = None
-        if self.analyzer is not None:
-            access = self.analyzer.count_access(
-                src,
-                dst,
-                uniq_all.data,
-                fanout=self.ngh_sampler.fanout,
-                valid_all=valid_all,
-            )
+        sampled_nid, len = self.ngh_sampler.sample(
+            root_nid=roots,
+            root_ts=ts,
+            sample_nid=sample_nid,
+            sample_ts=sample_ts,
+            pos_eid=eid,
+            gpu_id=gpu_id,
+        )
+        layout = SampledLayoutView(
+            nid=sampled_nid,
+            n_src=src.shape[0],
+            n_neg=self.neg_sampler.n_neg,
+            fanout=self.ngh_sampler.fanout,
+            sample_4_neg=self.ngh_sampler.sample_4_neg,
+        )
 
         meta = Meta(
             cur_epoch=cur_epoch,
@@ -399,21 +453,37 @@ class Host:
             n_macro_of_split=n_macro_of_split,
             flat_graph=None,
             n_src=src.shape[0],
-            batch_idx=batch_idx,
+            mini_batch_idx=mini_batch_idx,
             plan_set=None,
             buf_len=len,
             fanout=self.ngh_sampler.fanout,
         )
 
-        return meta, access
+        return meta, layout
 
-    def _cleanup(self) -> None:
-        """Shut down the PlanRouter and Scatter thread and log total elapsed time."""
+    def shutdown(self, graceful: bool, join_timeout_s: float = 5.0) -> None:
+        """Best-effort host shutdown that works for both normal and aborted runs."""
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+        self.stop_ev.set()
+
         if self.plan_router is not None:
-            self.plan_router.shutdown()
-        self.scatter_q.put(None)
-        self.scatter.join()
-        print("All threads have been joined. Host cleanup complete.")
+            self.plan_router.shutdown(join_timeout_s=join_timeout_s)
+
+        put_shutdown_sentinel(self.scatter_q, None)
+        join_thread(self.scatter, join_timeout_s, logger)
+
+        if self.scatter.is_alive():
+            logger.warning(
+                "Scatter thread is still alive; forcing process-group teardown."
+            )
+            destroy_process_group(sync=False, logger_=logger)
+            join_thread(self.scatter, 1.0, logger)
+        else:
+            destroy_process_group(sync=graceful, logger_=logger)
+
+        print("Host shutdown complete.")
         end = time.time()
         print("Total training time: {:.2f} seconds".format(end - self.start_time))
         elapsed = end - self.start_time

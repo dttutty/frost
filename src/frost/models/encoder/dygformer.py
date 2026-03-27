@@ -190,7 +190,7 @@ class DyGFormer(nn.Module):
         ndim: int,  # node feature dim   ${ndim}
         edim: int,  # edge feature dim   ${edim}
         d_time: int,  # time encoding dim  ${d_time}
-        d_out: int,  # output dim         ${final_emb_dim}
+        d_out: int,  # output dim         ${encoder.out_dim}
         channel_embedding_dim: int,  # per-channel latent dim
         patch_size: int,
         transformer_layers: int,
@@ -407,7 +407,7 @@ class DyGFormer(nn.Module):
         efeat = seq["efeat"]  # [B, L, edim]
 
         # Time-delta features; zero out at padding positions
-        delta_ts = (root_ts.unsqueeze(1) - ts).float()  # [B, L]
+        delta_ts = root_ts.unsqueeze(1) - ts  # [B, L]
         time_feat = self.time_encoder(delta_ts)  # [B, L, d_time]
         time_feat = time_feat.masked_fill((nid == -1).unsqueeze(-1), 0.0)
 

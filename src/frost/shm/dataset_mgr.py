@@ -5,10 +5,10 @@ features into POSIX shared-memory segments, and broadcasts lightweight
 metadata (shapes, dtypes, paths) to all worker ranks so they can attach to
 the same segments without re-loading from disk.
 """
+
 import logging
-import os
 import socket
-import time
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -22,14 +22,83 @@ from frost.shm._core import get_shared_mem_array as gsm
 from frost.utils.utils import broadcast_data
 
 logger = logging.getLogger(__name__)
+DATA_DIR = Path("DATA")
+_NP_TO_TORCH = {
+    np.dtype(np.bool_): torch.bool,
+    np.dtype(np.uint8): torch.uint8,
+    np.dtype(np.int8): torch.int8,
+    np.dtype(np.int16): torch.int16,
+    np.dtype(np.int32): torch.int32,
+    np.dtype(np.int64): torch.int64,
+    np.dtype(np.float16): torch.float16,
+    np.dtype(np.float32): torch.float32,
+    np.dtype(np.float64): torch.float64,
+}
 
 
-def load_graph(d: str) -> tuple[TemporalGraphType, pd.DataFrame, int, int]:
+def _resolve_dataset_dir(dataset: str) -> Path:
+    direct = DATA_DIR / dataset
+    if direct.is_dir():
+        return direct
+
+    lower = DATA_DIR / dataset.lower()
+    if lower.is_dir():
+        return lower
+
+    if DATA_DIR.is_dir():
+        for child in DATA_DIR.iterdir():
+            if child.is_dir() and child.name.lower() == dataset.lower():
+                return child
+
+    available = []
+    if DATA_DIR.is_dir():
+        available = sorted(
+            child.name for child in DATA_DIR.iterdir() if child.is_dir()
+        )
+    raise FileNotFoundError(
+        f"Could not resolve dataset directory for {dataset} under {DATA_DIR}. "
+        f"Available datasets: {available}"
+    )
+
+
+def _resolve_required_dataset_path(dataset: str, relative_paths: list[str]) -> Path:
+    base = _resolve_dataset_dir(dataset)
+    for relative_path in relative_paths:
+        path = base / relative_path
+        if path.exists():
+            return path
+
+    checked = [str(base / relative_path) for relative_path in relative_paths]
+    raise FileNotFoundError(
+        f"Could not resolve dataset file for {dataset}. Checked: {checked}"
+    )
+
+
+def _torch_dtype_from_numpy(np_dtype: np.dtype) -> torch.dtype:
+    try:
+        return _NP_TO_TORCH[np.dtype(np_dtype)]
+    except KeyError as exc:
+        raise TypeError(
+            f"Unsupported NumPy dtype for shared memory: {np_dtype}"
+        ) from exc
+
+
+def _rows_per_chunk(feature_dim: int, target_dtype: torch.dtype) -> int:
+    target_itemsize = torch.tensor([], dtype=target_dtype).element_size()
+    bytes_per_row = max(feature_dim * target_itemsize, 1)
+    return max(1, (128 * 1024 * 1024) // bytes_per_row)
+
+
+def load_graph(
+    d: str,
+    index_dtype: np.dtype,
+    time_dtype: np.dtype,
+) -> tuple[TemporalGraphType, pd.DataFrame, int, int]:
     """Load a temporal graph from pre-processed NPZ and CSV files.
 
-    Reads ``DATA/<d>/ext_full.npz`` (CSR topology) and ``DATA/<d>/edges.csv``
-    (edge list with metadata).  Node and edge counts are inferred from both
-    sources and asserted to be consistent.
+    Reads ``DATA/<d>/full_graph_with_reverse_edges.npz`` (CSR topology) and
+    ``DATA/<d>/edges.csv`` (edge list with metadata). Node and edge counts are
+    inferred from both sources and asserted to be consistent.
 
     Args:
         d: Dataset name; used as a directory name under ``DATA/``.
@@ -41,19 +110,26 @@ def load_graph(d: str) -> tuple[TemporalGraphType, pd.DataFrame, int, int]:
         - ``n_nodes``: Total number of nodes.
         - ``n_edges``: Total number of edges.
     """
-    npz = np.load(f"DATA/{d}/ext_full.npz")
+    npz_path = _resolve_required_dataset_path(d, ["full_graph_with_reverse_edges.npz"])
+    csv_path = _resolve_required_dataset_path(d, ["edges.csv"])
+    npz = np.load(npz_path)
 
-    # Force arrays to be C-contiguous with correct dtypes
-    # int32 is enough for MAG and GDELT, you can adjust if your dataset has more nodes/edges (number > 2^31)
-    indptr_arr = np.ascontiguousarray(npz["indptr"], dtype=np.int32)
-    indices_arr = np.ascontiguousarray(npz["indices"], dtype=np.int32)
-    eid_arr = np.ascontiguousarray(npz["eid"], dtype=np.int32)
-    ts_arr = np.ascontiguousarray(npz["ts"], dtype=np.float32)
+    indptr_arr = np.ascontiguousarray(npz["indptr"], dtype=index_dtype)
+    indices_arr = np.ascontiguousarray(npz["indices"], dtype=index_dtype)
+    eid_arr = np.ascontiguousarray(npz["eid"], dtype=index_dtype)
+    ts_arr = np.ascontiguousarray(npz["ts"], dtype=time_dtype)
 
     # Initialize TemporalGraph directly
     g = TemporalGraph(indptr=indptr_arr, indices=indices_arr, eid=eid_arr, ts=ts_arr)
 
-    df = pd.read_csv(f"DATA/{d}/edges.csv")
+    df = pd.read_csv(csv_path)
+    required_columns = {"eid", "src", "dst", "time", "default_split"}
+    missing_columns = required_columns.difference(df.columns)
+    if missing_columns:
+        raise ValueError(
+            f"Dataset {d} is missing required edge columns: "
+            f"{sorted(missing_columns)}. Found columns: {list(df.columns)}"
+        )
     src = df["src"].to_numpy()
     dst = df["dst"].to_numpy()
     n_nodes_infer_from_df = max(src.max(), dst.max()) + 1
@@ -86,54 +162,76 @@ class DatasetManager:
     Args:
         env: Distributed environment descriptor.
         run_id: Prefix string used to name shared-memory segments.
-        dataset_name: Name of the dataset directory under ``DATA/``.
-        target_ndim: Node-feature dimensionality override.
-            ``0`` disables node features; ``None`` loads from disk; ``>0``
-            generates random features of that size.
-        target_edim: Edge-feature dimensionality override (same semantics as
-            ``target_ndim``).
+        dataset: Name of the dataset directory under ``DATA/``.
     """
 
     def __init__(
         self,
         env: Env,
         run_id: str,
-        dataset_name: str,  # from hydra config
-        target_ndim: int | None,  # from hydra config
-        target_edim: int | None,  # from hydra config
+        dataset: str,  # from hydra config
+        index_dtype: np.dtype,
+        time_dtype: np.dtype,
+        feature_dtype: torch.dtype,
     ):
         self.env = env
         self.run_id = run_id
-        self.dataset = dataset_name
-        self.target_ndim = target_ndim
-        self.target_edim = target_edim
+        self.dataset = dataset
+        self.index_dtype = np.dtype(index_dtype)
+        self.time_dtype = np.dtype(time_dtype)
+        self.feature_dtype = feature_dtype
 
-    def prepare(self):
+    def prepare(
+        self,
+    ) -> tuple[
+        TemporalGraphType | None,
+        pd.DataFrame | None,
+        int,
+        int,
+        int,
+        int,
+        torch.dtype | None,
+        torch.dtype | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        int | None,
+    ]:
         """
         Prepare graph data and features, sync across distributed ranks.
         Returns a tuple of all prepared data.
         """
         # Local variable initialization
-        graph = df = nfeat = efeat = None
+        graph: TemporalGraphType | None = None
+        df: pd.DataFrame | None = None
+        nfeat: torch.Tensor | None = None
+        efeat: torch.Tensor | None = None
         n_nodes = n_edges = ndim = edim = 0
-        ndtype = edtype = port = None
+        ndtype: torch.dtype | None = None
+        edtype: torch.dtype | None = None
+        port: int | None = None
         metadata = None
 
         if self.env.is_host:
             # Load topology on host
-            graph, df, n_nodes, n_edges = load_graph(self.dataset)
+            graph, df, n_nodes, n_edges = load_graph(
+                self.dataset,
+                index_dtype=self.index_dtype,
+                time_dtype=self.time_dtype,
+            )
 
             # Process features on host
-            node_np, ndim, ndtype = self._process_feature(
-                self.dataset, "node", n_nodes, self.target_ndim
+            nfeat, ndim, ndtype = self._load_feature_to_shm(
+                dataset=self.dataset,
+                feat_type="node",
+                shm_name="nfeat",
+                expected_rows=n_nodes,
             )
-            edge_np, edim, edtype = self._process_feature(
-                self.dataset, "edge", n_edges, self.target_edim
+            efeat, edim, edtype = self._load_feature_to_shm(
+                dataset=self.dataset,
+                feat_type="edge",
+                shm_name="efeat",
+                expected_rows=n_edges,
             )
-
-            # Create shared memory on host
-            nfeat = self._create_shm("nfeat", node_np, [n_nodes, ndim])
-            efeat = self._create_shm("efeat", edge_np, [n_edges, edim])
 
             # Prepare metadata for broadcasting
             port = get_free_port()
@@ -169,33 +267,110 @@ class DatasetManager:
             port,
         )
 
-    def _process_feature(self, dataset, feat_type, count, target_dim):
-        """
-        Unified feature loading logic.
-        target_dim: 0 -> Skip | >0 -> Random | None -> Disk
-        """
-        if target_dim == 0:
+    def _resolve_feature_source(
+        self, dataset: str, feat_type: str
+    ) -> tuple[str, Path] | None:
+        stem = f"{feat_type}_features"
+        candidates = [
+            (f"{stem}.npy", "npy"),
+            (f"{stem}.pt", "pt"),
+        ]
+        base = _resolve_dataset_dir(dataset)
+        for relative_path, source_kind in candidates:
+            path = base / relative_path
+            if path.exists():
+                return source_kind, path
+        return None
+
+    def _load_feature_to_shm(
+        self,
+        dataset: str,
+        feat_type: str,
+        shm_name: str,
+        expected_rows: int,
+    ) -> tuple[torch.Tensor | None, int, torch.dtype | None]:
+        """Load a feature matrix and materialize it directly into shared memory."""
+        source = self._resolve_feature_source(dataset, feat_type)
+        if source is None:
+            logger.warning(
+                "No %s feature found for dataset %s. Returning empty.",
+                feat_type,
+                dataset,
+            )
             return None, 0, None
 
-        if target_dim is not None and target_dim > 0:
-            # Generate random features
-            feat = torch.randn(count, target_dim, dtype=torch.float32)
-            return feat, target_dim, feat.dtype
-
-        # Load from disk
-        path = f"DATA/{dataset}/{feat_type}_features.pt"
-        if not os.path.exists(path):
-            logger.warning(f"{feat_type} feature not found at {path}. Returning empty.")
-            return None, 0, None
-
+        source_kind, path = source
+        logger.info(
+            "Loading %s features for %s from %s (%s)",
+            feat_type,
+            dataset,
+            path,
+            source_kind,
+        )
         try:
-            feat = torch.load(path)
-            if feat.dtype == torch.bool:
-                feat = feat.type(torch.float32)
-            return feat, feat.shape[1], feat.dtype
-        except Exception as e:
-            logger.error(f"Failed to load {feat_type} feature: {e}")
+            if source_kind == "npy":
+                return self._load_npy_feature_to_shm(path, shm_name, expected_rows)
+            if source_kind == "pt":
+                return self._load_pt_feature_to_shm(path, shm_name, expected_rows)
+        except Exception as exc:
+            logger.error("Failed to load %s feature from %s: %s", feat_type, path, exc)
             return None, 0, None
+
+        raise ValueError(f"Unsupported feature source kind: {source_kind}")
+
+    def _load_npy_feature_to_shm(
+        self,
+        path: Path,
+        shm_name: str,
+        expected_rows: int,
+    ) -> tuple[torch.Tensor, int, torch.dtype]:
+        arr = np.load(path, mmap_mode="r", allow_pickle=False)
+        if arr.ndim != 2:
+            raise ValueError(
+                f"Expected 2D feature array at {path}, got shape {arr.shape}"
+            )
+        if arr.shape[0] != expected_rows:
+            raise ValueError(
+                f"Feature row mismatch for {path}: expected {expected_rows}, got {arr.shape[0]}"
+            )
+
+        src_dtype = _torch_dtype_from_numpy(arr.dtype)
+        final_dtype = self.feature_dtype
+        if src_dtype == torch.bool:
+            final_dtype = self.feature_dtype
+        feat_shm = csm(f"{self.run_id}_{shm_name}", arr.shape, dtype=final_dtype)
+        rows_per_chunk = _rows_per_chunk(arr.shape[1], final_dtype)
+        for start in range(0, arr.shape[0], rows_per_chunk):
+            end = min(start + rows_per_chunk, arr.shape[0])
+            chunk_np = np.array(arr[start:end], copy=True)
+            chunk = torch.from_numpy(chunk_np).to(dtype=final_dtype)
+            feat_shm[start:end].copy_(chunk)
+        return feat_shm, arr.shape[1], final_dtype
+
+    def _load_pt_feature_to_shm(
+        self,
+        path: Path,
+        shm_name: str,
+        expected_rows: int,
+    ) -> tuple[torch.Tensor, int, torch.dtype]:
+        feat = torch.load(path, map_location="cpu")
+        if not isinstance(feat, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor in {path}, got {type(feat)!r}")
+        if feat.ndim != 2:
+            raise ValueError(
+                f"Expected 2D feature tensor at {path}, got shape {tuple(feat.shape)}"
+            )
+        if feat.shape[0] != expected_rows:
+            raise ValueError(
+                f"Feature row mismatch for {path}: expected {expected_rows}, got {feat.shape[0]}"
+            )
+
+        final_dtype = self.feature_dtype
+        if feat.dtype != final_dtype:
+            feat = feat.to(final_dtype)
+        feat_shm = csm(f"{self.run_id}_{shm_name}", feat.shape, dtype=final_dtype)
+        feat_shm.copy_(feat)
+        return feat_shm, feat.shape[1], final_dtype
 
     def _create_shm(self, name, data_np, shape):
         """Host: Allocate and copy data to SHM."""
@@ -210,4 +385,3 @@ class DatasetManager:
         if shape[1] <= 0 or dtype is None:
             return None
         return gsm(f"{self.run_id}_{name}", shape, dtype=dtype)
-

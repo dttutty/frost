@@ -24,7 +24,7 @@ class TGN(torch.nn.Module):
         ndim: Dimensionality of raw node features.  Set to 0 if no node
             features are available.
         edim: Dimensionality of edge features.
-        d_mem: Dimensionality of node memory (must equal ``final_emb_dim``).
+        d_mem: Dimensionality of node memory (typically tied to ``encoder.out_dim``).
         d_time: Dimensionality of the time encoding.
         d_hid: Dimensionality of the attention output (hidden layer).
         heads: Number of attention heads.

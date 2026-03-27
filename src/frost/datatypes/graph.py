@@ -97,7 +97,7 @@ class FlatGraph:
         sizes = [n_root]
 
         if len(fanout) == 1 and not sample_4_neg:
-            # Special case for NghSampler without negative sampling
+            # Special case for NghSampler without negative sampling(APAN)
             sizes.append(n_src * 2 * fanout[0])
         else:
             if len(fanout) > 1 and not sample_4_neg:

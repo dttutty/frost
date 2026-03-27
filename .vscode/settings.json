@@ -2,6 +2,31 @@
   "ruff.nativeServer": "auto",
   "python.languageServer": "Pylance",
   "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "python.analysis.indexing": false,
+  "python.analysis.exclude": [
+    "**/.*",
+    "**/.git",
+    "**/__pycache__",
+    "**/.ruff_cache",
+    "**/node_modules",
+    "**/logs",
+    "**/checkpoints",
+    "**/wandb",
+    "**/data",
+    "**/outputs",
+    "**/build",
+    "**/dist",
+    "**/.venv",
+    "**/third_party"
+  ],
+  "python.analysis.extraPaths": [
+    "./src"
+  ],
+  "python.autoComplete.extraPaths": [
+    "./src"
+  ],
+
   "[python]": {
     "editor.defaultFormatter": "charliermarsh.ruff",
     "editor.formatOnSave": true,
@@ -10,7 +35,8 @@
       "source.organizeImports.ruff": "explicit"
     }
   },
-    "files.watcherExclude": {
+
+  "files.watcherExclude": {
     "**/.git/**": true,
     "**/__pycache__/**": true,
     "**/.ruff_cache/**": true,
@@ -19,17 +45,34 @@
     "**/checkpoints/**": true,
     "**/wandb/**": true,
     "**/data/**": true,
-    "**/outputs/**": true
+    "**/outputs/**": true,
+    "**/build/**": true,
+    "**/dist/**": true,
+    "**/.venv/**": true,
+    "**/third_party/**": true
   },
+
+  "files.exclude": {
+    "**/.git": true,
+    "**/.svn": true,
+    "**/.hg": true,
+    "**/.DS_Store": true,
+    "**/Thumbs.db": true,
+    "**/.venv": true,
+    "**/build": true,
+    "**/dist": true,
+    "hydralance": true
+  },
+
   "cmake.configureSettings": {
-      "Python_EXECUTABLE": "${workspaceFolder}/.venv/bin/python",
-      "nanobind_DIR": "${workspaceFolder}/.venv/lib/python3.12/site-packages/nanobind/cmake"
+    "Python_EXECUTABLE": "${workspaceFolder}/.venv/bin/python",
+    "nanobind_DIR": "${workspaceFolder}/.venv/lib/python3.12/site-packages/nanobind/cmake"
   },
+
   "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-  "python.analysis.extraPaths": ["./src"],
-  "python.autoComplete.extraPaths": ["./src"],
   "python-envs.defaultEnvManager": "ms-python.python:venv",
   "python-envs.defaultPackageManager": "ms-python.python:pip",
+
   "latex-workshop.latex.autoBuild.run": "onSave",
   "latex-workshop.latex.recipe.default": "first",
   "latex-workshop.latex.recipes": [
@@ -52,19 +95,16 @@
       ]
     }
   ],
-  
-  "files.exclude": {
-    "**/.git": true,
-    "**/.svn": true,
-    "**/.hg": true,
-    "**/.DS_Store": true,
-    "**/Thumbs.db": true,
-    "hydralance": true
-  },
+
   "hydralance.excludePatterns": [
     ".venv/**",
     "outputs/**",
     "/home/sqp17/Projects/frost/third_party/**"
   ],
-  "hydralance.hideHelperFolder": true
+  "hydralance.hideHelperFolder": true,
+
+  "workbench.editorAssociations": {
+    "README.md": "vscode.markdown.preview.editor",
+    "**/README.md": "vscode.markdown.preview.editor"
+  }
 }

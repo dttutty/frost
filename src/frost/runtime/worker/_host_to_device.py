@@ -14,7 +14,7 @@ import torch
 
 from frost.datatypes.meta import Meta
 from frost.protocols.cuda_event_proto import CudaEvent
-from frost.runtime._thread_base import StreamThreadBase
+from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
 from frost.runtime.worker._static_assembler import StaticAssembler
 from frost.shm.ring_buf import RingBuf
 
@@ -88,7 +88,7 @@ class H2D(StreamThreadBase):
             meta = self.in_q.get(block=True)
 
             if meta is None:
-                self.out_q.put(None, block=True)
+                put_shutdown_sentinel(self.out_q, None)
                 break
             elif meta == "end_of_epoch":
                 self.out_q.put("end_of_epoch", block=True)

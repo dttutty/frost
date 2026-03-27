@@ -137,7 +137,7 @@ class TransformerAttentionLayer(nn.Module):
         if self.dim_time > 0:
             time_feat = self.time_enc(dt)  # [N, S, dim_time]
             zero_time_feat = self.time_enc(
-                torch.zeros(N, dtype=torch.float32, device=dev)
+                torch.zeros(N, dtype=dt.dtype, device=dev)
             )
         else:
             time_feat = None

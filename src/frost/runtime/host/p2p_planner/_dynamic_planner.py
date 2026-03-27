@@ -1,16 +1,88 @@
 import logging
+import os
 import random
+import sys
 import threading
+from pathlib import Path
 
 import numpy as np
 import torch
 
 from frost.aliases.host import DynamicPlanInQ, DynamicPlanOutQ, MetaBundle, MetasDyNeed
 from frost.datatypes.plan import DynamicPlan
-from frost.runtime._thread_base import ThreadBase
+from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 from frost.utils.tensor_set import TensorSet
 
 logger = logging.getLogger(__name__)
+_PLAN_DUMP_LOCK = threading.Lock()
+
+
+def _should_dump_plans() -> bool:
+    dump_env = os.getenv("FROST_DUMP_DYNAMIC_PLANS")
+    if dump_env is not None:
+        return dump_env.lower() in {"1", "true", "yes", "on"}
+    return sys.gettrace() is not None
+
+
+def _tensor_values(ts: TensorSet | None) -> list[int] | None:
+    if ts is None:
+        return None
+    data = ts.data.detach().cpu()
+    return [int(v) for v in data.tolist()]
+
+
+def _tensor_set_lines(name: str, ts: TensorSet | None) -> list[str]:
+    values = _tensor_values(ts)
+    if values is None:
+        return [f"{name}_count: None", f"{name}: None"]
+    return [f"{name}_count: {len(values)}", f"{name}: {values}"]
+
+
+def _format_plan_section(
+    planner_kind: str,
+    meta,
+    plan: DynamicPlan,
+    extra_lines: list[str],
+) -> str:
+    lines = [
+        f"[{planner_kind}]",
+        f"cur_epoch: {meta.cur_epoch}",
+        f"split: {meta.split}",
+        f"cur_macro_of_split: {meta.cur_macro_of_split}",
+        f"cur_macro_of_epoch: {meta.cur_macro_of_epoch}",
+        f"n_macro_of_split: {meta.n_macro_of_split}",
+        f"n_src: {meta.n_src}",
+        f"fanout: {meta.fanout}",
+        *extra_lines,
+        *_tensor_set_lines("plan_fetch", plan.fetch),
+        *_tensor_set_lines("plan_writeback", plan.writeback),
+        f"plan_recv_counts: {plan.recv_counts.tolist()}",
+        f"plan_send_counts: {plan.send_counts.tolist()}",
+    ]
+    for peer_idx, peer_plan in enumerate(plan.p2p):
+        lines.extend(_tensor_set_lines(f"plan_p2p_to_gpu_{peer_idx}", peer_plan))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _append_plan_dump(
+    plan_dump_dir: Path | None,
+    planner_kind: str,
+    metas: MetaBundle,
+    plans: list[DynamicPlan],
+    extra_lines_per_gpu: list[list[str]],
+) -> None:
+    if plan_dump_dir is None:
+        return
+
+    with _PLAN_DUMP_LOCK:
+        plan_dump_dir.mkdir(parents=True, exist_ok=True)
+        for meta, plan, extra_lines in zip(
+            metas, plans, extra_lines_per_gpu, strict=True
+        ):
+            dump_path = plan_dump_dir / f"{meta.mini_batch_idx}_plan.log"
+            with dump_path.open("a", encoding="ascii") as f:
+                f.write(_format_plan_section(planner_kind, meta, plan, extra_lines))
 
 
 def compute_p2p_transfer_plan(
@@ -150,10 +222,10 @@ def deduplicate_updates_random(
 
 
 def deduplicate_updates(
-    updates: list[TensorSet], reverse: bool = True
+    updates: list[TensorSet], prefer_higher_rank: bool = True
 ) -> tuple[list[TensorSet], TensorSet]:
-    """Deterministic deduplication: higher-priority GPU (lower index when reverse=True)
-    wins conflicting node ownership."""
+    """Deterministic deduplication: when prefer_higher_rank=True,
+    higher-rank GPU wins conflicting node ownership."""
     n_gpus = len(updates)
 
     empty_tensor = torch.tensor([], dtype=torch.long)
@@ -167,7 +239,7 @@ def deduplicate_updates(
         return new_updates, empty_ts
 
     all_update = empty_ts
-    iterator = range(n_gpus - 1, -1, -1) if reverse else range(n_gpus)
+    iterator = range(n_gpus - 1, -1, -1) if prefer_higher_rank else range(n_gpus)
 
     for i in iterator:
         new_updates[i] = updates[i] - all_update
@@ -195,6 +267,8 @@ class DynamicPlanner(ThreadBase):
         out_q: DynamicPlanOutQ,
         stop_ev: threading.Event,
         handle_stale: bool = False,
+        output_dir: str | None = None,
+        plan_kind: str = "dynamic",
     ) -> None:
         super().__init__(name="dynamic_planner", stop_ev=stop_ev)
         self.gpus_distance = gpus_distance
@@ -204,6 +278,12 @@ class DynamicPlanner(ThreadBase):
         self.stop_ev = stop_ev
         self.handle_stale = handle_stale
         self.pending: MetasDyNeed | None = None
+        self.plan_kind = plan_kind
+        self.plan_dump_dir = (
+            Path(output_dir) / "detail"
+            if output_dir is not None and _should_dump_plans()
+            else None
+        )
 
     def logic(self) -> None:
         """Main planning loop: consume (needs, updates, metas) tuples and emit DynamicPlans.
@@ -220,7 +300,7 @@ class DynamicPlanner(ThreadBase):
             in_q_data = self.in_q.get(block=True)
 
             if in_q_data is None:
-                self.out_q.put(None)
+                put_shutdown_sentinel(self.out_q, None)
                 break
 
             elif in_q_data == "end_of_epoch":
@@ -340,6 +420,26 @@ class DynamicPlanner(ThreadBase):
                 )
             )
 
+        _append_plan_dump(
+            self.plan_dump_dir,
+            self.plan_kind,
+            metas,
+            plans,
+            [
+                [
+                    *_tensor_set_lines("current_need", all_list[src]),
+                    *_tensor_set_lines("current_update", update_list[src]),
+                    *_tensor_set_lines(
+                        "deduplicated_update", deduplicate_update_list[src]
+                    ),
+                    *_tensor_set_lines("next_need", next_all_list[src]),
+                    *_tensor_set_lines("next_update", next_update_list[src]),
+                    *_tensor_set_lines("next_prefetch", next_prefetch[src]),
+                ]
+                for src in range(n_gpus)
+            ],
+        )
+
         self.fetch = next_prefetch
         return plans
 
@@ -355,6 +455,8 @@ class APANDynamicPlanner(ThreadBase):
         out_q: DynamicPlanOutQ,
         stop_ev: threading.Event,
         handle_stale: bool = False,
+        output_dir: str | None = None,
+        plan_kind: str = "dynamic",
     ) -> None:
         super().__init__(name="dynamic_planner", stop_ev=stop_ev)
         self.gpus_distance = gpus_distance
@@ -364,6 +466,12 @@ class APANDynamicPlanner(ThreadBase):
         self.stop_ev = stop_ev
         self.handle_stale = handle_stale
         self.pending: MetasDyNeed | None = None
+        self.plan_kind = plan_kind
+        self.plan_dump_dir = (
+            Path(output_dir) / "detail"
+            if output_dir is not None and _should_dump_plans()
+            else None
+        )
 
     def logic(self) -> None:
         """Main planning loop: consume (box_fetch, box_update, metas) tuples and emit DynamicPlans.
@@ -380,7 +488,7 @@ class APANDynamicPlanner(ThreadBase):
             in_q_data = self.in_q.get(block=True)
 
             if in_q_data is None:
-                self.out_q.put(None)
+                put_shutdown_sentinel(self.out_q, None)
                 break
 
             elif in_q_data == "end_of_epoch":
@@ -439,15 +547,11 @@ class APANDynamicPlanner(ThreadBase):
 
         # 1. Deduplicate: each updated node is owned by exactly one GPU.
         # box_update_list = nodes that postman delivers mail to (src+dst + their neighbors)
-        deduplicate_update_list, all_update = deduplicate_updates(
-            box_update_list
-        )
+        deduplicate_update_list, all_update = deduplicate_updates(box_update_list)
 
         # 2. Fresh P2P: send this batch's updates to GPUs that need them next batch.
         # next_box_fetch_list = next batch's pos_root_need (src+dst that need box read)
-        _, p2p = compute_p2p_transfer_plan(
-            next_box_fetch_list, deduplicate_update_list
-        )
+        _, p2p = compute_p2p_transfer_plan(next_box_fetch_list, deduplicate_update_list)
 
         # 3. Writeback all updated nodes to keep ring buffer state consistent on CPU.
         writeback_list = deduplicate_update_list
@@ -469,5 +573,24 @@ class APANDynamicPlanner(ThreadBase):
                     send_counts=p2p_cts[src, :],
                 )
             )
+
+        _append_plan_dump(
+            self.plan_dump_dir,
+            self.plan_kind,
+            metas,
+            plans,
+            [
+                [
+                    *_tensor_set_lines("current_box_fetch", box_fetch_list[src]),
+                    *_tensor_set_lines("current_box_update", box_update_list[src]),
+                    *_tensor_set_lines(
+                        "deduplicated_box_update", deduplicate_update_list[src]
+                    ),
+                    *_tensor_set_lines("next_box_fetch", next_box_fetch_list[src]),
+                    *_tensor_set_lines("next_box_update", next_box_update_list[src]),
+                ]
+                for src in range(n_gpus)
+            ],
+        )
 
         return plans
