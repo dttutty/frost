@@ -24,3 +24,5 @@ class Result:
     val_loss: float
     val_auc: float
     val_ap: float
+    val_mrr: float = 0.0
+    test_mrr: float = 0.0

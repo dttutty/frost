@@ -8,7 +8,7 @@ from typing import Literal
 
 import torch
 
-from frost.datatypes.graph import FlatGraph, SeqGraph
+from frost.datatypes.graph import FlatGraph, HierGraph
 
 from .plan import PlanSet
 
@@ -35,10 +35,11 @@ class Meta:
         flat_graph: Flat sampled subgraph received from the host; ``None`` for
             the sentinel end-of-epoch signal.
         buf_len: Number of valid rows in the ``flat_graph`` RingBuf slot.
-        graph: Inflated ``Graph`` produced by H2D; populated in-place by H2D.
+        graph: Hierarchical ``HierGraph`` populated in-place before encoder forward.
         plan_set: Memory / mailbox / nfeat access plans; set by the Planner.
         labels: Binary link-prediction labels for this batch, or ``None``.
         fanout: Fanout list forwarded from the config, or ``None``.
+        n_neg: Number of negative samples expected for this batch.
     """
 
     cur_epoch: int
@@ -50,7 +51,8 @@ class Meta:
     mini_batch_idx: int
     flat_graph: FlatGraph | None
     buf_len: int
-    graph: SeqGraph | None = None
+    n_neg: int
+    graph: HierGraph | None = None
     plan_set: PlanSet | None = None
     labels: torch.Tensor | None = None
     fanout: list[int] | None = None

@@ -12,7 +12,7 @@ from typing import cast
 import torch
 import torch.nn as nn
 
-from frost.datatypes.graph import SeqGraph
+from frost.datatypes.graph import HierGraph
 
 logger = logging.getLogger(__name__)
 
@@ -29,17 +29,17 @@ class IdentityNormLayer(nn.Module):
     # how to use:
 
     # # 1. Prepare Target Features (Roots)
-    #     target_feat = seq_graph.root_mem
-    #     if self.dim_node > 0 and seq_graph.root_nfeat is not None:
-    #         target_feat = target_feat + self.n_feat_mapper(seq_graph.root_nfeat)
+    #     target_feat = hier_graph.root_mem
+    #     if self.dim_node > 0 and hier_graph.root_nfeat is not None:
+    #         target_feat = target_feat + self.n_feat_mapper(hier_graph.root_nfeat)
 
     #     # 2. Route based on neighborhood existence
-    #     if not seq_graph.neighbors or seq_graph.sampling_config[0] == 0:
+    #     if not hier_graph.neighbors or hier_graph.sampling_config[0] == 0:
     #         # Fast path: No neighbors to attend to (e.g., APAN or 0-neighbor sampling)
     #         out = self.identity_norm(target_feat)
     #     else:
     #         # Standard path: Attend to neighbors
-    #         nbr = seq_graph.neighbors[0]
+    #         nbr = hier_graph.neighbors[0]
     #         # ... (extract neighbor_feat, edge_feat, dt, mask as we discussed before) ...
     #         out = self.encoder(
     #             target_feat=target_feat,
@@ -131,7 +131,7 @@ class JODIE(nn.Module):
         self.layer_norm = nn.LayerNorm(d_mem)
         self.jodie_time_proj = JODIETimeEmbedding(dim_out=d_mem)
 
-    def forward(self, graph: SeqGraph) -> torch.Tensor:
+    def forward(self, graph: HierGraph) -> torch.Tensor:
         """
         graph: Graph with root_mem, root_mem_ts, root_ts, root_nfeat populated.
         root_* tensors cover all root nodes: [src, pos_dst, neg_dst].

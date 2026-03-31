@@ -1,0 +1,12 @@
+_target_: frost.models.encoder.cawn.CAWN
+ndim: ${ndim}
+edim: ${edim}
+d_time: ${d_time}
+out_dim: 172
+d_out: ${.out_dim}
+position_feat_dim: 50
+walk_length: 2
+num_walk_heads: 8
+n_neg: ${n_neg}
+dropout: 0.1
+fanout: [20, 20]

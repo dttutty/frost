@@ -134,5 +134,5 @@ class StaticPlanner(ThreadBase):
         #     logger.debug(f"Cache shapes: {[f.to_cache.data.shape[0] for f in plans_of_1]}")
 
         self.fetchs = fetchs_of_2
-        assert plans_of_1[0] is not None and plans_of_1[1] is not None
+        assert len(plans_of_1) == n_gpus
         return plans_of_1

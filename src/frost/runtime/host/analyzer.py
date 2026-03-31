@@ -1,25 +1,13 @@
-"""Planner-input factories for each model family.
+"""Planner-input factories for host-side memory, mailbox, and feature planning.
 
-Each class provides:
-- ``get_mem_plan_inputs()``: compute per-batch memory planner inputs.
-- ``create_mail_planner()``: factory that returns the correct DynamicPlanner thread.
-- ``get_mail_plan_inputs()``: compute per-batch mailbox planner inputs.
-- ``get_feat_plan_inputs()``: compute per-batch node-feature planner inputs.
+Each analyzer defines the per-batch inputs for:
+- ``get_mem_plan_inputs()``
+- ``create_mail_planner()``
+- ``get_mail_plan_inputs()``
+- ``get_feat_plan_inputs()``
 
-Legacy Access-field semantics, translated from the removed ``Access`` dataclass:
-- ``mem_needed``: For TGN and JODIE, all sampled nodes. For APAN,
-  ``src + pos_dst + neg_dst`` only, excluding neighbors.
-- ``mem_update``: For TGN, JODIE, and APAN, only ``src + pos_dst``.
-- ``box_needed``: For TGN and JODIE, all sampled nodes. For APAN,
-  ``src + pos_dst + neg_dst`` plus sampled neighbors when mailbox state must be
-  forwarded to peer GPUs.
-- ``box_update``: For TGN and JODIE, only ``src + pos_dst``. For APAN,
-  ``src + pos_dst`` plus the sampled neighbors of ``src`` and ``pos_dst``.
-- ``required_nfeat``: For TGN and JODIE, all sampled nodes. For APAN,
-  ``src + pos_dst + neg_dst`` only, excluding neighbors.
-
-The current APAN mailbox planner remains aligned with the runtime mailbox write
-path, so its concrete mail inputs are defined by ``APANAnalyzer`` below.
+Model-specific fetch/update semantics are documented on the concrete analyzer
+classes below.
 """
 
 import logging
@@ -48,147 +36,12 @@ def _unzip_dynamic_inputs(
     return list(needs), list(updates)
 
 
-class _RootMailboxAnalyzer:
-    """Shared planner-input policy for models where only positive roots update state."""
-
-    def __init__(self, n_neg: int):
-        self.n_neg = n_neg
-
-    def _mem_plan_input(self, layout: SampledLayoutView) -> tuple[TensorSet, TensorSet]:
-        pos_root = TensorSet(layout.pos_roots)
-        all_nodes_set = TensorSet(layout.valid_nid)
-        return all_nodes_set, pos_root
-
-    def _mail_plan_input(
-        self, layout: SampledLayoutView
-    ) -> tuple[TensorSet, TensorSet]:
-        pos_root = TensorSet(layout.pos_roots)
-        all_nodes_set = TensorSet(layout.valid_nid)
-        return all_nodes_set, pos_root
-
-    def _feat_plan_input(self, layout: SampledLayoutView) -> TensorSet:
-        return TensorSet(layout.valid_nid)
-
-    def get_mem_plan_inputs(
-        self, layouts: list[SampledLayoutView]
-    ) -> tuple[list[TensorSet], list[TensorSet]]:
-        return _unzip_dynamic_inputs(
-            [self._mem_plan_input(layout) for layout in layouts]
-        )
-
-    def create_mail_planner(
-        self,
-        gpu_dist: np.ndarray,
-        in_q: DynamicPlanInQ,
-        out_q: DynamicPlanOutQ,
-        stop_ev: threading.Event,
-        handle_stale: bool,
-        output_dir: str | None,
-    ) -> ThreadBase:
-        return DynamicPlanner(
-            gpus_distance=gpu_dist,
-            in_q=in_q,
-            out_q=out_q,
-            stop_ev=stop_ev,
-            handle_stale=handle_stale,
-            output_dir=output_dir,
-            plan_kind="mail",
-        )
-
-    def get_mail_plan_inputs(
-        self, layouts: list[SampledLayoutView]
-    ) -> tuple[list[TensorSet], list[TensorSet]]:
-        return _unzip_dynamic_inputs(
-            [self._mail_plan_input(layout) for layout in layouts]
-        )
-
-    def get_feat_plan_inputs(self, layouts: list[SampledLayoutView]) -> list[TensorSet]:
-        return [self._feat_plan_input(layout) for layout in layouts]
-
-
-class APANAnalyzer:
-    """Combined analyzer + planner for the APAN model (1-hop, sample_4_neg=False).
-
-    Uses ``APANDynamicPlanner`` for mail planning. The box update set includes
-    only the valid 1-hop neighbors of src+dst, matching what
-    ``Postman.deliver()`` produces at runtime.  Root nodes (src, dst) are
-    **not** written to the mailbox by the postman; their state is updated
-    directly through the memory updater.
-    """
-
-    def __init__(self, n_neg: int):
-        self.n_neg = n_neg
-
-    def _validate_layout(self, layout: SampledLayoutView) -> None:
-        assert layout.fanout is not None, "APAN requires fanout for neighbor sampling"
-        assert len(layout.fanout) == 1, "APAN only supports 1-hop sampling"
-        assert not layout.sample_4_neg, "APAN expects sample_4_neg=False layouts"
-
-    def _mem_plan_input(self, layout: SampledLayoutView) -> tuple[TensorSet, TensorSet]:
-        self._validate_layout(layout)
-
-        pos_root = TensorSet(layout.pos_roots)
-        all_root = TensorSet(layout.roots)
-        return all_root, pos_root
-
-    def _mail_plan_input(
-        self, layout: SampledLayoutView
-    ) -> tuple[TensorSet, TensorSet]:
-        self._validate_layout(layout)
-        pos_root = TensorSet(layout.pos_roots)
-        box_update = TensorSet(layout.filter_valid(layout.apan_pos_ngh))
-        return pos_root, box_update
-
-    def _feat_plan_input(self, layout: SampledLayoutView) -> TensorSet:
-        self._validate_layout(layout)
-        return TensorSet(layout.roots)
-
-    def get_mem_plan_inputs(
-        self, layouts: list[SampledLayoutView]
-    ) -> tuple[list[TensorSet], list[TensorSet]]:
-        return _unzip_dynamic_inputs(
-            [self._mem_plan_input(layout) for layout in layouts]
-        )
-
-    def create_mail_planner(
-        self,
-        gpu_dist: np.ndarray,
-        in_q: DynamicPlanInQ,
-        out_q: DynamicPlanOutQ,
-        stop_ev: threading.Event,
-        handle_stale: bool,
-        output_dir: str | None,
-    ) -> ThreadBase:
-        return APANDynamicPlanner(
-            gpus_distance=gpu_dist,
-            in_q=in_q,
-            out_q=out_q,
-            stop_ev=stop_ev,
-            handle_stale=handle_stale,
-            output_dir=output_dir,
-            plan_kind="mail",
-        )
-
-    def get_mail_plan_inputs(
-        self, layouts: list[SampledLayoutView]
-    ) -> tuple[list[TensorSet], list[TensorSet]]:
-        return _unzip_dynamic_inputs(
-            [self._mail_plan_input(layout) for layout in layouts]
-        )
-
-    def get_feat_plan_inputs(self, layouts: list[SampledLayoutView]) -> list[TensorSet]:
-        return [self._feat_plan_input(layout) for layout in layouts]
-
-
-class NoMemAnalyzer:
+class StaticAnalyzer:
     """Planner for memory-free models (e.g. TGAT, GraphMixer, DyGFormer).
 
     Only node features need to be fetched; there is no memory or mailbox state.
     Mail planner methods are stubs (never called when has_mem=False).
     """
-
-    def __init__(self, n_neg: int):
-        self.n_neg = n_neg
 
     def get_mem_plan_inputs(
         self, layouts: list[SampledLayoutView]
@@ -211,24 +64,146 @@ class NoMemAnalyzer:
     ) -> tuple[list[TensorSet], list[TensorSet]]:
         return [], []
 
+    def _feat_plan_input(self, layout: SampledLayoutView) -> TensorSet:
+        return TensorSet(layout.valid_nid)
+
     def get_feat_plan_inputs(self, layouts: list[SampledLayoutView]) -> list[TensorSet]:
-        return [TensorSet(layout.valid_nid) for layout in layouts]
+        return [self._feat_plan_input(layout) for layout in layouts]
 
 
-class TGNAnalyzer(_RootMailboxAnalyzer):
-    """Combined analyzer + planner for TGN.
+class MemoryAnalyzer(StaticAnalyzer):
+    """Shared planner-input policy for memory models without postman delivery.
 
-    Uses ``DynamicPlanner`` for mail planning. All sampled nodes need
-    memory/mailbox/nfeat; only src+dst update memory and mailbox.
+    Applies to TGN/JODIE-style models where all sampled valid nodes may be read
+    in the current batch, but only positive roots (``src + pos_dst``) mutate
+    state.
+
+    Planner-input semantics:
+    - memory fetch: all sampled valid nodes
+    - memory update: positive roots only
+    - mailbox fetch: all sampled valid nodes
+    - mailbox update: positive roots only
+    - node-feature fetch: all sampled valid nodes
+
+    Uses ``DynamicPlanner`` for mailbox planning.
     """
 
-    pass
+    def _mem_plan_input(self, layout: SampledLayoutView) -> tuple[TensorSet, TensorSet]:
+        pos_root = TensorSet(layout.pos_roots)
+        all_nodes_set = TensorSet(layout.valid_nid)
+        return all_nodes_set, pos_root
+
+    def _mail_plan_input(
+        self, layout: SampledLayoutView
+    ) -> tuple[TensorSet, TensorSet]:
+        pos_root = TensorSet(layout.pos_roots)
+        all_nodes_set = TensorSet(layout.valid_nid)
+        return all_nodes_set, pos_root
+
+    def get_mem_plan_inputs(
+        self, layouts: list[SampledLayoutView]
+    ) -> tuple[list[TensorSet], list[TensorSet]]:
+        return _unzip_dynamic_inputs(
+            [self._mem_plan_input(layout) for layout in layouts]
+        )
+
+    def get_mail_plan_inputs(
+        self, layouts: list[SampledLayoutView]
+    ) -> tuple[list[TensorSet], list[TensorSet]]:
+        return _unzip_dynamic_inputs(
+            [self._mail_plan_input(layout) for layout in layouts]
+        )
+
+    def create_mail_planner(
+        self,
+        gpu_dist: np.ndarray,
+        in_q: DynamicPlanInQ,
+        out_q: DynamicPlanOutQ,
+        stop_ev: threading.Event,
+        handle_stale: bool,
+        output_dir: str | None,
+    ) -> ThreadBase:
+        return DynamicPlanner(
+            gpus_distance=gpu_dist,
+            in_q=in_q,
+            out_q=out_q,
+            stop_ev=stop_ev,
+            handle_stale=handle_stale,
+            output_dir=output_dir,
+            plan_kind="mail",
+        )
 
 
-class JODIEAnalyzer(_RootMailboxAnalyzer):
-    """Combined analyzer + planner for JODIE (0-hop memory model).
+class APANMemoryAnalyzer(MemoryAnalyzer):
+    """Planner-input policy for APAN (1-hop, ``sample_4_neg=False``).
 
-    Same planning logic as TGN.
+    APAN narrows reads to roots and delegates mailbox writes to the runtime
+    ``Postman.deliver()`` path.
+
+    Planner-input semantics:
+    - memory fetch: all roots (``src + pos_dst + neg_dst``)
+    - memory update: positive roots only
+    - mailbox fetch: all roots
+    - mailbox update: valid 1-hop neighbors of ``src + pos_dst`` only
+    - node-feature fetch: all roots only, excluding sampled neighbors
+
+    The mailbox update set must stay aligned with the runtime write path:
+    padding entries in ``layout.apan_pos_ngh`` are dropped, and root nodes are
+    never written through the postman mailbox path. Uses
+    ``APANDynamicPlanner`` for mailbox planning.
     """
 
-    pass
+    def _validate_layout(self, layout: SampledLayoutView) -> None:
+        assert layout.fanout is not None, "APAN requires fanout for neighbor sampling"
+        assert len(layout.fanout) == 1, "APAN only supports 1-hop sampling"
+        assert not layout.sample_4_neg, "APAN expects sample_4_neg=False layouts"
+
+    def _mem_plan_input(self, layout: SampledLayoutView) -> tuple[TensorSet, TensorSet]:
+
+        self._validate_layout(layout)
+        roots = TensorSet(layout.roots)
+        pos_root = TensorSet(layout.pos_roots)
+        return roots, pos_root
+
+    def _mail_plan_input(
+        self, layout: SampledLayoutView
+    ) -> tuple[TensorSet, TensorSet]:
+        """Build APAN mailbox planner inputs for one batch.
+
+        For each batch:
+        - fetch mailbox state for all roots
+        - merge the fetched state with the previous P2P delta at runtime
+        - write one mail entry to each valid neighbor of ``src + pos_dst``
+        - send the current batch's updates so the next batch can prefetch them
+
+        ``box_update`` is returned explicitly, even though it can be inferred
+        from the layout, because the planner interface expects a
+        ``(fetch, update)`` pair.
+        """
+        self._validate_layout(layout)
+        roots = TensorSet(layout.roots)
+        box_update = TensorSet(layout.filter_valid(layout.apan_pos_ngh))
+        return roots, box_update
+
+    def _feat_plan_input(self, layout: SampledLayoutView) -> TensorSet:
+        self._validate_layout(layout)
+        return TensorSet(layout.roots)
+
+    def create_mail_planner(
+        self,
+        gpu_dist: np.ndarray,
+        in_q: DynamicPlanInQ,
+        out_q: DynamicPlanOutQ,
+        stop_ev: threading.Event,
+        handle_stale: bool,
+        output_dir: str | None,
+    ) -> ThreadBase:
+        return APANDynamicPlanner(
+            gpus_distance=gpu_dist,
+            in_q=in_q,
+            out_q=out_q,
+            stop_ev=stop_ev,
+            handle_stale=handle_stale,
+            output_dir=output_dir,
+            plan_kind="mail",
+        )

@@ -1,0 +1,2 @@
+strategy: time_interval_aware
+time_scaling_factor: 1.0e-6

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from numpy.typing import NDArray
 from torch import Tensor
 
-from frost.datatypes.graph import SeqGraph
+from frost.datatypes.graph import HierGraph
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.plan import DynamicPlan
 
@@ -46,7 +46,7 @@ class BoxTask:
         box_plan: DynamicPlan carrying node IDs and P2P routing for the
             mailbox update.
         is_last: ``True`` iff this is the final batch of the current epoch.
-        graph: Inflated ``Graph`` for this batch; used by the postman to
+        graph: Hierarchical ``HierGraph`` for this batch; used by the postman to
             determine which neighbor mailboxes to update.
     """
 
@@ -55,7 +55,7 @@ class BoxTask:
     mini_batch_idx: int
     box_plan: DynamicPlan
     is_last: bool
-    graph: SeqGraph | None
+    graph: HierGraph | None
     flat_nid_cpu: Tensor | None = None  # CPU nids for APAN writeback
 
     def __repr__(self) -> str:

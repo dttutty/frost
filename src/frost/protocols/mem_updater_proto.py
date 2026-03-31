@@ -9,4 +9,9 @@ from frost.datatypes.graph import FlatGraph
 class MemoryUpdaterProto(Protocol):
     d_mail: int
 
-    def __call__(self, flat_graph: FlatGraph, n_target_nodes: int) -> FlatGraph: ...
+    def __call__(
+        self,
+        flat_graph: FlatGraph,
+        n_target_nodes: int,
+        n_root_nodes: int | None = None,
+    ) -> FlatGraph: ...

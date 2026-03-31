@@ -73,7 +73,8 @@ hydralance/
 temp/
 traces/
 *.png
-*.cvs
+*.csv
+*.svg
 
 DATA/DGB*
 DATA/.temp

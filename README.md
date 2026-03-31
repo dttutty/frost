@@ -15,11 +15,9 @@
 
 ## Overview
 
-FROST is a distributed training system for temporal graph neural networks (TGNNs) with exact memory semantics. The system uses a dedicated host process to perform sampling, access analysis, and forward-looking planning, while GPU worker processes execute model training. The implementation supports both memory-based TGNNs and non-memory baselines through a unified Hydra configuration interface, shared-memory data movement, and a C++/nanobind sequence sampler.
+FROST is a distributed training system for temporal graph neural networks (TGNNs) with exact memory semantics. A dedicated host rank performs sampling, access analysis, and forward-looking planning, while GPU worker ranks execute model training.
 
-FROST is implemented directly on top of PyTorch and PyTorch Distributed. It does not depend on [DGL](https://github.com/dmlc/dgl), [PyTorch Geometric](https://github.com/pyg-team/pytorch_geometric), [pytorch_scatter](https://github.com/rusty1s/pytorch_scatter), or [pytorch_sparse](https://github.com/rusty1s/pytorch_sparse). (That means fewer dependency headaches.)
-
-If you use this repository, its code, or its design ideas in research or derived systems, please cite the paper.
+The implementation is built directly on top of PyTorch and PyTorch Distributed. It does not depend on DGL, PyG, `pytorch_scatter`, or `pytorch_sparse`.
 
 ## Citation
 
@@ -33,50 +31,60 @@ If you use this repository, its code, or its design ideas in research or derived
 
 ## Quick Start
 
-### 🛠️ Environment Setup
+### Environment
 
 ```bash
 uv python install 3.12
 uv sync --python 3.12
 ```
 
-`uv` will honor the project-level Python pin in [`.python-version`](.python-version) and create a local `.venv`. You can either activate it with `source .venv/bin/activate` or prefix commands with `uv run`.
+`uv` will honor [`.python-version`](.python-version), create a local `.venv`, and let you run commands via `uv run`.
 
-### 🤗 Download Datasets
+### Datasets
 
-FROST's curated datasets are hosted on the Hugging Face dataset repository [`dttutty/frost_dataset`](https://huggingface.co/datasets/dttutty/frost_dataset). The recommended workflow is to mirror that repository directly into [`DATA/`](DATA/) so the runtime sees the expected `DATA/<dataset>/...` layout.
+The supported dataset source is the Hugging Face dataset repository [`dttutty/frost_dataset`](https://huggingface.co/datasets/dttutty/frost_dataset). Mirror it into [`DATA/`](DATA/) so runtime paths match `DATA/<dataset>/...`.
 
 ```bash
-# Download the full curated bundle into DATA/
 uvx --from huggingface_hub hf download \
   dttutty/frost_dataset \
   --repo-type dataset \
-  --local-dir DATA
-
-# Or download only one dataset directory
-uvx --from huggingface_hub hf download \
-  dttutty/frost_dataset \
-  --repo-type dataset \
-  --include "lastfm/*" \
   --local-dir DATA
 ```
 
-`hf download --local-dir DATA` preserves the repository structure under `DATA/` and writes incremental-download metadata under `DATA/.cache/huggingface/` (gitignored in this repo).
+To fetch a single dataset:
 
-The Hugging Face mirror is the only supported dataset acquisition path in this repository.
+```bash
+uvx --from huggingface_hub hf download \
+  dttutty/frost_dataset \
+  --repo-type dataset \
+  --include "LASTFM/*" \
+  --local-dir DATA
+```
 
-For local runtime loading, `DatasetManager` expects `edges.csv` together with `full_graph_with_reverse_edges.npz`, plus optional top-level `node_features.npy` / `edge_features.npy` files or their `.pt` equivalents for local custom datasets.
+### Runtime Shape
 
-### 🚀 Runtime Model
-
-FROST uses `torchrun`, with one rank reserved for the host/planner process:
+FROST uses `torchrun` with one extra rank reserved for the host/planner process:
 
 - `nproc_per_node = n_worker_gpus + 1`
-- Worker ranks train on GPUs; the last rank acts as host
+- Worker ranks use GPUs; the last rank is the host
 
 Example with 2 GPUs:
 
-### ⚙️ Configuration
+## Common Entry Points
+
+List the shared presets:
+
+Launch a preset:
+
+Inspect the equivalent `torchrun` command without launching:
+
+Run a manual experiment:
+
+```bash
+uv run torchrun --nproc_per_node=3 run.py <hydra overrides...>
+```
+
+## Documentation
 
 ## Repository Layout
 
@@ -85,20 +93,21 @@ Example with 2 GPUs:
 | [`run.py`](run.py) | Hydra entry point for distributed experiments |
 | [`configs/`](configs/) | Experiment configuration and Hydra config groups |
 | [`src/frost/`](src/frost/) | Runtime, samplers, memory system, and model implementations |
-| [`eval_edgebank.py`](eval_edgebank.py) | Standalone EdgeBank baseline evaluator |
-| [`DATA/`](DATA/) | Curated dataset bundle mirrored from Hugging Face |
+| [`scripts/`](scripts/) | Utility scripts for presets, sweeps, and dataset helpers |
 | [`tests/`](tests/) | Test suite |
-| [`scripts/`](scripts/) | Utility scripts (training and dataset helpers) |
+| [`DATA/`](DATA/) | Curated dataset bundle mirrored from Hugging Face |
+| [`eval_edgebank.py`](eval_edgebank.py) | Standalone EdgeBank baseline evaluator |
 
-## Notes and Limitations
+## Notes
 
+- `batch_size` is local per worker, not global.
 - `ring_buf_size` is pipeline depth per worker, not dataset size or total batch count.
-- The planner auto-detects visible-GPU topology from `CUDA_VISIBLE_DEVICES` and `nvidia-smi topo -m`, ranking peers as NVLink, same-NUMA, or cross-NUMA when possible.
-- `batch_size` is local per worker, not a global batch size.
-- Per-rank logs are written to the Hydra output directory (`outputs/<date>/<time>/rank_*.log`).
+- Per-rank logs are written under Hydra outputs such as `outputs/<date>/<time>/rank_*.log`.
+- GPU topology is inferred from `CUDA_VISIBLE_DEVICES` and `nvidia-smi topo -m` when available.
 
 ## Troubleshooting
 
-- If `CUDA_VISIBLE_DEVICES=0,1`, `--nproc_per_node` should be `3`, not `2`.
-- If distributed training fails early, check whether external NCCL variables are overriding the intended runtime configuration.
-- If throughput drops unexpectedly, confirm that `CUDA_LAUNCH_BLOCKING` and verbose debug settings are not enabled.
+- If `CUDA_VISIBLE_DEVICES=0,1`, then `--nproc_per_node` should be `3`, not `2`.
+- If distributed training fails very early, check whether external NCCL environment variables are conflicting with the intended runtime setup.
+- If throughput drops unexpectedly, confirm that `CUDA_LAUNCH_BLOCKING` or verbose debug flags are not still enabled.
+- If CAWN is much slower than TGN, TGAT, or GraphMixer, reduce `batch_size` first, then `encoder.fanout`.

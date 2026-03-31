@@ -7,6 +7,8 @@ edim: ${edim}
 d_time: ${d_time}
 d_out: ${.out_dim}
 channel_embedding_dim: 32
+enable_dummy_edge_features: true
+dummy_edge_dim: null
 patch_size: 1
 transformer_layers: 2
 num_heads: 2

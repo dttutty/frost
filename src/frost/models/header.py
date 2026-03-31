@@ -66,6 +66,125 @@ class LinkPredictor(nn.Module):
         return torch.cat([ret_1, ret_2])
 
 
+class MergeLayerPredictor(nn.Module):
+    """Concat-based link predictor matching DyGLib's MergeLayer.
+
+    Logic: MLP(concat(h_src, h_dst)) -> score
+    Used by GraphMixer / TCL to match the original DyGLib implementation.
+    """
+
+    def __init__(
+        self,
+        d_in: int,
+        n_neg: int = 1,
+    ) -> None:
+        super().__init__()
+        self.neg_samples = n_neg
+        self.fc1 = nn.Linear(2 * d_in, d_in)
+        self.fc2 = nn.Linear(d_in, 1)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        num_edge = h.shape[0] // (self.neg_samples + 2)
+
+        h_src = h[:num_edge]
+        h_pos_dst = h[num_edge : 2 * num_edge]
+        h_neg_dst = h[2 * num_edge :]
+
+        h_pos = torch.cat([h_src, h_pos_dst], dim=1)
+        h_neg = torch.cat([h_src.tile(self.neg_samples, 1), h_neg_dst], dim=1)
+
+        pos_score = self.fc2(F.relu(self.fc1(h_pos)))
+        neg_score = self.fc2(F.relu(self.fc1(h_neg)))
+
+        return torch.cat([pos_score, neg_score])
+
+
+class DyGFormerLinkPredictor(nn.Module):
+    """Pair-aware predictor for DyGFormer.
+
+    DyGFormer jointly encodes each (src, dst) pair, so negative edges must use
+    the source embedding produced from the negative pairing instead of reusing
+    the positive-pair source embedding.
+    """
+
+    def __init__(
+        self,
+        d_in: int,  # from hydra config
+        n_neg: int = 1,  # from hydra config
+    ) -> None:
+        super().__init__()
+        self.dim_in = d_in
+        self.neg_samples = n_neg
+        self.src_fc = nn.Linear(d_in, d_in)
+        self.dst_fc = nn.Linear(d_in, d_in)
+        self.out_fc = nn.Linear(d_in, 1)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        """Compute logits from DyGFormer's pair-specific embedding layout.
+
+        Expects ``h`` laid out as:
+        ``[pos_src | pos_dst | neg_src | neg_dst]``
+        with lengths ``[n_src, n_src, n_src*n_neg, n_src*n_neg]``.
+        """
+        num_edge = h.shape[0] // (2 * (self.neg_samples + 1))
+        neg_span = num_edge * self.neg_samples
+
+        h_pos_src = self.src_fc(h[:num_edge])
+        h_pos_dst = self.dst_fc(h[num_edge : 2 * num_edge])
+        h_neg_src = self.src_fc(h[2 * num_edge : 2 * num_edge + neg_span])
+        h_neg_dst = self.dst_fc(h[2 * num_edge + neg_span :])
+
+        h_pos_edge = F.relu(h_pos_src + h_pos_dst)
+        h_neg_edge = F.relu(h_neg_src + h_neg_dst)
+
+        ret_1 = self.out_fc(h_pos_edge)
+        ret_2 = self.out_fc(h_neg_edge)
+        return torch.cat([ret_1, ret_2])
+
+
+class PairAwareMergeLayerPredictor(nn.Module):
+    """Concat-based pair-aware link predictor matching DyGLib's MergeLayer.
+
+    Like ``MergeLayerPredictor`` but expects the pair-aware embedding layout
+    ``[pos_src | pos_dst | neg_src | neg_dst]`` so that negative scoring uses
+    the cross-attention-contextualized source embedding from the (src, neg_dst)
+    pair, matching DyGLib's TCL evaluation exactly.
+    """
+
+    def __init__(
+        self,
+        d_in: int,
+        n_neg: int = 1,
+    ) -> None:
+        super().__init__()
+        self.neg_samples = n_neg
+        self.fc1 = nn.Linear(2 * d_in, d_in)
+        self.fc2 = nn.Linear(d_in, 1)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        """Compute logits from pair-aware embedding layout.
+
+        Expects ``h`` laid out as
+        ``[pos_src | pos_dst | neg_src | neg_dst]``
+        with lengths ``[n_src, n_src, n_src*n_neg, n_src*n_neg]``.
+        """
+        num_edge = h.shape[0] // (2 * (self.neg_samples + 1))
+        neg_span = num_edge * self.neg_samples
+
+        h_pos_src = h[:num_edge]
+        h_pos_dst = h[num_edge : 2 * num_edge]
+        h_neg_src = h[2 * num_edge : 2 * num_edge + neg_span]
+        h_neg_dst = h[2 * num_edge + neg_span :]
+
+        h_pos = torch.cat([h_pos_src, h_pos_dst], dim=1)
+        h_neg = torch.cat([h_neg_src, h_neg_dst], dim=1)
+
+        pos_score = self.fc2(F.relu(self.fc1(h_pos)))
+        neg_score = self.fc2(F.relu(self.fc1(h_neg)))
+
+        return torch.cat([pos_score, neg_score])
+
+
 class NodeClassificationHeader(torch.nn.Module):
     """Two-layer MLP head for node classification tasks.
 

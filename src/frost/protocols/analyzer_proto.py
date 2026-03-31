@@ -13,8 +13,6 @@ from frost.utils.tensor_set import TensorSet
 
 @runtime_checkable
 class AnalyzerProto(Protocol):
-    n_neg: int
-
     def get_mem_plan_inputs(
         self, layouts: list[SampledLayoutView]
     ) -> tuple[list[TensorSet], list[TensorSet]]: ...

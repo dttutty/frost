@@ -28,7 +28,7 @@ from frost.runtime._thread_base import (
 )
 from frost.runtime.host import PlanRouter, Scatter
 from frost.runtime.host._batch_balance import make_balance_plan
-from frost.sampling.neg_sampler import NegLinkSampler
+from frost.neg_sampler import PrecomputedNegSampler
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,8 @@ class Host:
         has_mem: bool,
         mail_same_plan_as_mem: bool,
         df: pd.DataFrame,
-        neg_sampler: NegLinkSampler,
+        neg_sampler_train: PrecomputedNegSampler,
+        neg_sampler_eval: PrecomputedNegSampler,
         ngh_sampler: NghSamplerProto,
         env: Env,
         start_time: float,
@@ -110,9 +111,11 @@ class Host:
         patience: int,
         handle_stale: bool = False,
         show_tqdm: bool = False,
+        no_memory_queue_size: int = 4,
         output_dir: str | None = None,
     ) -> None:
-        self.neg_sampler = neg_sampler
+        self.neg_sampler_train = neg_sampler_train
+        self.neg_sampler_eval = neg_sampler_eval
         self.ngh_sampler = ngh_sampler
         self.start_time = start_time
         self.has_nfeat = has_nfeat
@@ -124,6 +127,9 @@ class Host:
         self.analyzer = planner
         self.show_tqdm = show_tqdm
         self.time_dtype = time_dtype
+        if no_memory_queue_size < 1:
+            raise ValueError("no_memory_queue_size must be >= 1.")
+        self.no_memory_queue_size = no_memory_queue_size
 
         self.stop_ev = threading.Event()
         self.cur_macro_of_epoch = 0
@@ -161,16 +167,18 @@ class Host:
         No dedicated thread for routing — it is inlined into the main thread.
         """
         has_planner = self.has_nfeat or self.has_mem
+        stateless_q_size = self.no_memory_queue_size if not self.has_mem else 2
 
         self.result_q: Q[Result] = Q(maxsize=10)
-        self.scatter_q = Q(maxsize=2)
+        self.scatter_q = Q(maxsize=stateless_q_size)
 
         if has_planner:
             if self.has_mem:
                 self.mem_plan_out_q = Q(maxsize=1)
                 self.mail_plan_out_q = Q(maxsize=1)
             if self.has_nfeat:
-                self.nfeat_plan_out_q = Q(maxsize=1)
+                nfeat_q_size = 1 if self.has_mem else self.no_memory_queue_size
+                self.nfeat_plan_out_q = Q(maxsize=nfeat_q_size)
 
             self.plan_router = PlanRouter(
                 gpu_topo=gpu_topo,
@@ -235,6 +243,8 @@ class Host:
             f"[Epoch {self.curr_epoch}] "
             f"Train Loss: {res.train_loss:.4f} | "
             f"{val_ap_label}: {res.val_ap:.4f} | "
+            f"Val AUC: {res.val_auc:.4f} | "
+            f"Test AUC: {res.test_auc:.4f} | "
             f"Test AP: {res.test_ap:.4f}"
         )
 
@@ -418,15 +428,27 @@ class Host:
         eid = torch.from_numpy(edges["eid"].to_numpy(copy=True)).to(torch.long)
         # show ts content for debug
 
-        # sample neg destination nodes
-        neg_dst = self.neg_sampler.sample(src)
+        # pick sampler based on split (val and test share eval sampler)
+        neg_sampler = self.neg_sampler_train if split == "train" else self.neg_sampler_eval
+        # Historical / inductive samplers need per-batch context to determine
+        # which edges are "current" vs "historical".  Feed it if supported.
+        if callable(getattr(neg_sampler, "set_batch_context", None)):
+            import numpy as np
+            neg_sampler.set_batch_context(
+                batch_src=edges["src"].to_numpy(dtype=np.int64),
+                batch_dst=edges["dst"].to_numpy(dtype=np.int64),
+                batch_start_time=float(edges["time"].min()),
+                batch_end_time=float(edges["time"].max()),
+                batch_ts=edges["time"].to_numpy(dtype=np.float64),
+            )
+        neg_dst = neg_sampler.sample(src, eid)
 
         # handle different model types
         roots = torch.cat([src, dst, neg_dst])
         sample_nid, sample_ts = _prepare_sampler_inputs(
             roots=roots,
             ts=ts,
-            n_neg=self.neg_sampler.n_neg,
+            n_neg=neg_sampler.n_neg,
             sample_4_neg=self.ngh_sampler.sample_4_neg,
         )
         sampled_nid, len = self.ngh_sampler.sample(
@@ -440,7 +462,7 @@ class Host:
         layout = SampledLayoutView(
             nid=sampled_nid,
             n_src=src.shape[0],
-            n_neg=self.neg_sampler.n_neg,
+            n_neg=neg_sampler.n_neg,
             fanout=self.ngh_sampler.fanout,
             sample_4_neg=self.ngh_sampler.sample_4_neg,
         )
@@ -456,6 +478,7 @@ class Host:
             mini_batch_idx=mini_batch_idx,
             plan_set=None,
             buf_len=len,
+            n_neg=neg_sampler.n_neg,
             fanout=self.ngh_sampler.fanout,
         )
 
@@ -488,3 +511,23 @@ class Host:
         print("Total training time: {:.2f} seconds".format(end - self.start_time))
         elapsed = end - self.start_time
         logger.info("Elapsed time: %.2f seconds", elapsed)
+
+        # Force-exit if any thread is stuck on a blocking collective op.
+        still_alive = [
+            t for t in (self.scatter,) if t is not None and t.is_alive()
+        ]
+        if self.plan_router is not None:
+            still_alive.extend(
+                t for t in (
+                    self.plan_router.mem_planner,
+                    self.plan_router.mail_planner,
+                    self.plan_router.nfeat_planner,
+                ) if t is not None and t.is_alive()
+            )
+        if still_alive:
+            logger.warning(
+                "Host threads still alive after cleanup: %s — forcing os._exit",
+                [t.name for t in still_alive],
+            )
+            import os
+            os._exit(1)

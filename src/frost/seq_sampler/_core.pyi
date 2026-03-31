@@ -5,7 +5,7 @@ from typing import Literal, Sequence, TypeAlias
 import numpy as np
 import numpy.typing as npt
 
-NeighborStrategy = Literal["recent", "uniform"]
+NeighborStrategy = Literal["recent", "uniform", "time_interval_aware"]
 
 # Define 32-bit arrays
 Int32Array1D: TypeAlias = npt.NDArray[np.int32]
@@ -60,15 +60,19 @@ class SeqSampler_32_32:
     graph:
         Temporal graph.
     sample_neighbor_strategy:
-        Sampling strategy. Supported values: ``"recent"`` or ``"uniform"``.
+        Sampling strategy. Supported values: ``"recent"``, ``"uniform"``,
+        or ``"time_interval_aware"``.
     seed:
         Optional random seed.
+    time_scaling_factor:
+        Only used by ``"time_interval_aware"``.
     """
     def __init__(
         self,
         graph: TemporalGraph_32_32,
         sample_neighbor_strategy: NeighborStrategy = "recent",
         seed: int | None = None,
+        time_scaling_factor: float = 0.0,
     ) -> None: ...
     def get_historical_neighbors(
         self,
@@ -114,15 +118,19 @@ class SeqSampler_64_32:
     graph:
         Temporal graph.
     sample_neighbor_strategy:
-        Sampling strategy. Supported values: ``"recent"`` or ``"uniform"``.
+        Sampling strategy. Supported values: ``"recent"``, ``"uniform"``,
+        or ``"time_interval_aware"``.
     seed:
         Optional random seed.
+    time_scaling_factor:
+        Only used by ``"time_interval_aware"``.
     """
     def __init__(
         self,
         graph: TemporalGraph_64_32,
         sample_neighbor_strategy: NeighborStrategy = "recent",
         seed: int | None = None,
+        time_scaling_factor: float = 0.0,
     ) -> None: ...
     def get_historical_neighbors(
         self,
@@ -154,6 +162,7 @@ class SeqSampler_64_64:
         graph: TemporalGraph_64_64,
         sample_neighbor_strategy: NeighborStrategy = "recent",
         seed: int | None = None,
+        time_scaling_factor: float = 0.0,
     ) -> None: ...
     def get_historical_neighbors(
         self,

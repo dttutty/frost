@@ -33,8 +33,9 @@ class FakeWork:
         self.wait_calls += 1
 
 
-def _make_store(boxsize: int = 1, d_mem: int = 2, d_mail: int = 3) -> MemBoxStore:
-    n_nodes = 5
+def _make_store(
+    boxsize: int = 1, d_mem: int = 2, d_mail: int = 3, n_nodes: int = 5
+) -> MemBoxStore:
     return MemBoxStore(
         mem=torch.arange(n_nodes * d_mem, dtype=torch.float32).view(n_nodes, d_mem),
         mem_ts=torch.arange(n_nodes, dtype=torch.float32),
@@ -69,38 +70,58 @@ def _make_graph(nids: list[int]) -> FlatGraph:
     )
 
 
-def _make_meta(graph: FlatGraph, mem_plan: DynamicPlan, box_plan: DynamicPlan) -> Meta:
+def _make_meta(
+    graph: FlatGraph,
+    mem_plan: DynamicPlan,
+    box_plan: DynamicPlan,
+    *,
+    n_src: int = 1,
+    fanout: list[int] | None = None,
+) -> Meta:
     return Meta(
         cur_epoch=0,
         cur_macro_of_split=0,
         n_macro_of_split=1,
         cur_macro_of_epoch=0,
         split="train",
-        n_src=1,
+        n_src=n_src,
         mini_batch_idx=0,
         flat_graph=graph,
         buf_len=graph.nid.numel(),
         plan_set=PlanSet(mem_plan=mem_plan, box_plan=box_plan),
-        fanout=[],
+        fanout=[] if fanout is None else fanout,
     )
 
 
-def _make_assembler(store: MemBoxStore, *, use_shm_instead: bool) -> DynamicAssembler:
+def _make_assembler(
+    store: MemBoxStore,
+    *,
+    use_shm_instead: bool,
+    n_neg: int = 1,
+    sample_4_neg: bool = True,
+) -> DynamicAssembler:
     assembler = DynamicAssembler.__new__(DynamicAssembler)
     assembler.device = torch.device("cpu")
     assembler.shared = store
     assembler.boxsize = store.box.shape[1]
     assembler.d_mail = store.box.shape[2]
+    assembler.n_neg = n_neg
+    assembler.sample_4_neg = sample_4_neg
     assembler.use_shm_instead = use_shm_instead
     return assembler
 
 
 def _make_logic_assembler(
-    store: MemBoxStore, *, use_shm_instead: bool
+    store: MemBoxStore, *, use_shm_instead: bool, n_neg: int = 1, sample_4_neg: bool = True
 ) -> DynamicAssembler:
-    assembler = _make_assembler(store, use_shm_instead=use_shm_instead)
+    assembler = _make_assembler(
+        store,
+        use_shm_instead=use_shm_instead,
+        n_neg=n_neg,
+        sample_4_neg=sample_4_neg,
+    )
     assembler.in_q = Queue()
-    assembler.delta_q = Queue()
+    assembler.delta_queue = Queue()
     assembler.full_q = Queue()
     assembler.stop_ev = threading.Event()
     assembler.h2d_sem = threading.Semaphore(0)
@@ -132,7 +153,7 @@ def _make_handler(*, use_shm_instead: bool) -> P2PQHandler:
     handler.p2p_sem = threading.Semaphore(0)
     handler.env = SimpleNamespace(local_rank=0)
     handler.stop_ev = threading.Event()
-    handler.delta_q = Queue()
+    handler.delta_queue = Queue()
     handler.nccl_p2p = object()
     handler.use_shm_instead = use_shm_instead
     handler.count = 0
@@ -147,8 +168,8 @@ class TestDynamicAssemblerShmMode:
         mem_plan = _make_plan([1])
         box_plan = _make_plan([1])
 
-        assembler.prepare_shared_features(graph, mem_plan, box_plan)
-        assembler.apply_delta_features(graph, None, mem_plan, box_plan)
+        assembler.prepare_shared_features(graph, mem_plan, box_plan, n_src=1)
+        assembler.apply_delta_features(graph, None, mem_plan, box_plan, n_src=1)
 
         assert graph.mem is not None
         assert graph.mem_ts is not None
@@ -169,17 +190,43 @@ class TestDynamicAssemblerShmMode:
         mem_plan = _make_plan([1])
         box_plan = _make_plan([1])
 
-        assembler.prepare_shared_features(graph, mem_plan, box_plan)
+        assembler.prepare_shared_features(graph, mem_plan, box_plan, n_src=1)
 
         assert graph._box_pos_delta is None
         assert graph._box_delta_mask is None
 
-        assembler.apply_delta_features(graph, None, mem_plan, box_plan)
+        assembler.apply_delta_features(graph, None, mem_plan, box_plan, n_src=1)
 
         assert graph.box is not None
         assert graph.box_ts is not None
         assert torch.equal(graph.box[1], store.box[4])
         assert torch.equal(graph.box_ts[1], store.box_ts[4])
+
+    def test_apan_root_only_assembly_skips_neighbor_mem_and_box(self):
+        store = _make_store(boxsize=2, n_nodes=6)
+        assembler = _make_assembler(
+            store,
+            use_shm_instead=True,
+            n_neg=1,
+            sample_4_neg=False,
+        )
+        graph = _make_graph([1, 4, 2, 5])
+        mem_plan = _make_plan([1])
+        box_plan = _make_plan([1])
+
+        assembler.prepare_shared_features(graph, mem_plan, box_plan, n_src=1)
+        assembler.apply_delta_features(graph, None, mem_plan, box_plan, n_src=1)
+
+        assert graph.mem is not None
+        assert graph.box is not None
+        assert torch.equal(graph.mem[0], store.mem[1])
+        assert torch.equal(graph.mem[1], store.mem[4])
+        assert torch.equal(graph.mem[2], store.mem[2])
+        assert torch.equal(graph.mem[3], torch.zeros_like(store.mem[5]))
+        assert torch.equal(graph.box[0], store.box[1])
+        assert torch.equal(graph.box[1], store.box[4])
+        assert torch.equal(graph.box[2], store.box[2])
+        assert torch.equal(graph.box[3], torch.zeros_like(store.box[5]))
 
     def test_logic_with_nothing_skips_remote_fill(self, monkeypatch):
         store = _make_store(boxsize=1)
@@ -191,7 +238,7 @@ class TestDynamicAssemblerShmMode:
 
         assembler.in_q.put((meta, FakeCudaEvent()))
         assembler.in_q.put(None)
-        assembler.delta_q.put("nothing")
+        assembler.delta_queue.put("nothing")
         assembler.h2d_sem.release()
         assembler.h2d_sem.release()
 
@@ -228,7 +275,7 @@ class TestP2PQHandlerShmMode:
 
         handler.logic()
 
-        assert handler.delta_q.get_nowait() == (None, None, [])
+        assert handler.delta_queue.get_nowait() == (None, None, [])
         assert handler.p2p_sem.acquire(blocking=False)
 
     def test_shm_mode_keeps_nothing_sentinel(self):
@@ -240,7 +287,7 @@ class TestP2PQHandlerShmMode:
 
         handler.logic()
 
-        assert handler.delta_q.get_nowait() == "nothing"
+        assert handler.delta_queue.get_nowait() == "nothing"
         assert handler.p2p_sem.acquire(blocking=False)
 
     def test_default_mode_still_uses_nccl_and_payload(self, monkeypatch):
@@ -265,7 +312,7 @@ class TestP2PQHandlerShmMode:
 
         handler.logic()
 
-        mem_out, box_out, works = handler.delta_q.get_nowait()
+        mem_out, box_out, works = handler.delta_queue.get_nowait()
         assert mem_out is mem_task
         assert box_out is box_task
         assert len(calls) == 6

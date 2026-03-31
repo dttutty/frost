@@ -1,0 +1,3 @@
+_target_: frost.models.header.DyGFormerLinkPredictor
+d_in: ${encoder.out_dim}
+n_neg: ${n_neg}

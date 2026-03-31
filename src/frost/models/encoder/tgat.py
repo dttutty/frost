@@ -11,7 +11,7 @@ from typing import cast
 import torch
 import torch.nn as nn
 
-from frost.datatypes.graph import SeqGraph
+from frost.datatypes.graph import HierGraph
 from frost.models.modules.temporal_graph_attention_layer import (
     TemporalGraphAttentionLayer,
 )
@@ -64,9 +64,9 @@ class TGAT(nn.Module):
                 )
             )
 
-    def forward(self, graph: SeqGraph) -> torch.Tensor:
+    def forward(self, graph: HierGraph) -> torch.Tensor:
         """
-        Forward pass using pure PyTorch SeqGraph structure.
+        Forward pass using the pure PyTorch HierGraph structure.
         """
         assert graph.neighbors is not None, "Graph must have neighbors for TGAT."
         assert graph.fanout is not None, "TGAT requires fanout metadata."

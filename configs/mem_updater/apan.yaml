@@ -6,4 +6,3 @@ heads: 2
 dropout: ${dropout}
 mail_recipients: 10
 mail_combine: last
-postman_delivery_strategy: recent

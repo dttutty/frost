@@ -69,6 +69,10 @@ class H2D(StreamThreadBase):
         )
         self.seen_root_nids = torch.tensor([], dtype=torch.long, device="cpu")
 
+    def _uses_root_only_nfeat(self) -> bool:
+        fanout = self.ring_buf.fanout or []
+        return len(fanout) == 1 and not self.ring_buf.sample_4_neg
+
     @torch.no_grad()
     def logic(self) -> None:
         """Main loop: transfer each batch from CPU to GPU and forward downstream.
@@ -132,6 +136,7 @@ class H2D(StreamThreadBase):
                     flat_graph=meta.flat_graph,
                     nfeat_nid=nfeat,
                     meta=meta,
+                    strict=not self._uses_root_only_nfeat(),
                 )
 
             ready_event = cast(CudaEvent, torch.cuda.Event())

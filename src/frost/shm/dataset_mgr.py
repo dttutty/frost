@@ -83,6 +83,75 @@ def _torch_dtype_from_numpy(np_dtype: np.dtype) -> torch.dtype:
         ) from exc
 
 
+def _resolve_npy_alias_path(path: Path) -> Path:
+    """Resolve text-alias `.npy` files to the real NumPy payload.
+
+    Some dataset snapshots materialize a symlink-like indirection as a tiny
+    UTF-8 text file whose contents are the relative target path, for example
+    `node_features.npy -> node_role.npy`. Follow that chain until we land on an
+    actual NumPy file.
+    """
+
+    seen_paths: set[Path] = set()
+    current = path
+    while True:
+        if current in seen_paths:
+            raise ValueError(
+                f"Detected cyclic .npy alias indirection involving {current}"
+            )
+        seen_paths.add(current)
+
+        with current.open("rb") as f:
+            prefix = f.read(6)
+        if prefix == b"\x93NUMPY":
+            return current
+
+        try:
+            alias_text = current.read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"{current} is neither a valid NumPy file nor a UTF-8 alias."
+            ) from exc
+
+        if not alias_text:
+            raise ValueError(f"Alias file {current} is empty.")
+
+        target = (current.parent / alias_text).resolve()
+        if not target.exists():
+            raise FileNotFoundError(
+                f"Alias file {current} points to missing target {target}."
+            )
+        current = target
+
+
+def _expected_feature_rows(feat_type: str, n_items: int) -> int:
+    if feat_type == "edge":
+        return n_items + 1
+    return n_items
+
+
+def _validate_feature_rows(
+    *,
+    feat_type: str,
+    path: Path,
+    actual_rows: int,
+    n_items: int,
+) -> None:
+    expected_rows = _expected_feature_rows(feat_type, n_items)
+    if actual_rows == expected_rows:
+        return
+
+    if feat_type == "edge":
+        raise ValueError(
+            f"Feature row mismatch for {path}: expected {expected_rows} "
+            f"(n_edges + 1, with row 0 reserved), got {actual_rows}"
+        )
+
+    raise ValueError(
+        f"Feature row mismatch for {path}: expected {expected_rows}, got {actual_rows}"
+    )
+
+
 def _rows_per_chunk(feature_dim: int, target_dtype: torch.dtype) -> int:
     target_itemsize = torch.tensor([], dtype=target_dtype).element_size()
     bytes_per_row = max(feature_dim * target_itemsize, 1)
@@ -173,6 +242,7 @@ class DatasetManager:
         index_dtype: np.dtype,
         time_dtype: np.dtype,
         feature_dtype: torch.dtype,
+        ignore_nfeat_on_disk: bool = False,
     ):
         self.env = env
         self.run_id = run_id
@@ -180,6 +250,7 @@ class DatasetManager:
         self.index_dtype = np.dtype(index_dtype)
         self.time_dtype = np.dtype(time_dtype)
         self.feature_dtype = feature_dtype
+        self.ignore_nfeat_on_disk = ignore_nfeat_on_disk
 
     def prepare(
         self,
@@ -206,6 +277,7 @@ class DatasetManager:
         nfeat: torch.Tensor | None = None
         efeat: torch.Tensor | None = None
         n_nodes = n_edges = ndim = edim = 0
+        nfeat_rows = efeat_rows = 0
         ndtype: torch.dtype | None = None
         edtype: torch.dtype | None = None
         port: int | None = None
@@ -232,10 +304,22 @@ class DatasetManager:
                 shm_name="efeat",
                 expected_rows=n_edges,
             )
+            nfeat_rows = 0 if nfeat is None else int(nfeat.shape[0])
+            efeat_rows = 0 if efeat is None else int(efeat.shape[0])
 
             # Prepare metadata for broadcasting
             port = get_free_port()
-            metadata = (n_nodes, n_edges, ndim, edim, ndtype, edtype, port)
+            metadata = (
+                n_nodes,
+                n_edges,
+                ndim,
+                edim,
+                ndtype,
+                edtype,
+                nfeat_rows,
+                efeat_rows,
+                port,
+            )
 
         # Synchronize across all ranks
         dist.barrier()
@@ -244,12 +328,22 @@ class DatasetManager:
         metadata = broadcast_data(metadata, src=self.env.host_rank)
 
         # Unpack metadata on all ranks (including workers)
-        (n_nodes, n_edges, ndim, edim, ndtype, edtype, port) = metadata
+        (
+            n_nodes,
+            n_edges,
+            ndim,
+            edim,
+            ndtype,
+            edtype,
+            nfeat_rows,
+            efeat_rows,
+            port,
+        ) = metadata
 
         if not self.env.is_host:
             # Attach shared memory on workers using broadcasted metadata
-            nfeat = self._attach_shm("nfeat", [n_nodes, ndim], ndtype)
-            efeat = self._attach_shm("efeat", [n_edges, edim], edtype)
+            nfeat = self._attach_shm("nfeat", [nfeat_rows, ndim], ndtype)
+            efeat = self._attach_shm("efeat", [efeat_rows, edim], edtype)
 
         dist.barrier()  # Ensure all ranks have attached SHM before proceeding
 
@@ -290,6 +384,13 @@ class DatasetManager:
         expected_rows: int,
     ) -> tuple[torch.Tensor | None, int, torch.dtype | None]:
         """Load a feature matrix and materialize it directly into shared memory."""
+        if feat_type == "node" and self.ignore_nfeat_on_disk:
+            logger.info(
+                "ignore_nfeat_on_disk=True; skipping on-disk node features for dataset %s.",
+                dataset,
+            )
+            return None, 0, None
+
         source = self._resolve_feature_source(dataset, feat_type)
         if source is None:
             logger.warning(
@@ -309,9 +410,13 @@ class DatasetManager:
         )
         try:
             if source_kind == "npy":
-                return self._load_npy_feature_to_shm(path, shm_name, expected_rows)
+                return self._load_npy_feature_to_shm(
+                    path, feat_type, shm_name, expected_rows
+                )
             if source_kind == "pt":
-                return self._load_pt_feature_to_shm(path, shm_name, expected_rows)
+                return self._load_pt_feature_to_shm(
+                    path, feat_type, shm_name, expected_rows
+                )
         except Exception as exc:
             logger.error("Failed to load %s feature from %s: %s", feat_type, path, exc)
             return None, 0, None
@@ -321,18 +426,24 @@ class DatasetManager:
     def _load_npy_feature_to_shm(
         self,
         path: Path,
+        feat_type: str,
         shm_name: str,
         expected_rows: int,
     ) -> tuple[torch.Tensor, int, torch.dtype]:
-        arr = np.load(path, mmap_mode="r", allow_pickle=False)
+        resolved_path = _resolve_npy_alias_path(path)
+        if resolved_path != path:
+            logger.info("Resolved %s alias %s -> %s", feat_type, path, resolved_path)
+        arr = np.load(resolved_path, mmap_mode="r", allow_pickle=False)
         if arr.ndim != 2:
             raise ValueError(
-                f"Expected 2D feature array at {path}, got shape {arr.shape}"
+                f"Expected 2D feature array at {resolved_path}, got shape {arr.shape}"
             )
-        if arr.shape[0] != expected_rows:
-            raise ValueError(
-                f"Feature row mismatch for {path}: expected {expected_rows}, got {arr.shape[0]}"
-            )
+        _validate_feature_rows(
+            feat_type=feat_type,
+            path=resolved_path,
+            actual_rows=arr.shape[0],
+            n_items=expected_rows,
+        )
 
         src_dtype = _torch_dtype_from_numpy(arr.dtype)
         final_dtype = self.feature_dtype
@@ -350,6 +461,7 @@ class DatasetManager:
     def _load_pt_feature_to_shm(
         self,
         path: Path,
+        feat_type: str,
         shm_name: str,
         expected_rows: int,
     ) -> tuple[torch.Tensor, int, torch.dtype]:
@@ -360,10 +472,12 @@ class DatasetManager:
             raise ValueError(
                 f"Expected 2D feature tensor at {path}, got shape {tuple(feat.shape)}"
             )
-        if feat.shape[0] != expected_rows:
-            raise ValueError(
-                f"Feature row mismatch for {path}: expected {expected_rows}, got {feat.shape[0]}"
-            )
+        _validate_feature_rows(
+            feat_type=feat_type,
+            path=path,
+            actual_rows=int(feat.shape[0]),
+            n_items=expected_rows,
+        )
 
         final_dtype = self.feature_dtype
         if feat.dtype != final_dtype:
@@ -382,6 +496,6 @@ class DatasetManager:
 
     def _attach_shm(self, name, shape, dtype):
         """Worker: Attach to the SHM created by Host."""
-        if shape[1] <= 0 or dtype is None:
+        if shape[0] <= 0 or shape[1] <= 0 or dtype is None:
             return None
         return gsm(f"{self.run_id}_{name}", shape, dtype=dtype)

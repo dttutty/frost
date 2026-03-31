@@ -14,7 +14,7 @@ class FlatGraph:
 
     All node/edge tensors are concatenated in order: root nodes first, then
     per-hop neighbor tiers.  Call ``unflatten`` to recover the hierarchical
-    ``Graph`` view before model forward passes.
+    ``HierGraph`` view before model forward passes.
 
     Attributes:
         nid: Concatenated node IDs for every tier.
@@ -33,9 +33,9 @@ class FlatGraph:
         detached_nid: Node IDs paired with ``detached_mem``.
     """
 
-    nid: Tensor  # Total length of all nids in SeqGraph
-    eid: Tensor  # Total length of all eids in SeqGraph
-    ts: Tensor  # Total length of all timestamps in SeqGraph
+    nid: Tensor  # Total length of all nids in HierGraph
+    eid: Tensor  # Total length of all eids in HierGraph
+    ts: Tensor  # Total length of all timestamps in HierGraph
     nfeat: Tensor | None = None
     efeat: Tensor | None = None
     mem: Tensor | None = None
@@ -84,9 +84,9 @@ class FlatGraph:
         n_neg: int,
         fanout: list[int] | None = None,
         sample_4_neg: bool = True,
-    ) -> SeqGraph:
+    ) -> HierGraph:
         """
-        Splits a flattened ZipSeqGraph back into a hierarchical SeqGraph
+        Splits a flattened FlatGraph back into a hierarchical HierGraph
         based on the root node count and sampling configuration.
         """
         if fanout is None:
@@ -144,9 +144,9 @@ class FlatGraph:
             )
             neighbors.append(nbr)
 
-        # 5. Build and return the final SeqGraph
+        # 5. Build and return the final HierGraph
         # remove root_eid to prevent info leakage,
-        return SeqGraph(
+        return HierGraph(
             root_nid=nids[0],
             root_ts=tss[0],
             root_nfeat=nfeats[0],
@@ -194,7 +194,7 @@ class NeighborOnHop:
 
 
 @dataclass(kw_only=True)
-class SeqGraph:
+class HierGraph:
     """Hierarchical sampled subgraph consumed by encoder modules.
 
     Produced by ``FlatGraph.unflatten``.  Root nodes represent the

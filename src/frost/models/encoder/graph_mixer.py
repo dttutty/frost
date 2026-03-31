@@ -10,12 +10,16 @@ Consists of:
   neighbor node features).
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from frost.datatypes.graph import SeqGraph
+from frost.datatypes.graph import HierGraph
 from frost.models.modules.time_encoder import TimeEncoder
+
+logger = logging.getLogger(__name__)
 
 
 class FeedForwardNet(nn.Module):
@@ -128,23 +132,49 @@ class GraphMixer(nn.Module):
         d_time: int,  # time encoding dim  (${d_time})
         d_out: int,  # output dim         (${encoder.out_dim})
         num_tokens: int = 20,
-        num_channels: int = 100,
+        num_channels: int = 172,
         num_layers: int = 2,
         token_dim_expansion_factor: float = 0.5,
         channel_dim_expansion_factor: float = 4.0,
         dropout: float = 0.1,
+        freeze_time_encoder: bool = False,
+        align_dyglib_zero_features: bool = False,
+        dyglib_feature_dim: int | None = None,
     ):
         super().__init__()
-        self.ndim = ndim
-        self.edim = edim
+        self.raw_ndim = ndim
+        self.raw_edim = edim
         self.d_time = d_time
         self.num_tokens = num_tokens
         self.num_channels = num_channels
+        self.align_dyglib_zero_features = align_dyglib_zero_features
+
+        if self.align_dyglib_zero_features:
+            if dyglib_feature_dim is None or dyglib_feature_dim <= 0:
+                raise ValueError(
+                    "dyglib_feature_dim must be > 0 when "
+                    "align_dyglib_zero_features=True."
+                )
+            self.ndim = dyglib_feature_dim
+            self.edim = dyglib_feature_dim
+            logger.info(
+                "GraphMixer received raw ndim=%d, edim=%d; using %d-D DyGLib-style "
+                "zero node/edge features instead.",
+                self.raw_ndim,
+                self.raw_edim,
+                dyglib_feature_dim,
+            )
+        else:
+            self.ndim = ndim
+            self.edim = edim
 
         self.time_encoder = TimeEncoder(d_time)
+        if freeze_time_encoder:
+            for p in self.time_encoder.parameters():
+                p.requires_grad = False
 
         # Link encoder: project (edim + d_time) → num_channels
-        self.projection_layer = nn.Linear(edim + d_time, num_channels)
+        self.projection_layer = nn.Linear(self.edim + d_time, num_channels)
 
         self.mlp_mixers = nn.ModuleList(
             [
@@ -160,9 +190,9 @@ class GraphMixer(nn.Module):
         )
 
         # Final projection: concat link output and node output → d_out
-        self.output_layer = nn.Linear(num_channels + ndim, d_out)
+        self.output_layer = nn.Linear(num_channels + self.ndim, d_out)
 
-    def forward(self, graph: SeqGraph) -> torch.Tensor:
+    def forward(self, graph: HierGraph) -> torch.Tensor:
         """
         Returns h of shape [n_root, d_out].
         n_root = n_src * (2 + n_neg); all root nodes are processed independently.
@@ -177,14 +207,21 @@ class GraphMixer(nn.Module):
         # ------------------------------------------------------------------ #
         # Link encoder                                                        #
         # ------------------------------------------------------------------ #
-        # Slice neighbors to use_K before reshape to avoid large intermediates
-        ngh_nid = nbr.nid.reshape(n_root, K)[:, :use_K]  # [n_root, use_K]
-        ngh_ts = nbr.ts.reshape(n_root, K)[:, :use_K]  # [n_root, use_K]
-        assert nbr.efeat is not None, "GraphMixer requires edge features"
-        ngh_efeat = nbr.efeat.reshape(n_root, K, -1)[
-            :, :use_K, :
-        ]  # [n_root, use_K, edim]
+        # The sampler emits fixed-width recent histories with valid neighbors
+        # right-aligned in the K slots. DyGLib's direct num_neighbors=use_K call
+        # is equivalent to taking the tail use_K block from a time_gap=K recent
+        # sample, then left-aligning valid positions inside that block.
+        start = K - use_K
+        ngh_nid = nbr.nid.reshape(n_root, K)[:, start:]  # [n_root, use_K]
+        ngh_ts = nbr.ts.reshape(n_root, K)[:, start:]  # [n_root, use_K]
+        valid_mask = ngh_nid != -1
 
+        ngh_nid = self._left_align_valid_positions(
+            ngh_nid, valid_mask=valid_mask, pad_value=-1
+        )
+        ngh_ts = self._left_align_valid_positions(
+            ngh_ts, valid_mask=valid_mask, pad_value=0
+        )
         pad_mask = ngh_nid == -1  # [n_root, use_K]
 
         # Time delta: root_ts - neighbor_ts
@@ -193,11 +230,28 @@ class GraphMixer(nn.Module):
 
         # Zero out padding positions
         time_feat = time_feat.masked_fill(pad_mask.unsqueeze(-1), 0.0)
-        ngh_efeat = ngh_efeat.masked_fill(pad_mask.unsqueeze(-1), 0.0)
 
-        link_in = torch.cat(
-            [ngh_efeat, time_feat], dim=-1
-        )  # [n_root, use_K, edim+d_time]
+        if self.align_dyglib_zero_features:
+            ngh_efeat = torch.zeros(
+                n_root,
+                use_K,
+                self.edim,
+                device=time_feat.device,
+                dtype=time_feat.dtype,
+            )
+            link_in = torch.cat([ngh_efeat, time_feat], dim=-1)
+        elif nbr.efeat is not None and self.edim > 0:
+            ngh_efeat = nbr.efeat.reshape(n_root, K, -1)[
+                :, start:, :
+            ]  # [n_root, use_K, edim]
+            ngh_efeat = self._left_align_valid_positions(
+                ngh_efeat, valid_mask=valid_mask, pad_value=0
+            )
+            ngh_efeat = ngh_efeat.masked_fill(pad_mask.unsqueeze(-1), 0.0)
+            link_in = torch.cat([ngh_efeat, time_feat], dim=-1)
+        else:
+            link_in = time_feat  # [n_root, use_K, d_time]
+
         link_feat = self.projection_layer(link_in)  # [n_root, use_K, num_channels]
 
         # Pad token dimension to num_tokens if K < num_tokens
@@ -215,24 +269,31 @@ class GraphMixer(nn.Module):
         # ------------------------------------------------------------------ #
         # Node encoder                                                        #
         # ------------------------------------------------------------------ #
-        # Softmax-weighted mean of neighbor node features + root node feature
-        assert graph.root_nfeat is not None, "GraphMixer requires node features"
-        assert nbr.nfeat is not None, "GraphMixer requires neighbor node features"
+        # DyGLib calls the recent sampler twice for GraphMixer:
+        # num_neighbors for the link encoder and time_gap for the node encoder.
+        # When the sampler is "recent", a single K=time_gap sample is enough to
+        # emulate both calls: the node encoder uses all K slots, while the link
+        # encoder above uses the tail num_tokens block from the same sample.
+        if self.align_dyglib_zero_features:
+            node_out = torch.zeros(
+                (n_root, self.ndim), device=link_out.device, dtype=link_out.dtype
+            )
+        elif graph.root_nfeat is not None and nbr.nfeat is not None:
+            ngh_nfeat_all = nbr.nfeat.reshape(n_root, K, -1)  # [n_root, K, ndim]
 
-        ngh_nfeat = nbr.nfeat.reshape(n_root, K, -1)[
-            :, :use_K, :
-        ]  # [n_root, use_K, ndim]
+            # Build mask over full neighbor set
+            pad_mask_all = nbr.nid.reshape(n_root, K) == -1  # [n_root, K]
+            logits_all = torch.zeros((n_root, K), device=ngh_nfeat_all.device, dtype=torch.float32)
+            logits_all = logits_all.masked_fill(pad_mask_all, -1e10)
+            scores_all = torch.softmax(logits_all, dim=1)  # [n_root, K]
 
-        # Build mask: valid neighbors get 0, padding gets -1e10 (avoids nan from softmax)
-        logits = torch.zeros((n_root, use_K), device=dt.device, dtype=torch.float32)
-        logits = logits.masked_fill(pad_mask, -1e10)
-        scores = torch.softmax(logits, dim=1)  # [n_root, use_K]
-
-        # Weighted mean over neighbor features
-        node_agg = (ngh_nfeat * scores.unsqueeze(-1)).mean(dim=1)  # [n_root, ndim]
-
-        # Add root node features
-        node_out = node_agg + graph.root_nfeat  # [n_root, ndim]
+            node_agg = (ngh_nfeat_all * scores_all.unsqueeze(-1)).mean(dim=1)
+            node_out = node_agg + graph.root_nfeat  # [n_root, ndim]
+        else:
+            # No node features — produce zeros so output_layer still works
+            node_out = torch.zeros(
+                (n_root, self.ndim), device=link_out.device, dtype=link_out.dtype
+            )
 
         # ------------------------------------------------------------------ #
         # Output                                                              #
@@ -240,3 +301,25 @@ class GraphMixer(nn.Module):
         return self.output_layer(
             torch.cat([link_out, node_out], dim=-1)
         )  # [n_root, d_out]
+
+    def _left_align_valid_positions(
+        self,
+        x: torch.Tensor,
+        *,
+        valid_mask: torch.Tensor,
+        pad_value: int | float,
+    ) -> torch.Tensor:
+        """Left-pack valid positions inside a fixed-width recent-history block."""
+        order = torch.argsort((~valid_mask).to(torch.int64), dim=1, stable=True)
+        sorted_x = torch.gather(
+            x,
+            dim=1,
+            index=order.unsqueeze(-1).expand_as(x) if x.ndim == 3 else order,
+        )
+        
+        sorted_valid_mask = torch.gather(valid_mask, dim=1, index=order)
+        if x.ndim == 3:
+            sorted_valid_mask = sorted_valid_mask.unsqueeze(-1)
+            
+        sorted_x.masked_fill_(~sorted_valid_mask, pad_value)
+        return sorted_x

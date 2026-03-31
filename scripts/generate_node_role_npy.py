@@ -33,12 +33,32 @@ ROLE_CONFIG = {
 }
 
 
+def resolve_dataset_dir(dataset_name: str) -> Path:
+    direct = DATA_DIR / dataset_name
+    if direct.is_dir():
+        return direct
+
+    upper = DATA_DIR / dataset_name.upper()
+    if upper.is_dir():
+        return upper
+
+    lower = DATA_DIR / dataset_name.lower()
+    if lower.is_dir():
+        return lower
+
+    for child in DATA_DIR.iterdir():
+        if child.is_dir() and child.name.lower() == dataset_name.lower():
+            return child
+
+    raise FileNotFoundError(f"missing dataset directory for {dataset_name} under {DATA_DIR}")
+
+
 def log(message: str) -> None:
     print(message, flush=True)
 
 
 def dataset_csv_path(dataset_name: str) -> Path:
-    csv_path = DATA_DIR / dataset_name / "edges.csv"
+    csv_path = resolve_dataset_dir(dataset_name) / "edges.csv"
     if not csv_path.is_file():
         raise FileNotFoundError(f"missing edges.csv for {dataset_name}: {csv_path}")
     return csv_path
@@ -103,8 +123,7 @@ def generate_node_role(dataset_name: str, config: dict[str, tuple[int, int] | in
     arr = np.zeros((num_nodes, 1), dtype=np.bool_)
     arr[item_lo:item_hi, 0] = True
 
-    dataset_dir = DATA_DIR / dataset_name
-    dataset_dir.mkdir(parents=True, exist_ok=True)
+    dataset_dir = resolve_dataset_dir(dataset_name)
     dst_path = dataset_dir / "node_role.npy"
     np.save(dst_path, arr)
     log(

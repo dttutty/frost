@@ -13,7 +13,7 @@ from typing import cast
 import torch
 import torch.nn as nn
 
-from frost.datatypes.graph import SeqGraph
+from frost.datatypes.graph import HierGraph
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ class DyRep(nn.Module):
         if d_mem != d_out:
             self.out_proj = nn.Linear(d_mem, d_out)
 
-    def forward(self, graph: SeqGraph) -> torch.Tensor:
+    def forward(self, graph: HierGraph) -> torch.Tensor:
         """
         graph.root_mem  : [n_root, d_mem]   updated memory from RNN updater
         graph.root_nfeat: [n_root, ndim]    raw node features (optional)

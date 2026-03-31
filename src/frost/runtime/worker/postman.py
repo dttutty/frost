@@ -8,7 +8,7 @@ import logging
 
 import torch
 
-from frost.datatypes.graph import SeqGraph
+from frost.datatypes.graph import HierGraph
 from frost.datatypes.mem_mail_box.mail import MailEntry
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ class Postman:
     ):
         self.n_neg = n_neg  # from hydra config
 
-    def deliver(self, graph: "SeqGraph", mail_data: torch.Tensor) -> "MailEntry":
+    def deliver(self, graph: "HierGraph", mail_data: torch.Tensor) -> "MailEntry":
         """
         Deliver mails from the first 2/3 of root nodes to their 1-hop neighbors.
 
@@ -31,11 +31,11 @@ class Postman:
         updater.
 
         Args:
-            graph: SeqGraph containing the batch structure.
+            graph: HierGraph containing the batch structure.
             mail_data: Tensor of shape [2/3 * N, D] or [N, D] representing the mail payload.
         """
         if not graph.neighbors or len(graph.neighbors) == 0:
-            raise ValueError("SeqGraph must have at least 1 layer of neighbors.")
+            raise ValueError("HierGraph must have at least 1 layer of neighbors.")
 
         # 1. Calculate the number of target nodes (first 2/3)
         N_total = graph.root_nid.numel()

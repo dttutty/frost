@@ -102,17 +102,22 @@ class StaticAssembler:
         flat_graph: FlatGraph,
         nfeat_nid: "NodeFeatNid",
         meta: "Meta",
+        *,
+        strict: bool = True,
     ) -> FlatGraph:
         """Scatter node features into ``flat_graph.nfeat`` using binary search.
 
         Assigns the feature vector from ``nfeat_nid`` to every valid (non-``-1``)
-        NID in ``flat_graph.nid``.  Raises ``ValueError`` if any NID is absent
-        from the lookup table.
+        NID in ``flat_graph.nid``.  When ``strict`` is ``False``, only positions
+        present in the lookup table are filled and the rest stay zeroed.
 
         Args:
             flat_graph: The FlatGraph to annotate; modified in-place.
             nfeat_nid: Sorted lookup table mapping NID → feature vector.
             meta: Batch metadata (used for debugging context).
+            strict: Whether every valid node in ``flat_graph`` must exist in the
+                lookup table. APAN uses ``False`` so only root-node features are
+                filled while neighbor rows remain zeroed.
 
         Returns:
             The same ``flat_graph`` with ``nfeat`` populated.
@@ -144,6 +149,7 @@ class StaticAssembler:
 
         # Binary search on sorted nfeat_nid.nid
         permute_nidx = torch.searchsorted(nfeat_nid.nid, valid_nodes)
+        valid_positions = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
 
         # Prevent out-of-bounds access before equality check
         in_bounds = permute_nidx < nfeat_nid.nid.numel()
@@ -151,7 +157,7 @@ class StaticAssembler:
 
         found_mask = in_bounds & (nfeat_nid.nid[safe_idx] == valid_nodes)
 
-        if not torch.all(found_mask):
+        if strict and not torch.all(found_mask):
             missing_nids = torch.unique(valid_nodes[~found_mask])
             preview = missing_nids[:20].tolist()
             raise ValueError(
@@ -159,8 +165,9 @@ class StaticAssembler:
                 f"First {len(preview)} missing NIDs: {preview}"
             )
 
-        gathered_nfeat = nfeat_nid.nfeat[permute_nidx]
-        node_feat[valid_mask] = gathered_nfeat.to(self.device)
+        if torch.any(found_mask):
+            gathered_nfeat = nfeat_nid.nfeat[safe_idx[found_mask]]
+            node_feat[valid_positions[found_mask]] = gathered_nfeat.to(self.device)
 
         flat_graph.nfeat = node_feat
         return flat_graph

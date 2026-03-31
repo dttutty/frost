@@ -3,13 +3,14 @@ defaults:
   - encoder: tgn
   - loss_fn: bce  # no need to change mostly
   - mem_updater: null
-  - neg_sampler: base # don't change this unless you implement a new neg_sampler
+  - neg_sampler: precomputed # precomputed | rnd_then_rnd | rnd_then_hist | rnd_then_ind
+  - ngh_sampler: recent
   - precision: base # no need to change mostly
   - predictor: link # don't change this, current version only support link prediction
   - _self_
 
 epoch: 100
-batch_size: 4000 # local batch_size
+batch_size: 2000 # local batch_size
 patience: 100
 dropout: 0.2
 seed: 42
@@ -20,6 +21,9 @@ lr: 0.0001
 n_neg: 1
 ring_buf_size: 32
 handle_stale: false
+ignore_nfeat_on_disk: false
+no_memory_queue_size: 4
 compile: false
 tf32: false
+amp: false
 tqdm: true

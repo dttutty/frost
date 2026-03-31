@@ -6,31 +6,31 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from frost.datatypes.graph import SeqGraph
+from frost.datatypes.graph import HierGraph
 
 from .time_encoder import TimeEncoder
 
 logger = logging.getLogger(__name__)
 
 
-def process_seq_graph(
-    seq_graph: SeqGraph, attn_layer: "TransformerAttentionLayer"
+def process_hier_graph(
+    hier_graph: HierGraph, attn_layer: "TransformerAttentionLayer"
 ) -> torch.Tensor:
     """
-    Example of unpacking SeqGraph for the first hop.
+    Example of unpacking HierGraph for the first hop.
     """
-    assert seq_graph.fanout is not None
-    assert seq_graph.neighbors is not None
-    assert seq_graph.root_mem is not None
-    N = seq_graph.root_nid.numel()
-    S = seq_graph.fanout[0]
-    nbr = seq_graph.neighbors[0]
+    assert hier_graph.fanout is not None
+    assert hier_graph.neighbors is not None
+    assert hier_graph.root_mem is not None
+    N = hier_graph.root_nid.numel()
+    S = hier_graph.fanout[0]
+    nbr = hier_graph.neighbors[0]
 
     # 1. Target node features (Roots)
     # Target memory + static features
-    target_feat = seq_graph.root_mem
-    if seq_graph.root_nfeat is not None:
-        target_feat = target_feat + seq_graph.root_nfeat
+    target_feat = hier_graph.root_mem
+    if hier_graph.root_nfeat is not None:
+        target_feat = target_feat + hier_graph.root_nfeat
 
     # 2. Neighbor node features (Hop 0)
     # Reshape from flat [N * S, D] to dense [N, S, D]
@@ -48,7 +48,7 @@ def process_seq_graph(
 
     # 4. Time delta
     # root_ts: [N, 1], nbr.ts: [N, S]
-    dt = seq_graph.root_ts.unsqueeze(1) - nbr.ts.view(N, S)
+    dt = hier_graph.root_ts.unsqueeze(1) - nbr.ts.view(N, S)
 
     # 5. Padding mask
     # True for valid nodes, False for padding (-1)

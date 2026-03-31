@@ -11,7 +11,7 @@ from typing import cast
 import torch
 import torch.nn as nn
 
-from frost.datatypes.graph import SeqGraph
+from frost.datatypes.graph import HierGraph
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +37,13 @@ class APAN(nn.Module):
 
     def forward(
         self,
-        graph: SeqGraph,
+        graph: HierGraph,
     ) -> torch.Tensor:
         """
-        Forward pass using SeqGraph.
+        Forward pass using HierGraph.
         """
         # Ensure root memory exists
-        assert graph.root_mem is not None, "root_mem is missing in SeqGraph"
+        assert graph.root_mem is not None, "root_mem is missing in HierGraph"
 
         # Apply LayerNorm to target node memory
         embedding = self.gnn_norm(graph.root_mem)

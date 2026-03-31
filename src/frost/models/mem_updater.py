@@ -70,6 +70,7 @@ class MemoryUpdater(nn.Module):
         self,
         flat_graph: "FlatGraph",
         n_target_nodes: int,
+        n_root_nodes: int | None = None,
     ) -> "FlatGraph":
         """Update node memories for all nodes in the flat graph.
 
@@ -120,7 +121,7 @@ class MemoryUpdater(nn.Module):
 
 class TransformerMemoryUpdater(nn.Module):
     """
-    Batched Transformer Memory Updater for APAN using ZipSeqGraph.
+    Batched Transformer Memory Updater for APAN using FlatGraph inputs.
     Updates node memory by attending to the Mailbox messages.
     """
 
@@ -152,7 +153,12 @@ class TransformerMemoryUpdater(nn.Module):
         self.mlp = nn.Linear(d_mem, d_mem)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, flat_graph: "FlatGraph", n_target_nodes: int) -> "FlatGraph":
+    def forward(
+        self,
+        flat_graph: "FlatGraph",
+        n_target_nodes: int,
+        n_root_nodes: int | None = None,
+    ) -> "FlatGraph":
         """Update node memories using multi-head attention over mailbox messages.
 
         Computes queries from current node memory, keys and values from
@@ -167,6 +173,9 @@ class TransformerMemoryUpdater(nn.Module):
                 memories, and mailbox data for all nodes in the batch.
             n_target_nodes: Number of root nodes whose updated states should
                 be cached (typically ``n_src * 2``).
+            n_root_nodes: Optional prefix length to update. When provided,
+                only ``flat_graph[:n_root_nodes]`` participates in the
+                attention update and later rows are left untouched.
 
         Returns:
             The same ``flat_graph`` with ``flat_graph.mem`` updated in-place
@@ -180,6 +189,22 @@ class TransformerMemoryUpdater(nn.Module):
         ts = flat_graph.ts  # [N_total]
         box = flat_graph.box  # [N_total, boxsize, dim_mail]
         box_ts = flat_graph.box_ts  # [N_total, boxsize]
+
+        if n_root_nodes is None:
+            n_root_nodes = mem.size(0)
+        if n_root_nodes < n_target_nodes:
+            raise ValueError(
+                f"n_root_nodes ({n_root_nodes}) must be >= n_target_nodes ({n_target_nodes})"
+            )
+        if n_root_nodes > mem.size(0):
+            raise ValueError(
+                f"n_root_nodes ({n_root_nodes}) exceeds flat_graph size ({mem.size(0)})"
+            )
+
+        mem = mem[:n_root_nodes]
+        ts = ts[:n_root_nodes]
+        box = box[:n_root_nodes]
+        box_ts = box_ts[:n_root_nodes]
 
         batch_size = mem.size(0)
 
@@ -230,8 +255,10 @@ class TransformerMemoryUpdater(nn.Module):
         rst = self.dropout(rst)
         rst = F.relu(rst)
 
-        # Update the flattened memory tensor in-place
-        flat_graph.mem = rst
+        # Only root rows participate in APAN memory updates; neighbor rows stay untouched.
+        updated_mem = flat_graph.mem.clone()
+        updated_mem[:n_root_nodes] = rst
+        flat_graph.mem = updated_mem
 
         # Cache detached states for the Root nodes
         flat_graph.detached_mem = flat_graph.mem[:n_target_nodes].detach().clone()

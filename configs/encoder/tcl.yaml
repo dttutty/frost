@@ -1,11 +1,12 @@
 _target_: frost.models.encoder.tcl.TCL
-out_dim: 128
+out_dim: 172
 fanout: [20]
 ngh_sampler_strategy: recent
 ndim: ${ndim}
 edim: ${edim}
 d_time: ${d_time}
 d_out: ${.out_dim}
+d_model: 172
 num_depths: 21
 num_layers: 2
 num_heads: 2

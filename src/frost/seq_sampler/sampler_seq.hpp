@@ -23,10 +23,18 @@ class SeqSampler : public BaseSampler<ID_T, TIME_T> {
 private:
     std::string sample_strategy;
     int seed_val;
+    double time_scaling_factor;
 
 public:
-    SeqSampler(const TemporalGraph<ID_T, TIME_T>& g, const std::string& strategy = "recent", std::optional<int> seed = std::nullopt)
-        : BaseSampler<ID_T, TIME_T>(g), sample_strategy(strategy) {
+    SeqSampler(
+        const TemporalGraph<ID_T, TIME_T>& g,
+        const std::string& strategy = "recent",
+        std::optional<int> seed = std::nullopt,
+        double scaling_factor = 0.0
+    )
+        : BaseSampler<ID_T, TIME_T>(g),
+          sample_strategy(strategy),
+          time_scaling_factor(scaling_factor) {
         seed_val = seed.has_value() ? seed.value() : std::random_device{}();
     }
 
@@ -107,6 +115,7 @@ public:
 
                     size_t offset = i * n_ngh;
                     this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
+                                    time_scaling_factor,
                                     &out_n[offset], &out_e[offset], &out_t[offset]);
                 }
             } else {
@@ -117,6 +126,7 @@ public:
 
                     size_t offset = i * n_ngh;
                     this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
+                                    time_scaling_factor,
                                     &out_n[offset], &out_e[offset], &out_t[offset]);
                 }
             }
@@ -134,11 +144,22 @@ private:
     TIME_T window_duration;
     std::string sample_strategy;
     int seed_val;
+    double time_scaling_factor;
 
 public:
-    WindowSeqSampler(const TemporalGraph<ID_T, TIME_T>& g, int _num_history, TIME_T _window_duration,
-                     const std::string& strategy = "recent", std::optional<int> seed = std::nullopt)
-        : BaseSampler<ID_T, TIME_T>(g), num_history(_num_history), window_duration(_window_duration), sample_strategy(strategy) {
+    WindowSeqSampler(
+        const TemporalGraph<ID_T, TIME_T>& g,
+        int _num_history,
+        TIME_T _window_duration,
+        const std::string& strategy = "recent",
+        std::optional<int> seed = std::nullopt,
+        double scaling_factor = 0.0
+    )
+        : BaseSampler<ID_T, TIME_T>(g),
+          num_history(_num_history),
+          window_duration(_window_duration),
+          sample_strategy(strategy),
+          time_scaling_factor(scaling_factor) {
         seed_val = seed.has_value() ? seed.value() : std::random_device{}();
     }
 
@@ -186,6 +207,7 @@ public:
 
                         size_t offset = i * (num_history * n_ngh) + h * n_ngh;
                         this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
+                                        time_scaling_factor,
                                         &out_n[offset], &out_e[offset], &out_t[offset]);
                     }
                 }
@@ -202,6 +224,7 @@ public:
 
                         size_t offset = i * (num_history * n_ngh) + h * n_ngh;
                         this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
+                                        time_scaling_factor,
                                         &out_n[offset], &out_e[offset], &out_t[offset]);
                     }
                 }

@@ -5,7 +5,7 @@ import torch
 import torch.distributed as dist
 
 from frost.aliases.syncer import BoxP2PQ, MemP2PQ
-from frost.aliases.worker import DeltaQ
+from frost.aliases.worker import DeltaQueue
 from frost.datatypes.env import Env
 from frost.runtime._thread_base import StreamThreadBase
 
@@ -21,7 +21,7 @@ class P2PQHandler(StreamThreadBase):
         nccl_p2p: dist.ProcessGroup,
         p2p_sem: threading.Semaphore,
         stop_ev: threading.Event,
-        delta_q: DeltaQ,
+        delta_queue: DeltaQueue,
         device: torch.device,
         use_shm_instead: bool = False,
     ) -> None:
@@ -32,7 +32,7 @@ class P2PQHandler(StreamThreadBase):
         self.p2p_sem = p2p_sem
         self.env = env
         self.stop_ev = stop_ev
-        self.delta_q = delta_q
+        self.delta_queue = delta_queue
         self.nccl_p2p = nccl_p2p
         self.use_shm_instead = use_shm_instead
 
@@ -54,10 +54,10 @@ class P2PQHandler(StreamThreadBase):
                 if box_p2p_tuple is None:
                     break
                 assert box_p2p_tuple == "nothing_to_p2p"
-                self.delta_q.put("nothing")
+                self.delta_queue.put("nothing")
                 # Keep semaphore balanced so the next step doesn't block after no-op P2P.
                 # logger.debug(
-                #     "nothing_to_p2p received for both Mem and Box. Skipping P2P and sending 'nothing' to delta_q."
+                #     "nothing_to_p2p received for both Mem and Box. Skipping P2P and sending 'nothing' to delta_queue."
                 # )
                 self.p2p_sem.release()
 
@@ -145,7 +145,7 @@ class P2PQHandler(StreamThreadBase):
             self.count += 1
             if self.use_shm_instead:
                 self.p2p_sem.release()
-                self.delta_q.put((None, None, []))
+                self.delta_queue.put((None, None, []))
                 logger.debug(
                     "Rank %s skipped NCCL P2P and posted empty delta via shared memory, count=%s",
                     self.env.local_rank,
@@ -200,11 +200,11 @@ class P2PQHandler(StreamThreadBase):
 
             # delta = MemNBox(mem=delta_mem, box=delta_box)
 
-            # # 5. Record CUDA event and send to delta_q
+            # # 5. Record CUDA event and send to delta_queue
             # ready_event: CudaEventLike = torch.cuda.Event()
             # ready_event.record(torch.cuda.current_stream())
 
-            self.delta_q.put((mem_p2p, box_p2p, works))
+            self.delta_queue.put((mem_p2p, box_p2p, works))
             logger.debug(
-                f"Rank {self.env.local_rank} finished P2P communication, posted delta to delta_q, count={self.count}"
+                f"Rank {self.env.local_rank} finished P2P communication, posted delta to delta_queue, count={self.count}"
             )

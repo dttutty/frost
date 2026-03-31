@@ -174,8 +174,11 @@ class NghSampler:
             (src, pos_dst, neg_dst).  When ``False`` only src and pos_dst
             are expanded.
         n_neg: Number of negative samples per source edge.
-        strategy: Sampling strategy — ``"uniform"`` or ``"recent"``.
+        strategy: Sampling strategy — ``"uniform"``, ``"recent"``, or
+            ``"time_interval_aware"``.
         seed: Optional RNG seed for reproducible sampling.
+        time_scaling_factor: DyGLib-style scaling factor used by
+            ``"time_interval_aware"`` sampling.
     """
 
     def __init__(
@@ -185,8 +188,9 @@ class NghSampler:
         ring_buf: RingBuf,
         sample_4_neg: bool,  # from hydra config
         n_neg: int,  # from hydra config
-        strategy: Literal["uniform", "recent"],  # from hydra config
+        strategy: Literal["uniform", "recent", "time_interval_aware"],  # from hydra config
         seed: int | None,  # from hydra config
+        time_scaling_factor: float = 0.0,
     ):
         _ensure_seq_sampler_stable_mode()
         assert len(fanout) == 1, (
@@ -194,7 +198,12 @@ class NghSampler:
         )
         self.graph = graph
         self.fanout = fanout
-        self.seq_sampler = SeqSampler(graph=graph, strategy=strategy, seed=seed)
+        self.seq_sampler = SeqSampler(
+            graph=graph,
+            strategy=strategy,
+            seed=seed,
+            time_scaling_factor=time_scaling_factor,
+        )
         self.n_ngh = fanout[0]
         self.ring_buf = ring_buf
         self.sample_4_neg = sample_4_neg
@@ -331,7 +340,8 @@ class MultiHopNghSampler:
         fanout: Per-hop neighbor counts, e.g. ``[10, 5]`` for 2-hop sampling.
         ring_buf: Shared-memory ring buffer for host-to-worker transfer.
         n_neg: Number of negative samples per source edge.
-        strategy: Sampling strategy — ``"uniform"`` or ``"recent"``.
+        strategy: Sampling strategy — ``"uniform"``, ``"recent"``, or
+            ``"time_interval_aware"``.
         seed: Optional RNG seed for reproducibility.
         sample_4_neg: When ``True`` (default) negative nodes are also expanded
             at the first hop.
@@ -345,12 +355,18 @@ class MultiHopNghSampler:
         fanout: list[int],  # from hydra config
         ring_buf: RingBuf,
         n_neg: int,  # from hydra config
-        strategy: Literal["uniform", "recent"],  # from hydra config
+        strategy: Literal["uniform", "recent", "time_interval_aware"],  # from hydra config
         seed: int | None,  # from hydra config
+        time_scaling_factor: float = 0.0,
         sample_4_neg: bool = True,
     ):
         _ensure_seq_sampler_stable_mode()
-        self.sampler = SeqSampler(graph=graph, strategy=strategy, seed=seed)
+        self.sampler = SeqSampler(
+            graph=graph,
+            strategy=strategy,
+            seed=seed,
+            time_scaling_factor=time_scaling_factor,
+        )
         self.fanout = fanout
         self.ring_buf = ring_buf
         self.n_neg = n_neg

@@ -5,7 +5,7 @@ mailbox tensors:
 
 1. ``prepare_shared_features``: read the locally owned entries from the shared
    CPU ``MemBoxStore`` and scatter them into the FlatGraph tensors on GPU.
-2. ``apply_delta_features``: once the P2P delta arrives via ``delta_q``, fill
+2. ``apply_delta_features``: once the P2P delta arrives via ``delta_queue``, fill
    the remaining (remotely owned) entries received from peer GPUs.
 
 The assembled ``(Meta, CudaEvent)`` is forwarded to ``full_q`` for the main
@@ -22,7 +22,7 @@ from typing import Literal, cast
 
 import torch
 
-from frost.aliases.worker import AssembledQ, DeltaQ, H2DOutQ
+from frost.aliases.worker import AssembledQ, DeltaQueue, H2DOutQ
 from frost.datatypes.graph import FlatGraph
 from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
@@ -76,12 +76,12 @@ class DynamicAssembler(StreamThreadBase):
 
     Receives partially-prepared batches from ``h2d_out_q``, fills locally
     owned node memory / mailbox entries from ``MemBoxStore``, then waits for
-    the P2P delta from ``delta_q`` to fill remotely owned entries.  The
+    the P2P delta from ``delta_queue`` to fill remotely owned entries.  The
     completed batch is forwarded to ``full_q``.
 
     Args:
         h2d_out_q: Input queue from the H2D thread.
-        delta_q: Queue carrying P2P delta tuples or the sentinel ``"nothing"``.
+        delta_queue: Queue carrying P2P delta tuples or the sentinel ``"nothing"``.
         full_q: Output queue consumed by the main training loop.
         stop_ev: Shared stop event.
         device: Target CUDA device.
@@ -92,17 +92,19 @@ class DynamicAssembler(StreamThreadBase):
     def __init__(
         self,
         h2d_out_q: H2DOutQ,
-        delta_q: DeltaQ,
+        delta_queue: DeltaQueue,
         full_q: AssembledQ,
         stop_ev: threading.Event,
         device: torch.device,
         h2d_sem: threading.Semaphore,  # Optional semaphore for H2D synchronization
         mem_box_store: MemBoxStore,  # Pass shared memory instance here
+        n_neg: int = 1,
+        sample_4_neg: bool = True,
         use_shm_instead: bool = False,
     ) -> None:
         super().__init__(name="dy_assembler", stop_ev=stop_ev)
         self.in_q = h2d_out_q
-        self.delta_q = delta_q
+        self.delta_queue = delta_queue
         self.full_q = full_q
         self.device = device
         self.h2d_sem = h2d_sem
@@ -110,7 +112,26 @@ class DynamicAssembler(StreamThreadBase):
         self.stop_ev = stop_ev
         self.boxsize = mem_box_store.box.shape[1]
         self.d_mail = mem_box_store.box.shape[2]
+        self.n_neg = n_neg
+        self.sample_4_neg = sample_4_neg
         self.use_shm_instead = use_shm_instead
+
+    def _strict_assembly_mask(self, graph: FlatGraph, n_src: int) -> torch.Tensor:
+        """Return the positions whose mem/box state must be assembled this step.
+
+        APAN layouts sample 1-hop neighbors only for ``src`` and ``pos_dst`` but
+        the current forward pass only needs dynamic state for the root slice
+        ``[src | pos_dst | neg_dst]``.  Neighbor rows are intentionally left
+        zero-filled on GPU.
+        """
+        valid_mask = graph.nid != -1
+        if self.sample_4_neg:
+            return valid_mask
+
+        n_root = min(graph.nid.numel(), n_src * (2 + self.n_neg))
+        root_mask = torch.zeros_like(valid_mask)
+        root_mask[:n_root] = valid_mask[:n_root]
+        return root_mask
 
     def _fill_from_shared(
         self,
@@ -320,7 +341,11 @@ class DynamicAssembler(StreamThreadBase):
         return global_positions, local_positions
 
     def prepare_shared_features(
-        self, graph: FlatGraph, mem_plan: DynamicPlan, box_plan: DynamicPlan
+        self,
+        graph: FlatGraph,
+        mem_plan: DynamicPlan,
+        box_plan: DynamicPlan,
+        n_src: int,
     ) -> None:
         """Step 1: Initialize tensors and fill local shared memory data."""
         num_nodes = graph.nid.shape[0]
@@ -348,7 +373,7 @@ class DynamicAssembler(StreamThreadBase):
                 device=self.device,
             )
 
-        valid_mask = graph.nid != -1
+        valid_mask = self._strict_assembly_mask(graph, n_src)
 
         # Fill local unique data immediately
         if mem_plan is not None:
@@ -382,7 +407,7 @@ class DynamicAssembler(StreamThreadBase):
             # Pre-load them here (async H2D) instead of synchronous CPU→GPU
             # inside the delta path.
             if self.boxsize > 1 and not self.use_shm_instead:
-                box_delta_mask = self._build_delta_mask(graph, box_plan)
+                box_delta_mask = self._build_delta_mask(graph, box_plan, valid_mask)
                 delta_nids_gpu = graph.nid[box_delta_mask]
                 if delta_nids_gpu.numel() > 0:
                     delta_nids_cpu = delta_nids_gpu.cpu().long()
@@ -406,11 +431,12 @@ class DynamicAssembler(StreamThreadBase):
         self,
         graph: FlatGraph,
         plan: DynamicPlan | None,
+        required_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute a boolean mask for positions that must be filled from the P2P delta.
 
         A position requires delta data when:
-        * ``graph.nid[i] != -1`` (valid node), AND
+        * it is marked in ``required_mask`` (or ``graph.nid[i] != -1`` by default), AND
         * the NID is not already covered by the local shared fetch.
 
         Args:
@@ -425,7 +451,7 @@ class DynamicAssembler(StreamThreadBase):
         graph_nid = graph.nid
         assert graph_nid.dim() == 1, "graph.nid must be 1D"
 
-        base_mask = graph_nid != -1
+        base_mask = graph_nid != -1 if required_mask is None else required_mask
         if not torch.any(base_mask):
             return base_mask
 
@@ -517,6 +543,7 @@ class DynamicAssembler(StreamThreadBase):
         delta: MemAndBox | None,
         mem_plan: DynamicPlan | None,
         box_plan: DynamicPlan | None,
+        n_src: int,
     ) -> None:
         """Step 2: Apply network delta data to positions not covered by local shared."""
         assert graph.mem is not None
@@ -524,8 +551,9 @@ class DynamicAssembler(StreamThreadBase):
         assert graph.box is not None
         assert graph.box_ts is not None
 
-        mem_delta_mask = self._build_delta_mask(graph, mem_plan)
-        box_delta_mask = self._build_delta_mask(graph, box_plan)
+        strict_mask = self._strict_assembly_mask(graph, n_src)
+        mem_delta_mask = self._build_delta_mask(graph, mem_plan, strict_mask)
+        box_delta_mask = self._build_delta_mask(graph, box_plan, strict_mask)
 
         if self.use_shm_instead:
             self._fill_from_delta(
@@ -579,7 +607,7 @@ class DynamicAssembler(StreamThreadBase):
         2. Acquires two H2D semaphore slots (one for mem write-back, one for
            box write-back) to prevent the pipeline from over-running the writers.
         3. Calls ``prepare_shared_features`` to fill local data from the store.
-        4. Blocks on ``delta_q`` for the P2P result, then calls
+        4. Blocks on ``delta_queue`` for the P2P result, then calls
            ``apply_delta_features`` to fill remote data.
         5. Records a CUDA event and puts ``(meta, event)`` into ``full_q``.
         """
@@ -600,7 +628,7 @@ class DynamicAssembler(StreamThreadBase):
 
             # ==========================================================
             # OPTIMIZATION: Process local shared memory FIRST
-            # We do this BEFORE waiting on the blocking delta_q
+            # We do this BEFORE waiting on the blocking delta_queue
             # ==========================================================
             assert meta.flat_graph is not None
             assert meta.plan_set is not None
@@ -613,10 +641,11 @@ class DynamicAssembler(StreamThreadBase):
                 graph=meta.flat_graph,
                 mem_plan=meta.plan_set.mem_plan,
                 box_plan=meta.plan_set.box_plan,
+                n_src=meta.n_src,
             )
 
             # Now block and wait for network data
-            delta_tuple = self.delta_q.get(block=True)
+            delta_tuple = self.delta_queue.get(block=True)
             if delta_tuple is None:
                 put_shutdown_sentinel(self.full_q, None)
                 break
@@ -654,6 +683,7 @@ class DynamicAssembler(StreamThreadBase):
                     delta=delta,
                     mem_plan=meta.plan_set.mem_plan,
                     box_plan=meta.plan_set.box_plan,
+                    n_src=meta.n_src,
                 )
 
             # Push to the next queue

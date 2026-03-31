@@ -9,13 +9,17 @@ training framework.  Consists of:
   joint Transformer over (src, pos_dst) and (src, neg_dst) pairs.
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import MultiheadAttention
 
-from frost.datatypes.graph import SeqGraph
+from frost.datatypes.graph import HierGraph
 from frost.models.modules.time_encoder import TimeEncoder
+
+logger = logging.getLogger(__name__)
 
 
 class NeighborCooccurrenceEncoder(nn.Module):
@@ -198,6 +202,8 @@ class DyGFormer(nn.Module):
         dropout: float,
         max_input_sequence_length: int,
         n_neg: int,  # ${n_neg}
+        enable_dummy_edge_features: bool = True,
+        dummy_edge_dim: int | None = None,
     ):
         super().__init__()
         self.ndim = ndim
@@ -208,18 +214,54 @@ class DyGFormer(nn.Module):
         self.patch_size = patch_size
         self.max_input_sequence_length = max_input_sequence_length
         self.n_neg = n_neg
+        self.enable_dummy_edge_features = enable_dummy_edge_features
+        if edim > 0:
+            self.edge_feat_dim = edim
+            self.edge_channel_enabled = True
+            self.uses_dummy_edge_features = False
+        elif self.enable_dummy_edge_features:
+            if dummy_edge_dim is None:
+                raise ValueError(
+                    "dummy_edge_dim must be resolved before constructing DyGFormer "
+                    "when enable_dummy_edge_features=True and edim=0."
+                )
+            if dummy_edge_dim <= 0:
+                raise ValueError(
+                    "dummy_edge_dim must be > 0 when DyGFormer synthesizes edge features."
+                )
+            self.edge_feat_dim = dummy_edge_dim
+            self.edge_channel_enabled = True
+            self.uses_dummy_edge_features = True
+            logger.info(
+                "DyGFormer received edim=0; synthesizing %d-D zero edge features on GPU "
+                "to mirror DyGLib's dummy-feature path.",
+                self.edge_feat_dim,
+            )
+        else:
+            self.edge_feat_dim = 0
+            self.edge_channel_enabled = False
+            self.uses_dummy_edge_features = False
+            logger.info(
+                "DyGFormer received edim=0 with enable_dummy_edge_features=False; "
+                "disabling the dummy edge channel."
+            )
 
         self.time_encoder = TimeEncoder(d_time)
         self.neighbor_co_occurrence_encoder = NeighborCooccurrenceEncoder(C)
 
+        self.node_channel_enabled = ndim > 0
         self.projection_layer = nn.ModuleDict(
             {
-                "node": nn.Linear(patch_size * ndim, C),
-                "edge": nn.Linear(patch_size * edim, C),
                 "time": nn.Linear(patch_size * d_time, C),
                 "neighbor_co_occurrence": nn.Linear(patch_size * C, C),
             }
         )
+        if self.node_channel_enabled:
+            self.projection_layer["node"] = nn.Linear(patch_size * ndim, C)
+        if self.edge_channel_enabled:
+            self.projection_layer["edge"] = nn.Linear(
+                patch_size * self.edge_feat_dim, C
+            )
 
         attn_dim = 4 * C
         # num_channels == 4, including node feat, edge feat, time feat, neighbor co-occurrence feat
@@ -235,12 +277,13 @@ class DyGFormer(nn.Module):
     # Main entry point (FROST interface)
     # ------------------------------------------------------------------
 
-    def forward(self, graph: SeqGraph) -> torch.Tensor:
+    def forward(self, graph: HierGraph) -> torch.Tensor:
         """
-        Returns h of shape [n_root, d_out] where
-          h[0 : n_src]          = src embeddings
-          h[n_src : 2*n_src]    = pos_dst embeddings
-          h[2*n_src :]          = neg_dst embeddings
+        Returns pair-aware embeddings laid out as:
+          h[0 : n_src]                      = pos-pair src embeddings
+          h[n_src : 2*n_src]                = pos dst embeddings
+          h[2*n_src : 2*n_src + n_src*n_neg] = neg-pair src embeddings
+          h[2*n_src + n_src*n_neg :]        = neg dst embeddings
         """
         assert graph.neighbors is not None, "DyGFormer requires 1-hop neighbors"
         assert graph.fanout is not None, "DyGFormer requires fanout information"
@@ -254,7 +297,7 @@ class DyGFormer(nn.Module):
         # seq_nid  : [n_root, K+1]  (root at pos 0, then sampled neighbors)
         # seq_ts   : [n_root, K+1]
         # seq_nfeat: [n_root, K+1, ndim]
-        # seq_efeat: [n_root, K+1, edim]   (zeros at pos 0 — no edge to self)
+        # seq_efeat: [n_root, K+1, edge_feat_dim]
         seq = self._build_sequences(graph, n_root, K)
 
         # Split into three groups ----------------------------------------
@@ -266,28 +309,28 @@ class DyGFormer(nn.Module):
         neg_s = {k: _slice(v, 2 * n_src, n_root) for k, v in seq.items()}
 
         # Pass 1: (src, pos_dst) ----------------------------------------
-        src_emb, pos_dst_emb = self._forward_pair(src_s, pos_s)
+        pos_src_emb, pos_dst_emb = self._forward_pair(src_s, pos_s)
 
         # Pass 2: (src, neg_dst) ----------------------------------------
         # For n_neg > 1 src must be tiled to match neg_dst count.
         n_neg_actual = n_root - 2 * n_src  # = n_src * n_neg
         if n_neg_actual == n_src:
-            _, neg_dst_emb = self._forward_pair(src_s, neg_s)
+            neg_src_emb, neg_dst_emb = self._forward_pair(src_s, neg_s)
         else:
             # tile each src sequence n_neg times along the batch dim
             rep = n_neg_actual // n_src
             src_tiled = {k: v.repeat_interleave(rep, dim=0) for k, v in src_s.items()}
-            _, neg_dst_emb = self._forward_pair(src_tiled, neg_s)
+            neg_src_emb, neg_dst_emb = self._forward_pair(src_tiled, neg_s)
 
-        # Assemble [n_root, d_out] output --------------------------------
-        return torch.cat([src_emb, pos_dst_emb, neg_dst_emb], dim=0)
+        # Assemble pair-aware output for DyGFormer-specific prediction ----
+        return torch.cat([pos_src_emb, pos_dst_emb, neg_src_emb, neg_dst_emb], dim=0)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _build_sequences(
-        self, graph: SeqGraph, n_root: int, K: int
+        self, graph: HierGraph, n_root: int, K: int
     ) -> dict[str, torch.Tensor]:
         """
         Builds truncated, patch-aligned sequences for every root node.
@@ -308,8 +351,20 @@ class DyGFormer(nn.Module):
         keep_len = max(keep_len, self.patch_size)  # at least one patch
         use_K = keep_len - 1  # neighbor slots after root
 
-        ngh_nid = nbr.nid.reshape(n_root, K)[:, :use_K]  # [n_root, use_K]
-        ngh_ts = nbr.ts.reshape(n_root, K)[:, :use_K]
+        # The sampler emits fixed-width recent histories with valid neighbors
+        # right-aligned inside the K slots. DyGLib truncates to the most recent
+        # use_K neighbors first, then left-aligns valid positions after the root.
+        start = K - use_K
+        ngh_nid = nbr.nid.reshape(n_root, K)[:, start:]  # [n_root, use_K]
+        ngh_ts = nbr.ts.reshape(n_root, K)[:, start:]
+        valid_mask = ngh_nid != -1
+
+        ngh_nid = self._left_align_valid_positions(
+            ngh_nid, valid_mask=valid_mask, pad_value=-1
+        )
+        ngh_ts = self._left_align_valid_positions(
+            ngh_ts, valid_mask=valid_mask, pad_value=0
+        )
 
         seq_nid = torch.cat(
             [graph.root_nid.unsqueeze(1), ngh_nid], dim=1
@@ -321,25 +376,37 @@ class DyGFormer(nn.Module):
         # Node features --------------------------------------------------
         if graph.root_nfeat is not None and nbr.nfeat is not None:
             ngh_nfeat = nbr.nfeat.reshape(n_root, K, -1)[
-                :, :use_K, :
+                :, start:, :
             ]  # [n_root, use_K, ndim]
+            ngh_nfeat = self._left_align_valid_positions(
+                ngh_nfeat, valid_mask=valid_mask, pad_value=0
+            )
             seq_nfeat = torch.cat(
                 [graph.root_nfeat.unsqueeze(1), ngh_nfeat], dim=1
             )  # [n_root, keep_len, ndim]
         else:
             seq_nfeat = torch.zeros(n_root, keep_len, self.ndim, device=dev)
 
-        # Edge features (zero at root position — no edge to self) --------
-        if nbr.efeat is not None:
+        # Edge features (zero at root position — no edge to self). When the
+        # dataset has no real edge features, we either synthesize a dummy
+        # channel for DyGLib-style parity or leave the edge channel disabled.
+        if not self.edge_channel_enabled:
+            seq_efeat = torch.empty(n_root, keep_len, 0, device=dev)
+        elif nbr.efeat is not None:
             ngh_efeat = nbr.efeat.reshape(n_root, K, -1)[
-                :, :use_K, :
-            ]  # [n_root, use_K, edim]
-            root_efeat_0 = torch.zeros(n_root, 1, self.edim, device=dev)
+                :, start:, :
+            ]  # [n_root, use_K, edge_feat_dim]
+            ngh_efeat = self._left_align_valid_positions(
+                ngh_efeat, valid_mask=valid_mask, pad_value=0
+            )
+            root_efeat_0 = torch.zeros(n_root, 1, self.edge_feat_dim, device=dev)
             seq_efeat = torch.cat(
                 [root_efeat_0, ngh_efeat], dim=1
-            )  # [n_root, keep_len, edim]
+            )  # [n_root, keep_len, edge_feat_dim]
         else:
-            seq_efeat = torch.zeros(n_root, keep_len, self.edim, device=dev)
+            seq_efeat = torch.zeros(
+                n_root, keep_len, self.edge_feat_dim, device=dev
+            )
 
         # Zero out padding positions (nid == -1) -------------------------
         pad_mask = (seq_nid == -1).unsqueeze(-1)  # [n_root, keep_len, 1]
@@ -351,8 +418,30 @@ class DyGFormer(nn.Module):
             "ts": seq_ts,  # [n_root, keep_len]
             "root_ts": graph.root_ts,  # [n_root]
             "nfeat": seq_nfeat,  # [n_root, keep_len, ndim]
-            "efeat": seq_efeat,  # [n_root, keep_len, edim]
+            "efeat": seq_efeat,  # [n_root, keep_len, edge_feat_dim]
         }
+
+    def _left_align_valid_positions(
+        self,
+        x: torch.Tensor,
+        *,
+        valid_mask: torch.Tensor,
+        pad_value: int | float,
+    ) -> torch.Tensor:
+        """Pack valid neighbor positions to the left within each row."""
+        packed = torch.full_like(x, pad_value)
+        if not valid_mask.any():
+            return packed
+
+        dst_pos = valid_mask.long().cumsum(dim=1) - 1
+        row_idx = torch.arange(x.shape[0], device=x.device).unsqueeze(1)
+        row_idx = row_idx.expand_as(valid_mask)
+
+        if x.ndim == 2:
+            packed[row_idx[valid_mask], dst_pos[valid_mask]] = x[valid_mask]
+        else:
+            packed[row_idx[valid_mask], dst_pos[valid_mask], :] = x[valid_mask]
+        return packed
 
     def _forward_pair(
         self,
@@ -395,7 +484,7 @@ class DyGFormer(nn.Module):
         """
         Build patch embeddings for one group (src or dst).
 
-        seq keys: nid [B,L], ts [B,L], root_ts [B], nfeat [B,L,ndim], efeat [B,L,edim]
+        seq keys: nid [B,L], ts [B,L], root_ts [B], nfeat [B,L,ndim], efeat [B,L,edge_feat_dim]
         co_feat : [B, L, C]
 
         Returns : [B, num_patches, 4*C]
@@ -412,9 +501,16 @@ class DyGFormer(nn.Module):
         time_feat = time_feat.masked_fill((nid == -1).unsqueeze(-1), 0.0)
 
         # Project each channel after patchifying
-        p_node = self.projection_layer["node"](self._to_patches(nfeat))  # [B, P, C]
-        p_edge = self.projection_layer["edge"](self._to_patches(efeat))  # [B, P, C]
         p_time = self.projection_layer["time"](self._to_patches(time_feat))  # [B, P, C]
+        B_p, P_p = p_time.shape[0], p_time.shape[1]
+        if self.node_channel_enabled:
+            p_node = self.projection_layer["node"](self._to_patches(nfeat))  # [B, P, C]
+        else:
+            p_node = p_time.new_zeros(B_p, P_p, self.channel_embedding_dim)
+        if self.edge_channel_enabled:
+            p_edge = self.projection_layer["edge"](self._to_patches(efeat))  # [B, P, C]
+        else:
+            p_edge = p_time.new_zeros(B_p, P_p, self.channel_embedding_dim)
         p_co = self.projection_layer["neighbor_co_occurrence"](
             self._to_patches(co_feat)
         )  # [B, P, C]

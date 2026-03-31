@@ -28,8 +28,9 @@ class AssembledModel(nn.Module):
 
     Chains the following components in order:
       1. Memory updater (optional): updates node memories via RNN/Transformer.
-      2. FlatGraph inflation: converts flat tensor layout to a hierarchical Graph.
-      3. Encoder: computes root-node embeddings from the inflated Graph.
+      2. FlatGraph unflattening: converts flat tensor layout to a hierarchical
+         HierGraph.
+      3. Encoder: computes root-node embeddings from the hierarchical graph.
       4. Header: produces link-prediction logits from the embeddings.
 
     When a memory updater is present, the updated memory and mailbox states are
@@ -98,7 +99,7 @@ class AssembledModel(nn.Module):
         """
         logger.debug(f"Processing meta with meta.batch_idx={meta.mini_batch_idx}")
 
-        # 1. Update memory using the flattened ZipSeqGraph
+        # 1. Update memory using the flattened FlatGraph
 
         n_src = meta.n_src
         fanout = meta.fanout if meta.fanout is not None else []
@@ -108,8 +109,12 @@ class AssembledModel(nn.Module):
             assert mem_task_q is not None, "mem_task_q required when mem_updater is set"
             assert box_task_q is not None, "box_task_q required when mem_updater is set"
 
-            # Run unified memory update on the flattened ZipSeqGraph
-            meta.flat_graph = self.mem_updater(meta.flat_graph, meta.n_src * 2)
+            # Run unified memory update on the flattened FlatGraph
+            meta.flat_graph = self.mem_updater(
+                meta.flat_graph,
+                meta.n_src * 2,
+                n_root_nodes=meta.n_src * (2 + meta.n_neg),
+            )
             assert meta.flat_graph is not None
             assert meta.flat_graph.detached_mem is not None
             assert meta.flat_graph.detached_ts is not None
@@ -118,7 +123,7 @@ class AssembledModel(nn.Module):
             meta.graph = meta.flat_graph.unflatten(
                 n_src=n_src,
                 fanout=fanout,
-                n_neg=self.n_neg,
+                n_neg=meta.n_neg,
                 sample_4_neg=self.sample_4_neg,
             )
             # Retrieve detached states for p2p sync
@@ -171,11 +176,11 @@ class AssembledModel(nn.Module):
             meta.graph = meta.flat_graph.unflatten(
                 n_src=n_src,
                 fanout=fanout,
-                n_neg=self.n_neg,
+                n_neg=meta.n_neg,
                 sample_4_neg=self.sample_4_neg,
             )
 
-        # 3. Pass the hierarchical SeqGraph to the GNN
+        # 3. Pass the hierarchical HierGraph to the GNN
         h = self.encoder(graph=meta.graph)
 
         # 4. Predict edges

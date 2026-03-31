@@ -24,8 +24,11 @@ void bind_samplers(nb::module_& m, const std::string& suffix) {
 
     // 2. 绑定带有后缀的 SeqSampler 并注册它的所有方法
     nb::class_<S_Seq>(m, ("SeqSampler_" + suffix).c_str())
-        .def(nb::init<const TGraph&, const std::string&, std::optional<int>>(),
-             nb::arg("graph"), nb::arg("sample_neighbor_strategy") = "recent", nb::arg("seed") = nb::none())
+        .def(nb::init<const TGraph&, const std::string&, std::optional<int>, double>(),
+             nb::arg("graph"),
+             nb::arg("sample_neighbor_strategy") = "recent",
+             nb::arg("seed") = nb::none(),
+             nb::arg("time_scaling_factor") = 0.0)
         .def("get_all_first_hop_neighbors", &S_Seq::get_all_first_hop_neighbors)
         .def("get_historical_neighbors", &S_Seq::get_historical_neighbors)
         .def("reset_random_state", &S_Seq::reset_random_state);

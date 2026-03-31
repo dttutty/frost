@@ -11,6 +11,6 @@ MetaWithEvent: TypeAlias = tuple[Meta, CudaEvent]
 DeltaPayload: TypeAlias = tuple[P2PTask | None, P2PTask | None, list[Any]]
 
 ReceivedQ: TypeAlias = Queue[Meta | None | Literal["end_of_epoch"]]
-DeltaQ: TypeAlias = Queue[DeltaPayload | Literal["nothing"] | None]
+DeltaQueue: TypeAlias = Queue[DeltaPayload | Literal["nothing"] | None]
 H2DOutQ: TypeAlias = Queue[MetaWithEvent | None | Literal["end_of_epoch"]]
 AssembledQ: TypeAlias = Queue[MetaWithEvent | None | Literal["end_of_epoch"]]

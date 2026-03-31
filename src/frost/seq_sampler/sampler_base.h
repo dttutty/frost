@@ -1,6 +1,8 @@
 #pragma once
 #include "sampler_common.h"
 #include <algorithm>
+#include <cmath>
+#include <vector>
 
 
 // Base class containing common pointers and binary search logic
@@ -16,6 +18,7 @@ protected:
     template<typename RNG>
     void perform_sampling(ID_T start, ID_T end, int n_ngh,
                           const std::string& strategy, RNG& rng,
+                          double time_scaling_factor,
                           ID_T* out_n, ID_T* out_e, TIME_T* out_t) const {
         
         size_t eligible = (start <= end) ? (end - start + 1) : 0;
@@ -33,7 +36,7 @@ protected:
                 out_t[pad_offset + k] = edge_ts[copy_start + k];
             }
         } 
-        else { // uniform
+        else if (strategy == "uniform") {
             std::vector<size_t> sampled_idx(n_ngh);
             for (int k = 0; k < n_ngh; ++k) {
                 sampled_idx[k] = start + (rng() % eligible);
@@ -48,6 +51,59 @@ protected:
                 out_e[k] = edge_ids[sampled_idx[k]];
                 out_t[k] = edge_ts[sampled_idx[k]];
             }
+        }
+        else if (strategy == "time_interval_aware") {
+            std::vector<double> logits(eligible, -1e10);
+            const double latest_time = static_cast<double>(edge_ts[end]);
+            double cumulative = 0.0;
+
+            for (size_t rel_idx = 0; rel_idx < eligible; ++rel_idx) {
+                const size_t edge_idx = static_cast<size_t>(start) + rel_idx;
+                const double delta =
+                    static_cast<double>(edge_ts[edge_idx]) - latest_time;
+                const double exp_time =
+                    std::exp(time_scaling_factor * delta);
+                cumulative += exp_time;
+
+                if (std::isfinite(exp_time) && std::isfinite(cumulative) && cumulative > 0.0) {
+                    logits[rel_idx] = exp_time / cumulative;
+                }
+            }
+
+            const double max_logit =
+                *std::max_element(logits.begin(), logits.end());
+            std::vector<double> weights(eligible, 1.0);
+            double weight_sum = 0.0;
+
+            for (size_t rel_idx = 0; rel_idx < eligible; ++rel_idx) {
+                const double shifted = logits[rel_idx] - max_logit;
+                const double weight = std::exp(shifted);
+                weights[rel_idx] = std::isfinite(weight) ? weight : 0.0;
+                weight_sum += weights[rel_idx];
+            }
+            if (!(weight_sum > 0.0)) {
+                std::fill(weights.begin(), weights.end(), 1.0);
+            }
+
+            std::discrete_distribution<size_t> distribution(
+                weights.begin(), weights.end()
+            );
+            std::vector<size_t> sampled_idx(n_ngh);
+            for (int k = 0; k < n_ngh; ++k) {
+                sampled_idx[k] = static_cast<size_t>(start) + distribution(rng);
+            }
+
+            std::sort(sampled_idx.begin(), sampled_idx.end(), [&](size_t a, size_t b) {
+                return edge_ts[a] < edge_ts[b];
+            });
+
+            for (int k = 0; k < n_ngh; ++k) {
+                out_n[k] = indices[sampled_idx[k]];
+                out_e[k] = edge_ids[sampled_idx[k]];
+                out_t[k] = edge_ts[sampled_idx[k]];
+            }
+        } else {
+            throw std::invalid_argument("Unknown sampling strategy: " + strategy);
         }
     }
 

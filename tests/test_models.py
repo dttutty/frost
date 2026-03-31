@@ -2,7 +2,13 @@
 
 import torch
 
-from frost.models.header import LinkPredictor, NodeClassificationHeader
+from frost.datatypes.graph import HierGraph, NeighborOnHop
+from frost.models.encoder.dygformer import DyGFormer
+from frost.models.header import (
+    DyGFormerLinkPredictor,
+    LinkPredictor,
+    NodeClassificationHeader,
+)
 from frost.models.modules.time_encoder import TimeEncoder
 
 
@@ -57,6 +63,27 @@ class TestNodeClassificationHeader:
         assert x.grad is not None
 
 
+class TestDyGFormerLinkPredictor:
+    def test_output_shape(self):
+        d_in, n_src, n_neg = 32, 5, 2
+        pred = DyGFormerLinkPredictor(d_in=d_in, n_neg=n_neg)
+        h = torch.randn(2 * n_src * (1 + n_neg), d_in)
+        out = pred(h)
+        assert out.shape == (n_src * (1 + n_neg), 1)
+
+    def test_negative_src_segment_affects_logits(self):
+        d_in, n_src, n_neg = 16, 3, 2
+        pred = DyGFormerLinkPredictor(d_in=d_in, n_neg=n_neg)
+        h = torch.randn(2 * n_src * (1 + n_neg), d_in, requires_grad=True)
+        out = pred(h)
+        out.sum().backward()
+
+        neg_src_lo = 2 * n_src
+        neg_src_hi = neg_src_lo + n_src * n_neg
+        assert h.grad is not None
+        assert torch.count_nonzero(h.grad[neg_src_lo:neg_src_hi]).item() > 0
+
+
 class TestTimeEncoder:
     def test_output_shape_1d(self):
         enc = TimeEncoder(dim=128)
@@ -98,3 +125,115 @@ class TestTimeEncoder:
         out = enc(t)
         out.sum().backward()
         assert t.grad is not None
+
+
+class TestDyGFormer:
+    def test_build_sequences_left_aligns_recent_neighbors(self):
+        model = DyGFormer(
+            ndim=1,
+            edim=0,
+            d_time=4,
+            d_out=8,
+            channel_embedding_dim=2,
+            patch_size=2,
+            transformer_layers=1,
+            num_heads=1,
+            dropout=0.0,
+            max_input_sequence_length=4,
+            n_neg=1,
+            enable_dummy_edge_features=False,
+        )
+
+        graph = HierGraph(
+            root_nid=torch.tensor([100, 200], dtype=torch.int64),
+            root_ts=torch.tensor([10, 20], dtype=torch.int64),
+            root_nfeat=torch.tensor([[1000.0], [2000.0]]),
+            root_mem=None,
+            root_mem_ts=None,
+            root_box=None,
+            root_box_ts=None,
+            neighbors=[
+                NeighborOnHop(
+                    nid=torch.tensor(
+                        [-1, -1, -1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.int64
+                    ),
+                    eid=torch.full((10,), -1, dtype=torch.int64),
+                    ts=torch.tensor(
+                        [0, 0, 0, 8, 9, 14, 15, 16, 17, 18], dtype=torch.int64
+                    ),
+                    nfeat=torch.tensor(
+                        [[0.0], [0.0], [0.0], [12.0], [13.0], [14.0], [15.0], [16.0], [17.0], [18.0]]
+                    ),
+                    efeat=None,
+                    mem=None,
+                    mem_ts=None,
+                    box=None,
+                    box_ts=None,
+                )
+            ],
+            fanout=[5],
+        )
+
+        seq = model._build_sequences(graph, n_root=2, K=5)
+
+        assert torch.equal(
+            seq["nid"],
+            torch.tensor([[100, 2, 3, -1], [200, 6, 7, 8]], dtype=torch.int64),
+        )
+        assert torch.equal(
+            seq["ts"],
+            torch.tensor([[10, 8, 9, 0], [20, 16, 17, 18]], dtype=torch.int64),
+        )
+        assert torch.equal(
+            seq["nfeat"].squeeze(-1),
+            torch.tensor([[1000.0, 12.0, 13.0, 0.0], [2000.0, 16.0, 17.0, 18.0]]),
+        )
+
+    def test_forward_returns_pair_specific_layout(self):
+        model = DyGFormer(
+            ndim=1,
+            edim=0,
+            d_time=4,
+            d_out=8,
+            channel_embedding_dim=2,
+            patch_size=2,
+            transformer_layers=1,
+            num_heads=1,
+            dropout=0.0,
+            max_input_sequence_length=4,
+            n_neg=1,
+            enable_dummy_edge_features=False,
+        )
+        predictor = DyGFormerLinkPredictor(d_in=8, n_neg=1)
+
+        graph = HierGraph(
+            root_nid=torch.tensor([100, 200, 300], dtype=torch.int64),
+            root_ts=torch.tensor([10, 10, 10], dtype=torch.int64),
+            root_nfeat=torch.tensor([[1.0], [2.0], [3.0]]),
+            root_mem=None,
+            root_mem_ts=None,
+            root_box=None,
+            root_box_ts=None,
+            neighbors=[
+                NeighborOnHop(
+                    nid=torch.tensor([-1, 11, -1, 21, -1, 31], dtype=torch.int64),
+                    eid=torch.full((6,), -1, dtype=torch.int64),
+                    ts=torch.tensor([0, 9, 0, 8, 0, 7], dtype=torch.int64),
+                    nfeat=torch.tensor(
+                        [[0.0], [11.0], [0.0], [21.0], [0.0], [31.0]]
+                    ),
+                    efeat=None,
+                    mem=None,
+                    mem_ts=None,
+                    box=None,
+                    box_ts=None,
+                )
+            ],
+            fanout=[2],
+        )
+
+        h = model(graph)
+        logits = predictor(h)
+
+        assert h.shape == (4, 8)
+        assert logits.shape == (2, 1)

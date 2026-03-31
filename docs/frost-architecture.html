@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FROST — codebase architecture</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #1a222d;
+      --text: #e7eaef;
+      --muted: #8b98a5;
+      --accent: #5eb3e0;
+      --border: #2d3845;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 2rem clamp(1.25rem, 4vw, 3rem) 3rem;
+      font-family: "Source Serif 4", Georgia, serif;
+      font-size: 1.05rem;
+      line-height: 1.6;
+      color: var(--text);
+      background: var(--bg);
+      background-image:
+        radial-gradient(ellipse 80% 50% at 50% -20%, rgba(94, 179, 224, 0.12), transparent),
+        radial-gradient(ellipse 60% 40% at 100% 100%, rgba(94, 179, 224, 0.06), transparent);
+    }
+    h1 {
+      font-family: "DM Sans", system-ui, sans-serif;
+      font-weight: 700;
+      font-size: clamp(1.75rem, 4vw, 2.25rem);
+      letter-spacing: -0.02em;
+      margin: 0 0 0.35em;
+    }
+    .lede {
+      color: var(--muted);
+      font-size: 1.05rem;
+      max-width: 52ch;
+      margin-bottom: 2.5rem;
+    }
+    h2 {
+      font-family: "DM Sans", system-ui, sans-serif;
+      font-weight: 600;
+      font-size: 1.15rem;
+      margin: 2.25rem 0 1rem;
+      color: var(--accent);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.35rem;
+    }
+    section.card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem 1rem 1.5rem;
+      margin-bottom: 1.5rem;
+      overflow-x: auto;
+    }
+    .mermaid {
+      display: flex;
+      justify-content: center;
+      min-height: 120px;
+    }
+    footer {
+      margin-top: 2.5rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+      font-family: "DM Sans", system-ui, sans-serif;
+    }
+    footer code {
+      font-size: 0.9em;
+      background: var(--surface);
+      padding: 0.15em 0.4em;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+  <h1>FROST codebase architecture</h1>
+  <p class="lede">
+    Distributed temporal GNN training: process layout, batch pipeline from host sampling to worker forward pass,
+    and how <code style="font-size:0.95em">src/frost</code> modules group responsibilities.
+  </p>
+
+  <h2>Process topology</h2>
+  <section class="card">
+    <div class="mermaid">
+flowchart LR
+  subgraph torchrun["torchrun (nproc = n_gpus + 1)"]
+    W0["Worker rank 0"]
+    W1["Worker rank 1"]
+    Wn["Worker rank n-1"]
+    H["Host rank world_size-1"]
+  end
+  W0 & W1 & Wn <-->|"dist / P2P"| H
+    </div>
+  </section>
+
+  <h2>End-to-end data path</h2>
+  <section class="card">
+    <div class="mermaid">
+flowchart TB
+  subgraph host["Host process"]
+    S["Neighbor sampler → RingBuf"]
+    A["Analyzer → Access"]
+    MB["MetaBatcher"]
+    P["Planner (nfeat / mem / box)"]
+    SC["Scatter"]
+    S --> A --> MB --> P --> SC
+  end
+  subgraph worker["Worker process"]
+    R["Receiver"]
+    H2D["H2D"]
+    ASM["StaticAssembler / DynamicAssembler"]
+    M["AssembledModel"]
+    R --> H2D --> ASM --> M
+  end
+  SC -->|"scatter_object_list"| R
+  subgraph model["AssembledModel.forward"]
+    MU["mem_updater (optional)"]
+    IN["flat_graph.inflate"]
+    EN["encoder"]
+    PO["postman (APAN)"]
+    HD["header / predictor"]
+    MU --> IN --> EN --> PO --> HD
+  end
+  M --> model
+    </div>
+  </section>
+
+  <h2><code>src/frost</code> package map</h2>
+  <section class="card">
+    <div class="mermaid">
+flowchart TB
+  subgraph entry["Entry"]
+    run["run.py → frost.launcher.launch"]
+  end
+  subgraph rt["runtime/"]
+    HST["host/ — Host, MetaBatcher, Planner, Scatter, analyzers"]
+    WRK["worker/ — Worker, Receiver, H2D, assemblers, postman"]
+    P2P["worker/p2p_syncer/ — Mem/Box handlers, writers"]
+  end
+  subgraph mdl["models/"]
+    AM["_assembled_model.py"]
+    ENC["encoder/ — tgn, tgat, jodie, apan, dygformer, ..."]
+    MU2["mem_updater.py"]
+    HDR["header.py"]
+  end
+  subgraph infra["Data & sampling"]
+    SHM["shm/ — ring_buf, mem_mgr, dataset_mgr"]
+    SMP["sampling/ — ngh_sampler, neg_sampler"]
+    SEQ["seq_sampler/ — C++ extension"]
+    DT["datatypes/ — Meta, Graph, Access, Env, ..."]
+    PR["protocols/ — interfaces"]
+  end
+  entry --> rt
+  rt --> mdl
+  rt --> infra
+  mdl --> DT
+  SMP --> SEQ
+    </div>
+  </section>
+
+  <footer>
+    Diagrams render with Mermaid from the CDN below. Open this file in a browser with network access, or host it locally.
+    Path: <code>docs/frost-architecture.html</code>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "dark",
+      themeVariables: {
+        primaryColor: "#243447",
+        primaryTextColor: "#e7eaef",
+        primaryBorderColor: "#5eb3e0",
+        lineColor: "#8b98a5",
+        secondaryColor: "#1a222d",
+        tertiaryColor: "#0f1419",
+        fontFamily: '"DM Sans", system-ui, sans-serif',
+      },
+      flowchart: { curve: "basis", padding: 12 },
+    });
+  </script>
+</body>
+</html>
