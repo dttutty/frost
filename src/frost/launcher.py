@@ -69,6 +69,25 @@ def _set_nested_attr(root: object, path: tuple[str, ...], value: Any) -> None:
     setattr(target, path[-1], value)
 
 
+def _debug_force_deterministic_algorithms() -> bool:
+    flag = os.getenv("FROST_DEBUG_DETERMINISTIC")
+    if flag is None:
+        return False
+    return flag.lower() in {"1", "true", "yes", "on"}
+
+
+def _stable_mode_enabled(cfg: DictConfig) -> bool:
+    return bool(cfg.get("stable_mode", False))
+
+
+def _debug_load_model_path() -> str | None:
+    raw = os.getenv("FROST_DEBUG_LOAD_MODEL_PATH")
+    if raw is None:
+        return None
+    path = raw.strip()
+    return path or None
+
+
 def _resolve_dygformer_dummy_edge_dim(
     dataset: str,
     requested_dim: object,
@@ -171,6 +190,21 @@ def _resolve_time_scaling_factor(configured_factor: object | None) -> float:
     return resolved
 
 
+def _resolve_dynamic_state_fetch_mode(
+    cfg: DictConfig,
+    *,
+    has_mem: bool,
+    fanout: list[int],
+) -> bool:
+    """Return whether workers should bypass P2P delta and read remote state from SHM.
+
+    This remains an explicit debug mode only. Root-only memory models such as
+    JODIE still rely on Frost's normal planner/P2P path by default.
+    """
+    del has_mem, fanout
+    return bool(cfg.get("__debug_use_shm_instead", False))
+
+
 def launch(cfg: DictConfig):
     """Initialize distributed training and launch Host or Worker processes.
 
@@ -203,7 +237,29 @@ def launch(cfg: DictConfig):
     )
     _set_nested_attr(torch.backends, ("cudnn", "rnn", "fp32_precision"), fp32_precision)
 
+    if _debug_force_deterministic_algorithms():
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True)
+        if _is_host:
+            logger.info("Enabled debug deterministic algorithms mode.")
+    elif _stable_mode_enabled(cfg):
+        torch.backends.cudnn.benchmark = False
+        if _is_host:
+            logger.info(
+                "Enabled stable mode. CUDA_DEVICE_MAX_CONNECTIONS=%s, "
+                "CUBLAS_WORKSPACE_CONFIG=%s",
+                os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS"),
+                os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+            )
+
     env: Env = Env.initial()
+    per_gpu_batch_size = cfg.macro_batch_size // env.n_gpu
+    if cfg.macro_batch_size % env.n_gpu != 0:
+        raise ValueError(
+            f"macro_batch_size ({cfg.macro_batch_size}) must be divisible by "
+            f"n_gpu ({env.n_gpu})."
+        )
     if cfg.seed is not None:
         set_seed(cfg.seed)
     output_dir = HydraConfig.get().runtime.output_dir
@@ -214,6 +270,10 @@ def launch(cfg: DictConfig):
         f"run_{uuid4().hex}" if env.is_host else None, src=env.host_rank
     )
     if env.is_host:
+        logger.info(
+            "macro_batch_size=%d, n_gpu=%d -> per_gpu_batch_size=%d",
+            cfg.macro_batch_size, env.n_gpu, per_gpu_batch_size,
+        )
         logger.info("Using shared-memory run_id=%s", run_id)
     precision = resolve_precision(cfg)
     dataset_mgr = DatasetManager(
@@ -284,10 +344,16 @@ def launch(cfg: DictConfig):
     time_scaling_factor = _resolve_time_scaling_factor(
         None if is_apan else cfg.ngh_sampler.get("time_scaling_factor", 0.0)
     )
+    tgl_sampler_parity = bool(cfg.ngh_sampler.get("tgl_sampler_parity", False))
 
     postman_enabled = mail_recipients > 0
     no_memory_queue_size = _resolve_no_memory_queue_size(
         cfg.get("no_memory_queue_size")
+    )
+    use_shm_instead = _resolve_dynamic_state_fetch_mode(
+        cfg,
+        has_mem=has_mem,
+        fanout=fanout,
     )
 
     if len(fanout) > 1 and has_mem:
@@ -322,7 +388,7 @@ def launch(cfg: DictConfig):
         edtype=idx_dtype,
         tsdtype=precision.time_preprocessing_torch,
         fanout=fanout,
-        max_batch_size=cfg.batch_size,
+        max_batch_size=per_gpu_batch_size,
         n_neg=max_n_neg,
         sample_4_neg=sample_4_neg,
         max_size=cfg.ring_buf_size,
@@ -398,6 +464,7 @@ def launch(cfg: DictConfig):
                 strategy=ngh_sampler_strategy,
                 seed=cfg.seed,
                 time_scaling_factor=time_scaling_factor,
+                tgl_sampler_parity=tgl_sampler_parity,
             )
         else:
             ngh_sampler = MultiHopNghSampler(
@@ -409,6 +476,7 @@ def launch(cfg: DictConfig):
                 seed=cfg.seed,
                 time_scaling_factor=time_scaling_factor,
                 sample_4_neg=True,
+                tgl_sampler_parity=tgl_sampler_parity,
             )
         planner_cfg = cfg.get("access_analyzer")
         if planner_cfg is None:
@@ -435,7 +503,7 @@ def launch(cfg: DictConfig):
                 env=env,
                 start_time=start,
                 planner=planner,
-                batch_size=cfg.batch_size,
+                batch_size=per_gpu_batch_size,
                 neg_sampler_train=neg_sampler_train,
                 neg_sampler_eval=neg_sampler_eval,
                 ngh_sampler=ngh_sampler,
@@ -447,6 +515,17 @@ def launch(cfg: DictConfig):
                 show_tqdm=bool(cfg.get("tqdm", False)),
                 no_memory_queue_size=no_memory_queue_size,
                 output_dir=output_dir,
+                reset_eval_neg_sampler_each_epoch=bool(
+                    cfg.get("reset_eval_neg_sampler_each_epoch", False)
+                ),
+                share_neg_sampler_across_splits=bool(
+                    cfg.get("share_neg_sampler_across_splits", False)
+                ),
+                normalize_event_time=bool(cfg.get("normalize_event_time", False)),
+                persist_all_updates_to_cpu=bool(
+                    cfg.get("persist_all_updates_to_cpu", False)
+                )
+                or use_shm_instead,
             )
             host.run()
             host_failed = False
@@ -480,6 +559,7 @@ def launch(cfg: DictConfig):
         assert isinstance(encoder_cfg, dict)
         encoder_cfg.pop("out_dim", None)
         encoder_cfg.pop("fanout", None)
+        encoder_cfg.pop("ngh_sampler_strategy", None)
         if (
             str(cfg.encoder._target_) == DYGFORMER_ENCODER_TARGET
             and cfg.edim == 0
@@ -522,6 +602,12 @@ def launch(cfg: DictConfig):
         loss_fn: torch.nn.Module = instantiate(cfg.loss_fn)
         worker: Worker | None = None
         worker_failed = True
+        if use_shm_instead and not bool(cfg.get("__debug_use_shm_instead", False)):
+            logger.info(
+                "Auto-enabled shared-memory dynamic-state fetch path for root-only memory model "
+                "encoder=%s.",
+                str(cfg.encoder._target_),
+            )
         try:
             worker = Worker(
                 n_neg=max_n_neg,
@@ -541,11 +627,19 @@ def launch(cfg: DictConfig):
                 optimizer=cfg.optimizer,
                 lr=cfg.lr,
                 mail_combine=mail_combine,
-                use_shm_instead=bool(cfg.get("__debug_use_shm_instead", False)),
+                use_shm_instead=use_shm_instead,
                 compile_model=cfg.get("compile", True),
                 amp=bool(cfg.get("amp", False)),
                 no_memory_queue_size=no_memory_queue_size,
             )
+            debug_load_model_path = _debug_load_model_path()
+            if debug_load_model_path is not None:
+                if env.is_host:
+                    logger.info(
+                        "Loading debug checkpoint before worker.run(): %s",
+                        debug_load_model_path,
+                    )
+                worker.load_model(debug_load_model_path)
             worker.run()
             worker_failed = False
         except BaseException:

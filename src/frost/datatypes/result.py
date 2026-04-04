@@ -16,6 +16,14 @@ class Result:
         val_loss: Mean validation loss over the epoch.
         val_auc: Area-under-ROC-curve on the validation split.
         val_ap: Average precision on the validation split.
+        val_auc_batch_mean: TGL-style validation AUC computed as the mean of
+            per-batch AUCs across the split.
+        val_ap_batch_mean: TGL-style validation AP computed as the mean of
+            per-batch APs across the split.
+        test_auc_batch_mean: TGL-style test AUC computed as the mean of
+            per-batch AUCs across the split.
+        test_ap_batch_mean: TGL-style test AP computed as the mean of
+            per-batch APs across the split.
     """
 
     test_auc: float
@@ -26,3 +34,7 @@ class Result:
     val_ap: float
     val_mrr: float = 0.0
     test_mrr: float = 0.0
+    val_auc_batch_mean: float = 0.0
+    val_ap_batch_mean: float = 0.0
+    test_auc_batch_mean: float = 0.0
+    test_ap_batch_mean: float = 0.0

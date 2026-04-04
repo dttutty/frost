@@ -100,7 +100,7 @@ uv run torchrun --nproc_per_node=3 run.py <hydra overrides...>
 
 ## Notes
 
-- `batch_size` is local per worker, not global.
+- `macro_batch_size` is the total batch size across all GPUs. The launcher auto-computes `per_gpu_batch_size = macro_batch_size // n_gpu`.
 - `ring_buf_size` is pipeline depth per worker, not dataset size or total batch count.
 - Per-rank logs are written under Hydra outputs such as `outputs/<date>/<time>/rank_*.log`.
 - GPU topology is inferred from `CUDA_VISIBLE_DEVICES` and `nvidia-smi topo -m` when available.
@@ -110,4 +110,4 @@ uv run torchrun --nproc_per_node=3 run.py <hydra overrides...>
 - If `CUDA_VISIBLE_DEVICES=0,1`, then `--nproc_per_node` should be `3`, not `2`.
 - If distributed training fails very early, check whether external NCCL environment variables are conflicting with the intended runtime setup.
 - If throughput drops unexpectedly, confirm that `CUDA_LAUNCH_BLOCKING` or verbose debug flags are not still enabled.
-- If CAWN is much slower than TGN, TGAT, or GraphMixer, reduce `batch_size` first, then `encoder.fanout`.
+- If CAWN is much slower than TGN, TGAT, or GraphMixer, reduce `macro_batch_size` first, then `encoder.fanout`.

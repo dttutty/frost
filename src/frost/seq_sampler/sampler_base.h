@@ -2,6 +2,9 @@
 #include "sampler_common.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cctype>
+#include <string>
 #include <vector>
 
 
@@ -25,7 +28,27 @@ protected:
         if (eligible == 0) return;
 
         if (strategy == "recent") {
+            const auto is_env_truthy = [](const char* value) {
+                if (value == nullptr) {
+                    return false;
+                }
+                std::string normalized(value);
+                std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+            };
+
             size_t take = std::min<size_t>(eligible, static_cast<size_t>(n_ngh));
+            const bool mimic_tgl_recent_off_by_one = is_env_truthy(
+                std::getenv("FROST_DEBUG_TGL_RECENT_OFF_BY_ONE")
+            );
+            if (mimic_tgl_recent_off_by_one && eligible <= static_cast<size_t>(n_ngh)) {
+                if (eligible <= 1) {
+                    return;
+                }
+                take = eligible - 1;
+            }
+
             size_t copy_start = end - take + 1;
             // Calculate padding: if we take 5 neighbors but need 20, we start at index 15
             size_t pad_offset = n_ngh - take;

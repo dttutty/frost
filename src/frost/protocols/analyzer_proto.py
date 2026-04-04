@@ -25,6 +25,7 @@ class AnalyzerProto(Protocol):
         stop_ev: threading.Event,
         handle_stale: bool,
         output_dir: str | None,
+        persist_all_updates_to_cpu: bool = False,
     ) -> ThreadBase | None: ...
 
     def get_mail_plan_inputs(

@@ -18,6 +18,7 @@ def _make_meta(flat_graph: FlatGraph) -> Meta:
         mini_batch_idx=0,
         flat_graph=flat_graph,
         buf_len=flat_graph.nid.numel(),
+        n_neg=1,
         fanout=[1],
     )
 

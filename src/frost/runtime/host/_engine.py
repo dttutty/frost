@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 import time
 from queue import Queue as Q
@@ -31,6 +32,20 @@ from frost.runtime.host._batch_balance import make_balance_plan
 from frost.neg_sampler import PrecomputedNegSampler
 
 logger = logging.getLogger(__name__)
+
+
+def _debug_tgl_parity_metrics() -> bool:
+    flag = os.getenv("FROST_DEBUG_TGL_PARITY_METRICS")
+    if flag is None:
+        return False
+    return flag.lower() in {"1", "true", "yes", "on"}
+
+
+def _debug_reset_train_sampler_each_epoch() -> bool:
+    flag = os.getenv("FROST_DEBUG_RESET_TRAIN_SAMPLER_EACH_EPOCH")
+    if flag is None:
+        return False
+    return flag.lower() in {"1", "true", "yes", "on"}
 
 
 def _disable_tqdm_monitor_thread() -> None:
@@ -113,6 +128,10 @@ class Host:
         show_tqdm: bool = False,
         no_memory_queue_size: int = 4,
         output_dir: str | None = None,
+        reset_eval_neg_sampler_each_epoch: bool = False,
+        share_neg_sampler_across_splits: bool = False,
+        normalize_event_time: bool = False,
+        persist_all_updates_to_cpu: bool = False,
     ) -> None:
         self.neg_sampler_train = neg_sampler_train
         self.neg_sampler_eval = neg_sampler_eval
@@ -127,6 +146,9 @@ class Host:
         self.analyzer = planner
         self.show_tqdm = show_tqdm
         self.time_dtype = time_dtype
+        self.reset_eval_neg_sampler_each_epoch = reset_eval_neg_sampler_each_epoch
+        self.share_neg_sampler_across_splits = share_neg_sampler_across_splits
+        self.normalize_event_time = normalize_event_time
         if no_memory_queue_size < 1:
             raise ValueError("no_memory_queue_size must be >= 1.")
         self.no_memory_queue_size = no_memory_queue_size
@@ -150,7 +172,13 @@ class Host:
         self.last_epoch_result: Result | None = None
         self._shutdown_done = False
 
-        self._init_pipeline(env, gpu_topo, handle_stale, output_dir)
+        self._init_pipeline(
+            env,
+            gpu_topo,
+            handle_stale,
+            output_dir,
+            persist_all_updates_to_cpu,
+        )
         self._init_dataset(df)
 
     def _init_pipeline(
@@ -159,6 +187,7 @@ class Host:
         gpu_topo: list,
         handle_stale: bool,
         output_dir: str | None,
+        persist_all_updates_to_cpu: bool,
     ) -> None:
         """Fixed linear pipeline: main thread → [PlanRouter.dispatch() →] scatter_q → Scatter.
 
@@ -189,6 +218,7 @@ class Host:
                 stop_ev=self.stop_ev,
                 handle_stale=handle_stale,
                 output_dir=output_dir,
+                persist_all_updates_to_cpu=persist_all_updates_to_cpu,
             )
 
         self.scatter = Scatter(
@@ -215,8 +245,11 @@ class Host:
         # preprocess dataframe
         df["src"] = df["src"].astype(np.int64)
         df["dst"] = df["dst"].astype(np.int64)
-        t_min = df["time"].min()
-        df["time"] = (df["time"] - t_min).astype(np.int64)
+        if self.normalize_event_time:
+            t_min = df["time"].min()
+            df["time"] = (df["time"] - t_min).astype(np.int64)
+        else:
+            df["time"] = df["time"].astype(np.int64)
 
         train_edge_end = df[df["default_split"].gt(0)].index[0]
         val_edge_end = df[df["default_split"].gt(1)].index[0]
@@ -247,6 +280,14 @@ class Host:
             f"Test AUC: {res.test_auc:.4f} | "
             f"Test AP: {res.test_ap:.4f}"
         )
+        if _debug_tgl_parity_metrics():
+            print(
+                f"[Epoch {self.curr_epoch}][TGL-style batch mean] "
+                f"Val AP: {res.val_ap_batch_mean:.4f} | "
+                f"Val AUC: {res.val_auc_batch_mean:.4f} | "
+                f"Test AUC: {res.test_auc_batch_mean:.4f} | "
+                f"Test AP: {res.test_ap_batch_mean:.4f}"
+            )
 
     def early_stop_check(self, cur_epoch: int) -> bool:
         """
@@ -338,6 +379,16 @@ class Host:
         if len(df) == 0:
             return
 
+        if split == "train":
+            if _debug_reset_train_sampler_each_epoch():
+                reset = getattr(self.neg_sampler_train, "reset", None)
+                if callable(reset):
+                    reset()
+        elif not self.share_neg_sampler_across_splits:
+            reset = getattr(self.neg_sampler_eval, "reset", None)
+            if self.reset_eval_neg_sampler_each_epoch and callable(reset):
+                reset()
+
         # Use make_balance_plan for balanced GPU distribution
         df_out, step_id, gpu_id = make_balance_plan(
             df, org_batch_size=self.batch_size, n_gpu=self.n_gpu
@@ -428,8 +479,13 @@ class Host:
         eid = torch.from_numpy(edges["eid"].to_numpy(copy=True)).to(torch.long)
         # show ts content for debug
 
-        # pick sampler based on split (val and test share eval sampler)
-        neg_sampler = self.neg_sampler_train if split == "train" else self.neg_sampler_eval
+        # TGL parity mode shares a single RNG stream across train/val/test negatives.
+        # Otherwise val/test use the dedicated eval sampler.
+        neg_sampler = (
+            self.neg_sampler_train
+            if split == "train" or self.share_neg_sampler_across_splits
+            else self.neg_sampler_eval
+        )
         # Historical / inductive samplers need per-batch context to determine
         # which edges are "current" vs "historical".  Feed it if supported.
         if callable(getattr(neg_sampler, "set_batch_context", None)):

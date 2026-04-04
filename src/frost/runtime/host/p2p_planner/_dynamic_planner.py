@@ -17,11 +17,25 @@ logger = logging.getLogger(__name__)
 _PLAN_DUMP_LOCK = threading.Lock()
 
 
+def _debug_force_cpu_freshness_single_worker() -> bool:
+    flag = os.getenv("FROST_DEBUG_CPU_FRESHNESS_SINGLE_WORKER")
+    if flag is None:
+        return False
+    return flag.lower() in {"1", "true", "yes", "on"}
+
+
 def _should_dump_plans() -> bool:
     dump_env = os.getenv("FROST_DUMP_DYNAMIC_PLANS")
     if dump_env is not None:
         return dump_env.lower() in {"1", "true", "yes", "on"}
     return sys.gettrace() is not None
+
+
+def _emit_epoch_stats_line(line: str) -> None:
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(line)
+    else:
+        print(line)
 
 
 def _tensor_values(ts: TensorSet | None) -> list[int] | None:
@@ -269,6 +283,7 @@ class DynamicPlanner(ThreadBase):
         handle_stale: bool = False,
         output_dir: str | None = None,
         plan_kind: str = "dynamic",
+        persist_all_updates_to_cpu: bool = False,
     ) -> None:
         super().__init__(name="dynamic_planner", stop_ev=stop_ev)
         self.gpus_distance = gpus_distance
@@ -279,11 +294,73 @@ class DynamicPlanner(ThreadBase):
         self.handle_stale = handle_stale
         self.pending: MetasDyNeed | None = None
         self.plan_kind = plan_kind
+        self.persist_all_updates_to_cpu = persist_all_updates_to_cpu
         self.plan_dump_dir = (
             Path(output_dir) / "detail"
             if output_dir is not None and _should_dump_plans()
             else None
         )
+        self._reset_epoch_stats()
+
+    def _reset_epoch_stats(self) -> None:
+        n = self.n_gpus
+        self._stats_batch_count: int = 0
+        self._stats_unique_union: int = 0
+        self._stats_unique_per_gpu: list[int] = [0] * n
+        self._stats_p2p_recv_self_per_gpu: list[int] = [0] * n
+        self._stats_p2p_recv_per_gpu: list[int] = [0] * n
+        self._stats_p2p_send_self_per_gpu: list[int] = [0] * n
+        self._stats_p2p_send_per_gpu: list[int] = [0] * n
+        self._stats_writeback_per_gpu: list[int] = [0] * n
+
+    def _accumulate_stats(
+        self,
+        all_list: list[TensorSet],
+        p2p_cts: np.ndarray,
+        writeback_list: list[TensorSet],
+    ) -> None:
+        self._stats_batch_count += 1
+        n_gpus = self.n_gpus
+        if n_gpus > 0:
+            union: TensorSet = all_list[0]
+            for i in range(1, n_gpus):
+                union = union | all_list[i]
+            self._stats_unique_union += len(union)
+        for gpu in range(n_gpus):
+            self._stats_unique_per_gpu[gpu] += len(all_list[gpu])
+            self._stats_p2p_recv_self_per_gpu[gpu] += int(p2p_cts[gpu, gpu])
+            # cross-GPU only (exclude diagonal = self-transfer)
+            self._stats_p2p_recv_per_gpu[gpu] += (
+                int(p2p_cts[:, gpu].sum()) - int(p2p_cts[gpu, gpu])
+            )
+            self._stats_p2p_send_self_per_gpu[gpu] += int(p2p_cts[gpu, gpu])
+            self._stats_p2p_send_per_gpu[gpu] += (
+                int(p2p_cts[gpu, :].sum()) - int(p2p_cts[gpu, gpu])
+            )
+            wb = writeback_list[gpu]
+            self._stats_writeback_per_gpu[gpu] += len(wb) if wb is not None else 0
+
+    def _log_epoch_stats(self) -> None:
+        n = self._stats_batch_count
+        if n == 0:
+            return
+        n_gpus = self.n_gpus
+        _emit_epoch_stats_line(
+            f"[{self.plan_kind}] epoch stats — {n} minibatches, {n_gpus} GPU(s)"
+        )
+        _emit_epoch_stats_line(
+            f"  avg unique nodes (union across GPUs): {self._stats_unique_union / n:.1f}"
+        )
+        for gpu in range(n_gpus):
+            _emit_epoch_stats_line(
+                f"  GPU {gpu}: "
+                f"avg_unique={self._stats_unique_per_gpu[gpu] / n:.1f}  "
+                f"avg_p2p_recv_to_self={self._stats_p2p_recv_self_per_gpu[gpu] / n:.1f}  "
+                f"avg_p2p_recv_from_others={self._stats_p2p_recv_per_gpu[gpu] / n:.1f}  "
+                f"avg_p2p_send_to_self={self._stats_p2p_send_self_per_gpu[gpu] / n:.1f}  "
+                f"avg_p2p_send_to_others={self._stats_p2p_send_per_gpu[gpu] / n:.1f}  "
+                f"avg_writeback={self._stats_writeback_per_gpu[gpu] / n:.1f}"
+            )
 
     def logic(self) -> None:
         """Main planning loop: consume (needs, updates, metas) tuples and emit DynamicPlans.
@@ -324,6 +401,8 @@ class DynamicPlanner(ThreadBase):
                     all_needs, all_pos_root, next_needs, next_updates, metas
                 )
                 self.out_q.put(plan)
+                self._log_epoch_stats()
+                self._reset_epoch_stats()
                 self.pending = None
                 continue
 
@@ -358,6 +437,51 @@ class DynamicPlanner(ThreadBase):
         """
         n_gpus = self.n_gpus
 
+        # Hidden debug mode for single-worker diagnosis:
+        # - persist every current update to CPU
+        # - fetch every next-batch need from CPU
+        # - disable fresh self-P2P chaining
+        # Together with a 1-batch-in-flight worker pipeline, this approximates
+        # a strictly CPU-synchronized freshness baseline.
+        if _debug_force_cpu_freshness_single_worker() and n_gpus == 1:
+            deduplicate_update_list, _ = deduplicate_updates(update_list)
+            empty_ts = TensorSet.empty_like(deduplicate_update_list[0].data)
+            p2p = [[empty_ts]]
+            p2p_cts = np.zeros((1, 1), dtype=np.int32)
+
+            plans = [
+                DynamicPlan(
+                    p2p=p2p[0],
+                    fetch=self.fetch[0],
+                    writeback=deduplicate_update_list[0],
+                    recv_counts=p2p_cts[:, 0],
+                    send_counts=p2p_cts[0, :],
+                )
+            ]
+
+            _append_plan_dump(
+                self.plan_dump_dir,
+                self.plan_kind,
+                metas,
+                plans,
+                [
+                    [
+                        "debug_cpu_freshness_single_worker: True",
+                        *_tensor_set_lines("current_need", all_list[0]),
+                        *_tensor_set_lines("current_update", update_list[0]),
+                        *_tensor_set_lines(
+                            "deduplicated_update", deduplicate_update_list[0]
+                        ),
+                        *_tensor_set_lines("next_need", next_all_list[0]),
+                        *_tensor_set_lines("next_update", next_update_list[0]),
+                        *_tensor_set_lines("next_prefetch", next_all_list[0]),
+                    ]
+                ],
+            )
+
+            self.fetch = next_all_list
+            return plans
+
         # 1. Deduplicate: each updated node is owned by exactly one GPU.
         deduplicate_update_list, all_update = deduplicate_updates(update_list)
 
@@ -369,12 +493,20 @@ class DynamicPlanner(ThreadBase):
         # 3. Fresh P2P: send this batch's updates to GPUs that need them next batch.
         _, fresh_p2p = compute_p2p_transfer_plan(next_all_list, deduplicate_update_list)
 
-        # 4. Writeback: nodes updated here but NOT updated next batch must be persisted
-        #    to CPU shared memory now (future batches will need to re-read them).
-        writeback_list = [
-            per_gpu_update - next_all_update
-            for per_gpu_update in deduplicate_update_list
-        ]
+        # 4. Writeback policy:
+        #    - Shared-memory direct-fetch mode must persist every owned update now,
+        #      because later readers bypass P2P and re-read remote state from CPU.
+        #    - The one-step deferred writeback optimization is only sound when stale
+        #      P2P is enabled: if the next batch consumes a fresh delta but does not
+        #      update that node again, a later batch may need to fetch the node from
+        #      CPU. Without stale-P2P coverage the CPU copy would remain stale.
+        if self.persist_all_updates_to_cpu or not self.handle_stale:
+            writeback_list = deduplicate_update_list
+        else:
+            writeback_list = [
+                per_gpu_update - next_all_update
+                for per_gpu_update in deduplicate_update_list
+            ]
 
         # 5. Prefetch for next batch and optional stale P2P.
         if self.handle_stale:
@@ -440,6 +572,7 @@ class DynamicPlanner(ThreadBase):
             ],
         )
 
+        self._accumulate_stats(all_list, p2p_cts, writeback_list)
         self.fetch = next_prefetch
         return plans
 

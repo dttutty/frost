@@ -4,6 +4,7 @@ Provides ``TemporalGraphAttentionLayer``, a dense-tensor multi-head attention
 module that attends over a node's sampled neighborhood while incorporating
 temporal information via a time encoding.
 """
+
 import logging
 
 import torch
@@ -31,10 +32,11 @@ class TemporalGraphAttentionLayer(nn.Module):
         dim_out: int = 100,
         num_head: int = 2,
         dropout: float = 0.2,
+        dim_neighbor: int | None = None,
     ) -> None:
         """
         Args:
-            dim_node: Dimensionality of node features / memory vectors.
+            dim_node: Dimensionality of target node features.
             dim_edge: Dimensionality of edge features.
             dim_time: Dimensionality of the time encoding.  Set to 0 to
                 disable time encoding.
@@ -42,10 +44,14 @@ class TemporalGraphAttentionLayer(nn.Module):
                 by ``num_head``).
             num_head: Number of attention heads.
             dropout: Dropout probability.
+            dim_neighbor: Dimensionality of neighbor node features. If None,
+                defaults to ``dim_node`` for backward compatibility.
         """
         super().__init__()
         self.num_head = num_head
         self.dim_out = dim_out
+        self.dim_node = dim_node
+        self.dim_neighbor = dim_neighbor if dim_neighbor is not None else dim_node
 
         assert dim_out % num_head == 0
         self.head_dim = dim_out // num_head
@@ -54,11 +60,11 @@ class TemporalGraphAttentionLayer(nn.Module):
         self.layer_norm = nn.LayerNorm(dim_out)
         self.time_enc = TimeEncoder(dim_time) if dim_time > 0 else None
 
-        # Q: Source Node Features + Time (0)
+        # Q: Target Node Features + Time (0)
         self.w_q = nn.Linear(dim_node + dim_time, dim_out)
         # K, V: Neighbor Features + Edge Features + Time (dt)
-        self.w_k = nn.Linear(dim_node + dim_edge + dim_time, dim_out)
-        self.w_v = nn.Linear(dim_node + dim_edge + dim_time, dim_out)
+        self.w_k = nn.Linear(self.dim_neighbor + dim_edge + dim_time, dim_out)
+        self.w_v = nn.Linear(self.dim_neighbor + dim_edge + dim_time, dim_out)
 
         self.w_out = nn.Linear(dim_node + dim_out, dim_out)
 

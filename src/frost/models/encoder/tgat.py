@@ -51,11 +51,12 @@ class TGAT(nn.Module):
             )
         )
 
-        # --- Layer 2..N: Hidden (dim_hid) -> Hidden (dim_hid) ---
+        # --- Layer 2..N: Target (dim_node) with Neighbor (dim_hid) -> Hidden ---
         for _ in range(self.num_layers - 1):
             self.layers.append(
                 TemporalGraphAttentionLayer(
-                    dim_node=d_hid,  # Input is previous layer's output
+                    dim_node=ndim,  # Target features are original node features
+                    dim_neighbor=d_hid,  # Neighbor features are from previous layer
                     dim_edge=edim,
                     dim_time=d_time,
                     dim_out=d_hid,

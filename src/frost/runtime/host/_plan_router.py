@@ -317,6 +317,7 @@ class PlanRouter:
         stop_ev: threading.Event,
         handle_stale: bool = False,
         output_dir: str | None = None,
+        persist_all_updates_to_cpu: bool = False,
     ) -> None:
         self.gpu_dist = build_gpu_distance_matrix(gpu_topo)
         self.n_gpus = len(self.gpu_dist)
@@ -337,6 +338,7 @@ class PlanRouter:
                 handle_stale=handle_stale,
                 output_dir=output_dir,
                 plan_kind="mem",
+                persist_all_updates_to_cpu=persist_all_updates_to_cpu,
             )
 
         self.mail_plan_in_q: DynamicPlanInQ | None = None
@@ -349,6 +351,7 @@ class PlanRouter:
                 stop_ev=stop_ev,
                 handle_stale=handle_stale,
                 output_dir=output_dir,
+                persist_all_updates_to_cpu=persist_all_updates_to_cpu,
             )
 
         self.nfeat_plan_in_q: StaticPlanInQ | None = None

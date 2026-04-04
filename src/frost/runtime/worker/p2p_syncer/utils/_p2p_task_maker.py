@@ -85,11 +85,9 @@ def make_p2p_task(
         send_ts = torch.cat(buckets_ts, dim=0)
     else:
         # No data to send to any GPU
-        send_nid = torch.tensor([], dtype=nid.dtype, device=nid.device)
-        send_data = torch.tensor([], dtype=data.dtype, device=data.device).reshape(
-            0, data.shape[1]
-        )
-        send_ts = torch.tensor([], dtype=ts.dtype, device=ts.device)
+        send_nid = nid.new_empty((0,))
+        send_data = data.new_empty((0, *data.shape[1:]))
+        send_ts = ts.new_empty((0, *ts.shape[1:]))
 
     total_planned_send = sum(send_counts)
     real_shape = send_nid.shape[0]

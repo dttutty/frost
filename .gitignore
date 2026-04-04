@@ -80,3 +80,5 @@ DATA/DGB*
 DATA/.temp
 DATA/TGL*
 TGL_DATA/
+seed_sweeps/*
+tmp/

@@ -52,6 +52,11 @@ def _ensure_seq_sampler_stable_mode() -> None:
         )
 
 
+def _enable_tgl_sampler_parity_if_requested(tgl_sampler_parity: bool) -> None:
+    if tgl_sampler_parity:
+        os.environ["FROST_DEBUG_TGL_BATCH_SHARED_RECENT"] = "1"
+
+
 class NoSampler:
     """Zero-hop sampler that writes only seed nodes into the ring buffer.
 
@@ -191,8 +196,10 @@ class NghSampler:
         strategy: Literal["uniform", "recent", "time_interval_aware"],  # from hydra config
         seed: int | None,  # from hydra config
         time_scaling_factor: float = 0.0,
+        tgl_sampler_parity: bool = False,
     ):
         _ensure_seq_sampler_stable_mode()
+        _enable_tgl_sampler_parity_if_requested(tgl_sampler_parity)
         assert len(fanout) == 1, (
             "Only single-hop sampling is supported in NghSampler. Use MultiHopNghSampler for multi-hop sampling."
         )
@@ -208,6 +215,7 @@ class NghSampler:
         self.ring_buf = ring_buf
         self.sample_4_neg = sample_4_neg
         self.n_neg = n_neg
+        self.tgl_sampler_parity = tgl_sampler_parity
         # Keep sampler input dtype aligned with temporal-graph indices to avoid
         # unsafe casts in the nanobind/C++ boundary.
         graph_indices = getattr(graph, "indices", None)
@@ -226,9 +234,11 @@ class NghSampler:
             "on",
         }
         logger.info(
-            "NghSampler initialized with SeqSampler backend path: %s (FROST_SEQSAMPLER_NO_OMP=%r)",
+            "NghSampler initialized with SeqSampler backend path: %s "
+            "(FROST_SEQSAMPLER_NO_OMP=%r, tgl_sampler_parity=%r)",
             "single-thread" if omp_disabled else "OpenMP",
             os.getenv("FROST_SEQSAMPLER_NO_OMP"),
+            tgl_sampler_parity,
         )
 
     def sample(
@@ -359,8 +369,10 @@ class MultiHopNghSampler:
         seed: int | None,  # from hydra config
         time_scaling_factor: float = 0.0,
         sample_4_neg: bool = True,
+        tgl_sampler_parity: bool = False,
     ):
         _ensure_seq_sampler_stable_mode()
+        _enable_tgl_sampler_parity_if_requested(tgl_sampler_parity)
         self.sampler = SeqSampler(
             graph=graph,
             strategy=strategy,
@@ -372,6 +384,7 @@ class MultiHopNghSampler:
         self.n_neg = n_neg
         self.padding_node_id = -1
         self.sample_4_neg = sample_4_neg
+        self.tgl_sampler_parity = tgl_sampler_parity
         graph_indices = getattr(graph, "indices", None)
         self._node_np_dtype = (
             graph_indices.dtype if graph_indices is not None else np.int64

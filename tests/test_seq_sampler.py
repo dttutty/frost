@@ -24,6 +24,28 @@ def test_recent_strategy_left_pads_when_history_is_short():
     assert out_ts.tolist() == [[0, 0, 1, 2]]
 
 
+def test_recent_strategy_can_mimic_tgl_off_by_one_for_debug(monkeypatch):
+    monkeypatch.setenv("FROST_DEBUG_TGL_RECENT_OFF_BY_ONE", "1")
+    sampler = SeqSampler(_make_int64_graph(), strategy="recent", seed=0)
+
+    out_nid, out_eid, out_ts = sampler.get_historical_neighbors([0], [3], 4)
+
+    assert out_nid.tolist() == [[-1, -1, -1, 11]]
+    assert out_eid.tolist() == [[-1, -1, -1, 101]]
+    assert out_ts.tolist() == [[0, 0, 0, 2]]
+
+
+def test_recent_strategy_can_mimic_tgl_batch_shared_window(monkeypatch):
+    monkeypatch.setenv("FROST_DEBUG_TGL_BATCH_SHARED_RECENT", "1")
+    sampler = SeqSampler(_make_int64_graph(), strategy="recent", seed=0)
+
+    out_nid, out_eid, out_ts = sampler.get_historical_neighbors([0, 0], [3, 5], 4)
+
+    assert out_nid.tolist() == [[-1, -1, -1, 11], [-1, 11, 12, 13]]
+    assert out_eid.tolist() == [[-1, -1, -1, 101], [-1, 101, 102, 103]]
+    assert out_ts.tolist() == [[0, 0, 0, 2], [0, 2, 3, 4]]
+
+
 def test_time_interval_aware_outputs_sorted_sampled_times_without_padding():
     sampler = SeqSampler(
         _make_int64_graph(),

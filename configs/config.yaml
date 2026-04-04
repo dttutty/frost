@@ -10,7 +10,7 @@ defaults:
   - _self_
 
 epoch: 100
-batch_size: 2000 # local batch_size
+macro_batch_size: 4000 # total batch size across all GPUs
 patience: 100
 dropout: 0.2
 seed: 42
@@ -27,3 +27,8 @@ compile: false
 tf32: false
 amp: false
 tqdm: true
+stable_mode: false
+reset_eval_neg_sampler_each_epoch: false
+share_neg_sampler_across_splits: false
+normalize_event_time: false
+persist_all_updates_to_cpu: false

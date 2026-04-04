@@ -56,6 +56,7 @@ class StaticAnalyzer:
         stop_ev: threading.Event,
         handle_stale: bool,
         output_dir: str | None,
+        persist_all_updates_to_cpu: bool = False,
     ) -> None:
         return None
 
@@ -122,6 +123,7 @@ class MemoryAnalyzer(StaticAnalyzer):
         stop_ev: threading.Event,
         handle_stale: bool,
         output_dir: str | None,
+        persist_all_updates_to_cpu: bool = False,
     ) -> ThreadBase:
         return DynamicPlanner(
             gpus_distance=gpu_dist,
@@ -131,6 +133,7 @@ class MemoryAnalyzer(StaticAnalyzer):
             handle_stale=handle_stale,
             output_dir=output_dir,
             plan_kind="mail",
+            persist_all_updates_to_cpu=persist_all_updates_to_cpu,
         )
 
 
@@ -197,6 +200,7 @@ class APANMemoryAnalyzer(MemoryAnalyzer):
         stop_ev: threading.Event,
         handle_stale: bool,
         output_dir: str | None,
+        persist_all_updates_to_cpu: bool = False,
     ) -> ThreadBase:
         return APANDynamicPlanner(
             gpus_distance=gpu_dist,
@@ -206,4 +210,5 @@ class APANMemoryAnalyzer(MemoryAnalyzer):
             handle_stale=handle_stale,
             output_dir=output_dir,
             plan_kind="mail",
+            persist_all_updates_to_cpu=persist_all_updates_to_cpu,
         )

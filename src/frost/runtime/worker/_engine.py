@@ -6,10 +6,12 @@ optional DynamicAssembler), and optional P2P memory-sync threads when a
 MemBoxStore is configured.
 """
 
+import json
 import logging
 import os
 import threading
 import time
+from pathlib import Path
 from queue import Queue as Q
 from typing import Literal, cast
 
@@ -22,6 +24,10 @@ from torch.profiler import ProfilerActivity, profile, record_function
 from torchmetrics import MetricCollection
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
+from torchmetrics.functional.classification import (
+    binary_auroc,
+    binary_average_precision,
+)
 
 from frost.aliases.syncer import (
     BoxP2PQ,
@@ -44,6 +50,7 @@ from frost.runtime._thread_base import (
     put_shutdown_sentinel,
 )
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
+from frost.runtime.worker._h2d_credit import BatchAwareCreditManager
 from frost.runtime.worker._host_to_device import H2D
 from frost.runtime.worker._receiver import Receiver as Receiver
 from frost.runtime.worker.p2p_syncer._p2p_comm import P2PQHandler
@@ -56,6 +63,120 @@ from frost.shm.mem_mgr import MemBoxStore
 from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
+
+
+def _debug_force_cpu_freshness_single_worker() -> bool:
+    flag = os.getenv("FROST_DEBUG_CPU_FRESHNESS_SINGLE_WORKER")
+    if flag is None:
+        return False
+    return flag.lower() in {"1", "true", "yes", "on"}
+
+
+def _debug_initial_h2d_slots_override() -> int | None:
+    raw = os.getenv("FROST_DEBUG_INITIAL_H2D_SLOTS")
+    if raw is None:
+        return None
+    value = int(raw)
+    if value < 0:
+        raise ValueError("FROST_DEBUG_INITIAL_H2D_SLOTS must be >= 0")
+    return value
+
+
+def _initial_h2d_pipeline_slots(
+    *,
+    debug_force_cpu_freshness_single_worker: bool,
+    p2p_world_size: int,
+) -> int:
+    override = _debug_initial_h2d_slots_override()
+    if override is not None:
+        return override
+
+    # Single-worker memory runs have no cross-GPU overlap benefit, and
+    # allowing two batches in flight has proven much more timing-sensitive
+    # than the serialized one-batch path. Keep that configuration at one
+    # batch in flight by default.
+    if p2p_world_size == 1:
+        return 2
+    return 4
+
+
+def _debug_disable_best_ckpt_save() -> bool:
+    flag = os.getenv("FROST_DEBUG_DISABLE_BEST_CKPT_SAVE")
+    if flag is None:
+        return False
+    return flag.lower() in {"1", "true", "yes", "on"}
+
+
+def _debug_sync_train_step_boundaries() -> bool:
+    flag = os.getenv("FROST_DEBUG_SYNC_TRAIN_STEP_BOUNDARIES")
+    if flag is None:
+        return False
+    return flag.lower() in {"1", "true", "yes", "on"}
+
+
+def _debug_sync_membox_after_train_step() -> bool:
+    flag = os.getenv("FROST_DEBUG_SYNC_MEMBOX_AFTER_TRAIN_STEP")
+    if flag is None:
+        return False
+    return flag.lower() in {"1", "true", "yes", "on"}
+
+
+def _debug_param_checksums_path() -> Path | None:
+    raw = os.getenv("FROST_DEBUG_PARAM_CHECKSUMS_PATH")
+    if raw is None:
+        return None
+    value = raw.strip()
+    if value == "":
+        return None
+    return Path(value)
+
+
+def _debug_param_checksum_batches() -> set[int] | None:
+    raw = os.getenv("FROST_DEBUG_PARAM_CHECKSUM_BATCHES")
+    if raw is None or raw.strip() == "":
+        return None
+    return {int(token.strip()) for token in raw.split(",") if token.strip() != ""}
+
+
+def _debug_grad_checksums_path() -> Path | None:
+    raw = os.getenv("FROST_DEBUG_GRAD_CHECKSUMS_PATH")
+    if raw is None:
+        return None
+    value = raw.strip()
+    if value == "":
+        return None
+    return Path(value)
+
+
+def _debug_grad_checksum_batches() -> set[int] | None:
+    raw = os.getenv("FROST_DEBUG_GRAD_CHECKSUM_BATCHES")
+    if raw is None or raw.strip() == "":
+        return None
+    return {int(token.strip()) for token in raw.split(",") if token.strip() != ""}
+
+
+def _debug_step_tensor_dump_dir() -> Path | None:
+    raw = os.getenv("FROST_DEBUG_DUMP_STEP_TENSOR_DIR")
+    if raw is None:
+        return None
+    value = raw.strip()
+    if value == "":
+        return None
+    return Path(value)
+
+
+def _debug_step_tensor_dump_batches() -> set[int] | None:
+    raw = os.getenv("FROST_DEBUG_DUMP_STEP_TENSOR_BATCHES")
+    if raw is None or raw.strip() == "":
+        return None
+    return {int(token.strip()) for token in raw.split(",") if token.strip() != ""}
+
+
+def _debug_step_tensor_dump_names() -> set[str] | None:
+    raw = os.getenv("FROST_DEBUG_DUMP_STEP_TENSOR_NAMES")
+    if raw is None or raw.strip() == "":
+        return None
+    return {token.strip() for token in raw.split(",") if token.strip() != ""}
 
 
 class P2PGuardCommHook:
@@ -184,7 +305,7 @@ class Worker:
 
         # --- Synchronization primitives ---
         self.stop_ev = threading.Event()
-        self.h2d_sem: threading.Semaphore = threading.Semaphore(0)
+        self.h2d_sem = BatchAwareCreditManager()
         self.p2p_sem = threading.Semaphore(0)
 
         self._init_pipeline(ring_buf, nfeat, efeat)
@@ -225,6 +346,7 @@ class Worker:
             assert self.mem_box_store is not None
             self.delta_queue = Q(maxsize=1)
             self.h2d_out_q = Q(maxsize=1)
+            self._init_mem_box_threads()
             self.dy_asm = DynamicAssembler(
                 mem_box_store=self.mem_box_store,
                 h2d_out_q=self.h2d_out_q,
@@ -236,8 +358,11 @@ class Worker:
                 n_neg=self.n_neg,
                 sample_4_neg=ring_buf.sample_4_neg,
                 use_shm_instead=self.use_shm_instead,
+                mem_task_q=self.mem_task_q,
+                box_task_q=self.box_task_q,
+                mem_wr_q=self.mem_wr_q,
+                box_wr_q=self.box_wr_q,
             )
-            self._init_mem_box_threads()
             h2d_dest_q = self.h2d_out_q
         else:
             h2d_dest_q = self.full_q
@@ -375,25 +500,98 @@ class Worker:
         self.train_loss_tracker = MeanMetric(process_group=self.nccl).cuda()
         self.val_mrr_tracker = MeanMetric(process_group=self.nccl).cuda()
         self.test_mrr_tracker = MeanMetric(process_group=self.nccl).cuda()
+        self.val_auc_batch_mean = MeanMetric(process_group=self.nccl).cuda()
+        self.val_ap_batch_mean = MeanMetric(process_group=self.nccl).cuda()
+        self.test_auc_batch_mean = MeanMetric(process_group=self.nccl).cuda()
+        self.test_ap_batch_mean = MeanMetric(process_group=self.nccl).cuda()
 
         self.val_metrics = MetricCollection(
             {
                 "val_loss": MeanMetric(process_group=self.nccl),
-                "val_auc": BinaryAUROC(thresholds=10000, process_group=self.nccl),
+                # Use exact distributed metrics here. The binned approximation
+                # can shift the selected best epoch enough to materially change
+                # the reported JODIE parity numbers.
+                "val_auc": BinaryAUROC(thresholds=None, process_group=self.nccl),
                 "val_ap": BinaryAveragePrecision(
-                    thresholds=10000, process_group=self.nccl
+                    thresholds=None, process_group=self.nccl
                 ),
             }
         ).cuda()
 
         self.test_metrics = MetricCollection(
             {
-                "test_auc": BinaryAUROC(thresholds=10000, process_group=self.nccl),
+                "test_auc": BinaryAUROC(thresholds=None, process_group=self.nccl),
                 "test_ap": BinaryAveragePrecision(
-                    thresholds=10000, process_group=self.nccl
+                    thresholds=None, process_group=self.nccl
                 ),
             }
         ).cuda()
+
+    def _flush_epoch_writebacks(self) -> None:
+        """Block until async mem/mail handlers, P2P routing, and writers drain.
+
+        Without this flush, the main loop can call ``mem_box_store.reset()``
+        while the last batch's async writeback is still in flight, allowing late
+        test-split writes or stale P2P guard tokens to leak into the next epoch.
+        """
+        if self.mem_box_store is None:
+            return
+
+        for q in (
+            self.mem_task_q,
+            self.box_task_q,
+            self.mem_p2p_q,
+            self.box_p2p_q,
+            self.mem_wr_q,
+            self.box_wr_q,
+        ):
+            assert q is not None
+            q.join()
+
+    def _drain_stale_p2p_guard_tokens(self) -> int:
+        """Drop leftover epoch-end P2P guard tokens.
+
+        The final batch of an epoch still posts one P2P completion token even
+        though there is no subsequent train/eval step in the same epoch to
+        consume it. If left in the semaphore, the next epoch's first train
+        backward can acquire a stale token and skip waiting for its own batch's
+        P2P completion.
+        """
+        drained = 0
+        while self.p2p_sem.acquire(blocking=False):
+            drained += 1
+        return drained
+
+    def _flush_train_step_async_state(self) -> None:
+        """Wait until the current train step's async mem/mail sync fully drains.
+
+        This debug path preserves the normal P2P/writeback pipeline, but removes
+        cross-step overlap by waiting for:
+
+        - mem/box task handlers to consume the current batch
+        - P2P routing to finish the current round
+        - mem/box writers to persist local shared-memory updates
+
+        That approximates TGL's step-local memory/mailbox update semantics
+        without disabling P2P transport itself.
+        """
+        if self.mem_box_store is None:
+            return
+
+        assert self.mem_task_q is not None
+        assert self.box_task_q is not None
+        assert self.mem_p2p_q is not None
+        assert self.box_p2p_q is not None
+        assert self.mem_wr_q is not None
+        assert self.box_wr_q is not None
+
+        self.mem_task_q.join()
+        self.box_task_q.join()
+        self.mem_p2p_q.join()
+        self.box_p2p_q.join()
+        self.p2p_sem.acquire()
+        self.mem_wr_q.join()
+        self.box_wr_q.join()
 
     def on_train_epoch_end(self) -> Result:
         """Aggregate per-epoch metrics across all ranks and return a Result.
@@ -414,12 +612,20 @@ class Worker:
         test_results = self.test_metrics.compute()
         val_mrr = self.val_mrr_tracker.compute().item()
         test_mrr = self.test_mrr_tracker.compute().item()
+        val_auc_batch_mean = self.val_auc_batch_mean.compute().item()
+        val_ap_batch_mean = self.val_ap_batch_mean.compute().item()
+        test_auc_batch_mean = self.test_auc_batch_mean.compute().item()
+        test_ap_batch_mean = self.test_ap_batch_mean.compute().item()
 
         self.val_metrics.reset()
         self.test_metrics.reset()
         self.train_loss_tracker.reset()
         self.val_mrr_tracker.reset()
         self.test_mrr_tracker.reset()
+        self.val_auc_batch_mean.reset()
+        self.val_ap_batch_mean.reset()
+        self.test_auc_batch_mean.reset()
+        self.test_ap_batch_mean.reset()
 
         res = Result(
             train_loss=avg_loss.item(),
@@ -430,6 +636,10 @@ class Worker:
             test_ap=test_results["test_ap"].item(),
             val_mrr=val_mrr,
             test_mrr=test_mrr,
+            val_auc_batch_mean=val_auc_batch_mean,
+            val_ap_batch_mean=val_ap_batch_mean,
+            test_auc_batch_mean=test_auc_batch_mean,
+            test_ap_batch_mean=test_ap_batch_mean,
         )
         self._last_train_start_t = None
         return res
@@ -458,12 +668,34 @@ class Worker:
             loss = self.criterion(
                 logits_flat[:n_pos], meta.labels[:n_pos]
             ) + self.criterion(logits_flat[n_pos:], meta.labels[n_pos:])
-        if self.mem_box_store is not None:
+        if self.mem_box_store is not None and not _debug_sync_membox_after_train_step():
             self.p2p_guard.arm()  # Arm guard: wait for P2P before the first AllReduce
+        if _debug_sync_train_step_boundaries():
+            torch.cuda.synchronize(self.device)
         self.grad_scaler.scale(loss).backward()
+        self._maybe_append_grad_checksums(
+            meta=meta,
+            loss=loss,
+            grad_scale=float(self.grad_scaler.get_scale()),
+        )
+        self._maybe_dump_step_tensors(meta=meta, phase="grad")
 
+        grad_scale_before = float(self.grad_scaler.get_scale())
         self.grad_scaler.step(self.optimizer)
         self.grad_scaler.update()
+        if _debug_sync_train_step_boundaries():
+            torch.cuda.synchronize(self.device)
+        if self.mem_box_store is not None and _debug_sync_membox_after_train_step():
+            self._flush_train_step_async_state()
+        grad_scale_after = float(self.grad_scaler.get_scale())
+        self._maybe_dump_step_tensors(meta=meta, phase="param")
+
+        self._maybe_append_param_checksums(
+            meta=meta,
+            loss=loss,
+            grad_scale_before=grad_scale_before,
+            grad_scale_after=grad_scale_after,
+        )
 
         self.train_loss_tracker.update(loss.detach().float())
         self._release_meta_tensors(meta)
@@ -493,6 +725,11 @@ class Worker:
             self.p2p_sem.acquire()  # Ensure no other P2P task is in flight during eval
 
         y_pred = logits.float().sigmoid().squeeze(-1)
+        if meta.n_neg == 1:
+            batch_ap = binary_average_precision(
+                y_pred, meta.labels.long(), thresholds=None
+            )
+            batch_auc = binary_auroc(y_pred, meta.labels.long(), thresholds=None)
 
         if meta.split == "val":
             logits_flat = logits.float().squeeze(-1)
@@ -507,6 +744,8 @@ class Worker:
                     target=meta.labels.long(),
                     value=loss,
                 )
+                self.val_ap_batch_mean.update(batch_ap)
+                self.val_auc_batch_mean.update(batch_auc)
             else:
                 # 100-negative evaluation logic (MRR)
                 # logits_flat is [n_pos * (1 + n_neg)] where first chunk is positives
@@ -521,6 +760,8 @@ class Worker:
             assert meta.split == "test"
             if meta.n_neg == 1:
                 self.test_metrics.update(preds=y_pred, target=meta.labels.long())
+                self.test_ap_batch_mean.update(batch_ap)
+                self.test_auc_batch_mean.update(batch_auc)
             else:
                 logits_flat = logits.float().squeeze(-1)
                 n_pos = meta.n_src
@@ -568,17 +809,34 @@ class Worker:
     def run(self) -> None:
         """Main training loop: consume ``full_q`` and dispatch train/eval/epoch-end.
 
-        Primes the H2D pipeline semaphore (4 releases) and injects an initial
-        ``"nothing"`` token into ``delta_queue`` for memory models before entering the
-        main loop.  The loop terminates when ``None`` is dequeued.
+        Primes the H2D pipeline semaphore and injects an initial ``"nothing"``
+        token into ``delta_queue`` for memory models before entering the main
+        loop. The H2D credit manager keeps writeback credits ordered by batch,
+        so later batches cannot consume shared-memory fetch credits before all
+        earlier mem/box writebacks have finished. The loop terminates when
+        ``None`` is dequeued.
         """
         self.start_all_threads()
         if self.mem_box_store is not None:
-            # Pre-release 4 slots to prime the H2D pipeline (2 batches in flight)
-            self.h2d_sem.release()
-            self.h2d_sem.release()
-            self.h2d_sem.release()
-            self.h2d_sem.release()
+            p2p_world_size = dist.get_world_size(self.nccl_p2p)
+            initial_slots = _initial_h2d_pipeline_slots(
+                debug_force_cpu_freshness_single_worker=_debug_force_cpu_freshness_single_worker(),
+                p2p_world_size=p2p_world_size,
+            )
+            if initial_slots % 2 != 0:
+                raise ValueError(
+                    "initial h2d slots must be even because each batch consumes "
+                    f"two writeback credits, got {initial_slots}"
+                )
+            max_in_flight_batches = max(1, initial_slots // 2)
+            set_max_in_flight_batches = getattr(
+                self.h2d_sem, "set_max_in_flight_batches", None
+            )
+            if callable(set_max_in_flight_batches):
+                set_max_in_flight_batches(max_in_flight_batches)
+            else:
+                for _ in range(initial_slots):
+                    self.h2d_sem.release()
             assert self.delta_queue is not None
             self.delta_queue.put("nothing")
 
@@ -684,16 +942,20 @@ class Worker:
                 val_ap = result.val_ap if result is not None else 0.0
                 if val_ap > self.local_best_ap:
                     self.local_best_ap = val_ap
-                    # Save asynchronously so rank-0 disk I/O doesn't stall the loop
-                    threading.Thread(
-                        target=self.save_model,
-                        args=(os.path.join(self.save_to, "best.ckpt"),),
-                        daemon=True,
-                    ).start()
+                    if not _debug_disable_best_ckpt_save():
+                        self.save_model(os.path.join(self.save_to, "best.ckpt"))
                 # dist.barrier() is redundant: on_train_epoch_end() compute() calls
                 # already performed 7 NCCL all-reduces that synchronize all ranks.
                 self.curr_epoch += 1
                 if self.mem_box_store:
+                    self._flush_epoch_writebacks()
+                    stale_p2p_tokens = self._drain_stale_p2p_guard_tokens()
+                    if stale_p2p_tokens > 0:
+                        logger.debug(
+                            "[Rank %s] Drained %s stale p2p guard token(s) at epoch end",
+                            self.env.local_rank,
+                            stale_p2p_tokens,
+                        )
                     self.mem_box_store.reset()
             if full is None:
                 if (
@@ -797,10 +1059,18 @@ class Worker:
         # (scatter, NCCL), Python's normal exit will hang waiting for them.
         # Force-exit to release the CUDA context immediately.
         still_alive = [
-            t for t in (
-                self.h2d, self.receiver, self.mem_handler, self.mem_wr,
-                self.box_wr, self.box_handler, self.p2p_q_handler, self.dy_asm,
-            ) if t is not None and t.is_alive()
+            t
+            for t in (
+                self.h2d,
+                self.receiver,
+                self.mem_handler,
+                self.mem_wr,
+                self.box_wr,
+                self.box_handler,
+                self.p2p_q_handler,
+                self.dy_asm,
+            )
+            if t is not None and t.is_alive()
         ]
         if still_alive:
             logger.warning(
@@ -820,12 +1090,180 @@ class Worker:
             model = model.module
         return cast(AssembledModel, model)
 
+    def _maybe_append_param_checksums(
+        self,
+        *,
+        meta: Meta,
+        loss: torch.Tensor,
+        grad_scale_before: float,
+        grad_scale_after: float,
+    ) -> None:
+        path = _debug_param_checksums_path()
+        if path is None:
+            return
+
+        batches = _debug_param_checksum_batches()
+        if batches is not None and meta.mini_batch_idx not in batches:
+            return
+
+        total_sum = 0.0
+        total_abs_sum = 0.0
+        total_sq_sum = 0.0
+        total_numel = 0
+        param_records: list[dict[str, float | int | str]] = []
+
+        with torch.no_grad():
+            for name, value in self._unwrap_model().named_parameters():
+                tensor = value.detach().float()
+                sum_value = float(tensor.sum().item())
+                abs_sum_value = float(tensor.abs().sum().item())
+                sq_sum_value = float(tensor.square().sum().item())
+                numel_value = int(tensor.numel())
+                total_sum += sum_value
+                total_abs_sum += abs_sum_value
+                total_sq_sum += sq_sum_value
+                total_numel += numel_value
+                param_records.append(
+                    {
+                        "name": name,
+                        "numel": numel_value,
+                        "sum": sum_value,
+                        "abs_sum": abs_sum_value,
+                        "sq_sum": sq_sum_value,
+                    }
+                )
+
+        record = {
+            "mini_batch_idx": int(meta.mini_batch_idx),
+            "cur_epoch": int(meta.cur_epoch),
+            "split": meta.split,
+            "cur_macro_of_split": int(meta.cur_macro_of_split),
+            "cur_macro_of_epoch": int(meta.cur_macro_of_epoch),
+            "loss": float(loss.detach().float().item()),
+            "grad_scale_before": grad_scale_before,
+            "grad_scale_after": grad_scale_after,
+            "lr": float(self.optimizer.param_groups[0]["lr"]),
+            "num_params": total_numel,
+            "param_sum": total_sum,
+            "param_abs_sum": total_abs_sum,
+            "param_sq_sum": total_sq_sum,
+            "params": param_records,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def _maybe_append_grad_checksums(
+        self,
+        *,
+        meta: Meta,
+        loss: torch.Tensor,
+        grad_scale: float,
+    ) -> None:
+        path = _debug_grad_checksums_path()
+        if path is None:
+            return
+
+        batches = _debug_grad_checksum_batches()
+        if batches is not None and meta.mini_batch_idx not in batches:
+            return
+
+        total_sum = 0.0
+        total_abs_sum = 0.0
+        total_sq_sum = 0.0
+        total_numel = 0
+        grad_records: list[dict[str, float | int | str]] = []
+
+        with torch.no_grad():
+            for name, value in self._unwrap_model().named_parameters():
+                if value.grad is None:
+                    continue
+                tensor = value.grad.detach().float()
+                sum_value = float(tensor.sum().item())
+                abs_sum_value = float(tensor.abs().sum().item())
+                sq_sum_value = float(tensor.square().sum().item())
+                numel_value = int(tensor.numel())
+                total_sum += sum_value
+                total_abs_sum += abs_sum_value
+                total_sq_sum += sq_sum_value
+                total_numel += numel_value
+                grad_records.append(
+                    {
+                        "name": name,
+                        "numel": numel_value,
+                        "sum": sum_value,
+                        "abs_sum": abs_sum_value,
+                        "sq_sum": sq_sum_value,
+                    }
+                )
+
+        record = {
+            "mini_batch_idx": int(meta.mini_batch_idx),
+            "cur_epoch": int(meta.cur_epoch),
+            "split": meta.split,
+            "cur_macro_of_split": int(meta.cur_macro_of_split),
+            "cur_macro_of_epoch": int(meta.cur_macro_of_epoch),
+            "loss": float(loss.detach().float().item()),
+            "grad_scale": grad_scale,
+            "num_grad_params": total_numel,
+            "grad_sum": total_sum,
+            "grad_abs_sum": total_abs_sum,
+            "grad_sq_sum": total_sq_sum,
+            "grads": grad_records,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def _maybe_dump_step_tensors(
+        self,
+        *,
+        meta: Meta,
+        phase: Literal["grad", "param"],
+    ) -> None:
+        dump_dir = _debug_step_tensor_dump_dir()
+        if dump_dir is None:
+            return
+
+        batches = _debug_step_tensor_dump_batches()
+        if batches is not None and meta.mini_batch_idx not in batches:
+            return
+
+        names = _debug_step_tensor_dump_names()
+        if names is None or len(names) == 0:
+            return
+
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        for name, value in self._unwrap_model().named_parameters():
+            if name not in names:
+                continue
+            if phase == "grad":
+                if value.grad is None:
+                    continue
+                tensor = value.grad.detach()
+            else:
+                tensor = value.detach()
+            safe_name = name.replace(".", "__")
+            torch.save(
+                {
+                    "mini_batch_idx": int(meta.mini_batch_idx),
+                    "cur_epoch": int(meta.cur_epoch),
+                    "split": meta.split,
+                    "phase": phase,
+                    "name": name,
+                    "tensor": tensor.cpu(),
+                },
+                dump_dir / f"batch_{meta.mini_batch_idx}_{phase}_{safe_name}.pt",
+            )
+
     # Public model save/load interface
     def save_model(self, path: str) -> None:
-        """Save the unwrapped model weights to disk (rank 0 only).
+        """Save a consistent CPU snapshot of the unwrapped model (rank 0 only).
 
-        The DDP wrapper is stripped so the checkpoint can be loaded without
-        a distributed context.
+        The DDP wrapper is stripped so the checkpoint can be loaded without a
+        distributed context. The snapshot is materialized on CPU in the caller
+        thread before ``torch.save`` so training never overlaps with a
+        background thread reading live GPU parameters.
 
         Args:
             path: File path where the state dict will be written.
@@ -833,10 +1271,16 @@ class Worker:
         rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
 
         if rank == 0:
-            torch.save(self._unwrap_model().state_dict(), path)
+            torch.cuda.synchronize(self.device)
+            with torch.no_grad():
+                cpu_state_dict = {
+                    key: value.detach().cpu().clone()
+                    for key, value in self._unwrap_model().state_dict().items()
+                }
+            torch.save(cpu_state_dict, path)
 
     def load_model(self, path: str) -> None:
-        """Load model weights from a checkpoint and re-wrap with DDP.
+        """Load model weights into the existing model / DDP wrapper in place.
 
         A barrier before loading ensures the file is fully written by rank 0
         before any rank reads it.  A second barrier after loading keeps all
@@ -853,15 +1297,7 @@ class Worker:
 
         bare_model = self._unwrap_model()
         bare_model.load_state_dict(state, strict=True)
-        bare_model = bare_model.to(self.device)
-
-        self.model = DDP(bare_model, device_ids=[0])
-        if self.compile_model:
-            inner = self.model.module
-            inner.encoder = torch.compile(inner.encoder)
-            if inner.mem_updater is not None:
-                inner.mem_updater = torch.compile(inner.mem_updater)
-            inner.header = torch.compile(inner.header)
+        bare_model.to(self.device)
 
         if dist.is_available() and dist.is_initialized():
             dist.barrier(group=self.nccl)

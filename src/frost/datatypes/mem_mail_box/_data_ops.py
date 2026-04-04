@@ -40,10 +40,26 @@ def compute_last_indices(nid: torch.Tensor, ts: torch.Tensor) -> torch.Tensor:
 
     unique_nids, compact_idx = torch.unique(nid, return_inverse=True)
     M = unique_nids.numel()
-    # Sort by ts ascending so the largest-ts entry is written last (scatter_ last-write-wins)
-    order = torch.argsort(ts)
-    argmax = torch.empty(M, dtype=torch.long, device=ts.device)
-    argmax.scatter_(0, compact_idx[order], order)
+
+    # Step 1: deterministic max-ts per group via scatter_reduce_
+    if ts.is_floating_point():
+        fill_val = float("-inf")
+    else:
+        fill_val = torch.iinfo(ts.dtype).min
+    max_ts = ts.new_full((M,), fill_val)
+    max_ts.scatter_reduce_(
+        0, compact_idx, ts, reduce="amax", include_self=False
+    )
+
+    # Step 2: mask entries that match the per-group maximum
+    is_max = ts == max_ts[compact_idx]
+
+    # Step 3: among ties pick the largest original index (deterministic)
+    arange = torch.arange(nid.numel(), device=nid.device, dtype=torch.long)
+    argmax = torch.full((M,), -1, dtype=torch.long, device=nid.device)
+    argmax.scatter_reduce_(
+        0, compact_idx[is_max], arange[is_max], reduce="amax", include_self=False
+    )
     return argmax
 
 

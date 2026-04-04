@@ -5,6 +5,7 @@ each incoming batch and constructs per-batch label tensors.  When a
 ``MemBoxStore`` is absent the output queue feeds directly into ``full_q``;
 otherwise it feeds into the ``DynamicAssembler``.
 """
+
 import logging
 import threading
 from queue import Queue as Q
@@ -111,7 +112,7 @@ class H2D(StreamThreadBase):
 
             meta.flat_graph.eid[
                 0 : meta.n_src * self.n_neg
-            ] = -1  # set negative edge id to -1 to prevent info leakage
+            ] = -1  # set negative edge id to -1 to prevent info leakage, because we don't need eid for root nodes after h2d
 
             # move gnn_mfgs to gpu
             meta.flat_graph = meta.flat_graph.to(self.device)

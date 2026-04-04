@@ -71,37 +71,29 @@ def _resolve_num_edges(dataset_or_num_edges: str | int, data_dir: Path) -> int:
     raise TypeError("dataset_or_num_edges must be a dataset name or an integer.")
 
 
-def get_max_batch_size(
+def get_max_macro_batch_size(
     dataset_or_num_edges: str | int,
     split: Sequence[int] = DEFAULT_SPLIT,
-    n_gpu: int = 2,
     data_dir: str | Path = DEFAULT_DATA_DIR,
 ) -> int:
-    """Return a conservative upper bound for per-worker ``batch_size``.
+    """Return a conservative upper bound for ``macro_batch_size``.
 
-    The returned value ensures ``batch_size * n_gpu`` does not exceed the
+    The returned value ensures ``macro_batch_size`` does not exceed the
     smallest non-train split implied by ``split``. This matches the current
     host-side balancing constraint, which requires each evaluation split to
-    contain at least one full multi-GPU macro-batch.
+    contain at least one full macro-batch.
 
     Args:
         dataset_or_num_edges: Dataset name under ``DATA/`` or a known ``num_edges``.
         split: Relative train/eval split weights. Default is ``(8, 1, 1)``.
-        n_gpu: Number of worker GPUs. Default is ``2``.
         data_dir: Dataset root used when ``dataset_or_num_edges`` is a name.
 
     Returns:
-        The maximum allowed per-worker batch size. A return value of ``0``
-        means the requested split is too small for the given ``n_gpu``.
+        The maximum allowed macro batch size.
     """
-    if isinstance(n_gpu, bool) or not isinstance(n_gpu, int):
-        raise TypeError("n_gpu must be an integer.")
-    if n_gpu <= 0:
-        raise ValueError("n_gpu must be positive.")
-
     normalized_split = _normalize_split(split)
     total_weight = sum(normalized_split)
     min_eval_weight = min(normalized_split[1:])
     num_edges = _resolve_num_edges(dataset_or_num_edges, Path(data_dir))
     min_eval_edges = (num_edges * min_eval_weight) // total_weight
-    return min_eval_edges // n_gpu
+    return min_eval_edges

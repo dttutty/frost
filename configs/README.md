@@ -7,7 +7,7 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | Key | Default |
 | --- | --- |
 | `dataset` | `LASTFM` |
-| `batch_size` | `4000` |
+| `macro_batch_size` | `4000` |
 | `access_analyzer` | omitted |
 | `n_neg` | `1` |
 | `d_time` | `128` |
@@ -19,7 +19,7 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `epoch` | `100` | Number of training epochs. |
-| `batch_size` | `4000` | Per-worker local batch size. The host groups `batch_size * n_gpu` samples into a macro-batch before dispatch. |
+| `macro_batch_size` | `4000` | Total batch size across all GPUs. The launcher auto-computes `per_gpu_batch_size = macro_batch_size // n_gpu`. |
 | `patience` | `100` | Early stopping patience in epochs. |
 | `dropout` | `0.2` | Shared dropout hyperparameter forwarded into several encoders and memory modules. |
 | `seed` | `42` | Shared random seed for sampling and reproducibility. |
@@ -56,7 +56,7 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 - `fanout` is derived, not stored at the root: APAN uses `mem_updater.mail_recipients`, while every other model uses `encoder.fanout`. `null` selects 0-hop, a 1-element list selects 1-hop, and a longer list selects multi-hop.
 - `encoder.out_dim` is the shared embedding size used by the predictor and, for memory models, the default source of `mem_updater.d_mem`.
 - `encoder.out_dim` is a config-level alias, not a direct constructor argument for every encoder. It maps to `d_hid` in TGN/TGAT, `d_out` in GraphMixer/TCL/DyGFormer/DyRep, and `d_mem` in JODIE/APAN. `launcher.py` resolves this alias before instantiating the concrete model classes.
-- `batch_size`, `n_neg`, the derived `fanout`, `mem_updater.mail_recipients`, and `ring_buf_size` together determine the ring-buffer slot layout and pipeline depth.
+- `macro_batch_size`, `n_neg`, the derived `fanout`, `mem_updater.mail_recipients`, and `ring_buf_size` together determine the ring-buffer slot layout and pipeline depth.
 - The runtime neighborhood sampler is configured under `ngh_sampler`. In particular, `ngh_sampler.strategy` selects `uniform`, `recent`, or `time_interval_aware`, and `ngh_sampler.time_scaling_factor` is consumed by the `time_interval_aware` sampler.
 - GPU placement is auto-detected from `CUDA_VISIBLE_DEVICES` plus `nvidia-smi topo -m`. The planner distinguishes three levels when available: NVLink peers, same-NUMA peers, and cross-NUMA peers.
 - `edim` is inferred from the edge-feature file under `DATA/<dataset>/` (typically `edge_features.npy`) and combines with `d_mem` / `boxsize` to determine mailbox dimensionality: `d_mail = 2 * d_mem + edim`.

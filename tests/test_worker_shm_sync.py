@@ -19,6 +19,12 @@ class FakeStream:
     def wait_event(self, _event) -> None:
         pass
 
+    def __init__(self) -> None:
+        self.synchronize_calls = 0
+
+    def synchronize(self) -> None:
+        self.synchronize_calls += 1
+
 
 class FakeCudaEvent:
     def record(self, *_args, **_kwargs) -> None:
@@ -89,6 +95,7 @@ def _make_meta(
         flat_graph=graph,
         buf_len=graph.nid.numel(),
         plan_set=PlanSet(mem_plan=mem_plan, box_plan=box_plan),
+        n_neg=1,
         fanout=[] if fanout is None else fanout,
     )
 
@@ -161,6 +168,45 @@ def _make_handler(*, use_shm_instead: bool) -> P2PQHandler:
 
 
 class TestDynamicAssemblerShmMode:
+    def test_four_h2d_slots_allow_n_plus_2_to_read_stale_shared_state(self):
+        store = _make_store(boxsize=1)
+        assembler = _make_assembler(store, use_shm_instead=False)
+        graph = _make_graph([1])
+        mem_plan = _make_plan([1])
+        box_plan = _make_plan([1])
+
+        old_mem = store.mem[1].clone()
+        old_box = store.box[1].clone()
+
+        h2d_sem = threading.Semaphore(4)
+        for _ in range(2):
+            h2d_sem.acquire()  # batch N
+        for _ in range(2):
+            h2d_sem.acquire()  # batch N+1
+
+        # batch N+1 finishes first, so batch N+2 is allowed to start even
+        # though batch N's writeback has not landed in shared memory yet.
+        h2d_sem.release()
+        h2d_sem.release()
+        assert h2d_sem.acquire(blocking=False)
+        assert h2d_sem.acquire(blocking=False)
+
+        assembler.prepare_shared_features(graph, mem_plan, box_plan, n_src=1)
+
+        store.mem[1] = torch.tensor([99.0, 101.0])
+        store.mem_ts[1] = torch.tensor(77.0)
+        store.box[1, 0] = torch.tensor([5.0, 6.0, 7.0])
+        store.box_ts[1, 0] = torch.tensor(77.0)
+
+        assert graph.mem is not None
+        assert graph.mem_ts is not None
+        assert graph.box is not None
+        assert graph.box_ts is not None
+        assert torch.equal(graph.mem[0], old_mem)
+        assert torch.equal(graph.mem_ts[0], torch.tensor(1.0))
+        assert torch.equal(graph.box[0], old_box)
+        assert torch.equal(graph.box_ts[0], torch.tensor([1.0]))
+
     def test_apply_delta_features_reads_remote_mem_and_box_from_shm(self):
         store = _make_store(boxsize=1)
         assembler = _make_assembler(store, use_shm_instead=True)
@@ -317,4 +363,28 @@ class TestP2PQHandlerShmMode:
         assert box_out is box_task
         assert len(calls) == 6
         assert len(works) == 6
+        assert handler.p2p_sem.acquire(blocking=False)
+
+    def test_single_rank_bypass_synchronizes_stream_before_publishing_delta(
+        self, monkeypatch
+    ):
+        handler = _make_handler(use_shm_instead=False)
+        mem_task = _make_p2p_task((2, 2))
+        box_task = _make_p2p_task((2, 1, 3))
+        fake_stream = FakeStream()
+
+        handler.mem_p2p_q.put((mem_task, object()))
+        handler.mem_p2p_q.put(None)
+        handler.box_p2p_q.put((box_task, object()))
+
+        monkeypatch.setattr(torch.cuda, "current_stream", lambda: fake_stream)
+        monkeypatch.setattr(torch.distributed, "get_world_size", lambda _group: 1)
+
+        handler.logic()
+
+        mem_out, box_out, works = handler.delta_queue.get_nowait()
+        assert mem_out is mem_task
+        assert box_out is box_task
+        assert works == []
+        assert fake_stream.synchronize_calls == 1
         assert handler.p2p_sem.acquire(blocking=False)

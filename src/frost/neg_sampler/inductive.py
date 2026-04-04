@@ -68,6 +68,14 @@ class InductiveNegLinkSampler:
         self._batch_start_time: float = 0.0
         self._batch_end_time: float = 0.0
 
+    def reset(self) -> None:
+        """Reset RNG and per-batch context for deterministic evaluation."""
+        self._rng = np.random.RandomState(self.seed)
+        self._batch_src = None
+        self._batch_dst = None
+        self._batch_start_time = 0.0
+        self._batch_end_time = 0.0
+
     # ------------------------------------------------------------------
     # Setup helpers
     # ------------------------------------------------------------------

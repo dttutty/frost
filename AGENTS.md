@@ -34,7 +34,7 @@ uv run pytest tests/ -v
 | CAWN | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=cawn predictor=dygformer` |
 | EdgeBank | `uv run python eval_edgebank.py --dataset LASTFM` |
 
-**Config defaults** (`configs/config.yaml`): `access_analyzer` omitted on non-memory runs, `mem_updater=null`, `n_neg=1`, `ring_buf_size=32`, `batch_size=4000`, `d_time=128`, `no_memory_queue_size=4`.
+**Config defaults** (`configs/config.yaml`): `access_analyzer` omitted on non-memory runs, `mem_updater=null`, `n_neg=1`, `ring_buf_size=32`, `macro_batch_size=4000`, `d_time=128`, `no_memory_queue_size=4`.
 
 **Pair-aware predictor auto-switches** (`launcher.py`): if the user leaves the default `predictor=link`, `DyGFormer` and `CAWN` are auto-switched to `DyGFormerLinkPredictor`, and `TCL` is auto-switched to `PairAwareMergeLayerPredictor`.
 

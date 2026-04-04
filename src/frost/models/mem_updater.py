@@ -76,7 +76,7 @@ class MemoryUpdater(nn.Module):
 
         Encodes the time delta between the current event timestamp and the
         last memory update timestamp, concatenates it with the mailbox
-        message, and feeds the result through the recurrent cell.  Detached
+        message, and feeds the result through the recurrent cell. Detached
         copies of the new memory, timestamp, and node IDs for the first
         ``n_target_nodes`` nodes (i.e., src + pos_dst) are cached on
         ``flat_graph`` for async global synchronization.

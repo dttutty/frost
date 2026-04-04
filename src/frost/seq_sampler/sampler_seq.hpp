@@ -12,6 +12,7 @@
 #include <vector>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include "sampler_base.h"
 namespace nb = nanobind;
 
@@ -99,35 +100,93 @@ public:
             return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
         };
         const bool disable_omp = is_env_truthy(std::getenv("FROST_SEQSAMPLER_NO_OMP"));
+        const bool mimic_tgl_batch_shared_recent =
+            sample_strategy == "recent" &&
+            is_env_truthy(std::getenv("FROST_DEBUG_TGL_BATCH_SHARED_RECENT"));
 
         size_t bs = nid.size();
         std::vector<ID_T> out_n(bs * n_ngh, -1);
         std::vector<ID_T> out_e(bs * n_ngh, -1);
         std::vector<TIME_T> out_t(bs * n_ngh, 0.0f);
 
+        std::unordered_map<ID_T, TIME_T> batch_max_ts;
+        if (mimic_tgl_batch_shared_recent) {
+            batch_max_ts.reserve(bs);
+            for (size_t i = 0; i < bs; ++i) {
+                auto it = batch_max_ts.find(nid[i]);
+                if (it == batch_max_ts.end() || it->second < ts[i]) {
+                    batch_max_ts[nid[i]] = ts[i];
+                }
+            }
+        }
+
         {
             nb::gil_scoped_release release;
+
+            const auto sample_recent_with_batch_shared_window =
+                [&](size_t i) {
+                    const TIME_T batch_upper = batch_max_ts.at(nid[i]);
+                    auto [start, end] = this->find_edge_range_base(nid[i], batch_upper);
+                    if (start > end) {
+                        return;
+                    }
+
+                    const size_t offset = i * n_ngh;
+                    const ID_T limit = ((end - start + 1) <= n_ngh)
+                        ? start
+                        : static_cast<ID_T>(end - n_ngh);
+
+                    std::vector<ID_T> picked;
+                    picked.reserve(static_cast<size_t>(n_ngh));
+
+                    for (ID_T k = end; k > limit; --k) {
+                        if (this->edge_ts[k] < ts[i]) {
+                            picked.push_back(k);
+                        }
+                    }
+
+                    const size_t take = picked.size();
+                    if (take == 0) {
+                        return;
+                    }
+
+                    const size_t pad_offset = n_ngh - take;
+                    for (size_t k = 0; k < take; ++k) {
+                        const ID_T edge_idx = picked[take - 1 - k];
+                        out_n[offset + pad_offset + k] = this->indices[edge_idx];
+                        out_e[offset + pad_offset + k] = this->edge_ids[edge_idx];
+                        out_t[offset + pad_offset + k] = this->edge_ts[edge_idx];
+                    }
+                };
 
             if (disable_omp) {
                 for (size_t i = 0; i < bs; ++i) {
                     std::mt19937 local_rng(seed_val + i);
-                    auto [start, end] = this->find_edge_range_base(nid[i], ts[i]);
+                    if (mimic_tgl_batch_shared_recent) {
+                        sample_recent_with_batch_shared_window(i);
+                    } else {
+                        auto [start, end] = this->find_edge_range_base(nid[i], ts[i]);
 
-                    size_t offset = i * n_ngh;
-                    this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
-                                    time_scaling_factor,
-                                    &out_n[offset], &out_e[offset], &out_t[offset]);
+                        size_t offset = i * n_ngh;
+                        this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
+                                        time_scaling_factor,
+                                        &out_n[offset], &out_e[offset], &out_t[offset]);
+                    }
                 }
             } else {
                 #pragma omp parallel for schedule(static)
                 for (size_t i = 0; i < bs; ++i) {
                     std::mt19937 local_rng(seed_val + i);
-                    auto [start, end] = this->find_edge_range_base(nid[i], ts[i]);
+                    if (mimic_tgl_batch_shared_recent) {
+                        sample_recent_with_batch_shared_window(i);
+                    } else {
+                        auto [start, end] = this->find_edge_range_base(nid[i], ts[i]);
 
-                    size_t offset = i * n_ngh;
-                    this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
-                                    time_scaling_factor,
-                                    &out_n[offset], &out_e[offset], &out_t[offset]);
+                        size_t offset = i * n_ngh;
+                        this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
+                                        time_scaling_factor,
+                                        &out_n[offset], &out_e[offset], &out_t[offset]);
+                    }
                 }
             }
         } // GIL reacquired here before creating Python objects

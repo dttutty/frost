@@ -14,6 +14,19 @@ from frost.shm.mem_mgr import MemBoxStore
 logger = logging.getLogger(__name__)
 
 
+def _release_h2d_credit(
+    h2d_sem,
+    *,
+    batch_idx: int,
+    kind: str,
+) -> None:
+    writer_done = getattr(h2d_sem, "writer_done", None)
+    if callable(writer_done):
+        writer_done(batch_idx=batch_idx, kind=kind)
+        return
+    h2d_sem.release()
+
+
 class SharedMemWriter(ThreadBase):
     """Generic write-back thread for shared-memory tensors (node memory or mailbox)."""
 
@@ -46,31 +59,51 @@ class SharedMemWriter(ThreadBase):
         if entry is None or writeback is None:
             return
 
-        if writeback.device.type != "cuda":
-            writeback = writeback.cuda()
+        if writeback.numel() == 0:
+            return
+
+        if writeback.device != entry.nid.device:
+            writeback = writeback.to(entry.nid.device)
 
         mask = torch.isin(entry.nid, writeback)
         valid_nid_gpu = entry.nid[mask]
         valid_data_gpu = entry.data[mask]
         valid_ts_gpu = entry.ts[mask]
 
+        if valid_nid_gpu.numel() == 0:
+            return
+
         idx = valid_nid_gpu.cpu().long()
-        self.shared_data[idx] = valid_data_gpu.cpu()
-        self.shared_ts[idx] = valid_ts_gpu.cpu()
+        data_cpu = valid_data_gpu.cpu().to(self.shared_data.dtype)
+        ts_cpu = valid_ts_gpu.cpu().to(self.shared_ts.dtype)
+        current_ts = self.shared_ts[idx]
+        fresh_mask = ts_cpu >= current_ts
+        if not torch.any(fresh_mask):
+            return
+
+        idx = idx[fresh_mask]
+        self.shared_data[idx] = data_cpu[fresh_mask]
+        self.shared_ts[idx] = ts_cpu[fresh_mask]
 
     @torch.no_grad()
     def logic(self) -> None:
         while not self.stop_ev.is_set():
             task = self.wr_q.get(block=True)
-            if task is None:
-                break
+            try:
+                if task is None:
+                    break
 
-            data, batch_idx, entry, ready_event = task
-            if data is not None and data.shape[0] > 0:
-                torch.cuda.current_stream().wait_event(ready_event)
-
-            self.write_back(data, entry)
-            self.h2d_sem.release()
+                data, batch_idx, entry, ready_event = task
+                if isinstance(data, torch.Tensor) and data.numel() > 0:
+                    with torch.cuda.stream(self.writer_stream):
+                        self.writer_stream.wait_event(ready_event)
+                        self.write_back(data, entry)
+                    self.writer_stream.synchronize()
+                else:
+                    self.write_back(data, entry)
+                _release_h2d_credit(self.h2d_sem, batch_idx=batch_idx, kind="mem")
+            finally:
+                self.wr_q.task_done()
 
 
 class BoxMailWriter(ThreadBase):
@@ -104,6 +137,9 @@ class BoxMailWriter(ThreadBase):
         self.stop_ev = stop_ev
         self.n_neg = n_neg
         self.fanout = fanout[0] if fanout and len(fanout) > 0 else 0
+        self.writer_stream = cast(
+            torch.cuda.Stream, torch.cuda.Stream(device=self.device)
+        )
 
     def write_back(
         self,
@@ -113,8 +149,11 @@ class BoxMailWriter(ThreadBase):
         if entry is None or writeback is None:
             return
 
-        if writeback.device.type != "cuda":
-            writeback = writeback.cuda()
+        if writeback.numel() == 0:
+            return
+
+        if writeback.device != entry.nid.device:
+            writeback = writeback.to(entry.nid.device)
 
         mask = torch.isin(entry.nid, writeback)
         valid_nid = entry.nid[mask]
@@ -126,6 +165,21 @@ class BoxMailWriter(ThreadBase):
         # Squeeze back to MailEntry format: data=[N,D], ts=[N]
         valid_data = entry.data[mask].squeeze(1)
         valid_ts = entry.ts[mask].squeeze(1)
+
+        if self.mem_box_store.box.shape[1] == 1:
+            idx = valid_nid.cpu().long()
+            data_cpu = valid_data.cpu().to(self.mem_box_store.box.dtype)
+            ts_cpu = valid_ts.cpu().to(self.mem_box_store.box_ts.dtype)
+            current_ts = self.mem_box_store.box_ts[idx, 0]
+            fresh_mask = ts_cpu >= current_ts
+            if not torch.any(fresh_mask):
+                return
+
+            idx = idx[fresh_mask]
+            self.mem_box_store.box[idx, 0] = data_cpu[fresh_mask]
+            self.mem_box_store.box_ts[idx, 0] = ts_cpu[fresh_mask]
+            self.mem_box_store.box_pos[idx] = 0
+            return
 
         mail = MailEntry(
             nid=valid_nid,
@@ -153,6 +207,9 @@ class BoxMailWriter(ThreadBase):
         the entry with the latest timestamp wins (keep_last semantics).
         """
         if writeback is None:
+            return
+
+        if writeback.numel() == 0:
             return
 
         # --- Extract neighbor section from flat_nid_cpu ---
@@ -199,12 +256,15 @@ class BoxMailWriter(ThreadBase):
         nbr_data = nbr_data[sort_order]
         nbr_ts = nbr_ts[sort_order]
 
-        # After sorting by (nid, ts), the LAST occurrence per nid has the highest ts
-        unique_nids, inverse = torch.unique_consecutive(nbr_nids, return_inverse=True)
-        # Use scatter to keep the last index per unique nid
-        last_idx = torch.zeros(unique_nids.shape[0], dtype=torch.long)
-        idx_range = torch.arange(nbr_nids.shape[0])
-        last_idx.scatter_(0, inverse, idx_range)  # last write wins = latest ts
+        # After sorting by (nid, ts), the LAST occurrence per nid has the highest ts.
+        # Detect group boundaries instead of scatter_ (which is non-deterministic
+        # for duplicate indices on CUDA and technically undefined on CPU).
+        N = nbr_nids.shape[0]
+        is_last = torch.ones(N, dtype=torch.bool)
+        if N > 1:
+            is_last[:-1] = nbr_nids[:-1] != nbr_nids[1:]
+        last_idx = torch.nonzero(is_last, as_tuple=False).squeeze(-1)
+        unique_nids = nbr_nids[last_idx]
 
         dedup_nids = nbr_nids[last_idx]
         dedup_data = nbr_data[last_idx]
@@ -234,17 +294,27 @@ class BoxMailWriter(ThreadBase):
     def logic(self) -> None:
         while not self.stop_ev.is_set():
             task = self.wr_q.get(block=True)
-            if task is None:
-                break
+            try:
+                if task is None:
+                    break
 
-            data, batch_idx, entry, ready_event = task
-            if data is not None and isinstance(data, torch.Tensor) and data.shape[0] > 0:
-                torch.cuda.current_stream().wait_event(ready_event)
-
-            # APAN fast path: entry is (MailEntry, Tensor) tuple
-            if isinstance(entry, tuple):
-                seed_mail, flat_nid_cpu = entry
-                self.write_back_apan(data, seed_mail, flat_nid_cpu)
-            else:
-                self.write_back(data, entry)
-            self.h2d_sem.release()
+                data, batch_idx, entry, ready_event = task
+                if (
+                    isinstance(data, torch.Tensor)
+                    and data.numel() > 0
+                    and not isinstance(entry, tuple)
+                ):
+                    with torch.cuda.stream(self.writer_stream):
+                        self.writer_stream.wait_event(ready_event)
+                        self.write_back(data, entry)
+                    self.writer_stream.synchronize()
+                else:
+                    # APAN fast path: entry is (MailEntry, Tensor) tuple
+                    if isinstance(entry, tuple):
+                        seed_mail, flat_nid_cpu = entry
+                        self.write_back_apan(data, seed_mail, flat_nid_cpu)
+                    else:
+                        self.write_back(data, entry)
+                _release_h2d_credit(self.h2d_sem, batch_idx=batch_idx, kind="box")
+            finally:
+                self.wr_q.task_done()

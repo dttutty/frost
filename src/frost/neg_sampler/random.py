@@ -53,9 +53,17 @@ class RandomNegLinkSampler:
             raise ValueError("RandomNegLinkSampler requires at least one candidate node.")
 
         self._generator: torch.Generator | None = None
-        if seed is not None:
-            self._generator = torch.Generator(device="cpu")
-            self._generator.manual_seed(seed)
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset sampler RNG so eval splits reuse the same negatives every epoch."""
+        self._batch_dst = None
+        if self.seed is None:
+            self._generator = None
+            return
+
+        self._generator = torch.Generator(device="cpu")
+        self._generator.manual_seed(self.seed)
 
     def set_batch_context(
         self,
@@ -64,7 +72,9 @@ class RandomNegLinkSampler:
         batch_dst: np.ndarray,
         batch_start_time: float,
         batch_end_time: float,
+        batch_ts: np.ndarray | None = None,
     ) -> None:
+        del batch_src, batch_start_time, batch_end_time, batch_ts
         if self.collision_check:
             self._batch_dst = torch.from_numpy(batch_dst)
 

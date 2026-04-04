@@ -2,15 +2,15 @@ from pathlib import Path
 
 import pytest
 
-from frost.utils.batch_size import get_max_batch_size
+from frost.utils.batch_size import get_max_macro_batch_size
 
 
-def test_get_max_batch_size_from_num_edges():
-    assert get_max_batch_size(74478, n_gpu=1) == 7447
-    assert get_max_batch_size(74478, n_gpu=2) == 3723
+def test_get_max_macro_batch_size_from_num_edges():
+    # 74478 edges, split (8,1,1) -> min_eval = 74478 * 1 // 10 = 7447
+    assert get_max_macro_batch_size(74478) == 7447
 
 
-def test_get_max_batch_size_from_dataset_name_case_insensitive(tmp_path: Path):
+def test_get_max_macro_batch_size_from_dataset_name_case_insensitive(tmp_path: Path):
     dataset_dir = tmp_path / "lastfm"
     dataset_dir.mkdir()
     (dataset_dir / "edges.csv").write_text(
@@ -22,11 +22,13 @@ def test_get_max_batch_size_from_dataset_name_case_insensitive(tmp_path: Path):
         encoding="utf-8",
     )
 
-    assert get_max_batch_size("LASTFM", split=(2, 1, 1), n_gpu=1, data_dir=tmp_path) == 1
+    # 4 edges, split (2,1,1) -> min_eval = 4 * 1 // 4 = 1
+    assert get_max_macro_batch_size("LASTFM", split=(2, 1, 1), data_dir=tmp_path) == 1
 
 
-def test_get_max_batch_size_with_custom_split():
-    assert get_max_batch_size(100, split=(7, 2, 1), n_gpu=2) == 5
+def test_get_max_macro_batch_size_with_custom_split():
+    # 100 edges, split (7,2,1) -> min_eval = 100 * 1 // 10 = 10
+    assert get_max_macro_batch_size(100, split=(7, 2, 1)) == 10
 
 
 @pytest.mark.parametrize(
@@ -37,11 +39,6 @@ def test_get_max_batch_size_with_custom_split():
         ((8, True, 1), TypeError),
     ],
 )
-def test_get_max_batch_size_rejects_invalid_split(split: tuple[int, ...], error: type[Exception]):
+def test_get_max_macro_batch_size_rejects_invalid_split(split: tuple[int, ...], error: type[Exception]):
     with pytest.raises(error):
-        get_max_batch_size(100, split=split)
-
-
-def test_get_max_batch_size_rejects_invalid_n_gpu():
-    with pytest.raises(ValueError):
-        get_max_batch_size(100, n_gpu=0)
+        get_max_macro_batch_size(100, split=split)

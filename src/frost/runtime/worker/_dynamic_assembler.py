@@ -14,10 +14,14 @@ training loop.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from functools import cached_property
+from pathlib import Path
+from queue import Queue
 from typing import Literal, cast
 
 import torch
@@ -32,6 +36,48 @@ from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
 from frost.shm.mem_mgr import MemBoxStore
 
 logger = logging.getLogger(__name__)
+
+
+def _debug_assert_batch_alignment() -> bool:
+    flag = os.getenv("FROST_DEBUG_ASSERT_BATCH_ALIGNMENT")
+    if flag is None:
+        return False
+    return flag.lower() in {"1", "true", "yes", "on"}
+
+
+def _debug_dump_assembly_dir() -> Path | None:
+    raw = os.getenv("FROST_DEBUG_DUMP_ASSEMBLY_DIR")
+    if raw is None or raw == "":
+        return None
+    return Path(raw)
+
+
+def _debug_dump_assembly_batches() -> set[int] | None:
+    raw = os.getenv("FROST_DEBUG_DUMP_ASSEMBLY_BATCHES")
+    if raw is None or raw.strip() == "":
+        return None
+    return {
+        int(token.strip())
+        for token in raw.split(",")
+        if token.strip() != ""
+    }
+
+
+def _debug_dump_assembly_full() -> bool:
+    flag = os.getenv("FROST_DEBUG_DUMP_ASSEMBLY_FULL")
+    if flag is None:
+        return False
+    return flag.lower() in {"1", "true", "yes", "on"}
+
+
+def _debug_assembly_checksums_path() -> Path | None:
+    raw = os.getenv("FROST_DEBUG_ASSEMBLY_CHECKSUMS_PATH")
+    if raw is None:
+        return None
+    value = raw.strip()
+    if value == "":
+        return None
+    return Path(value)
 
 
 @dataclass(kw_only=True)
@@ -101,6 +147,10 @@ class DynamicAssembler(StreamThreadBase):
         n_neg: int = 1,
         sample_4_neg: bool = True,
         use_shm_instead: bool = False,
+        mem_task_q: Queue | None = None,
+        box_task_q: Queue | None = None,
+        mem_wr_q: Queue | None = None,
+        box_wr_q: Queue | None = None,
     ) -> None:
         super().__init__(name="dy_assembler", stop_ev=stop_ev)
         self.in_q = h2d_out_q
@@ -115,6 +165,13 @@ class DynamicAssembler(StreamThreadBase):
         self.n_neg = n_neg
         self.sample_4_neg = sample_4_neg
         self.use_shm_instead = use_shm_instead
+        self.mem_task_q = mem_task_q
+        self.box_task_q = box_task_q
+        self.mem_wr_q = mem_wr_q
+        self.box_wr_q = box_wr_q
+        self._debug_dump_dir = _debug_dump_assembly_dir()
+        self._debug_dump_batches = _debug_dump_assembly_batches()
+        self._debug_dump_full = _debug_dump_assembly_full()
 
     def _strict_assembly_mask(self, graph: FlatGraph, n_src: int) -> torch.Tensor:
         """Return the positions whose mem/box state must be assembled this step.
@@ -517,7 +574,9 @@ class DynamicAssembler(StreamThreadBase):
             local_positions = pos_safe[found_mask]
 
             # Ring-buffer write position (already on GPU)
-            write_pos = (cached_pos[found_mask] - 1) % self.boxsize
+            # box_pos points to the *next* write slot; write there, matching
+            # MemBoxStore.write_mail() semantics.
+            write_pos = cached_pos[found_mask] % self.boxsize
 
             # delta_box.data is [N, 1, d_mail] → squeeze to [M, d_mail]
             mail_data = delta_box.data[local_positions].squeeze(1)
@@ -598,6 +657,170 @@ class DynamicAssembler(StreamThreadBase):
                 delta.box, graph.box, graph.box_ts, graph, box_delta_mask, kind="box"
             )
 
+    def _maybe_dump_assembly_state(
+        self,
+        *,
+        meta,
+        graph: FlatGraph,
+        mem_plan: DynamicPlan | None,
+        box_plan: DynamicPlan | None,
+        delta: MemAndBox | None,
+        n_src: int,
+    ) -> None:
+        dump_dir = getattr(self, "_debug_dump_dir", None)
+        dump_batches = getattr(self, "_debug_dump_batches", None)
+        if dump_dir is None or dump_batches is None:
+            return
+        if meta.mini_batch_idx not in dump_batches:
+            return
+
+        strict_mask = self._strict_assembly_mask(graph, n_src)
+        mem_delta_mask = self._build_delta_mask(graph, mem_plan, strict_mask)
+        box_delta_mask = self._build_delta_mask(graph, box_plan, strict_mask)
+
+        assert graph.mem is not None
+        assert graph.mem_ts is not None
+        assert graph.box is not None
+        assert graph.box_ts is not None
+
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "mini_batch_idx": int(meta.mini_batch_idx),
+            "split": meta.split,
+            "n_src": int(meta.n_src),
+            "nid": graph.nid.detach().cpu(),
+            "ts": graph.ts.detach().cpu(),
+            "strict_mask": strict_mask.detach().cpu(),
+            "mem_delta_mask": mem_delta_mask.detach().cpu(),
+            "box_delta_mask": box_delta_mask.detach().cpu(),
+            "mem_fetch_nid": (
+                mem_plan.fetch.data.detach().cpu() if mem_plan is not None else None
+            ),
+            "box_fetch_nid": (
+                box_plan.fetch.data.detach().cpu() if box_plan is not None else None
+            ),
+            "delta_mem_nid": (
+                delta.mem.nid.detach().cpu()
+                if delta is not None and delta.mem is not None
+                else None
+            ),
+            "delta_box_nid": (
+                delta.box.nid.detach().cpu()
+                if delta is not None and delta.box is not None
+                else None
+            ),
+            "delta_mem_ts": (
+                delta.mem.ts.detach().cpu()
+                if delta is not None and delta.mem is not None
+                else None
+            ),
+            "delta_box_ts": (
+                delta.box.ts.detach().cpu()
+                if delta is not None and delta.box is not None
+                else None
+            ),
+            "delta_mem_checksum": (
+                delta.mem.data.detach().float().sum(dim=1).cpu()
+                if delta is not None and delta.mem is not None
+                else None
+            ),
+            "delta_box_checksum": (
+                delta.box.data.detach().float().reshape(delta.box.data.shape[0], -1).sum(dim=1).cpu()
+                if delta is not None and delta.box is not None
+                else None
+            ),
+            "mem_ts": graph.mem_ts.detach().cpu(),
+            "box_ts": graph.box_ts.detach().cpu(),
+            "mem_checksum": graph.mem.detach().float().cpu().sum(dim=1),
+            "box_checksum": graph.box.detach().float().cpu().reshape(graph.box.shape[0], -1).sum(dim=1),
+        }
+        if getattr(self, "_debug_dump_full", False):
+            payload["mem_data"] = graph.mem.detach().cpu()
+            payload["box_data"] = graph.box.detach().cpu()
+            if delta is not None and delta.mem is not None:
+                payload["delta_mem_data"] = delta.mem.data.detach().cpu()
+            if delta is not None and delta.box is not None:
+                payload["delta_box_data"] = delta.box.data.detach().cpu()
+        torch.save(payload, dump_dir / f"batch_{meta.mini_batch_idx}.pt")
+
+    def _maybe_append_assembly_checksums(
+        self,
+        *,
+        meta,
+        graph: FlatGraph,
+        mem_plan: DynamicPlan | None,
+        box_plan: DynamicPlan | None,
+        delta: MemAndBox | None,
+    ) -> None:
+        path = _debug_assembly_checksums_path()
+        if path is None:
+            return
+
+        def _sum_or_zero(t: torch.Tensor | None) -> float:
+            if t is None or t.numel() == 0:
+                return 0.0
+            return float(t.detach().float().sum().item())
+
+        def _abssum_or_zero(t: torch.Tensor | None) -> float:
+            if t is None or t.numel() == 0:
+                return 0.0
+            return float(t.detach().float().abs().sum().item())
+
+        def _len_or_zero(t: torch.Tensor | None) -> int:
+            if t is None:
+                return 0
+            return int(t.numel())
+
+        record = {
+            "mini_batch_idx": int(meta.mini_batch_idx),
+            "cur_epoch": int(meta.cur_epoch),
+            "split": meta.split,
+            "cur_macro_of_split": int(meta.cur_macro_of_split),
+            "cur_macro_of_epoch": int(meta.cur_macro_of_epoch),
+            "mem_fetch_len": _len_or_zero(
+                None if mem_plan is None or mem_plan.fetch is None else mem_plan.fetch.data
+            ),
+            "box_fetch_len": _len_or_zero(
+                None if box_plan is None or box_plan.fetch is None else box_plan.fetch.data
+            ),
+            "delta_mem_len": _len_or_zero(None if delta is None else delta.mem.nid),
+            "delta_box_len": _len_or_zero(None if delta is None else delta.box.nid),
+            "mem_fetch_nid_sum": _sum_or_zero(
+                None if mem_plan is None or mem_plan.fetch is None else mem_plan.fetch.data
+            ),
+            "box_fetch_nid_sum": _sum_or_zero(
+                None if box_plan is None or box_plan.fetch is None else box_plan.fetch.data
+            ),
+            "delta_mem_nid_sum": _sum_or_zero(None if delta is None else delta.mem.nid),
+            "delta_box_nid_sum": _sum_or_zero(None if delta is None else delta.box.nid),
+            "mem_sum": _sum_or_zero(graph.mem),
+            "mem_abs_sum": _abssum_or_zero(graph.mem),
+            "box_sum": _sum_or_zero(graph.box),
+            "box_abs_sum": _abssum_or_zero(graph.box),
+            "delta_mem_sum": _sum_or_zero(None if delta is None else delta.mem.data),
+            "delta_mem_abs_sum": _abssum_or_zero(
+                None if delta is None else delta.mem.data
+            ),
+            "delta_box_sum": _sum_or_zero(None if delta is None else delta.box.data),
+            "delta_box_abs_sum": _abssum_or_zero(
+                None if delta is None else delta.box.data
+            ),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def _drain_prior_eval_writebacks(self, *, split: str) -> None:
+        # Eval is much faster than train because it has no backward / optimizer step.
+        # Without draining completed writer work here, the assembler can start the
+        # next val/test batch's shared-memory fetch before older mem/box writebacks
+        # have become visible, which makes AP timing-sensitive.
+        if split == "train":
+            return
+        for q in (self.mem_task_q, self.box_task_q, self.mem_wr_q, self.box_wr_q):
+            if q is not None:
+                q.join()
+
     def logic(self) -> None:
         """Main assembly loop: merge shared + delta data and forward to full_q.
 
@@ -634,8 +857,13 @@ class DynamicAssembler(StreamThreadBase):
             assert meta.plan_set is not None
             assert meta.plan_set.mem_plan is not None
             assert meta.plan_set.box_plan is not None
-            self.h2d_sem.acquire()
-            self.h2d_sem.acquire()
+            self._drain_prior_eval_writebacks(split=meta.split)
+            wait_for_batch = getattr(self.h2d_sem, "wait_for_batch", None)
+            if callable(wait_for_batch):
+                wait_for_batch(meta.mini_batch_idx)
+            else:
+                self.h2d_sem.acquire()
+                self.h2d_sem.acquire()
 
             self.prepare_shared_features(
                 graph=meta.flat_graph,
@@ -660,6 +888,20 @@ class DynamicAssembler(StreamThreadBase):
                     mem, box, works = delta_tuple
                     assert mem is not None
                     assert box is not None
+                    if _debug_assert_batch_alignment():
+                        expected_delta_batch_idx = meta.mini_batch_idx - 1
+                        if mem.mini_batch_idx != expected_delta_batch_idx:
+                            raise RuntimeError(
+                                "DynamicAssembler received mem delta with unexpected batch offset: "
+                                f"meta={meta.mini_batch_idx}, expected_delta={expected_delta_batch_idx}, "
+                                f"actual_delta={mem.mini_batch_idx}"
+                            )
+                        if box.mini_batch_idx != expected_delta_batch_idx:
+                            raise RuntimeError(
+                                "DynamicAssembler received box delta with unexpected batch offset: "
+                                f"meta={meta.mini_batch_idx}, expected_delta={expected_delta_batch_idx}, "
+                                f"actual_delta={box.mini_batch_idx}"
+                            )
 
                     # Wait for P2P network streams to finish receiving
                     for work in works:
@@ -685,6 +927,22 @@ class DynamicAssembler(StreamThreadBase):
                     box_plan=meta.plan_set.box_plan,
                     n_src=meta.n_src,
                 )
+
+            self._maybe_dump_assembly_state(
+                meta=meta,
+                graph=meta.flat_graph,
+                mem_plan=meta.plan_set.mem_plan,
+                box_plan=meta.plan_set.box_plan,
+                delta=delta if delta_tuple != "nothing" else None,
+                n_src=meta.n_src,
+            )
+            self._maybe_append_assembly_checksums(
+                meta=meta,
+                graph=meta.flat_graph,
+                mem_plan=meta.plan_set.mem_plan,
+                box_plan=meta.plan_set.box_plan,
+                delta=delta if delta_tuple != "nothing" else None,
+            )
 
             # Push to the next queue
             ready_event = cast(CudaEvent, torch.cuda.Event())

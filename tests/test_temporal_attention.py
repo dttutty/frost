@@ -1,0 +1,140 @@
+"""Tests for TemporalGraphAttentionLayer."""
+
+import torch
+
+from frost.models.modules.temporal_graph_attention_layer import (
+    TemporalGraphAttentionLayer,
+)
+
+
+class TestTemporalGraphAttentionLayer:
+    def test_output_shape(self):
+        dim_node, dim_edge, dim_time, dim_out, num_head = 32, 16, 8, 64, 4
+        layer = TemporalGraphAttentionLayer(
+            dim_node=dim_node,
+            dim_edge=dim_edge,
+            dim_time=dim_time,
+            dim_out=dim_out,
+            num_head=num_head,
+        )
+        N, S = 10, 20
+        target_feat = torch.randn(N, dim_node)
+        neighbor_feat = torch.randn(N, S, dim_node)
+        edge_feat = torch.randn(N, S, dim_edge)
+        dt = torch.rand(N, S) * 100
+        mask = torch.ones(N, S, dtype=torch.bool)
+        out = layer(target_feat, neighbor_feat, edge_feat, dt, mask)
+        assert out.shape == (N, dim_out)
+
+    def test_output_shape_no_time_encoding(self):
+        dim_node, dim_edge, dim_time, dim_out, num_head = 32, 16, 0, 64, 4
+        layer = TemporalGraphAttentionLayer(
+            dim_node=dim_node,
+            dim_edge=dim_edge,
+            dim_time=dim_time,
+            dim_out=dim_out,
+            num_head=num_head,
+        )
+        N, S = 5, 10
+        target_feat = torch.randn(N, dim_node)
+        neighbor_feat = torch.randn(N, S, dim_node)
+        edge_feat = torch.randn(N, S, dim_edge)
+        dt = torch.rand(N, S) * 100
+        mask = torch.ones(N, S, dtype=torch.bool)
+        out = layer(target_feat, neighbor_feat, edge_feat, dt, mask)
+        assert out.shape == (N, dim_out)
+
+    def test_single_head(self):
+        dim_node, dim_edge, dim_time, dim_out, num_head = 32, 8, 4, 32, 1
+        layer = TemporalGraphAttentionLayer(
+            dim_node=dim_node,
+            dim_edge=dim_edge,
+            dim_time=dim_time,
+            dim_out=dim_out,
+            num_head=num_head,
+        )
+        N, S = 8, 15
+        target_feat = torch.randn(N, dim_node)
+        neighbor_feat = torch.randn(N, S, dim_node)
+        edge_feat = torch.randn(N, S, dim_edge)
+        dt = torch.rand(N, S) * 50
+        mask = torch.ones(N, S, dtype=torch.bool)
+        out = layer(target_feat, neighbor_feat, edge_feat, dt, mask)
+        assert out.shape == (N, dim_out)
+
+    def test_with_padding_mask(self):
+        dim_node, dim_edge, dim_time, dim_out, num_head = 16, 8, 4, 32, 2
+        layer = TemporalGraphAttentionLayer(
+            dim_node=dim_node,
+            dim_edge=dim_edge,
+            dim_time=dim_time,
+            dim_out=dim_out,
+            num_head=num_head,
+        )
+        N, S = 4, 10
+        target_feat = torch.randn(N, dim_node)
+        neighbor_feat = torch.randn(N, S, dim_node)
+        edge_feat = torch.randn(N, S, dim_edge)
+        dt = torch.rand(N, S) * 100
+        mask = torch.ones(N, S, dtype=torch.bool)
+        mask[:, 5:] = False
+        out = layer(target_feat, neighbor_feat, edge_feat, dt, mask)
+        assert out.shape == (N, dim_out)
+
+    def test_all_padding_neighbors(self):
+        dim_node, dim_edge, dim_time, dim_out, num_head = 16, 4, 4, 16, 2
+        layer = TemporalGraphAttentionLayer(
+            dim_node=dim_node,
+            dim_edge=dim_edge,
+            dim_time=dim_time,
+            dim_out=dim_out,
+            num_head=num_head,
+        )
+        N, S = 3, 5
+        target_feat = torch.randn(N, dim_node)
+        neighbor_feat = torch.randn(N, S, dim_node)
+        edge_feat = torch.randn(N, S, dim_edge)
+        dt = torch.rand(N, S) * 100
+        mask = torch.zeros(N, S, dtype=torch.bool)
+        out = layer(target_feat, neighbor_feat, edge_feat, dt, mask)
+        assert out.shape == (N, dim_out)
+
+    def test_gradient_flow(self):
+        dim_node, dim_edge, dim_time, dim_out, num_head = 16, 4, 4, 16, 2
+        layer = TemporalGraphAttentionLayer(
+            dim_node=dim_node,
+            dim_edge=dim_edge,
+            dim_time=dim_time,
+            dim_out=dim_out,
+            num_head=num_head,
+        )
+        N, S = 4, 8
+        target_feat = torch.randn(N, dim_node, requires_grad=True)
+        neighbor_feat = torch.randn(N, S, dim_node, requires_grad=True)
+        edge_feat = torch.randn(N, S, dim_edge, requires_grad=True)
+        dt = torch.rand(N, S) * 100
+        mask = torch.ones(N, S, dtype=torch.bool)
+        out = layer(target_feat, neighbor_feat, edge_feat, dt, mask)
+        out.sum().backward()
+        assert target_feat.grad is not None
+        assert neighbor_feat.grad is not None
+        assert edge_feat.grad is not None
+
+    def test_different_batch_sizes(self):
+        dim_node, dim_edge, dim_time, dim_out, num_head = 16, 4, 4, 32, 2
+        layer = TemporalGraphAttentionLayer(
+            dim_node=dim_node,
+            dim_edge=dim_edge,
+            dim_time=dim_time,
+            dim_out=dim_out,
+            num_head=num_head,
+        )
+        for N in [1, 4, 16, 64]:
+            S = 10
+            target_feat = torch.randn(N, dim_node)
+            neighbor_feat = torch.randn(N, S, dim_node)
+            edge_feat = torch.randn(N, S, dim_edge)
+            dt = torch.rand(N, S) * 100
+            mask = torch.ones(N, S, dtype=torch.bool)
+            out = layer(target_feat, neighbor_feat, edge_feat, dt, mask)
+            assert out.shape == (N, dim_out)

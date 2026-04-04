@@ -5,8 +5,11 @@ optional APAN postman, and link predictor header) into a single forward pass
 used by the worker during training and evaluation.
 """
 
+import json
 import logging
+import os
 from queue import Queue
+from pathlib import Path
 from typing import cast
 
 import torch
@@ -21,6 +24,30 @@ from frost.protocols.mem_updater_proto import MemoryUpdaterProto
 from frost.protocols.postman_proto import PostmanProto
 
 logger = logging.getLogger(__name__)
+
+
+def _debug_dump_model_dir() -> Path | None:
+    raw = os.getenv("FROST_DEBUG_DUMP_MODEL_DIR")
+    if raw is None or raw == "":
+        return None
+    return Path(raw)
+
+
+def _debug_dump_model_batches() -> set[int] | None:
+    raw = os.getenv("FROST_DEBUG_DUMP_MODEL_BATCHES")
+    if raw is None or raw.strip() == "":
+        return None
+    return {int(token.strip()) for token in raw.split(",") if token.strip() != ""}
+
+
+def _debug_model_checksums_path() -> Path | None:
+    raw = os.getenv("FROST_DEBUG_MODEL_CHECKSUMS_PATH")
+    if raw is None:
+        return None
+    value = raw.strip()
+    if value == "":
+        return None
+    return Path(value)
 
 
 class AssembledModel(nn.Module):
@@ -67,6 +94,86 @@ class AssembledModel(nn.Module):
 
         self.n_neg = n_neg  # from hydra config
         self.sample_4_neg = sample_4_neg  # from hydra config
+        self._debug_dump_model_dir = _debug_dump_model_dir()
+        self._debug_dump_model_batches = _debug_dump_model_batches()
+
+    def _maybe_dump_model_state(
+        self,
+        *,
+        meta: Meta,
+        logits: torch.Tensor,
+        root_new_mem: MemEntry | None,
+    ) -> None:
+        dump_dir = self._debug_dump_model_dir
+        dump_batches = self._debug_dump_model_batches
+        if dump_dir is None or dump_batches is None:
+            return
+        if meta.mini_batch_idx not in dump_batches:
+            return
+
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "mini_batch_idx": int(meta.mini_batch_idx),
+            "split": meta.split,
+            "logits": logits.detach().cpu(),
+        }
+        if root_new_mem is not None:
+            payload["root_new_mem_nid"] = root_new_mem.nid.detach().cpu()
+            payload["root_new_mem_ts"] = root_new_mem.ts.detach().cpu()
+            payload["root_new_mem_data"] = root_new_mem.data.detach().cpu()
+        torch.save(payload, dump_dir / f"batch_{meta.mini_batch_idx}.pt")
+
+    def _maybe_append_model_checksums(
+        self,
+        *,
+        meta: Meta,
+        logits: torch.Tensor,
+        root_new_mem: MemEntry | None,
+    ) -> None:
+        path = _debug_model_checksums_path()
+        if path is None:
+            return
+
+        def _sum_or_zero(t: torch.Tensor | None) -> float:
+            if t is None or t.numel() == 0:
+                return 0.0
+            return float(t.detach().float().sum().item())
+
+        def _abssum_or_zero(t: torch.Tensor | None) -> float:
+            if t is None or t.numel() == 0:
+                return 0.0
+            return float(t.detach().float().abs().sum().item())
+
+        def _len_or_zero(t: torch.Tensor | None) -> int:
+            if t is None:
+                return 0
+            return int(t.numel())
+
+        record = {
+            "mini_batch_idx": int(meta.mini_batch_idx),
+            "cur_epoch": int(meta.cur_epoch),
+            "split": meta.split,
+            "cur_macro_of_split": int(meta.cur_macro_of_split),
+            "cur_macro_of_epoch": int(meta.cur_macro_of_epoch),
+            "logits_sum": _sum_or_zero(logits),
+            "logits_abs_sum": _abssum_or_zero(logits),
+            "root_new_mem_len": _len_or_zero(None if root_new_mem is None else root_new_mem.nid),
+            "root_new_mem_nid_sum": _sum_or_zero(
+                None if root_new_mem is None else root_new_mem.nid
+            ),
+            "root_new_mem_ts_sum": _sum_or_zero(
+                None if root_new_mem is None else root_new_mem.ts
+            ),
+            "root_new_mem_sum": _sum_or_zero(
+                None if root_new_mem is None else root_new_mem.data
+            ),
+            "root_new_mem_abs_sum": _abssum_or_zero(
+                None if root_new_mem is None else root_new_mem.data
+            ),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
 
     def forward(
         self,
@@ -104,6 +211,7 @@ class AssembledModel(nn.Module):
         n_src = meta.n_src
         fanout = meta.fanout if meta.fanout is not None else []
         assert meta.flat_graph is not None
+        root_new_mem_for_dump: MemEntry | None = None
 
         if self.mem_updater is not None:
             assert mem_task_q is not None, "mem_task_q required when mem_updater is set"
@@ -135,6 +243,7 @@ class AssembledModel(nn.Module):
                     ts=meta.flat_graph.detached_ts,
                     data=meta.flat_graph.detached_mem,
                 )
+                root_new_mem_for_dump = root_new_mem
 
                 plan_set = meta.plan_set
 
@@ -185,4 +294,14 @@ class AssembledModel(nn.Module):
 
         # 4. Predict edges
         ret = self.header(h)
+        self._maybe_dump_model_state(
+            meta=meta,
+            logits=cast(torch.Tensor, ret),
+            root_new_mem=root_new_mem_for_dump,
+        )
+        self._maybe_append_model_checksums(
+            meta=meta,
+            logits=cast(torch.Tensor, ret),
+            root_new_mem=root_new_mem_for_dump,
+        )
         return cast(torch.Tensor, ret)
