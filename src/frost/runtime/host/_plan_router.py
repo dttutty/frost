@@ -377,11 +377,13 @@ class PlanRouter:
 
         if self.mem_plan_in_q is not None:
             mem_needs, mem_updates = self.analyzer.get_mem_plan_inputs(layouts)
-            self.mem_plan_in_q.put((mem_needs, mem_updates, metas))
+            mem_raw_need_counts = self.analyzer.get_mem_plan_raw_need_counts(layouts)
+            self.mem_plan_in_q.put((mem_needs, mem_updates, mem_raw_need_counts, metas))
 
         if self.mail_plan_in_q is not None:
             box_needs, box_updates = self.analyzer.get_mail_plan_inputs(layouts)
-            self.mail_plan_in_q.put((box_needs, box_updates, metas))
+            box_raw_need_counts = self.analyzer.get_mail_plan_raw_need_counts(layouts)
+            self.mail_plan_in_q.put((box_needs, box_updates, box_raw_need_counts, metas))
 
         if self.nfeat_plan_in_q is not None:
             nfeat_needs = self.analyzer.get_feat_plan_inputs(layouts)

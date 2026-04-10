@@ -94,8 +94,18 @@ class AssembledModel(nn.Module):
 
         self.n_neg = n_neg  # from hydra config
         self.sample_4_neg = sample_4_neg  # from hydra config
+        self._delay_box_task_for_structural_mail = self._encoder_uses_structural_mail(
+            encoder
+        )
         self._debug_dump_model_dir = _debug_dump_model_dir()
         self._debug_dump_model_batches = _debug_dump_model_batches()
+
+    @staticmethod
+    def _encoder_uses_structural_mail(encoder: nn.Module) -> bool:
+        encoder = getattr(encoder, "_orig_mod", encoder)
+        return encoder.__class__.__name__ == "DyRep" and bool(
+            getattr(encoder, "use_structural_attention", False)
+        )
 
     def _maybe_dump_model_state(
         self,
@@ -157,7 +167,9 @@ class AssembledModel(nn.Module):
             "cur_macro_of_epoch": int(meta.cur_macro_of_epoch),
             "logits_sum": _sum_or_zero(logits),
             "logits_abs_sum": _abssum_or_zero(logits),
-            "root_new_mem_len": _len_or_zero(None if root_new_mem is None else root_new_mem.nid),
+            "root_new_mem_len": _len_or_zero(
+                None if root_new_mem is None else root_new_mem.nid
+            ),
             "root_new_mem_nid_sum": _sum_or_zero(
                 None if root_new_mem is None else root_new_mem.nid
             ),
@@ -212,6 +224,12 @@ class AssembledModel(nn.Module):
         fanout = meta.fanout if meta.fanout is not None else []
         assert meta.flat_graph is not None
         root_new_mem_for_dump: MemEntry | None = None
+        delay_box_task = self._delay_box_task_for_structural_mail
+        pending_box_root_new_mem: MemEntry | None = None
+        pending_box_pos_efeat: torch.Tensor | None = None
+        pending_box_plan = None
+        pending_box_graph = None
+        pending_box_flat_nid_cpu = None
 
         if self.mem_updater is not None:
             assert mem_task_q is not None, "mem_task_q required when mem_updater is set"
@@ -267,20 +285,32 @@ class AssembledModel(nn.Module):
 
                 assert meta.flat_graph.box is not None
                 assert meta.flat_graph.box_ts is not None
-
-                # Handle box sync
-                box_task = BoxTask(
-                    pos_efeat=meta.flat_graph.efeat[0:n_src].clone()
+                box_pos_efeat = (
+                    meta.flat_graph.efeat[0:n_src].clone()
                     if meta.flat_graph.efeat is not None
-                    else None,
-                    root_new_mem=root_new_mem_clone,
-                    mini_batch_idx=meta.mini_batch_idx,
-                    box_plan=plan_set.box_plan,
-                    is_last=meta.is_last_macro_of_epoch,
-                    graph=meta.graph if self.postman else None,
-                    flat_nid_cpu=meta.flat_nid_cpu if self.postman else None,
+                    else None
                 )
-                box_task_q.put((box_task, ready_event))
+                box_graph = meta.graph if self.postman else None
+                box_flat_nid_cpu = meta.flat_nid_cpu if self.postman else None
+
+                if delay_box_task:
+                    pending_box_root_new_mem = root_new_mem_clone
+                    pending_box_pos_efeat = box_pos_efeat
+                    pending_box_plan = plan_set.box_plan
+                    pending_box_graph = box_graph
+                    pending_box_flat_nid_cpu = box_flat_nid_cpu
+                else:
+                    box_task = BoxTask(
+                        pos_efeat=box_pos_efeat,
+                        root_new_mem=root_new_mem_clone,
+                        mail_peer_mem=None,
+                        mini_batch_idx=meta.mini_batch_idx,
+                        box_plan=plan_set.box_plan,
+                        is_last=meta.is_last_macro_of_epoch,
+                        graph=box_graph,
+                        flat_nid_cpu=box_flat_nid_cpu,
+                    )
+                    box_task_q.put((box_task, ready_event))
         else:
             meta.graph = meta.flat_graph.unflatten(
                 n_src=n_src,
@@ -290,7 +320,39 @@ class AssembledModel(nn.Module):
             )
 
         # 3. Pass the hierarchical HierGraph to the GNN
-        h = self.encoder(graph=meta.graph)
+        encoder_out = self.encoder(graph=meta.graph)
+        mail_peer_mem: torch.Tensor | None = None
+        if isinstance(encoder_out, tuple):
+            h = encoder_out[0]
+            if len(encoder_out) > 1:
+                mail_peer_mem = encoder_out[1]
+        else:
+            h = encoder_out
+        h = cast(torch.Tensor, h)
+
+        if self.mem_updater is not None and delay_box_task:
+            assert box_task_q is not None
+            assert pending_box_root_new_mem is not None
+            assert pending_box_plan is not None
+            with torch.no_grad():
+                mail_peer_mem_for_box = (
+                    mail_peer_mem.detach().clone()
+                    if mail_peer_mem is not None
+                    else None
+                )
+                box_task = BoxTask(
+                    pos_efeat=pending_box_pos_efeat,
+                    root_new_mem=pending_box_root_new_mem,
+                    mail_peer_mem=mail_peer_mem_for_box,
+                    mini_batch_idx=meta.mini_batch_idx,
+                    box_plan=pending_box_plan,
+                    is_last=meta.is_last_macro_of_epoch,
+                    graph=pending_box_graph,
+                    flat_nid_cpu=pending_box_flat_nid_cpu,
+                )
+                box_ready_event = cast(CudaEvent, torch.cuda.Event())
+                box_ready_event.record(stream=torch.cuda.current_stream())
+                box_task_q.put((box_task, box_ready_event))
 
         # 4. Predict edges
         ret = self.header(h)

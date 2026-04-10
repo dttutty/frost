@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Queue as Q
 from typing import Literal, cast
@@ -179,6 +180,95 @@ def _debug_step_tensor_dump_names() -> set[str] | None:
     return {token.strip() for token in raw.split(",") if token.strip() != ""}
 
 
+def _appendix_train_e2e_enabled() -> bool:
+    flag = os.getenv("FROST_APPENDIX_TRAIN_E2E")
+    if flag is None:
+        return False
+    return flag.lower() in {"1", "true", "yes", "on"}
+
+
+def _appendix_measure_start_epoch() -> int:
+    raw = os.getenv("FROST_APPENDIX_MEASURE_START_EPOCH")
+    if raw is None or raw.strip() == "":
+        return 1
+    value = int(raw)
+    if value < 0:
+        raise ValueError("FROST_APPENDIX_MEASURE_START_EPOCH must be >= 0")
+    return value
+
+
+def _appendix_warmup_batches() -> int:
+    raw = os.getenv("FROST_APPENDIX_WARMUP_BATCHES")
+    if raw is None or raw.strip() == "":
+        return 20
+    value = int(raw)
+    if value < 0:
+        raise ValueError("FROST_APPENDIX_WARMUP_BATCHES must be >= 0")
+    return value
+
+
+@dataclass(slots=True)
+class AppendixTrainE2EBenchmark:
+    enabled: bool
+    system: str
+    rank: int
+    compile_enabled: bool
+    measure_start_epoch: int
+    warmup_batches: int
+    intervals_ms: list[float] = field(default_factory=list)
+    train_batches_seen: int = 0
+    _last_start_t: float | None = None
+
+    def reset_chain(self) -> None:
+        self._last_start_t = None
+
+    def on_train_batch_start(self, *, epoch: int, now: float) -> None:
+        if not self.enabled:
+            return
+        if epoch < self.measure_start_epoch:
+            self._last_start_t = None
+            return
+        if self._last_start_t is not None:
+            self.intervals_ms.append((now - self._last_start_t) * 1000.0)
+        self._last_start_t = now
+        self.train_batches_seen += 1
+
+    def emit_summary(self) -> None:
+        if not self.enabled:
+            return
+
+        skipped_intervals = min(self.warmup_batches, len(self.intervals_ms))
+        measured = self.intervals_ms[skipped_intervals:]
+        payload: dict[str, int | float | bool | str] = {
+            "system": self.system,
+            "rank": self.rank,
+            "compile": self.compile_enabled,
+            "measure_start_epoch": self.measure_start_epoch,
+            "warmup_batches": self.warmup_batches,
+            "train_batches_seen": self.train_batches_seen,
+            "interval_count_raw": len(self.intervals_ms),
+            "interval_count": len(measured),
+            "skipped_intervals": skipped_intervals,
+        }
+        if measured:
+            ordered = sorted(measured)
+            n = len(ordered)
+            mean = sum(ordered) / n
+            variance = (
+                sum((value - mean) ** 2 for value in ordered) / n if n > 1 else 0.0
+            )
+            payload.update(
+                {
+                    "avg_wall_ms": mean,
+                    "std_wall_ms": variance**0.5,
+                    "p50_wall_ms": ordered[int(0.50 * (n - 1))],
+                    "p90_wall_ms": ordered[int(0.90 * (n - 1))],
+                    "p99_wall_ms": ordered[int(0.99 * (n - 1))],
+                }
+            )
+        print(f"APPENDIX_TRAIN_E2E_SUMMARY {json.dumps(payload, sort_keys=True)}")
+
+
 class P2PGuardCommHook:
     """Wait for P2P memory sync to finish before the first AllReduce of each training step."""
 
@@ -302,6 +392,14 @@ class Worker:
         self._throughput_events = 0
         self._throughput_start_time: float | None = None
         self._shutdown_done = False
+        self._appendix_train_bench = AppendixTrainE2EBenchmark(
+            enabled=_appendix_train_e2e_enabled(),
+            system="frost",
+            rank=env.local_rank,
+            compile_enabled=compile_model,
+            measure_start_epoch=_appendix_measure_start_epoch(),
+            warmup_batches=_appendix_warmup_batches(),
+        )
 
         # --- Synchronization primitives ---
         self.stop_ev = threading.Event()
@@ -642,6 +740,7 @@ class Worker:
             test_ap_batch_mean=test_ap_batch_mean,
         )
         self._last_train_start_t = None
+        self._appendix_train_bench.reset_chain()
         return res
 
     def train(self, meta: Meta) -> None:
@@ -714,6 +813,7 @@ class Worker:
         """
         assert meta.labels is not None
         self.model.eval()
+        self._appendix_train_bench.reset_chain()
 
         with torch.amp.autocast("cuda", enabled=self.amp):
             logits = self.model(
@@ -904,6 +1004,10 @@ class Worker:
                                 torch.tensor(interval_ms, device=self.device)
                             )
                         self._last_train_start_t = now
+                        self._appendix_train_bench.on_train_batch_start(
+                            epoch=self.curr_epoch,
+                            now=now,
+                        )
                         self.train(meta)
                     if should_profile:
                         prof.step()  # Mark end of one profiling step
@@ -970,6 +1074,7 @@ class Worker:
                         f"({self._throughput_events} events in {elapsed:.1f}s, "
                         f"excluding first 4 warm-up batches)"
                     )
+                self._appendix_train_bench.emit_summary()
                 if self.mem_box_store is not None:
                     assert self.box_task_q is not None
                     assert self.mem_task_q is not None

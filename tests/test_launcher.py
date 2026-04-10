@@ -14,6 +14,8 @@ from frost.launcher import (
     _resolve_dygformer_dummy_edge_dim,
     _resolve_no_memory_queue_size,
     _resolve_predictor_cfg,
+    _resolve_tgat_dummy_node_dim,
+    _resolve_tgat_dummy_edge_dim,
     _resolve_time_scaling_factor,
 )
 
@@ -53,6 +55,54 @@ class TestResolveDyGFormerDummyEdgeDim:
         )
 
         assert resolved == 64
+
+
+class TestResolveTGATDummyEdgeDim:
+    def test_uses_dyglib_alignment_floor_for_zero_feature_datasets(self, tmp_path: Path):
+        dataset_dir = tmp_path / "lastfm"
+        dataset_dir.mkdir()
+        np.save(dataset_dir / "ml_lastfm.npy", np.zeros((8, 1), dtype=np.float32))
+
+        resolved = _resolve_tgat_dummy_edge_dim(
+            dataset="LASTFM",
+            requested_dim=None,
+            processed_data_root=tmp_path,
+        )
+
+        assert resolved == DYGLIB_ALIGNED_FEATURE_DIM
+
+    def test_explicit_config_override_wins(self, tmp_path: Path):
+        resolved = _resolve_tgat_dummy_edge_dim(
+            dataset="LASTFM",
+            requested_dim=32,
+            processed_data_root=tmp_path,
+        )
+
+        assert resolved == 32
+
+
+class TestResolveTGATDummyNodeDim:
+    def test_uses_dyglib_alignment_floor_for_zero_feature_datasets(self, tmp_path: Path):
+        dataset_dir = tmp_path / "lastfm"
+        dataset_dir.mkdir()
+        np.save(dataset_dir / "ml_lastfm_node.npy", np.zeros((8, 1), dtype=np.float32))
+
+        resolved = _resolve_tgat_dummy_node_dim(
+            dataset="LASTFM",
+            requested_dim=None,
+            processed_data_root=tmp_path,
+        )
+
+        assert resolved == DYGLIB_ALIGNED_FEATURE_DIM
+
+    def test_explicit_config_override_wins(self, tmp_path: Path):
+        resolved = _resolve_tgat_dummy_node_dim(
+            dataset="LASTFM",
+            requested_dim=48,
+            processed_data_root=tmp_path,
+        )
+
+        assert resolved == 48
 
 
 class TestResolvePredictorCfg:

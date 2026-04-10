@@ -80,5 +80,13 @@ DATA/DGB*
 DATA/.temp
 DATA/TGL*
 TGL_DATA/
-seed_sweeps/*
 tmp/
+
+
+# 先忽略 seed_sweeps 下所有内容
+seed_sweeps/**
+
+
+
+
+download_data.sh

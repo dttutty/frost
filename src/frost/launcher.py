@@ -88,16 +88,19 @@ def _debug_load_model_path() -> str | None:
     return path or None
 
 
-def _resolve_dygformer_dummy_edge_dim(
+def _resolve_dummy_feature_dim(
     dataset: str,
     requested_dim: object,
     *,
+    model_name: str,
+    feature_name: str,
+    feature_file_name: str,
     processed_data_root: Path | None = None,
 ) -> int:
-    """Resolve DyGFormer's synthetic edge-feature width for DyGLib parity.
+    """Resolve a synthetic feature width for DyGLib-style zero-feature parity.
 
     DyGLib pads link-prediction node/edge features to a shared width of 172.
-    If a processed edge-feature file is available locally, use its raw width but
+    If a processed feature file is available locally, use its raw width but
     still apply the DyGLib floor so datasets with missing features (for example
     our generated LASTFM zeros with width 1) resolve to 172.
     """
@@ -106,40 +109,96 @@ def _resolve_dygformer_dummy_edge_dim(
 
     dataset_key = dataset.strip().lower()
     data_root = processed_data_root or DYGLIB_PROCESSED_DATA_ROOT
-    edge_feat_path = data_root / dataset_key / f"ml_{dataset_key}.npy"
+    feature_path = data_root / dataset_key / feature_file_name.format(
+        dataset_key=dataset_key
+    )
 
-    raw_edge_dim: int | None = None
-    if edge_feat_path.exists():
+    raw_feature_dim: int | None = None
+    if feature_path.exists():
         try:
-            edge_raw_features = np.load(edge_feat_path, mmap_mode="r")
-            if edge_raw_features.ndim == 2:
-                raw_edge_dim = int(edge_raw_features.shape[1])
+            raw_features = np.load(feature_path, mmap_mode="r")
+            if raw_features.ndim == 2:
+                raw_feature_dim = int(raw_features.shape[1])
         except Exception as exc:
             logger.warning(
-                "Failed to inspect DyGLib edge features at %s: %s",
-                edge_feat_path,
+                "Failed to inspect DyGLib %s features at %s: %s",
+                feature_name,
+                feature_path,
                 exc,
             )
 
-    if raw_edge_dim is not None:
-        resolved_dim = max(raw_edge_dim, DYGLIB_ALIGNED_FEATURE_DIM)
+    if raw_feature_dim is not None:
+        resolved_dim = max(raw_feature_dim, DYGLIB_ALIGNED_FEATURE_DIM)
         logger.info(
-            "Resolved DyGFormer dummy_edge_dim=%d for dataset=%s from DyGLib edge features "
+            "Resolved %s dummy_%s_dim=%d for dataset=%s from DyGLib %s features "
             "(raw=%d, aligned floor=%d).",
+            model_name,
+            feature_name,
             resolved_dim,
             dataset,
-            raw_edge_dim,
+            feature_name,
+            raw_feature_dim,
             DYGLIB_ALIGNED_FEATURE_DIM,
         )
         return resolved_dim
 
     logger.info(
-        "Resolved DyGFormer dummy_edge_dim=%d for dataset=%s using DyGLib's "
+        "Resolved %s dummy_%s_dim=%d for dataset=%s using DyGLib's "
         "default aligned feature width.",
+        model_name,
+        feature_name,
         DYGLIB_ALIGNED_FEATURE_DIM,
         dataset,
     )
     return DYGLIB_ALIGNED_FEATURE_DIM
+
+
+def _resolve_dygformer_dummy_edge_dim(
+    dataset: str,
+    requested_dim: object,
+    *,
+    processed_data_root: Path | None = None,
+) -> int:
+    return _resolve_dummy_feature_dim(
+        dataset=dataset,
+        requested_dim=requested_dim,
+        model_name="DyGFormer",
+        feature_name="edge",
+        feature_file_name="ml_{dataset_key}.npy",
+        processed_data_root=processed_data_root,
+    )
+
+
+def _resolve_tgat_dummy_edge_dim(
+    dataset: str,
+    requested_dim: object,
+    *,
+    processed_data_root: Path | None = None,
+) -> int:
+    return _resolve_dummy_feature_dim(
+        dataset=dataset,
+        requested_dim=requested_dim,
+        model_name="TGAT",
+        feature_name="edge",
+        feature_file_name="ml_{dataset_key}.npy",
+        processed_data_root=processed_data_root,
+    )
+
+
+def _resolve_tgat_dummy_node_dim(
+    dataset: str,
+    requested_dim: object,
+    *,
+    processed_data_root: Path | None = None,
+) -> int:
+    return _resolve_dummy_feature_dim(
+        dataset=dataset,
+        requested_dim=requested_dim,
+        model_name="TGAT",
+        feature_name="node",
+        feature_file_name="ml_{dataset_key}_node.npy",
+        processed_data_root=processed_data_root,
+    )
 
 
 def _resolve_predictor_cfg(
@@ -566,6 +625,24 @@ def launch(cfg: DictConfig):
             and bool(encoder_cfg.get("enable_dummy_edge_features", True))
         ):
             encoder_cfg["dummy_edge_dim"] = _resolve_dygformer_dummy_edge_dim(
+                dataset=cfg.dataset,
+                requested_dim=encoder_cfg.get("dummy_edge_dim"),
+            )
+        if (
+            str(cfg.encoder._target_) == TGAT_ENCODER_TARGET
+            and cfg.ndim == 0
+            and bool(encoder_cfg.get("enable_dummy_node_features", True))
+        ):
+            encoder_cfg["dummy_node_dim"] = _resolve_tgat_dummy_node_dim(
+                dataset=cfg.dataset,
+                requested_dim=encoder_cfg.get("dummy_node_dim"),
+            )
+        if (
+            str(cfg.encoder._target_) == TGAT_ENCODER_TARGET
+            and cfg.edim == 0
+            and bool(encoder_cfg.get("enable_dummy_edge_features", True))
+        ):
+            encoder_cfg["dummy_edge_dim"] = _resolve_tgat_dummy_edge_dim(
                 dataset=cfg.dataset,
                 requested_dim=encoder_cfg.get("dummy_edge_dim"),
             )

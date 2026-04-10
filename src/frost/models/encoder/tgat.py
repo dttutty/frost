@@ -33,17 +33,77 @@ class TGAT(nn.Module):
         fanout: list[int],  # from hydra config
         heads: int = 2,  # from hydra config
         dropout: float = 0.1,  # from hydra config
+        enable_dummy_node_features: bool = True,
+        dummy_node_dim: int | None = None,
+        enable_dummy_edge_features: bool = True,
+        dummy_edge_dim: int | None = None,
     ) -> None:
         super().__init__()
         self.num_layers = len(fanout)
         self.dim_hid = d_hid
         self.layers = nn.ModuleList()
+        self.enable_dummy_node_features = enable_dummy_node_features
+        self.enable_dummy_edge_features = enable_dummy_edge_features
+
+        if ndim > 0:
+            self.node_feat_dim = ndim
+            self.uses_dummy_node_features = False
+        elif self.enable_dummy_node_features:
+            if dummy_node_dim is None:
+                raise ValueError(
+                    "dummy_node_dim must be resolved before constructing TGAT "
+                    "when enable_dummy_node_features=True and ndim=0."
+                )
+            if dummy_node_dim <= 0:
+                raise ValueError(
+                    "dummy_node_dim must be > 0 when TGAT synthesizes node features."
+                )
+            self.node_feat_dim = dummy_node_dim
+            self.uses_dummy_node_features = True
+            logger.info(
+                "TGAT received ndim=0; synthesizing %d-D zero node features on GPU.",
+                self.node_feat_dim,
+            )
+        else:
+            self.node_feat_dim = 0
+            self.uses_dummy_node_features = False
+            logger.info(
+                "TGAT received ndim=0 with enable_dummy_node_features=False; "
+                "disabling the node-feature channel."
+            )
+
+        if edim > 0:
+            self.edge_feat_dim = edim
+            self.uses_dummy_edge_features = False
+        elif self.enable_dummy_edge_features:
+            if dummy_edge_dim is None:
+                raise ValueError(
+                    "dummy_edge_dim must be resolved before constructing TGAT "
+                    "when enable_dummy_edge_features=True and edim=0."
+                )
+            if dummy_edge_dim <= 0:
+                raise ValueError(
+                    "dummy_edge_dim must be > 0 when TGAT synthesizes edge features."
+                )
+            self.edge_feat_dim = dummy_edge_dim
+            self.uses_dummy_edge_features = True
+            logger.info(
+                "TGAT received edim=0; synthesizing %d-D zero edge features on GPU.",
+                self.edge_feat_dim,
+            )
+        else:
+            self.edge_feat_dim = 0
+            self.uses_dummy_edge_features = False
+            logger.info(
+                "TGAT received edim=0 with enable_dummy_edge_features=False; "
+                "disabling the edge-feature channel."
+            )
 
         # --- Layer 1: Input (dim_node) -> Hidden (dim_hid) ---
         self.layers.append(
             TemporalGraphAttentionLayer(
-                dim_node=ndim,
-                dim_edge=edim,
+                dim_node=self.node_feat_dim,
+                dim_edge=self.edge_feat_dim,
                 dim_time=d_time,
                 dim_out=d_hid,
                 num_head=heads,
@@ -55,9 +115,9 @@ class TGAT(nn.Module):
         for _ in range(self.num_layers - 1):
             self.layers.append(
                 TemporalGraphAttentionLayer(
-                    dim_node=ndim,  # Target features are original node features
+                    dim_node=self.node_feat_dim,  # Target features are original node features
                     dim_neighbor=d_hid,  # Neighbor features are from previous layer
-                    dim_edge=edim,
+                    dim_edge=self.edge_feat_dim,
                     dim_time=d_time,
                     dim_out=d_hid,
                     num_head=heads,
@@ -65,20 +125,75 @@ class TGAT(nn.Module):
                 )
             )
 
+    @staticmethod
+    def _resolve_feature_dtype(*tensors: torch.Tensor | None) -> torch.dtype:
+        for tensor in tensors:
+            if tensor is not None and tensor.is_floating_point():
+                return tensor.dtype
+        return torch.float32
+
+    def _node_features(
+        self,
+        *,
+        node_features: torch.Tensor | None,
+        num_rows: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        if node_features is not None:
+            return node_features
+        if self.node_feat_dim > 0:
+            return torch.zeros(
+                num_rows,
+                self.node_feat_dim,
+                device=device,
+                dtype=dtype,
+            )
+        return None
+
+    def _edge_features_for_hop(
+        self,
+        *,
+        edge_features: torch.Tensor | None,
+        num_targets: int,
+        fanout: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        if edge_features is not None:
+            return edge_features.view(num_targets, fanout, -1)
+        if self.edge_feat_dim > 0:
+            return torch.zeros(
+                num_targets,
+                fanout,
+                self.edge_feat_dim,
+                device=device,
+                dtype=dtype,
+            )
+        return None
+
     def forward(self, graph: HierGraph) -> torch.Tensor:
         """
         Forward pass using the pure PyTorch HierGraph structure.
         """
         assert graph.neighbors is not None, "Graph must have neighbors for TGAT."
         assert graph.fanout is not None, "TGAT requires fanout metadata."
-        assert graph.root_nfeat is not None, "TGAT requires node features."
         assert len(graph.neighbors) >= self.num_layers, (
             f"Expected at least {self.num_layers} hops of neighbors, "
             f"but got {len(graph.neighbors)}."
         )
 
         # Extract root features
-        h_root = graph.root_nfeat
+        h_root = self._node_features(
+            node_features=graph.root_nfeat,
+            num_rows=graph.root_nid.numel(),
+            device=graph.root_ts.device,
+            dtype=self._resolve_feature_dtype(graph.root_nfeat, graph.root_mem),
+        )
+        assert h_root is not None, (
+            "TGAT requires node features. Provide node features or enable "
+            "dummy zero node features."
+        )
         if graph.root_mem is not None:
             # Combine node features and memory if both exist
             h_root = h_root + graph.root_mem if h_root is not None else graph.root_mem
@@ -90,14 +205,28 @@ class TGAT(nn.Module):
             nbr = graph.neighbors[0]
 
             # Prepare neighbor features
-            assert nbr.nfeat is not None, "TGAT requires neighbor node features."
-            h_nbr = nbr.nfeat.view(N, S, -1)
+            h_nbr = self._node_features(
+                node_features=nbr.nfeat,
+                num_rows=nbr.nid.numel(),
+                device=h_root.device,
+                dtype=self._resolve_feature_dtype(nbr.nfeat, nbr.mem, h_root),
+            )
+            assert h_nbr is not None, (
+                "TGAT requires neighbor node features. Provide node features or "
+                "enable dummy zero node features."
+            )
+            h_nbr = h_nbr.view(N, S, -1)
             if nbr.mem is not None:
                 h_nbr = h_nbr + nbr.mem.view(N, S, -1)
 
             # Prepare edge features and time deltas
-            assert nbr.efeat is not None, "TGAT requires edge features."
-            e_feat = nbr.efeat.view(N, S, -1)
+            e_feat = self._edge_features_for_hop(
+                edge_features=nbr.efeat,
+                num_targets=N,
+                fanout=S,
+                device=h_nbr.device,
+                dtype=h_nbr.dtype,
+            )
             dt = graph.root_ts.unsqueeze(1) - nbr.ts.view(N, S)
             mask = nbr.nid.view(N, S) != -1
 
@@ -121,8 +250,16 @@ class TGAT(nn.Module):
 
         for i in range(self.num_layers):
             nbr = graph.neighbors[i]
-            assert nbr.nfeat is not None, "TGAT requires neighbor node features."
-            h_n = nbr.nfeat
+            h_n = self._node_features(
+                node_features=nbr.nfeat,
+                num_rows=nbr.nid.numel(),
+                device=h_root.device,
+                dtype=self._resolve_feature_dtype(nbr.nfeat, nbr.mem, h_root),
+            )
+            assert h_n is not None, (
+                "TGAT requires neighbor node features. Provide node features or "
+                "enable dummy zero node features."
+            )
             if nbr.mem is not None:
                 h_n = h_n + nbr.mem if h_n is not None else nbr.mem
             hidden_states.append(h_n)
@@ -141,11 +278,16 @@ class TGAT(nn.Module):
             # The neighbors of the current target nodes
             S = graph.fanout[hop_idx]
             nbr_level = graph.neighbors[hop_idx]
-            assert nbr_level.efeat is not None, "TGAT requires edge features."
 
             # Reshape neighbor inputs to [num_targets, S, dim]
             neighbor_feat = hidden_states[hop_idx + 1].view(num_targets, S, -1)
-            e_feat = nbr_level.efeat.view(num_targets, S, -1)
+            e_feat = self._edge_features_for_hop(
+                edge_features=nbr_level.efeat,
+                num_targets=num_targets,
+                fanout=S,
+                device=neighbor_feat.device,
+                dtype=neighbor_feat.dtype,
+            )
 
             # Get target timestamps to compute dt
             if hop_idx == 0:

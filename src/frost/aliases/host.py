@@ -27,7 +27,7 @@ MetaBundleQ: TypeAlias = Queue[tuple[MetaBundle, LayoutBundle] | None | Literal[
 MetaBundleWithPlan: TypeAlias = tuple[MetaBundle, list[PlanSet]]
 MetaBundleWithoutPlan: TypeAlias = tuple[MetaBundle, None]
 
-MetasDyNeed: TypeAlias = tuple[list[TensorSet], list[TensorSet], MetaBundle]
+MetasDyNeed: TypeAlias = tuple[list[TensorSet], list[TensorSet], list[int], MetaBundle]
 MetasStNeed: TypeAlias = list[TensorSet]
 
 

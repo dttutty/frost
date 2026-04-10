@@ -42,6 +42,9 @@ class BoxTask:
             not used.
         root_new_mem: Updated memory entries for root nodes, needed to build
             the mail content.
+        mail_peer_mem: Optional peer embedding used for the "other node" half
+            of the mail message.  DyRep uses this to send structural
+            graph-attention embeddings while preserving the self-memory half.
         batch_idx: Global batch counter for ordering writes.
         box_plan: DynamicPlan carrying node IDs and P2P routing for the
             mailbox update.
@@ -52,6 +55,7 @@ class BoxTask:
 
     pos_efeat: Tensor | None
     root_new_mem: MemEntry
+    mail_peer_mem: Tensor | None
     mini_batch_idx: int
     box_plan: DynamicPlan
     is_last: bool

@@ -1,4 +1,3 @@
-import logging
 import os
 import random
 import sys
@@ -13,7 +12,6 @@ from frost.datatypes.plan import DynamicPlan
 from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 from frost.utils.tensor_set import TensorSet
 
-logger = logging.getLogger(__name__)
 _PLAN_DUMP_LOCK = threading.Lock()
 
 
@@ -29,13 +27,6 @@ def _should_dump_plans() -> bool:
     if dump_env is not None:
         return dump_env.lower() in {"1", "true", "yes", "on"}
     return sys.gettrace() is not None
-
-
-def _emit_epoch_stats_line(line: str) -> None:
-    if logger.isEnabledFor(logging.INFO):
-        logger.info(line)
-    else:
-        print(line)
 
 
 def _tensor_values(ts: TensorSet | None) -> list[int] | None:
@@ -300,70 +291,9 @@ class DynamicPlanner(ThreadBase):
             if output_dir is not None and _should_dump_plans()
             else None
         )
-        self._reset_epoch_stats()
-
-    def _reset_epoch_stats(self) -> None:
-        n = self.n_gpus
-        self._stats_batch_count: int = 0
-        self._stats_unique_union: int = 0
-        self._stats_unique_per_gpu: list[int] = [0] * n
-        self._stats_p2p_recv_self_per_gpu: list[int] = [0] * n
-        self._stats_p2p_recv_per_gpu: list[int] = [0] * n
-        self._stats_p2p_send_self_per_gpu: list[int] = [0] * n
-        self._stats_p2p_send_per_gpu: list[int] = [0] * n
-        self._stats_writeback_per_gpu: list[int] = [0] * n
-
-    def _accumulate_stats(
-        self,
-        all_list: list[TensorSet],
-        p2p_cts: np.ndarray,
-        writeback_list: list[TensorSet],
-    ) -> None:
-        self._stats_batch_count += 1
-        n_gpus = self.n_gpus
-        if n_gpus > 0:
-            union: TensorSet = all_list[0]
-            for i in range(1, n_gpus):
-                union = union | all_list[i]
-            self._stats_unique_union += len(union)
-        for gpu in range(n_gpus):
-            self._stats_unique_per_gpu[gpu] += len(all_list[gpu])
-            self._stats_p2p_recv_self_per_gpu[gpu] += int(p2p_cts[gpu, gpu])
-            # cross-GPU only (exclude diagonal = self-transfer)
-            self._stats_p2p_recv_per_gpu[gpu] += (
-                int(p2p_cts[:, gpu].sum()) - int(p2p_cts[gpu, gpu])
-            )
-            self._stats_p2p_send_self_per_gpu[gpu] += int(p2p_cts[gpu, gpu])
-            self._stats_p2p_send_per_gpu[gpu] += (
-                int(p2p_cts[gpu, :].sum()) - int(p2p_cts[gpu, gpu])
-            )
-            wb = writeback_list[gpu]
-            self._stats_writeback_per_gpu[gpu] += len(wb) if wb is not None else 0
-
-    def _log_epoch_stats(self) -> None:
-        n = self._stats_batch_count
-        if n == 0:
-            return
-        n_gpus = self.n_gpus
-        _emit_epoch_stats_line(
-            f"[{self.plan_kind}] epoch stats — {n} minibatches, {n_gpus} GPU(s)"
-        )
-        _emit_epoch_stats_line(
-            f"  avg unique nodes (union across GPUs): {self._stats_unique_union / n:.1f}"
-        )
-        for gpu in range(n_gpus):
-            _emit_epoch_stats_line(
-                f"  GPU {gpu}: "
-                f"avg_unique={self._stats_unique_per_gpu[gpu] / n:.1f}  "
-                f"avg_p2p_recv_to_self={self._stats_p2p_recv_self_per_gpu[gpu] / n:.1f}  "
-                f"avg_p2p_recv_from_others={self._stats_p2p_recv_per_gpu[gpu] / n:.1f}  "
-                f"avg_p2p_send_to_self={self._stats_p2p_send_self_per_gpu[gpu] / n:.1f}  "
-                f"avg_p2p_send_to_others={self._stats_p2p_send_per_gpu[gpu] / n:.1f}  "
-                f"avg_writeback={self._stats_writeback_per_gpu[gpu] / n:.1f}"
-            )
 
     def logic(self) -> None:
-        """Main planning loop: consume (needs, updates, metas) tuples and emit DynamicPlans.
+        """Main planning loop: consume (needs, updates, raw_need_counts, metas) tuples and emit DynamicPlans.
 
         Uses a one-step lookahead: each incoming batch is held as ``pending`` until
         the *next* batch arrives (or an end-of-epoch / shutdown sentinel), so that
@@ -382,7 +312,7 @@ class DynamicPlanner(ThreadBase):
 
             elif in_q_data == "end_of_epoch":
                 assert self.pending is not None
-                all_needs, all_pos_root, metas = self.pending
+                all_needs, all_pos_root, raw_need_counts, metas = self.pending
 
                 if all_needs and len(all_needs) > 0:
                     ref_t = all_needs[0].data
@@ -398,22 +328,30 @@ class DynamicPlanner(ThreadBase):
                 next_updates: list[TensorSet] = [empty_ts for _ in range(self.n_gpus)]
 
                 plan = self._plan(
-                    all_needs, all_pos_root, next_needs, next_updates, metas
+                    all_needs,
+                    all_pos_root,
+                    next_needs,
+                    next_updates,
+                    metas,
+                    raw_need_counts=raw_need_counts,
                 )
                 self.out_q.put(plan)
-                self._log_epoch_stats()
-                self._reset_epoch_stats()
                 self.pending = None
                 continue
 
             if self.pending is None:
-                all_needs, all_pos_root, metas = in_q_data
+                all_needs, all_pos_root, raw_need_counts, metas = in_q_data
                 self.pending = in_q_data
                 self.fetch = all_needs  # first batch: fetch everything from CPU
             else:
-                all_needs, all_pos_root, metas = self.pending
+                all_needs, all_pos_root, raw_need_counts, metas = self.pending
                 plan = self._plan(
-                    all_needs, all_pos_root, in_q_data[0], in_q_data[1], metas
+                    all_needs,
+                    all_pos_root,
+                    in_q_data[0],
+                    in_q_data[1],
+                    metas,
+                    raw_need_counts=raw_need_counts,
                 )
                 self.out_q.put(plan)
                 self.pending = in_q_data
@@ -425,6 +363,7 @@ class DynamicPlanner(ThreadBase):
         next_all_list: list[TensorSet],
         next_update_list: list[TensorSet],
         metas: MetaBundle,
+        raw_need_counts: list[int] | None = None,
     ) -> list[DynamicPlan]:
         """Build per-GPU DynamicPlan for the current batch.
 
@@ -436,6 +375,8 @@ class DynamicPlanner(ThreadBase):
             metas:           batch metadata (for reference).
         """
         n_gpus = self.n_gpus
+        if raw_need_counts is None:
+            raw_need_counts = [len(ts) for ts in all_list]
 
         # Hidden debug mode for single-worker diagnosis:
         # - persist every current update to CPU
@@ -572,7 +513,6 @@ class DynamicPlanner(ThreadBase):
             ],
         )
 
-        self._accumulate_stats(all_list, p2p_cts, writeback_list)
         self.fetch = next_prefetch
         return plans
 
@@ -585,8 +525,11 @@ class APANDynamicPlanner(DynamicPlanner):
         next_box_fetch_list: list[TensorSet],
         next_box_update_list: list[TensorSet],
         metas: MetaBundle,
+        raw_need_counts: list[int] | None = None,
     ) -> list[DynamicPlan]:
         n_gpus = self.n_gpus
+        if raw_need_counts is None:
+            raw_need_counts = [len(ts) for ts in box_fetch_list]
 
         # 1. Deduplicate: each updated node is owned by exactly one GPU.
         # box_update_list = nodes that postman delivers mail to (src+dst + their neighbors)

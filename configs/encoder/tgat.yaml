@@ -6,5 +6,9 @@ d_time: ${d_time}
 d_hid: ${.out_dim}
 ndim: ${ndim}
 edim: ${edim}
+enable_dummy_node_features: true
+dummy_node_dim: null
+enable_dummy_edge_features: true
+dummy_edge_dim: null
 heads: 2
 dropout: ${dropout}

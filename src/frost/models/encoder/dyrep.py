@@ -1,62 +1,46 @@
 """DyRep encoder module.
 
-DyRep treats the updated node memory directly as the node embedding.  Because
-FROST's ``AssembledModel`` already runs the memory updater before the encoder,
-``graph.root_mem`` already contains the updated memory when this encoder is
-called.  The encoder simply normalizes the memory and applies an optional
-output projection.
+This implementation keeps DyRep's RNN-updated memory state, then applies a
+lightweight 1-hop structural attention block so the representation and the next
+mail message can depend on the temporal neighborhood.
 """
 
 import logging
-from typing import cast
 
 import torch
 import torch.nn as nn
 
 from frost.datatypes.graph import HierGraph
+from frost.models.modules.temporal_graph_attention_layer import (
+    TemporalGraphAttentionLayer,
+)
 
 logger = logging.getLogger(__name__)
+
+
+DyRepOutput = tuple[torch.Tensor, torch.Tensor | None]
 
 
 class DyRep(nn.Module):
     """
     DyRep encoder adapted for the FROST framework.
 
-    In the reference implementation, DyRep's final node embedding is simply
-    the raw updated memory:
-        src_emb = updated_node_memories[src_ids]
-        dst_emb = updated_node_memories[dst_ids]
+    FROST's AssembledModel already runs the memory updater before the encoder,
+    so ``graph.root_mem`` contains the latest RNN memory.  The DyGLib-style path
+    uses a 1-hop temporal graph-attention embedding for both the current root
+    embedding and the peer embedding written into the next mailbox message.
 
-    FROST's AssembledModel already runs the memory updater (RNN cell) before
-    the encoder, so `graph.root_mem` already contains the updated memory when
-    this encoder is called.
-
-    Architecture:
+    Base memory representation:
         h = root_mem  (+  Linear(root_nfeat) if node features exist)
         h = LayerNorm(h)
         h = Dropout(h)
+
+    Structural representation:
+        h_struct = TemporalGraphAttention(h, neighbor_mem + neighbor_nfeat, dt)
         h = Linear(h, d_out)  [only if d_mem != d_out]
 
-    Key differences from JODIE encoder:
-        - No time projection  ( JODIE:  h = h * (1 + W * delta_t) )
-        - Simpler: essentially memory → output projection
-
-    Key differences from TGN encoder:
-        - No graph attention on neighbors
-        - No neighbor sampling needed  (use fanout=null)
-
-    Note on mail approximation
-    --------------------------
-    The original DyRep paper builds messages as
-        [self_mem, dst_graph_attn_emb, delta_t_enc, edge_feat]
-    where  dst_graph_attn_emb  is computed by a graph attention module.
-    FROST's mail pipeline (interaction_ops.generate_interaction_mails) uses
-        [self_mem, other_mem, edge_feat]
-    which is a standard TGN/JODIE-style message.  Changing this would require
-    modifying the assembled model timing (encoder must run before box_task is
-    queued).  The current implementation is therefore an approximation: the
-    message uses raw memory rather than graph-attention memory.  The memory
-    cell (RNN vs GRU) and output semantics (memory as embedding) are exact.
+    The returned tuple is ``(h, mail_peer_mem)``.  ``mail_peer_mem`` stays in
+    ``d_mem`` space so the mailbox width remains ``2 * d_mem + edim``.
     """
 
     def __init__(
@@ -64,19 +48,32 @@ class DyRep(nn.Module):
         ndim: int,  # node feature dim  (${ndim})
         d_mem: int,  # memory dim        (${encoder.out_dim}, must match mem_updater.d_mem)
         d_out: int,  # output dim        (${encoder.out_dim})
+        edim: int = 0,  # edge feature dim  (${edim})
+        d_time: int = 0,
+        heads: int = 2,
         dropout: float = 0.1,
+        use_structural_attention: bool = True,
     ) -> None:
         """
         Args:
             ndim: Dimensionality of raw node features.  Set to 0 if no node
                 features are available.
+            edim: Dimensionality of raw edge features.
             d_mem: Dimensionality of the node memory (must match the memory
                 updater's output dim).
             d_out: Dimensionality of the encoder output.
+            d_time: Dimensionality of temporal encodings used by structural
+                attention.
+            heads: Number of attention heads used by structural attention.
             dropout: Dropout probability applied after LayerNorm.
+            use_structural_attention: If ``False``, keep the historical 0-hop
+                memory-only behavior and return no structural mail embedding.
         """
         super().__init__()
         self.dim_node = ndim
+        self.dim_edge = edim
+        self.dim_memory = d_mem
+        self.use_structural_attention = use_structural_attention
 
         # Optional projection if node features exist and have a different dim
         self.node_feat_map: nn.Linear | None = None
@@ -91,29 +88,92 @@ class DyRep(nn.Module):
         if d_mem != d_out:
             self.out_proj = nn.Linear(d_mem, d_out)
 
-    def forward(self, graph: HierGraph) -> torch.Tensor:
+        self.structural_encoder: TemporalGraphAttentionLayer | None = None
+        if use_structural_attention:
+            self.structural_encoder = TemporalGraphAttentionLayer(
+                dim_node=d_mem,
+                dim_edge=edim,
+                dim_time=d_time,
+                dim_out=d_mem,
+                num_head=heads,
+                dropout=dropout,
+            )
+
+    def _memory_feature(
+        self, mem: torch.Tensor, nfeat: torch.Tensor | None
+    ) -> torch.Tensor:
+        h = mem
+        if self.dim_node > 0 and nfeat is not None:
+            nfeat_proj = self.node_feat_map(nfeat) if self.node_feat_map else nfeat
+            h = h + nfeat_proj
+        return self.dropout(self.layer_norm(h))
+
+    def _structural_embedding(
+        self,
+        graph: HierGraph,
+        root_feat: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.structural_encoder is not None
+        assert graph.neighbors is not None, (
+            "DyRep structural attention requires 1-hop neighbors; set "
+            "encoder.use_structural_attention=false for 0-hop DyRep."
+        )
+        assert graph.fanout is not None and len(graph.fanout) > 0, (
+            "DyRep structural attention requires non-empty fanout."
+        )
+
+        nbr_data = graph.neighbors[0]
+        assert nbr_data.mem is not None, (
+            "DyRep structural attention requires neighbor memory"
+        )
+        if self.dim_edge > 0:
+            assert nbr_data.efeat is not None, (
+                "DyRep structural attention requires neighbor edge features when edim > 0"
+            )
+
+        neighbor_feat = self._memory_feature(nbr_data.mem, nbr_data.nfeat)
+        n_root = graph.root_nid.numel()
+        fanout = graph.fanout[0]
+
+        dense_neighbor_feat = neighbor_feat.view(n_root, fanout, -1)
+        edge_feat = (
+            nbr_data.efeat.view(n_root, fanout, -1)
+            if nbr_data.efeat is not None
+            else None
+        )
+        neighbor_ts = nbr_data.ts.view(n_root, fanout)
+        neighbor_nid = nbr_data.nid.view(n_root, fanout)
+        dt = graph.root_ts.unsqueeze(1) - neighbor_ts
+        mask = neighbor_nid != -1
+
+        return self.structural_encoder(
+            target_feat=root_feat,
+            neighbor_feat=dense_neighbor_feat,
+            edge_feat=edge_feat,
+            dt=dt,
+            mask=mask,
+        )
+
+    def forward(self, graph: HierGraph) -> DyRepOutput:
         """
         graph.root_mem  : [n_root, d_mem]   updated memory from RNN updater
         graph.root_nfeat: [n_root, ndim]    raw node features (optional)
 
-        Returns h : [n_root, d_out]
+        Returns:
+            h: [n_root, d_out]
+            mail_peer_mem: [n_root, d_mem] structural peer embedding for
+                next-batch mailbox generation, or ``None`` in 0-hop mode.
         """
         assert graph.root_mem is not None, "DyRep requires root_mem (use a mem_updater)"
 
-        h: torch.Tensor = graph.root_mem
+        h_mem = self._memory_feature(graph.root_mem, graph.root_nfeat)
+        mail_peer_mem: torch.Tensor | None = None
+        if self.structural_encoder is not None:
+            h_mem = self._structural_embedding(graph, h_mem)
+            mail_peer_mem = h_mem
 
-        if self.dim_node > 0 and graph.root_nfeat is not None:
-            nfeat_proj = (
-                self.node_feat_map(graph.root_nfeat)
-                if self.node_feat_map is not None
-                else graph.root_nfeat
-            )
-            h = h + nfeat_proj
-
-        h = self.layer_norm(h)
-        h = self.dropout(h)
-
+        h = h_mem
         if self.out_proj is not None:
             h = self.out_proj(h)
 
-        return cast(torch.Tensor, h)
+        return h, mail_peer_mem

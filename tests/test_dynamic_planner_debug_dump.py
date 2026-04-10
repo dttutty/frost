@@ -1,6 +1,4 @@
 """Tests for debug-only dynamic planner plan dumps."""
-
-import logging
 import threading
 from queue import Queue
 
@@ -165,36 +163,3 @@ def test_dynamic_planner_without_stale_handling_keeps_all_owned_updates():
     assert plans[1].writeback is not None
     assert plans[0].writeback.data.tolist() == [1]
     assert plans[1].writeback.data.tolist() == [3]
-
-
-def test_dynamic_planner_logs_epoch_stats_with_self_and_cross_gpu_counts(caplog):
-    planner = DynamicPlanner(
-        gpus_distance=np.array([[0, 1], [1, 0]], dtype=np.int32),
-        in_q=Queue(),
-        out_q=Queue(),
-        stop_ev=threading.Event(),
-        plan_kind="mem",
-    )
-
-    planner._accumulate_stats(
-        all_list=[_ts([1, 2]), _ts([2, 3, 4])],
-        p2p_cts=np.array([[2, 5], [7, 11]], dtype=np.int32),
-        writeback_list=[_ts([1, 2, 9]), _ts([3])],
-    )
-
-    with caplog.at_level(logging.INFO):
-        planner._log_epoch_stats()
-
-    text = caplog.text
-    assert "[mem] epoch stats" in text
-    assert "avg unique nodes (union across GPUs): 4.0" in text
-    assert (
-        "GPU 0: avg_unique=2.0  avg_p2p_recv_to_self=2.0  "
-        "avg_p2p_recv_from_others=7.0  avg_p2p_send_to_self=2.0  "
-        "avg_p2p_send_to_others=5.0  avg_writeback=3.0"
-    ) in text
-    assert (
-        "GPU 1: avg_unique=3.0  avg_p2p_recv_to_self=11.0  "
-        "avg_p2p_recv_from_others=5.0  avg_p2p_send_to_self=11.0  "
-        "avg_p2p_send_to_others=7.0  avg_writeback=1.0"
-    ) in text

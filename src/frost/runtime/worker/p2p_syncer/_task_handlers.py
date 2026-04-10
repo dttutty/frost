@@ -137,7 +137,9 @@ class MemTaskHandler(StreamThreadBase):
                         (to_writeback, mini_batch_idx, mem_ts_nid, writeback_event)
                     )
                 else:
-                    self.mem_wr_q.put((None, mini_batch_idx, mem_ts_nid, writeback_event))
+                    self.mem_wr_q.put(
+                        (None, mini_batch_idx, mem_ts_nid, writeback_event)
+                    )
             finally:
                 self.mem_task_q.task_done()
 
@@ -241,6 +243,7 @@ class MessageHandler(StreamThreadBase):
                 new_mail = generate_interaction_mails(
                     box_task.root_new_mem,
                     box_task.pos_efeat,
+                    box_task.mail_peer_mem,
                 )
 
                 p2p_task, box_entry, seed_mail_cpu = self._process_messages(

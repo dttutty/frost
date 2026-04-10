@@ -17,6 +17,10 @@ class AnalyzerProto(Protocol):
         self, layouts: list[SampledLayoutView]
     ) -> tuple[list[TensorSet], list[TensorSet]]: ...
 
+    def get_mem_plan_raw_need_counts(
+        self, layouts: list[SampledLayoutView]
+    ) -> list[int]: ...
+
     def create_mail_planner(
         self,
         gpu_dist: np.ndarray,
@@ -31,6 +35,10 @@ class AnalyzerProto(Protocol):
     def get_mail_plan_inputs(
         self, layouts: list[SampledLayoutView]
     ) -> tuple[list[TensorSet], list[TensorSet]]: ...
+
+    def get_mail_plan_raw_need_counts(
+        self, layouts: list[SampledLayoutView]
+    ) -> list[int]: ...
 
     def get_feat_plan_inputs(
         self, layouts: list[SampledLayoutView]

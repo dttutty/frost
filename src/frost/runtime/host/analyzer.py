@@ -48,6 +48,11 @@ class StaticAnalyzer:
     ) -> tuple[list[TensorSet], list[TensorSet]]:
         return [], []
 
+    def get_mem_plan_raw_need_counts(
+        self, layouts: list[SampledLayoutView]
+    ) -> list[int]:
+        return []
+
     def create_mail_planner(
         self,
         gpu_dist: np.ndarray,
@@ -64,6 +69,11 @@ class StaticAnalyzer:
         self, layouts: list[SampledLayoutView]
     ) -> tuple[list[TensorSet], list[TensorSet]]:
         return [], []
+
+    def get_mail_plan_raw_need_counts(
+        self, layouts: list[SampledLayoutView]
+    ) -> list[int]:
+        return []
 
     def _feat_plan_input(self, layout: SampledLayoutView) -> TensorSet:
         return TensorSet(layout.valid_nid)
@@ -108,12 +118,22 @@ class MemoryAnalyzer(StaticAnalyzer):
             [self._mem_plan_input(layout) for layout in layouts]
         )
 
+    def get_mem_plan_raw_need_counts(
+        self, layouts: list[SampledLayoutView]
+    ) -> list[int]:
+        return [int(layout.valid_nid.numel()) for layout in layouts]
+
     def get_mail_plan_inputs(
         self, layouts: list[SampledLayoutView]
     ) -> tuple[list[TensorSet], list[TensorSet]]:
         return _unzip_dynamic_inputs(
             [self._mail_plan_input(layout) for layout in layouts]
         )
+
+    def get_mail_plan_raw_need_counts(
+        self, layouts: list[SampledLayoutView]
+    ) -> list[int]:
+        return [int(layout.valid_nid.numel()) for layout in layouts]
 
     def create_mail_planner(
         self,
@@ -191,6 +211,16 @@ class APANMemoryAnalyzer(MemoryAnalyzer):
     def _feat_plan_input(self, layout: SampledLayoutView) -> TensorSet:
         self._validate_layout(layout)
         return TensorSet(layout.roots)
+
+    def get_mem_plan_raw_need_counts(
+        self, layouts: list[SampledLayoutView]
+    ) -> list[int]:
+        return [int(layout.roots.numel()) for layout in layouts]
+
+    def get_mail_plan_raw_need_counts(
+        self, layouts: list[SampledLayoutView]
+    ) -> list[int]:
+        return [int(layout.roots.numel()) for layout in layouts]
 
     def create_mail_planner(
         self,
