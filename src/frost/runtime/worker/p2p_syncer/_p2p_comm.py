@@ -1,5 +1,4 @@
 import logging
-import os
 import threading
 
 import torch
@@ -11,43 +10,6 @@ from frost.datatypes.env import Env
 from frost.runtime._thread_base import StreamThreadBase
 
 logger = logging.getLogger(__name__)
-
-
-def _debug_release_p2p_sem_after_wait() -> bool:
-    flag = os.getenv("FROST_DEBUG_P2P_SEM_AFTER_WAIT")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
-
-
-def _debug_sync_membox_after_train_step() -> bool:
-    flag = os.getenv("FROST_DEBUG_SYNC_MEMBOX_AFTER_TRAIN_STEP")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
-
-
-def _debug_assert_batch_alignment() -> bool:
-    flag = os.getenv("FROST_DEBUG_ASSERT_BATCH_ALIGNMENT")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
-
-
-def _debug_serialize_p2p_rounds() -> bool:
-    flag = os.getenv("FROST_DEBUG_SERIALIZE_P2P_ROUNDS")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
-
-
-def _debug_bypass_single_rank_p2p() -> bool:
-    flag = os.getenv("FROST_DEBUG_BYPASS_SINGLE_RANK_P2P")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
-
-
 def _copy_single_rank_p2p_round(mem_p2p, box_p2p) -> None:
     """Bypass NCCL when the P2P group has a single rank.
 
@@ -131,12 +93,6 @@ class P2PQHandler(StreamThreadBase):
                     break
                 assert box_p2p_tuple != "nothing_to_p2p"
                 box_p2p, box_event = box_p2p_tuple
-                if _debug_assert_batch_alignment():
-                    if mem_p2p.mini_batch_idx != box_p2p.mini_batch_idx:
-                        raise RuntimeError(
-                            "P2P batch misalignment between mem and box tasks: "
-                            f"mem={mem_p2p.mini_batch_idx}, box={box_p2p.mini_batch_idx}"
-                        )
                 torch.cuda.current_stream().wait_event(mem_event)
                 torch.cuda.current_stream().wait_event(box_event)
 
@@ -201,7 +157,7 @@ class P2PQHandler(StreamThreadBase):
                     continue
 
                 world_size = _safe_p2p_world_size(self.nccl_p2p)
-                if world_size == 1 or _debug_bypass_single_rank_p2p():
+                if world_size == 1:
                     _copy_single_rank_p2p_round(mem_p2p, box_p2p)
                     # Single-rank bypass still launches GPU copy kernels on this
                     # thread's current stream. Unlike the NCCL path there is no
@@ -243,14 +199,6 @@ class P2PQHandler(StreamThreadBase):
                 logger.debug(
                     f"[Rank {self.env.local_rank}] Posted all NCCL P2P ops for count {self.count}. Waiting for completion..."
                 )
-                must_wait_before_release = (
-                    _debug_serialize_p2p_rounds()
-                    or _debug_release_p2p_sem_after_wait()
-                    or _debug_sync_membox_after_train_step()
-                )
-                if must_wait_before_release:
-                    for work in works:
-                        work.wait()
                 self.p2p_sem.release()  # Allow the next P2P round to proceed
                 self.delta_queue.put((mem_p2p, box_p2p, works))
                 logger.debug(

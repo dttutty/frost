@@ -1,5 +1,8 @@
+import json
 import logging
+import os
 import threading
+import time
 from queue import Queue as Q
 from typing import Literal, cast
 
@@ -13,6 +16,15 @@ from frost.datatypes.result import Result
 from frost.runtime._thread_base import ThreadBase
 
 logger = logging.getLogger(__name__)
+
+
+def _timing_enabled() -> bool:
+    return os.environ.get("FROST_HOST_TIMING_BENCH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 class Scatter(ThreadBase):
@@ -60,6 +72,11 @@ class Scatter(ThreadBase):
         self.host_rank: int = env.host_rank
         self.ngpus: int = env.n_gpu
         self._gather_seq = 0
+        self._timing_enabled = _timing_enabled()
+        self._mem_plan_wait_s_curve: list[float] = []
+        self._mail_plan_wait_s_curve: list[float] = []
+        self._nfeat_plan_wait_s_curve: list[float] = []
+        self._scatter_call_s_curve: list[float] = []
 
         assert self.local_rank == self.host_rank
 
@@ -75,9 +92,13 @@ class Scatter(ThreadBase):
             scatter_input[rank] = obj
         # Host's own slot (scatter_input[host_rank]) stays None
         output: list[None] = [None]
+        scatter_start = time.perf_counter()
         dist.scatter_object_list(
             output, scatter_object_input_list=scatter_input, src=self.host_rank
         )
+        scatter_end = time.perf_counter()
+        if self._timing_enabled:
+            self._scatter_call_s_curve.append(scatter_end - scatter_start)
 
     def _gather_from_workers(self) -> Result:
         """Gather results from all workers via collective gather."""
@@ -119,17 +140,33 @@ class Scatter(ThreadBase):
                 mail_plan: list[DynamicPlan] | None = None
                 nfeat_plan: list[StaticPlan] | None = None
                 if self.mem_plan_out_q is not None:
+                    mem_wait_start = time.perf_counter()
                     mem_plan = self.mem_plan_out_q.get(block=True)
+                    mem_wait_end = time.perf_counter()
+                    if self._timing_enabled:
+                        self._mem_plan_wait_s_curve.append(mem_wait_end - mem_wait_start)
                     if mem_plan is None and self.stop_ev.is_set():
                         self._scatter_to_workers([None] * self.n_gpu)
                         break
                 if self.mail_plan_out_q is not None:
+                    mail_wait_start = time.perf_counter()
                     mail_plan = self.mail_plan_out_q.get(block=True)
+                    mail_wait_end = time.perf_counter()
+                    if self._timing_enabled:
+                        self._mail_plan_wait_s_curve.append(
+                            mail_wait_end - mail_wait_start
+                        )
                     if mail_plan is None and self.stop_ev.is_set():
                         self._scatter_to_workers([None] * self.n_gpu)
                         break
                 if self.nfeat_plan_out_q is not None:
+                    nfeat_wait_start = time.perf_counter()
                     nfeat_plan = self.nfeat_plan_out_q.get(block=True)
+                    nfeat_wait_end = time.perf_counter()
+                    if self._timing_enabled:
+                        self._nfeat_plan_wait_s_curve.append(
+                            nfeat_wait_end - nfeat_wait_start
+                        )
                     if nfeat_plan is None and self.stop_ev.is_set():
                         self._scatter_to_workers([None] * self.n_gpu)
                         break
@@ -146,3 +183,26 @@ class Scatter(ThreadBase):
                         nfeat_plan=safe_nfeat,
                     )
                 self._scatter_to_workers(cast(list[Meta | str | None], meta_2_scatter))
+
+        if self._timing_enabled and self._scatter_call_s_curve:
+            payload = {
+                "system": "frost",
+                "rank": self.local_rank,
+                "batch_count": len(self._scatter_call_s_curve),
+                "mem_plan_wait_s_curve": [
+                    round(v, 6) for v in self._mem_plan_wait_s_curve
+                ],
+                "mail_plan_wait_s_curve": [
+                    round(v, 6) for v in self._mail_plan_wait_s_curve
+                ],
+                "nfeat_plan_wait_s_curve": [
+                    round(v, 6) for v in self._nfeat_plan_wait_s_curve
+                ],
+                "scatter_call_s_curve": [
+                    round(v, 6) for v in self._scatter_call_s_curve
+                ],
+            }
+            print(
+                "APPENDIX_HOST_SCATTER_TIMING_CURVE "
+                f"{json.dumps(payload, sort_keys=True)}"
+            )

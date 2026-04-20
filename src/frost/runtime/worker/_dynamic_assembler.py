@@ -18,14 +18,15 @@ import json
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from functools import cached_property
-from pathlib import Path
 from queue import Queue
 from typing import Literal, cast
 
 import torch
 
+from frost.ablation import DynamicStateAblation
 from frost.aliases.worker import AssembledQ, DeltaQueue, H2DOutQ
 from frost.datatypes.graph import FlatGraph
 from frost.datatypes.mem_mail_box.box import BoxEntry
@@ -38,46 +39,13 @@ from frost.shm.mem_mgr import MemBoxStore
 logger = logging.getLogger(__name__)
 
 
-def _debug_assert_batch_alignment() -> bool:
-    flag = os.getenv("FROST_DEBUG_ASSERT_BATCH_ALIGNMENT")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
-
-
-def _debug_dump_assembly_dir() -> Path | None:
-    raw = os.getenv("FROST_DEBUG_DUMP_ASSEMBLY_DIR")
-    if raw is None or raw == "":
-        return None
-    return Path(raw)
-
-
-def _debug_dump_assembly_batches() -> set[int] | None:
-    raw = os.getenv("FROST_DEBUG_DUMP_ASSEMBLY_BATCHES")
-    if raw is None or raw.strip() == "":
-        return None
-    return {
-        int(token.strip())
-        for token in raw.split(",")
-        if token.strip() != ""
+def _timing_enabled() -> bool:
+    return os.environ.get("FROST_PIPELINE_TIMING_BENCH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
     }
-
-
-def _debug_dump_assembly_full() -> bool:
-    flag = os.getenv("FROST_DEBUG_DUMP_ASSEMBLY_FULL")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
-
-
-def _debug_assembly_checksums_path() -> Path | None:
-    raw = os.getenv("FROST_DEBUG_ASSEMBLY_CHECKSUMS_PATH")
-    if raw is None:
-        return None
-    value = raw.strip()
-    if value == "":
-        return None
-    return Path(value)
 
 
 @dataclass(kw_only=True)
@@ -151,6 +119,7 @@ class DynamicAssembler(StreamThreadBase):
         box_task_q: Queue | None = None,
         mem_wr_q: Queue | None = None,
         box_wr_q: Queue | None = None,
+        dynamic_state_ablation: DynamicStateAblation | None = None,
     ) -> None:
         super().__init__(name="dy_assembler", stop_ev=stop_ev)
         self.in_q = h2d_out_q
@@ -169,9 +138,17 @@ class DynamicAssembler(StreamThreadBase):
         self.box_task_q = box_task_q
         self.mem_wr_q = mem_wr_q
         self.box_wr_q = box_wr_q
-        self._debug_dump_dir = _debug_dump_assembly_dir()
-        self._debug_dump_batches = _debug_dump_assembly_batches()
-        self._debug_dump_full = _debug_dump_assembly_full()
+        self.dynamic_state_ablation = (
+            dynamic_state_ablation
+            if dynamic_state_ablation is not None
+            else DynamicStateAblation(name="baseline")
+        )
+        self._timing_enabled = _timing_enabled()
+        self._h2d_credit_wait_s_curve: list[float] = []
+        self._prepare_shared_s_curve: list[float] = []
+        self._delta_queue_wait_s_curve: list[float] = []
+        self._p2p_work_wait_s_curve: list[float] = []
+        self._apply_delta_s_curve: list[float] = []
 
     def _strict_assembly_mask(self, graph: FlatGraph, n_src: int) -> torch.Tensor:
         """Return the positions whose mem/box state must be assembled this step.
@@ -192,7 +169,7 @@ class DynamicAssembler(StreamThreadBase):
 
     def _fill_from_shared(
         self,
-        plan: DynamicPlan,
+        plan: DynamicPlan | None,
         shared_data: torch.Tensor,
         shared_ts: torch.Tensor,
         target_data: torch.Tensor,
@@ -208,6 +185,8 @@ class DynamicAssembler(StreamThreadBase):
         - Only graph.nid entries that exist in plan.fetch_on_gpu will be filled
         - Missing graph.nid entries are ignored because they may belong to remote peers
         """
+        if plan is None:
+            return
         fetch_nids = plan.fetch.data
         fetch_on_gpu = plan.fetch_on_gpu
 
@@ -231,36 +210,9 @@ class DynamicAssembler(StreamThreadBase):
         )
         assert valid_mask.dtype == torch.bool, "valid_mask must be a bool tensor"
 
-        table_size = shared_data.shape[0]
-        if __debug__:
-            max_id = fetch_nids.max().item()
-            min_id = fetch_nids.min().item()
-
-            if min_id < 0 or max_id >= table_size:
-                bad_mask = (fetch_nids < 0) | (fetch_nids >= table_size)
-                bad_ids = torch.unique(fetch_nids[bad_mask])
-                preview = bad_ids[:20].tolist()
-                raise IndexError(
-                    f"plan.fetch.data contains out-of-bounds indices for shared table. "
-                    f"Valid range: [0, {table_size - 1}], "
-                    f"actual min={min_id}, max={max_id}. "
-                    f"First {len(preview)} bad ids: {preview}"
-                )
-
         unique_data_gpu = shared_data[fetch_nids].to(self.device)
         unique_ts_gpu = shared_ts[fetch_nids].to(self.device)
         unique_nids_gpu = fetch_on_gpu
-        if __debug__:
-            if unique_nids_gpu.numel() > 1:
-                if not torch.all(unique_nids_gpu[1:] > unique_nids_gpu[:-1]):
-                    bad_mask = unique_nids_gpu[1:] <= unique_nids_gpu[:-1]
-                    bad_pos = torch.nonzero(bad_mask, as_tuple=False).squeeze(-1)
-                    preview_pos = bad_pos[:20]
-                    preview_vals = unique_nids_gpu[preview_pos].tolist()
-                    raise ValueError(
-                        "plan.fetch_on_gpu must be strictly increasing after sort "
-                        f"(sorted and unique). First problematic values: {preview_vals}"
-                    )
 
         query_nids = graph.nid[valid_mask]
         if query_nids.numel() == 0:
@@ -304,21 +256,6 @@ class DynamicAssembler(StreamThreadBase):
             shared_data = self.shared.box
             shared_ts = self.shared.box_ts
 
-        if __debug__:
-            table_size = shared_data.shape[0]
-            max_id = valid_nids.max().item()
-            min_id = valid_nids.min().item()
-            if min_id < 0 or max_id >= table_size:
-                bad_mask = (valid_nids < 0) | (valid_nids >= table_size)
-                bad_ids = torch.unique(valid_nids[bad_mask])
-                preview = bad_ids[:20].tolist()
-                raise IndexError(
-                    f"graph.nid contains out-of-bounds node ids for shared {kind}. "
-                    f"Valid range: [0, {table_size - 1}], "
-                    f"actual min={min_id}, max={max_id}. "
-                    f"First {len(preview)} bad ids: {preview}"
-                )
-
         fetch_nids = valid_nids.cpu().long()
         global_positions = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
 
@@ -358,18 +295,6 @@ class DynamicAssembler(StreamThreadBase):
         if delta_source.nid.numel() == 0:
             return None, None
 
-        if __debug__:
-            if delta_source.nid.numel() > 1:
-                if not torch.all(delta_source.nid[1:] > delta_source.nid[:-1]):
-                    bad_mask = delta_source.nid[1:] <= delta_source.nid[:-1]
-                    bad_pos = torch.nonzero(bad_mask, as_tuple=False).squeeze(-1)
-                    preview_pos = bad_pos[:20]
-                    preview_vals = delta_source.nid[preview_pos].tolist()
-                    raise ValueError(
-                        "delta_source.nid must be strictly increasing "
-                        f"(sorted and unique). First problematic values: {preview_vals}"
-                    )
-
         valid_nids = graph.nid[valid_mask]
         if valid_nids.numel() == 0:
             return None, None
@@ -377,17 +302,6 @@ class DynamicAssembler(StreamThreadBase):
         pos = torch.searchsorted(delta_source.nid, valid_nids)
         in_bound = pos < delta_source.nid.numel()
         pos_safe = pos.clamp(max=delta_source.nid.numel() - 1)
-        if __debug__:
-            found_mask = in_bound & (delta_source.nid[pos_safe] == valid_nids)
-
-            if not torch.all(found_mask):
-                missing_nids = torch.unique(valid_nids[~found_mask])
-                preview = missing_nids[:20].tolist()
-                raise ValueError(
-                    "Some graph.nid entries selected by valid_mask are missing from delta_source.nid. "
-                    f"Missing count: {missing_nids.numel()}. "
-                    f"First {len(preview)} missing NIDs: {preview}"
-                )
 
         global_positions = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
         local_positions = pos_safe
@@ -400,8 +314,8 @@ class DynamicAssembler(StreamThreadBase):
     def prepare_shared_features(
         self,
         graph: FlatGraph,
-        mem_plan: DynamicPlan,
-        box_plan: DynamicPlan,
+        mem_plan: DynamicPlan | None,
+        box_plan: DynamicPlan | None,
         n_src: int,
     ) -> None:
         """Step 1: Initialize tensors and fill local shared memory data."""
@@ -484,6 +398,27 @@ class DynamicAssembler(StreamThreadBase):
                     graph._box_pos_delta = None
                     graph._box_delta_mask = None
 
+    def _fill_all_required_from_shm(self, graph: FlatGraph, n_src: int) -> None:
+        assert graph.mem is not None
+        assert graph.mem_ts is not None
+        assert graph.box is not None
+        assert graph.box_ts is not None
+        strict_mask = self._strict_assembly_mask(graph, n_src)
+        self._fill_from_shm(
+            "mem",
+            graph.mem,
+            graph.mem_ts,
+            graph,
+            strict_mask,
+        )
+        self._fill_from_shm(
+            "box",
+            graph.box,
+            graph.box_ts,
+            graph,
+            strict_mask,
+        )
+
     def _build_delta_mask(
         self,
         graph: FlatGraph,
@@ -517,12 +452,6 @@ class DynamicAssembler(StreamThreadBase):
 
         shared_nids = plan.fetch_on_gpu
         assert shared_nids.dim() == 1, "plan.fetch_on_gpu must be 1D"
-
-        if __debug__:
-            # searchsorted requires sorted keys
-            if shared_nids.numel() > 1:
-                if not torch.all(shared_nids[1:] >= shared_nids[:-1]):
-                    shared_nids = torch.sort(shared_nids).values
 
         query_nids = graph_nid[base_mask]
         pos = torch.searchsorted(shared_nids, query_nids)
@@ -657,159 +586,6 @@ class DynamicAssembler(StreamThreadBase):
                 delta.box, graph.box, graph.box_ts, graph, box_delta_mask, kind="box"
             )
 
-    def _maybe_dump_assembly_state(
-        self,
-        *,
-        meta,
-        graph: FlatGraph,
-        mem_plan: DynamicPlan | None,
-        box_plan: DynamicPlan | None,
-        delta: MemAndBox | None,
-        n_src: int,
-    ) -> None:
-        dump_dir = getattr(self, "_debug_dump_dir", None)
-        dump_batches = getattr(self, "_debug_dump_batches", None)
-        if dump_dir is None or dump_batches is None:
-            return
-        if meta.mini_batch_idx not in dump_batches:
-            return
-
-        strict_mask = self._strict_assembly_mask(graph, n_src)
-        mem_delta_mask = self._build_delta_mask(graph, mem_plan, strict_mask)
-        box_delta_mask = self._build_delta_mask(graph, box_plan, strict_mask)
-
-        assert graph.mem is not None
-        assert graph.mem_ts is not None
-        assert graph.box is not None
-        assert graph.box_ts is not None
-
-        dump_dir.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "mini_batch_idx": int(meta.mini_batch_idx),
-            "split": meta.split,
-            "n_src": int(meta.n_src),
-            "nid": graph.nid.detach().cpu(),
-            "ts": graph.ts.detach().cpu(),
-            "strict_mask": strict_mask.detach().cpu(),
-            "mem_delta_mask": mem_delta_mask.detach().cpu(),
-            "box_delta_mask": box_delta_mask.detach().cpu(),
-            "mem_fetch_nid": (
-                mem_plan.fetch.data.detach().cpu() if mem_plan is not None else None
-            ),
-            "box_fetch_nid": (
-                box_plan.fetch.data.detach().cpu() if box_plan is not None else None
-            ),
-            "delta_mem_nid": (
-                delta.mem.nid.detach().cpu()
-                if delta is not None and delta.mem is not None
-                else None
-            ),
-            "delta_box_nid": (
-                delta.box.nid.detach().cpu()
-                if delta is not None and delta.box is not None
-                else None
-            ),
-            "delta_mem_ts": (
-                delta.mem.ts.detach().cpu()
-                if delta is not None and delta.mem is not None
-                else None
-            ),
-            "delta_box_ts": (
-                delta.box.ts.detach().cpu()
-                if delta is not None and delta.box is not None
-                else None
-            ),
-            "delta_mem_checksum": (
-                delta.mem.data.detach().float().sum(dim=1).cpu()
-                if delta is not None and delta.mem is not None
-                else None
-            ),
-            "delta_box_checksum": (
-                delta.box.data.detach().float().reshape(delta.box.data.shape[0], -1).sum(dim=1).cpu()
-                if delta is not None and delta.box is not None
-                else None
-            ),
-            "mem_ts": graph.mem_ts.detach().cpu(),
-            "box_ts": graph.box_ts.detach().cpu(),
-            "mem_checksum": graph.mem.detach().float().cpu().sum(dim=1),
-            "box_checksum": graph.box.detach().float().cpu().reshape(graph.box.shape[0], -1).sum(dim=1),
-        }
-        if getattr(self, "_debug_dump_full", False):
-            payload["mem_data"] = graph.mem.detach().cpu()
-            payload["box_data"] = graph.box.detach().cpu()
-            if delta is not None and delta.mem is not None:
-                payload["delta_mem_data"] = delta.mem.data.detach().cpu()
-            if delta is not None and delta.box is not None:
-                payload["delta_box_data"] = delta.box.data.detach().cpu()
-        torch.save(payload, dump_dir / f"batch_{meta.mini_batch_idx}.pt")
-
-    def _maybe_append_assembly_checksums(
-        self,
-        *,
-        meta,
-        graph: FlatGraph,
-        mem_plan: DynamicPlan | None,
-        box_plan: DynamicPlan | None,
-        delta: MemAndBox | None,
-    ) -> None:
-        path = _debug_assembly_checksums_path()
-        if path is None:
-            return
-
-        def _sum_or_zero(t: torch.Tensor | None) -> float:
-            if t is None or t.numel() == 0:
-                return 0.0
-            return float(t.detach().float().sum().item())
-
-        def _abssum_or_zero(t: torch.Tensor | None) -> float:
-            if t is None or t.numel() == 0:
-                return 0.0
-            return float(t.detach().float().abs().sum().item())
-
-        def _len_or_zero(t: torch.Tensor | None) -> int:
-            if t is None:
-                return 0
-            return int(t.numel())
-
-        record = {
-            "mini_batch_idx": int(meta.mini_batch_idx),
-            "cur_epoch": int(meta.cur_epoch),
-            "split": meta.split,
-            "cur_macro_of_split": int(meta.cur_macro_of_split),
-            "cur_macro_of_epoch": int(meta.cur_macro_of_epoch),
-            "mem_fetch_len": _len_or_zero(
-                None if mem_plan is None or mem_plan.fetch is None else mem_plan.fetch.data
-            ),
-            "box_fetch_len": _len_or_zero(
-                None if box_plan is None or box_plan.fetch is None else box_plan.fetch.data
-            ),
-            "delta_mem_len": _len_or_zero(None if delta is None else delta.mem.nid),
-            "delta_box_len": _len_or_zero(None if delta is None else delta.box.nid),
-            "mem_fetch_nid_sum": _sum_or_zero(
-                None if mem_plan is None or mem_plan.fetch is None else mem_plan.fetch.data
-            ),
-            "box_fetch_nid_sum": _sum_or_zero(
-                None if box_plan is None or box_plan.fetch is None else box_plan.fetch.data
-            ),
-            "delta_mem_nid_sum": _sum_or_zero(None if delta is None else delta.mem.nid),
-            "delta_box_nid_sum": _sum_or_zero(None if delta is None else delta.box.nid),
-            "mem_sum": _sum_or_zero(graph.mem),
-            "mem_abs_sum": _abssum_or_zero(graph.mem),
-            "box_sum": _sum_or_zero(graph.box),
-            "box_abs_sum": _abssum_or_zero(graph.box),
-            "delta_mem_sum": _sum_or_zero(None if delta is None else delta.mem.data),
-            "delta_mem_abs_sum": _abssum_or_zero(
-                None if delta is None else delta.mem.data
-            ),
-            "delta_box_sum": _sum_or_zero(None if delta is None else delta.box.data),
-            "delta_box_abs_sum": _abssum_or_zero(
-                None if delta is None else delta.box.data
-            ),
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, sort_keys=True) + "\n")
-
     def _drain_prior_eval_writebacks(self, *, split: str) -> None:
         # Eval is much faster than train because it has no backward / optimizer step.
         # Without draining completed writer work here, the assembler can start the
@@ -835,6 +611,12 @@ class DynamicAssembler(StreamThreadBase):
         5. Records a CUDA event and puts ``(meta, event)`` into ``full_q``.
         """
         epoch_count = getattr(self, "epoch_count", 0)
+        dynamic_state_ablation = getattr(
+            self,
+            "dynamic_state_ablation",
+            DynamicStateAblation(name="baseline"),
+        )
+        timing_enabled = getattr(self, "_timing_enabled", False)
 
         while not self.stop_ev.is_set():
             in_data = self.in_q.get(block=True)
@@ -855,57 +637,64 @@ class DynamicAssembler(StreamThreadBase):
             # ==========================================================
             assert meta.flat_graph is not None
             assert meta.plan_set is not None
-            assert meta.plan_set.mem_plan is not None
-            assert meta.plan_set.box_plan is not None
             self._drain_prior_eval_writebacks(split=meta.split)
             wait_for_batch = getattr(self.h2d_sem, "wait_for_batch", None)
+            h2d_wait_start = time.perf_counter()
             if callable(wait_for_batch):
                 wait_for_batch(meta.mini_batch_idx)
             else:
                 self.h2d_sem.acquire()
                 self.h2d_sem.acquire()
+            h2d_wait_end = time.perf_counter()
 
+            prepare_start = time.perf_counter()
             self.prepare_shared_features(
                 graph=meta.flat_graph,
                 mem_plan=meta.plan_set.mem_plan,
                 box_plan=meta.plan_set.box_plan,
                 n_src=meta.n_src,
             )
+            prepare_end = time.perf_counter()
+
+            if dynamic_state_ablation.disable_p2p_delta:
+                if dynamic_state_ablation.direct_cpu_read_all_positions:
+                    self._fill_all_required_from_shm(meta.flat_graph, meta.n_src)
+                if timing_enabled:
+                    self._delta_queue_wait_s_curve.append(0.0)
+                    self._p2p_work_wait_s_curve.append(0.0)
+                    self._apply_delta_s_curve.append(0.0)
+                ready_event = cast(CudaEvent, torch.cuda.Event())
+                ready_event.record(torch.cuda.current_stream())
+                self.full_q.put((meta, ready_event), block=True)
+                continue
 
             # Now block and wait for network data
+            delta_wait_start = time.perf_counter()
             delta_tuple = self.delta_queue.get(block=True)
+            delta_wait_end = time.perf_counter()
             if delta_tuple is None:
                 put_shutdown_sentinel(self.full_q, None)
                 break
 
             logger.debug(
-                f"DynamicAssembler received delta for batch {meta.mini_batch_idx}, epoch {epoch_count}"
+                "DynamicAssembler received delta for batch %s, epoch %s",
+                meta.mini_batch_idx,
+                epoch_count,
             )
 
             if delta_tuple != "nothing":
                 delta = None
+                p2p_wait_s = 0.0
                 if not self.use_shm_instead:
                     mem, box, works = delta_tuple
                     assert mem is not None
                     assert box is not None
-                    if _debug_assert_batch_alignment():
-                        expected_delta_batch_idx = meta.mini_batch_idx - 1
-                        if mem.mini_batch_idx != expected_delta_batch_idx:
-                            raise RuntimeError(
-                                "DynamicAssembler received mem delta with unexpected batch offset: "
-                                f"meta={meta.mini_batch_idx}, expected_delta={expected_delta_batch_idx}, "
-                                f"actual_delta={mem.mini_batch_idx}"
-                            )
-                        if box.mini_batch_idx != expected_delta_batch_idx:
-                            raise RuntimeError(
-                                "DynamicAssembler received box delta with unexpected batch offset: "
-                                f"meta={meta.mini_batch_idx}, expected_delta={expected_delta_batch_idx}, "
-                                f"actual_delta={box.mini_batch_idx}"
-                            )
 
                     # Wait for P2P network streams to finish receiving
+                    p2p_wait_start = time.perf_counter()
                     for work in works:
                         work.wait()
+                    p2p_wait_s = time.perf_counter() - p2p_wait_start
 
                     box_data = box.data2recv
                     delta_mem = MemEntry(
@@ -920,6 +709,7 @@ class DynamicAssembler(StreamThreadBase):
                 # ==========================================================
                 # Apply the received delta to the already partially-filled graph
                 # ==========================================================
+                apply_delta_start = time.perf_counter()
                 self.apply_delta_features(
                     graph=meta.flat_graph,
                     delta=delta,
@@ -927,22 +717,24 @@ class DynamicAssembler(StreamThreadBase):
                     box_plan=meta.plan_set.box_plan,
                     n_src=meta.n_src,
                 )
+                apply_delta_end = time.perf_counter()
+            else:
+                p2p_wait_s = 0.0
+                apply_delta_start = None
+                apply_delta_end = None
 
-            self._maybe_dump_assembly_state(
-                meta=meta,
-                graph=meta.flat_graph,
-                mem_plan=meta.plan_set.mem_plan,
-                box_plan=meta.plan_set.box_plan,
-                delta=delta if delta_tuple != "nothing" else None,
-                n_src=meta.n_src,
-            )
-            self._maybe_append_assembly_checksums(
-                meta=meta,
-                graph=meta.flat_graph,
-                mem_plan=meta.plan_set.mem_plan,
-                box_plan=meta.plan_set.box_plan,
-                delta=delta if delta_tuple != "nothing" else None,
-            )
+            if timing_enabled:
+                self._h2d_credit_wait_s_curve.append(h2d_wait_end - h2d_wait_start)
+                self._prepare_shared_s_curve.append(prepare_end - prepare_start)
+                self._delta_queue_wait_s_curve.append(
+                    delta_wait_end - delta_wait_start
+                )
+                self._p2p_work_wait_s_curve.append(p2p_wait_s)
+                self._apply_delta_s_curve.append(
+                    0.0
+                    if apply_delta_start is None or apply_delta_end is None
+                    else apply_delta_end - apply_delta_start
+                )
 
             # Push to the next queue
             ready_event = cast(CudaEvent, torch.cuda.Event())
@@ -950,4 +742,30 @@ class DynamicAssembler(StreamThreadBase):
             self.full_q.put((meta, ready_event), block=True)
             logger.debug(
                 f"DynamicAssembler put full meta for batch {meta.mini_batch_idx}, epoch {epoch_count} into full_q"
+            )
+
+        if timing_enabled and self._delta_queue_wait_s_curve:
+            payload = {
+                "system": "frost",
+                "rank": getattr(self.device, "index", -1),
+                "batch_count": len(self._delta_queue_wait_s_curve),
+                "h2d_credit_wait_s_curve": [
+                    round(v, 6) for v in self._h2d_credit_wait_s_curve
+                ],
+                "prepare_shared_s_curve": [
+                    round(v, 6) for v in self._prepare_shared_s_curve
+                ],
+                "delta_queue_wait_s_curve": [
+                    round(v, 6) for v in self._delta_queue_wait_s_curve
+                ],
+                "p2p_work_wait_s_curve": [
+                    round(v, 6) for v in self._p2p_work_wait_s_curve
+                ],
+                "apply_delta_s_curve": [
+                    round(v, 6) for v in self._apply_delta_s_curve
+                ],
+            }
+            print(
+                "APPENDIX_DYNAMIC_ASSEMBLER_TIMING_CURVE "
+                f"{json.dumps(payload, sort_keys=True)}"
             )

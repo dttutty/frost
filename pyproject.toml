@@ -1,10 +1,10 @@
 [build-system]
-# 使用 scikit-build-core 统一接管 C++ 编译和 Python 打包
+# Use scikit-build-core to handle C++ builds and Python packaging end to end.
 requires = ["scikit-build-core>=0.10", "nanobind>=2.12.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "frost"  # 统一对外的包名
+name = "frost"  # Public package name.
 version = "0.1.0"
 description = "A high-performance distributed GNN training framework with sequence-based samplers."
 readme = "README.md"
@@ -71,5 +71,5 @@ warn_unused_configs = true
 
 [tool.scikit-build]
 cmake.build-type = "RelWithDebInfo"
-# 关键：告诉 scikit-build 去 src 目录下把这两个独立的 Python 命名空间都打包进 wheel 中
+# Important: tell scikit-build to package the Python namespace under src into the wheel.
 wheel.packages = ["src/frost"]

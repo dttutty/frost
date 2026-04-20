@@ -16,6 +16,7 @@ from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf, open_dict
 
+from frost.ablation import resolve_dynamic_state_ablation
 from frost.datatypes.env import Env
 from frost.protocols.mem_updater_proto import MemoryUpdaterProto
 from frost.protocols.ngh_sampler_proto import NghSamplerProto
@@ -38,6 +39,7 @@ APAN_ENCODER_TARGET = "frost.models.encoder.apan.APAN"
 TGAT_ENCODER_TARGET = "frost.models.encoder.tgat.TGAT"
 DYGFORMER_ENCODER_TARGET = "frost.models.encoder.dygformer.DyGFormer"
 CAWN_ENCODER_TARGET = "frost.models.encoder.cawn.CAWN"
+TGN_ENCODER_TARGET = "frost.models.encoder.tgn.TGN"
 GRAPH_MIXER_ENCODER_TARGET = "frost.models.encoder.graph_mixer.GraphMixer"
 TCL_ENCODER_TARGET = "frost.models.encoder.tcl.TCL"
 LINK_PREDICTOR_TARGET = "frost.models.header.LinkPredictor"
@@ -69,23 +71,8 @@ def _set_nested_attr(root: object, path: tuple[str, ...], value: Any) -> None:
     setattr(target, path[-1], value)
 
 
-def _debug_force_deterministic_algorithms() -> bool:
-    flag = os.getenv("FROST_DEBUG_DETERMINISTIC")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
-
-
 def _stable_mode_enabled(cfg: DictConfig) -> bool:
     return bool(cfg.get("stable_mode", False))
-
-
-def _debug_load_model_path() -> str | None:
-    raw = os.getenv("FROST_DEBUG_LOAD_MODEL_PATH")
-    if raw is None:
-        return None
-    path = raw.strip()
-    return path or None
 
 
 def _resolve_dummy_feature_dim(
@@ -165,6 +152,22 @@ def _resolve_dygformer_dummy_edge_dim(
         model_name="DyGFormer",
         feature_name="edge",
         feature_file_name="ml_{dataset_key}.npy",
+        processed_data_root=processed_data_root,
+    )
+
+
+def _resolve_dygformer_dummy_node_dim(
+    dataset: str,
+    requested_dim: object,
+    *,
+    processed_data_root: Path | None = None,
+) -> int:
+    return _resolve_dummy_feature_dim(
+        dataset=dataset,
+        requested_dim=requested_dim,
+        model_name="DyGFormer",
+        feature_name="node",
+        feature_file_name="ml_{dataset_key}_node.npy",
         processed_data_root=processed_data_root,
     )
 
@@ -296,13 +299,7 @@ def launch(cfg: DictConfig):
     )
     _set_nested_attr(torch.backends, ("cudnn", "rnn", "fp32_precision"), fp32_precision)
 
-    if _debug_force_deterministic_algorithms():
-        torch.backends.cudnn.benchmark = False
-        torch.backends.cudnn.deterministic = True
-        torch.use_deterministic_algorithms(True)
-        if _is_host:
-            logger.info("Enabled debug deterministic algorithms mode.")
-    elif _stable_mode_enabled(cfg):
+    if _stable_mode_enabled(cfg):
         torch.backends.cudnn.benchmark = False
         if _is_host:
             logger.info(
@@ -313,6 +310,22 @@ def launch(cfg: DictConfig):
             )
 
     env: Env = Env.initial()
+    dynamic_state_ablation = resolve_dynamic_state_ablation(
+        cfg.get("dynamic_state_ablation", "baseline")
+    )
+    cpu_util_bench_enabled = os.getenv("FROST_CPU_UTIL_BENCH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    cpu_benchmark_pid_list: list[int] | None = None
+    if cpu_util_bench_enabled:
+        gathered_pids: list[int | None] = [None] * env.world_size
+        dist.all_gather_object(gathered_pids, os.getpid())
+        cpu_benchmark_pid_list = [
+            int(pid) for pid in gathered_pids if pid is not None
+        ]
     per_gpu_batch_size = cfg.macro_batch_size // env.n_gpu
     if cfg.macro_batch_size % env.n_gpu != 0:
         raise ValueError(
@@ -343,6 +356,7 @@ def launch(cfg: DictConfig):
         time_dtype=precision.time_preprocessing_np,
         feature_dtype=precision.feature_torch,
         ignore_nfeat_on_disk=bool(cfg.get("ignore_nfeat_on_disk", False)),
+        ignore_efeat_on_disk=bool(cfg.get("ignore_efeat_on_disk", False)),
     )
     (
         graph,
@@ -370,13 +384,27 @@ def launch(cfg: DictConfig):
         logger.info("Detected GPU topology from CUDA_VISIBLE_DEVICES: %s", gpu_topo)
 
     has_mem = cfg.get("mem_updater") is not None
+    encoder_target = str(cfg.encoder._target_)
+    if dynamic_state_ablation.requires_tgn_boxsize_one_only:
+        if not has_mem:
+            raise ValueError(
+                "dynamic_state_ablation requires mem_updater to be configured."
+            )
+        if encoder_target != TGN_ENCODER_TARGET:
+            raise ValueError(
+                "dynamic_state_ablation is only supported for encoder=tgn."
+            )
+        if int(cfg.mem_updater.boxsize) != 1:
+            raise ValueError(
+                "dynamic_state_ablation currently only supports mem_updater.boxsize=1."
+            )
     mail_recipients = int(cfg.mem_updater.get("mail_recipients", 0)) if has_mem else 0
     mail_combine = cfg.mem_updater.get("mail_combine") if has_mem else None
     if mail_recipients < 0:
         raise ValueError("mem_updater.mail_recipients must be >= 0.")
     if has_mem and mail_combine is None:
         raise ValueError("Memory models require mem_updater.mail_combine.")
-    is_apan = str(cfg.encoder._target_) == APAN_ENCODER_TARGET
+    is_apan = encoder_target == APAN_ENCODER_TARGET
 
     if is_apan:
         if not has_mem:
@@ -549,7 +577,7 @@ def launch(cfg: DictConfig):
         has_nfeat = ndim > 0
         has_efeat = edim > 0
 
-        handle_stale: bool = bool(cfg.get("handle_stale", False))
+        if_carry_over_route: bool = bool(cfg.get("if_carry_over_route", False))
         host: Host | None = None
         host_failed = True
         try:
@@ -570,7 +598,7 @@ def launch(cfg: DictConfig):
                 n_epoch=cfg.epoch,
                 patience=cfg.patience,
                 gpu_topo=gpu_topo,
-                handle_stale=handle_stale,
+                if_carry_over_route=if_carry_over_route,
                 show_tqdm=bool(cfg.get("tqdm", False)),
                 no_memory_queue_size=no_memory_queue_size,
                 output_dir=output_dir,
@@ -585,6 +613,7 @@ def launch(cfg: DictConfig):
                     cfg.get("persist_all_updates_to_cpu", False)
                 )
                 or use_shm_instead,
+                dynamic_state_ablation=dynamic_state_ablation,
             )
             host.run()
             host_failed = False
@@ -620,7 +649,16 @@ def launch(cfg: DictConfig):
         encoder_cfg.pop("fanout", None)
         encoder_cfg.pop("ngh_sampler_strategy", None)
         if (
-            str(cfg.encoder._target_) == DYGFORMER_ENCODER_TARGET
+            encoder_target == DYGFORMER_ENCODER_TARGET
+            and cfg.ndim == 0
+            and bool(encoder_cfg.get("enable_dummy_node_features", False))
+        ):
+            encoder_cfg["dummy_node_dim"] = _resolve_dygformer_dummy_node_dim(
+                dataset=cfg.dataset,
+                requested_dim=encoder_cfg.get("dummy_node_dim"),
+            )
+        if (
+            encoder_target == DYGFORMER_ENCODER_TARGET
             and cfg.edim == 0
             and bool(encoder_cfg.get("enable_dummy_edge_features", True))
         ):
@@ -629,7 +667,7 @@ def launch(cfg: DictConfig):
                 requested_dim=encoder_cfg.get("dummy_edge_dim"),
             )
         if (
-            str(cfg.encoder._target_) == TGAT_ENCODER_TARGET
+            encoder_target == TGAT_ENCODER_TARGET
             and cfg.ndim == 0
             and bool(encoder_cfg.get("enable_dummy_node_features", True))
         ):
@@ -638,7 +676,7 @@ def launch(cfg: DictConfig):
                 requested_dim=encoder_cfg.get("dummy_node_dim"),
             )
         if (
-            str(cfg.encoder._target_) == TGAT_ENCODER_TARGET
+            encoder_target == TGAT_ENCODER_TARGET
             and cfg.edim == 0
             and bool(encoder_cfg.get("enable_dummy_edge_features", True))
         ):
@@ -647,7 +685,7 @@ def launch(cfg: DictConfig):
                 requested_dim=encoder_cfg.get("dummy_edge_dim"),
             )
         if (
-            str(cfg.encoder._target_) == GRAPH_MIXER_ENCODER_TARGET
+            encoder_target == GRAPH_MIXER_ENCODER_TARGET
             and bool(encoder_cfg.get("align_dyglib_zero_features", False))
             and encoder_cfg.get("dyglib_feature_dim") is None
         ):
@@ -657,20 +695,20 @@ def launch(cfg: DictConfig):
                 DYGLIB_ALIGNED_FEATURE_DIM,
                 GRAPH_MIXER_ENCODER_TARGET,
             )
-        if str(cfg.encoder._target_) == TGAT_ENCODER_TARGET:
+        if encoder_target == TGAT_ENCODER_TARGET:
             encoder: nn.Module = instantiate(encoder_cfg, fanout=fanout)
         else:
             encoder = instantiate(encoder_cfg)
         predictor_cfg = OmegaConf.to_container(cfg.predictor, resolve=True)
         assert isinstance(predictor_cfg, dict)
         predictor_cfg, predictor_switched = _resolve_predictor_cfg(
-            str(cfg.encoder._target_),
+            encoder_target,
             predictor_cfg,
         )
         if predictor_switched:
             logger.info(
                 "Auto-switched predictor to DyGFormerLinkPredictor for pair-aware encoder=%s.",
-                str(cfg.encoder._target_),
+                encoder_target,
             )
         predictor: nn.Module = instantiate(predictor_cfg)
         postman: None | PostmanProto = (
@@ -683,7 +721,7 @@ def launch(cfg: DictConfig):
             logger.info(
                 "Auto-enabled shared-memory dynamic-state fetch path for root-only memory model "
                 "encoder=%s.",
-                str(cfg.encoder._target_),
+                encoder_target,
             )
         try:
             worker = Worker(
@@ -705,18 +743,12 @@ def launch(cfg: DictConfig):
                 lr=cfg.lr,
                 mail_combine=mail_combine,
                 use_shm_instead=use_shm_instead,
+                dynamic_state_ablation=dynamic_state_ablation,
                 compile_model=cfg.get("compile", True),
                 amp=bool(cfg.get("amp", False)),
                 no_memory_queue_size=no_memory_queue_size,
+                cpu_benchmark_pid_list=cpu_benchmark_pid_list,
             )
-            debug_load_model_path = _debug_load_model_path()
-            if debug_load_model_path is not None:
-                if env.is_host:
-                    logger.info(
-                        "Loading debug checkpoint before worker.run(): %s",
-                        debug_load_model_path,
-                    )
-                worker.load_model(debug_load_model_path)
             worker.run()
             worker_failed = False
         except BaseException:

@@ -8,6 +8,7 @@ from numpy.typing import NDArray
 from torch import Tensor
 
 from frost.datatypes.graph import HierGraph
+from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.plan import DynamicPlan
 
@@ -20,6 +21,8 @@ class MemTask:
         batch_idx: Global batch counter used to order writes correctly.
         root_new_mem: Updated memory entries for root nodes computed during
             the forward pass.
+        stale_mem: Optional pre-update memory snapshot for stale carry-over
+            nodes already assembled on this worker for the current batch.
         mem_plan: DynamicPlan carrying the node IDs and P2P routing needed to
             propagate the memory update to other workers.
         is_last: ``True`` iff this is the final batch of the current epoch;
@@ -28,6 +31,7 @@ class MemTask:
 
     mini_batch_idx: int
     root_new_mem: MemEntry
+    stale_mem: MemEntry | None
     mem_plan: DynamicPlan
     is_last: bool
 
@@ -42,6 +46,8 @@ class BoxTask:
             not used.
         root_new_mem: Updated memory entries for root nodes, needed to build
             the mail content.
+        stale_box: Optional pre-update mailbox snapshot for stale carry-over
+            nodes already assembled on this worker for the current batch.
         mail_peer_mem: Optional peer embedding used for the "other node" half
             of the mail message.  DyRep uses this to send structural
             graph-attention embeddings while preserving the self-memory half.
@@ -55,6 +61,7 @@ class BoxTask:
 
     pos_efeat: Tensor | None
     root_new_mem: MemEntry
+    stale_box: BoxEntry | None
     mail_peer_mem: Tensor | None
     mini_batch_idx: int
     box_plan: DynamicPlan
@@ -70,6 +77,22 @@ class BoxTask:
             f"is_last={self.is_last}, "
             f"graph={self.graph})"
         )
+
+
+@dataclass(slots=True)
+class DirectWritebackRequest:
+    """Synchronous CPU writeback payload for ablation modes.
+
+    The entries preserve raw row order and may contain duplicate node IDs.
+    Optional filter tensors restrict which node IDs are allowed to be
+    persisted, but they must not change row order among retained items.
+    """
+
+    mini_batch_idx: int
+    mem_entry: MemEntry | None
+    box_entry: BoxEntry | None
+    mem_filter_nids: Tensor | None
+    box_filter_nids: Tensor | None
 
 
 @dataclass(slots=True)

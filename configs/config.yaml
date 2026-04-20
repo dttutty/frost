@@ -19,9 +19,10 @@ dataset: "LASTFM"
 optimizer: "adam"
 lr: 0.0001
 n_neg: 1
-ring_buf_size: 32
-handle_stale: false
+ring_buf_size: 64
+if_carry_over_route: false
 ignore_nfeat_on_disk: false
+ignore_efeat_on_disk: false
 no_memory_queue_size: 4
 compile: false
 tf32: false
@@ -32,3 +33,4 @@ reset_eval_neg_sampler_each_epoch: false
 share_neg_sampler_across_splits: false
 normalize_event_time: false
 persist_all_updates_to_cpu: false
+dynamic_state_ablation: baseline

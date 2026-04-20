@@ -27,9 +27,10 @@ class AnalyzerProto(Protocol):
         in_q: DynamicPlanInQ,
         out_q: DynamicPlanOutQ,
         stop_ev: threading.Event,
-        handle_stale: bool,
+        if_carry_over_route: bool,
         output_dir: str | None,
         persist_all_updates_to_cpu: bool = False,
+        current_batch_only: bool = False,
     ) -> ThreadBase | None: ...
 
     def get_mail_plan_inputs(

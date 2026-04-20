@@ -1,15 +1,19 @@
 import logging
-import os
 import threading
-from pathlib import Path
 from typing import Literal, cast
 
 import torch
 
 from frost.aliases.syncer import BoxP2PQ, BoxTaskQ, BoxWrQ, MemP2PQ, MemTaskQ, MemWrQ
-from frost.datatypes.mem_mail_box._data_ops import keep_last, keep_mean, mail_to_box
+from frost.datatypes.mem_mail_box._data_ops import (
+    keep_last,
+    keep_mean,
+    mail_to_box,
+    merge_with_priority,
+)
 from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mail import MailEntry
+from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.tasks import BoxTask, P2PTask
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.protocols.postman_proto import PostmanProto
@@ -21,50 +25,66 @@ from .utils._p2p_task_maker import make_p2p_task
 logger = logging.getLogger(__name__)
 
 
-def _debug_dump_sync_dir() -> Path | None:
-    raw = os.getenv("FROST_DEBUG_DUMP_SYNC_DIR")
-    if raw is None or raw.strip() == "":
-        return None
-    return Path(raw)
+def _dedupe_box_entry(entry: BoxEntry) -> BoxEntry:
+    if entry.nid.numel() == 0:
+        entry.is_sorted = True
+        entry.is_unique = True
+        return entry
+
+    entry = entry.sort_by_nid()
+    if entry.is_unique:
+        return entry
+
+    keep = torch.ones(entry.nid.numel(), dtype=torch.bool, device=entry.nid.device)
+    if entry.nid.numel() > 1:
+        keep[:-1] = entry.nid[:-1] != entry.nid[1:]
+
+    if keep.sum().item() != entry.nid.numel():
+        return BoxEntry(
+            nid=entry.nid[keep],
+            data=entry.data[keep],
+            ts=entry.ts[keep],
+            is_sorted=True,
+            is_unique=True,
+        )
+
+    entry.is_unique = True
+    return entry
 
 
-def _debug_dump_sync_batches() -> set[int] | None:
-    raw = os.getenv("FROST_DEBUG_DUMP_SYNC_BATCHES")
-    if raw is None or raw.strip() == "":
-        return None
-    return {int(tok.strip()) for tok in raw.split(",") if tok.strip() != ""}
+def _merge_box_entries_with_priority(
+    fresh_box: BoxEntry,
+    stale_box: BoxEntry | None,
+) -> BoxEntry:
+    if stale_box is None or stale_box.nid.numel() == 0:
+        return _dedupe_box_entry(fresh_box)
 
+    fresh_box = _dedupe_box_entry(fresh_box)
+    stale_box = _dedupe_box_entry(stale_box)
 
-def _maybe_dump_mem_sync_state(
-    *,
-    mini_batch_idx: int,
-    root_new_mem,
-    mem_ts_nid,
-    p2p_task,
-) -> None:
-    dump_dir = _debug_dump_sync_dir()
-    dump_batches = _debug_dump_sync_batches()
-    if dump_dir is None or dump_batches is None or mini_batch_idx not in dump_batches:
-        return
+    if fresh_box.data.shape[1:] != stale_box.data.shape[1:]:
+        logger.warning(
+            "Skipping stale box merge because shapes differ: fresh=%s stale=%s",
+            tuple(fresh_box.data.shape[1:]),
+            tuple(stale_box.data.shape[1:]),
+        )
+        return fresh_box
 
-    dump_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "mini_batch_idx": int(mini_batch_idx),
-        "root_new_mem_nid": root_new_mem.nid.detach().cpu(),
-        "root_new_mem_ts": root_new_mem.ts.detach().cpu(),
-        "root_new_mem_data": root_new_mem.data.detach().cpu(),
-        "mem_ts_nid_nid": mem_ts_nid.nid.detach().cpu(),
-        "mem_ts_nid_ts": mem_ts_nid.ts.detach().cpu(),
-        "mem_ts_nid_data": mem_ts_nid.data.detach().cpu(),
-    }
-    if p2p_task is not None:
-        payload["p2p_send_nid"] = p2p_task.send_nid.detach().cpu()
-        payload["p2p_send_ts"] = p2p_task.ts2send.detach().cpu()
-        payload["p2p_send_data"] = p2p_task.data2send.detach().cpu()
-        payload["p2p_recv_nid_shape"] = tuple(p2p_task.recv_nid.shape)
-        payload["p2p_send_counts"] = p2p_task.send_counts.copy()
-        payload["p2p_recv_counts"] = p2p_task.recv_counts.copy()
-    torch.save(payload, dump_dir / f"mem_batch_{mini_batch_idx}.pt")
+    keep_low = ~torch.isin(stale_box.nid, fresh_box.nid)
+    if not torch.any(keep_low):
+        return fresh_box
+
+    cat_nid = torch.cat((fresh_box.nid, stale_box.nid[keep_low]), dim=0)
+    cat_data = torch.cat((fresh_box.data, stale_box.data[keep_low]), dim=0)
+    cat_ts = torch.cat((fresh_box.ts, stale_box.ts[keep_low]), dim=0)
+    sort_idx = torch.argsort(cat_nid)
+    return BoxEntry(
+        nid=cat_nid[sort_idx],
+        data=cat_data[sort_idx],
+        ts=cat_ts[sort_idx],
+        is_sorted=True,
+        is_unique=True,
+    )
 
 
 class MemTaskHandler(StreamThreadBase):
@@ -99,9 +119,15 @@ class MemTaskHandler(StreamThreadBase):
                 mem_plan = mem_task.mem_plan
                 root_new_mem = keep_last(mem_task.root_new_mem)
 
-                # skip stale memory for speed
-                # mem_ts_nid = merge_with_priority(root_new_mem, mem_task.old_mem_ts_nid)
-                mem_ts_nid = root_new_mem
+                mem_ts_nid: MemEntry = root_new_mem
+                if (
+                    mem_task.stale_mem is not None
+                    and mem_task.stale_mem.nid.numel() > 0
+                ):
+                    mem_ts_nid = cast(
+                        MemEntry,
+                        merge_with_priority(root_new_mem, mem_task.stale_mem),
+                    )
                 mini_batch_idx = mem_task.mini_batch_idx
 
                 if mem_task.is_last is False:
@@ -111,22 +137,10 @@ class MemTaskHandler(StreamThreadBase):
                         device=self.device,
                         mini_batch_idx=mini_batch_idx,
                     )
-                    _maybe_dump_mem_sync_state(
-                        mini_batch_idx=mini_batch_idx,
-                        root_new_mem=mem_task.root_new_mem,
-                        mem_ts_nid=mem_ts_nid,
-                        p2p_task=p2p_task,
-                    )
                     p2p_event: CudaEvent = cast(CudaEvent, torch.cuda.Event())
                     p2p_event.record(torch.cuda.current_stream())
                     self.mem_p2p_q.put((p2p_task, p2p_event))
                 else:
-                    _maybe_dump_mem_sync_state(
-                        mini_batch_idx=mini_batch_idx,
-                        root_new_mem=mem_task.root_new_mem,
-                        mem_ts_nid=mem_ts_nid,
-                        p2p_task=None,
-                    )
                     self.mem_p2p_q.put("nothing_to_p2p")
 
                 writeback_event: CudaEvent = cast(CudaEvent, torch.cuda.Event())
@@ -214,6 +228,7 @@ class MessageHandler(StreamThreadBase):
             new_mail = keep_mean(new_mail)
 
         box_entry = mail_to_box(new_mail)
+        box_entry = _merge_box_entries_with_priority(box_entry, box_task.stale_box)
 
         p2p_task = make_p2p_task(
             entry=box_entry,

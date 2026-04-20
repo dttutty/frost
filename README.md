@@ -1,16 +1,7 @@
-# FROST
+# FROST: Accelerating Temporal Graph Neural Network Training via a Unified Multi-GPU Framework
 
 <p align="center">
-  <strong>FROST: Forward-Looking Routing for Exact-Memory Multi-GPU TGNN Training</strong>
-</p>
-<p align="center">
   Research artifact repository for the FROST paper submission.
-</p>
-<p align="center">
-  <a href="https://github.com/dttutty/FROST/actions/workflows/manual-ruff.yml"><img src="https://github.com/dttutty/FROST/actions/workflows/manual-ruff.yml/badge.svg" alt="ruff status"></a>
-  <a href="https://github.com/dttutty/FROST/actions/workflows/manual-mypy.yml"><img src="https://github.com/dttutty/FROST/actions/workflows/manual-mypy.yml/badge.svg" alt="mypy status"></a>
-  <a href="https://github.com/dttutty/FROST/actions/workflows/manual-test.yml"><img src="https://github.com/dttutty/FROST/actions/workflows/manual-test.yml/badge.svg" alt="test status"></a>
-  <a href="https://huggingface.co/datasets/dttutty/frost_dataset"><img src="https://img.shields.io/badge/Hugging%20Face-dataset%20repo-FFD21E?logo=huggingface&logoColor=000" alt="Hugging Face dataset repo"></a>
 </p>
 
 ## Overview
@@ -18,16 +9,6 @@
 FROST is a distributed training system for temporal graph neural networks (TGNNs) with exact memory semantics. A dedicated host rank performs sampling, access analysis, and forward-looking planning, while GPU worker ranks execute model training.
 
 The implementation is built directly on top of PyTorch and PyTorch Distributed. It does not depend on DGL, PyG, `pytorch_scatter`, or `pytorch_sparse`.
-
-## Citation
-
-```bibtex
-@misc{zhao_frost,
-  title  = {FROST: Forward-Looking Routing for Exact-Memory Multi-GPU TGNN Training},
-  author = {Lei Zhao and Chul-Ho Lee},
-  note   = {Paper submission accompanying this repository}
-}
-```
 
 ## Quick Start
 
@@ -42,11 +23,12 @@ uv sync --python 3.12
 
 ### Datasets
 
-The supported dataset source is the Hugging Face dataset repository [`dttutty/frost_dataset`](https://huggingface.co/datasets/dttutty/frost_dataset). Mirror it into [`DATA/`](DATA/) so runtime paths match `DATA/<dataset>/...`.
+Mirror the prepared dataset bundle into [`DATA/`](DATA/) so runtime paths match `DATA/<dataset>/...`. If you host the datasets on Hugging Face, set the repository id via an environment variable before downloading.
 
 ```bash
+export HF_DATASET_REPO=<your-dataset-repo>
 uvx --from huggingface_hub hf download \
-  dttutty/frost_dataset \
+  "$HF_DATASET_REPO" \
   --repo-type dataset \
   --local-dir DATA
 ```
@@ -54,8 +36,9 @@ uvx --from huggingface_hub hf download \
 To fetch a single dataset:
 
 ```bash
+export HF_DATASET_REPO=<your-dataset-repo>
 uvx --from huggingface_hub hf download \
-  dttutty/frost_dataset \
+  "$HF_DATASET_REPO" \
   --repo-type dataset \
   --include "LASTFM/*" \
   --local-dir DATA
@@ -69,6 +52,11 @@ FROST uses `torchrun` with one extra rank reserved for the host/planner process:
 - Worker ranks use GPUs; the last rank is the host
 
 Example with 2 GPUs:
+
+For throughput benchmarking, we recommend explicitly setting
+`OMP_NUM_THREADS=8` and `MKL_NUM_THREADS=8` before launching either FROST
+or the TGL baselines so CPU-side sampling and data preparation use a
+consistent thread budget.
 
 ## Common Entry Points
 

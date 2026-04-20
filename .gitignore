@@ -36,10 +36,12 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
-.venv
+.venv/
 env/
 venv/
 ENV/
+.pytest_cache/
+.mypy_cache/
 
 # Logs & outputs
 outputs/
@@ -72,21 +74,30 @@ slurm/
 hydralance/
 temp/
 traces/
-*.png
-*.csv
-*.svg
 
 DATA/DGB*
 DATA/.temp
 DATA/TGL*
 TGL_DATA/
 tmp/
+*.tar
+*.tar.gz
 
-
-# 先忽略 seed_sweeps 下所有内容
+# Generated experiment artifacts
 seed_sweeps/**
-
-
-
+experiments/**/configs/
+experiments/**/logs/
+experiments/**/progress*.md
+experiments/**/report*.md
+experiments/**/combined_summary.md
+experiments/**/*.pdf
+experiments/**/*.png
+experiments/**/*.svg
+experiments/**/*.csv
+experiments/**/*.tsv
+experiments/**/*.txt
+experiments/**/*.json
 
 download_data.sh
+*.txt
+*.tsv

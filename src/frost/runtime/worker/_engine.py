@@ -6,12 +6,11 @@ optional DynamicAssembler), and optional P2P memory-sync threads when a
 MemBoxStore is configured.
 """
 
-import json
 import logging
+import json
 import os
 import threading
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Queue as Q
 from typing import Literal, cast
@@ -19,9 +18,12 @@ from typing import Literal, cast
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+try:
+    import psutil
+except ImportError:  # pragma: no cover - optional dependency in prod envs
+    psutil = None  # type: ignore[assignment]
 from torch.distributed.algorithms.ddp_comm_hooks.default_hooks import allreduce_hook
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.profiler import ProfilerActivity, profile, record_function
 from torchmetrics import MetricCollection
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
@@ -30,6 +32,7 @@ from torchmetrics.functional.classification import (
     binary_average_precision,
 )
 
+from frost.ablation import DynamicStateAblation
 from frost.aliases.syncer import (
     BoxP2PQ,
     BoxTaskQ,
@@ -50,6 +53,7 @@ from frost.runtime._thread_base import (
     join_thread,
     put_shutdown_sentinel,
 )
+from frost.runtime.worker._direct_writeback import DirectDynamicStateWriter
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
 from frost.runtime.worker._h2d_credit import BatchAwareCreditManager
 from frost.runtime.worker._host_to_device import H2D
@@ -64,34 +68,130 @@ from frost.shm.mem_mgr import MemBoxStore
 from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
+_CLOCK_TICKS_PER_SEC = max(int(os.sysconf("SC_CLK_TCK")), 1)
 
 
-def _debug_force_cpu_freshness_single_worker() -> bool:
-    flag = os.getenv("FROST_DEBUG_CPU_FRESHNESS_SINGLE_WORKER")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
+def _get_non_negative_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    value = int(raw)
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0")
+    return value
 
 
-def _debug_initial_h2d_slots_override() -> int | None:
-    raw = os.getenv("FROST_DEBUG_INITIAL_H2D_SLOTS")
-    if raw is None:
+def _get_optional_non_negative_int_env(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
         return None
     value = int(raw)
     if value < 0:
-        raise ValueError("FROST_DEBUG_INITIAL_H2D_SLOTS must be >= 0")
+        raise ValueError(f"{name} must be >= 0")
     return value
+
+
+def _get_bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_memory_worker_queue_size_env(default: int = 1) -> int:
+    raw = os.getenv("FROST_MEMORY_WORKER_QUEUE_SIZE")
+    if raw is None or raw.strip() == "":
+        return default
+    value = int(raw)
+    if value < 1:
+        raise ValueError("FROST_MEMORY_WORKER_QUEUE_SIZE must be >= 1")
+    return value
+
+
+def _discover_sibling_rank_pids() -> list[int]:
+    """Return all sibling rank PIDs launched under the same torchrun parent.
+
+    We rely on the launcher parent rather than distributed collectives so the
+    benchmark can include both worker ranks and the host process without adding
+    any extra synchronization requirements to the host runtime.
+    """
+
+    pid = os.getpid()
+    if psutil is None:  # pragma: no cover - guarded by benchmark flag
+        return [pid]
+    try:
+        if psutil is not None:
+            proc = psutil.Process(pid)
+            parent = proc.parent()
+            if parent is None:
+                return [pid]
+            child_pids = sorted({child.pid for child in parent.children(recursive=False)})
+            return child_pids or [pid]
+
+        stat_path = Path(f"/proc/{pid}/stat")
+        text = stat_path.read_text(encoding="utf-8")
+        rparen = text.rfind(")")
+        if rparen == -1:
+            return [pid]
+        tail = text[rparen + 2 :].split()
+        parent_pid = int(tail[1])
+        if parent_pid <= 1:
+            return [pid]
+        child_pids: list[int] = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                sibling_text = (entry / "stat").read_text(encoding="utf-8")
+                sibling_rparen = sibling_text.rfind(")")
+                if sibling_rparen == -1:
+                    continue
+                sibling_tail = sibling_text[sibling_rparen + 2 :].split()
+                if int(sibling_tail[1]) == parent_pid:
+                    child_pids.append(int(entry.name))
+            except (OSError, ValueError):
+                continue
+        return sorted(set(child_pids)) or [pid]
+    except (psutil.Error, OSError, ValueError):
+        return [pid]
+
+
+def _sample_total_cpu_time_s(pid_list: list[int]) -> tuple[float, list[int]]:
+    """Return summed user+system CPU time over tracked processes."""
+
+    total = 0.0
+    live_pids: list[int] = []
+    for pid in pid_list:
+        try:
+            if psutil is not None:
+                proc = psutil.Process(pid)
+                cpu_times = proc.cpu_times()
+                total += float(cpu_times.user) + float(cpu_times.system)
+            else:
+                text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+                rparen = text.rfind(")")
+                if rparen == -1:
+                    continue
+                tail = text[rparen + 2 :].split()
+                utime_ticks = int(tail[11])
+                stime_ticks = int(tail[12])
+                total += (utime_ticks + stime_ticks) / _CLOCK_TICKS_PER_SEC
+        except (
+            psutil.NoSuchProcess if psutil is not None else ProcessLookupError,
+            psutil.AccessDenied if psutil is not None else PermissionError,
+            psutil.ZombieProcess if psutil is not None else ChildProcessError,
+            OSError,
+            ValueError,
+        ):
+            continue
+        live_pids.append(pid)
+    return total, live_pids
 
 
 def _initial_h2d_pipeline_slots(
     *,
-    debug_force_cpu_freshness_single_worker: bool,
     p2p_world_size: int,
 ) -> int:
-    override = _debug_initial_h2d_slots_override()
-    if override is not None:
-        return override
-
     # Single-worker memory runs have no cross-GPU overlap benefit, and
     # allowing two batches in flight has proven much more timing-sensitive
     # than the serialized one-batch path. Keep that configuration at one
@@ -99,174 +199,6 @@ def _initial_h2d_pipeline_slots(
     if p2p_world_size == 1:
         return 2
     return 4
-
-
-def _debug_disable_best_ckpt_save() -> bool:
-    flag = os.getenv("FROST_DEBUG_DISABLE_BEST_CKPT_SAVE")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
-
-
-def _debug_sync_train_step_boundaries() -> bool:
-    flag = os.getenv("FROST_DEBUG_SYNC_TRAIN_STEP_BOUNDARIES")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
-
-
-def _debug_sync_membox_after_train_step() -> bool:
-    flag = os.getenv("FROST_DEBUG_SYNC_MEMBOX_AFTER_TRAIN_STEP")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
-
-
-def _debug_param_checksums_path() -> Path | None:
-    raw = os.getenv("FROST_DEBUG_PARAM_CHECKSUMS_PATH")
-    if raw is None:
-        return None
-    value = raw.strip()
-    if value == "":
-        return None
-    return Path(value)
-
-
-def _debug_param_checksum_batches() -> set[int] | None:
-    raw = os.getenv("FROST_DEBUG_PARAM_CHECKSUM_BATCHES")
-    if raw is None or raw.strip() == "":
-        return None
-    return {int(token.strip()) for token in raw.split(",") if token.strip() != ""}
-
-
-def _debug_grad_checksums_path() -> Path | None:
-    raw = os.getenv("FROST_DEBUG_GRAD_CHECKSUMS_PATH")
-    if raw is None:
-        return None
-    value = raw.strip()
-    if value == "":
-        return None
-    return Path(value)
-
-
-def _debug_grad_checksum_batches() -> set[int] | None:
-    raw = os.getenv("FROST_DEBUG_GRAD_CHECKSUM_BATCHES")
-    if raw is None or raw.strip() == "":
-        return None
-    return {int(token.strip()) for token in raw.split(",") if token.strip() != ""}
-
-
-def _debug_step_tensor_dump_dir() -> Path | None:
-    raw = os.getenv("FROST_DEBUG_DUMP_STEP_TENSOR_DIR")
-    if raw is None:
-        return None
-    value = raw.strip()
-    if value == "":
-        return None
-    return Path(value)
-
-
-def _debug_step_tensor_dump_batches() -> set[int] | None:
-    raw = os.getenv("FROST_DEBUG_DUMP_STEP_TENSOR_BATCHES")
-    if raw is None or raw.strip() == "":
-        return None
-    return {int(token.strip()) for token in raw.split(",") if token.strip() != ""}
-
-
-def _debug_step_tensor_dump_names() -> set[str] | None:
-    raw = os.getenv("FROST_DEBUG_DUMP_STEP_TENSOR_NAMES")
-    if raw is None or raw.strip() == "":
-        return None
-    return {token.strip() for token in raw.split(",") if token.strip() != ""}
-
-
-def _appendix_train_e2e_enabled() -> bool:
-    flag = os.getenv("FROST_APPENDIX_TRAIN_E2E")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
-
-
-def _appendix_measure_start_epoch() -> int:
-    raw = os.getenv("FROST_APPENDIX_MEASURE_START_EPOCH")
-    if raw is None or raw.strip() == "":
-        return 1
-    value = int(raw)
-    if value < 0:
-        raise ValueError("FROST_APPENDIX_MEASURE_START_EPOCH must be >= 0")
-    return value
-
-
-def _appendix_warmup_batches() -> int:
-    raw = os.getenv("FROST_APPENDIX_WARMUP_BATCHES")
-    if raw is None or raw.strip() == "":
-        return 20
-    value = int(raw)
-    if value < 0:
-        raise ValueError("FROST_APPENDIX_WARMUP_BATCHES must be >= 0")
-    return value
-
-
-@dataclass(slots=True)
-class AppendixTrainE2EBenchmark:
-    enabled: bool
-    system: str
-    rank: int
-    compile_enabled: bool
-    measure_start_epoch: int
-    warmup_batches: int
-    intervals_ms: list[float] = field(default_factory=list)
-    train_batches_seen: int = 0
-    _last_start_t: float | None = None
-
-    def reset_chain(self) -> None:
-        self._last_start_t = None
-
-    def on_train_batch_start(self, *, epoch: int, now: float) -> None:
-        if not self.enabled:
-            return
-        if epoch < self.measure_start_epoch:
-            self._last_start_t = None
-            return
-        if self._last_start_t is not None:
-            self.intervals_ms.append((now - self._last_start_t) * 1000.0)
-        self._last_start_t = now
-        self.train_batches_seen += 1
-
-    def emit_summary(self) -> None:
-        if not self.enabled:
-            return
-
-        skipped_intervals = min(self.warmup_batches, len(self.intervals_ms))
-        measured = self.intervals_ms[skipped_intervals:]
-        payload: dict[str, int | float | bool | str] = {
-            "system": self.system,
-            "rank": self.rank,
-            "compile": self.compile_enabled,
-            "measure_start_epoch": self.measure_start_epoch,
-            "warmup_batches": self.warmup_batches,
-            "train_batches_seen": self.train_batches_seen,
-            "interval_count_raw": len(self.intervals_ms),
-            "interval_count": len(measured),
-            "skipped_intervals": skipped_intervals,
-        }
-        if measured:
-            ordered = sorted(measured)
-            n = len(ordered)
-            mean = sum(ordered) / n
-            variance = (
-                sum((value - mean) ** 2 for value in ordered) / n if n > 1 else 0.0
-            )
-            payload.update(
-                {
-                    "avg_wall_ms": mean,
-                    "std_wall_ms": variance**0.5,
-                    "p50_wall_ms": ordered[int(0.50 * (n - 1))],
-                    "p90_wall_ms": ordered[int(0.90 * (n - 1))],
-                    "p99_wall_ms": ordered[int(0.99 * (n - 1))],
-                }
-            )
-        print(f"APPENDIX_TRAIN_E2E_SUMMARY {json.dumps(payload, sort_keys=True)}")
 
 
 class P2PGuardCommHook:
@@ -336,6 +268,7 @@ class Worker:
     box_handler: MessageHandler | None = None
     box_wr: BoxMailWriter | None = None
     p2p_q_handler: P2PQHandler | None = None
+    direct_state_writer: DirectDynamicStateWriter | None = None
 
     model: AssembledModel | DDP
     result_q: Q[Result]
@@ -360,9 +293,11 @@ class Worker:
         lr: float,
         mail_combine: Literal["last", "mean"] | None,
         use_shm_instead: bool = False,
+        dynamic_state_ablation: DynamicStateAblation | None = None,
         compile_model: bool = True,
         amp: bool = False,
         no_memory_queue_size: int = 4,
+        cpu_benchmark_pid_list: list[int] | None = None,
     ) -> None:
         # --- Basic config ---
         self.ring_buf = ring_buf
@@ -377,6 +312,11 @@ class Worker:
         self.device = torch.device(f"cuda:{env.local_rank}")
         self.mail_combine = mail_combine
         self.use_shm_instead = use_shm_instead
+        self.dynamic_state_ablation = (
+            dynamic_state_ablation
+            if dynamic_state_ablation is not None
+            else DynamicStateAblation(name="baseline")
+        )
         self.compile_model = compile_model
         self.amp = amp
         self.lr = lr
@@ -385,26 +325,77 @@ class Worker:
         self.no_memory_queue_size = no_memory_queue_size
         self.curr_epoch = 0
         self.local_best_ap = 0.0
-        self._last_train_start_t: float | None = None
 
-        # Throughput tracking (skip first 4 batches as warm-up)
-        self._throughput_batch_count = 0
-        self._throughput_events = 0
-        self._throughput_start_time: float | None = None
-        self._shutdown_done = False
-        self._appendix_train_bench = AppendixTrainE2EBenchmark(
-            enabled=_appendix_train_e2e_enabled(),
-            system="frost",
-            rank=env.local_rank,
-            compile_enabled=compile_model,
-            measure_start_epoch=_appendix_measure_start_epoch(),
-            warmup_batches=_appendix_warmup_batches(),
+        # Throughput benchmark controls:
+        # - legacy mode: warmup is applied at the start of every epoch
+        # - optional global mode: warmup is applied once across the whole run
+        # - measurement stops after target batches when target > 0
+        self._throughput_warmup_batches_per_epoch = _get_non_negative_int_env(
+            "FROST_THROUGHPUT_WARMUP_BATCHES_PER_EPOCH",
+            _get_non_negative_int_env("FROST_THROUGHPUT_WARMUP_BATCHES", 4),
         )
+        self._throughput_warmup_batches_total = _get_optional_non_negative_int_env(
+            "FROST_THROUGHPUT_WARMUP_BATCHES_TOTAL"
+        )
+        self._throughput_measure_batches_target = _get_non_negative_int_env(
+            "FROST_THROUGHPUT_MEASURE_BATCHES",
+            0,
+        )
+        self._throughput_epoch_train_batch_count = 0
+        self._throughput_total_train_batch_count = 0
+        self._throughput_measured_batches = 0
+        self._throughput_events = 0
+        self._throughput_wall_intervals_s: list[float] = []
+        self._throughput_gpu_pairs: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
+        self._throughput_prev_start_event: torch.cuda.Event | None = None
+        self._throughput_prev_start_wall_s: float | None = None
+        self._throughput_prev_start_wall_unix_s: float | None = None
+        self._throughput_prev_batch_events: int | None = None
+        self._throughput_window_start_unix_s: float | None = None
+        self._throughput_window_end_unix_s: float | None = None
+        self._throughput_last_completed_window_start_unix_s: float | None = None
+        self._throughput_last_completed_window_end_unix_s: float | None = None
+        self._throughput_last_completed_measured_batches = 0
+        self._throughput_interval_start_unix_s: list[float] = []
+        self._throughput_interval_end_unix_s: list[float] = []
+        self._memory_reserved_mib: list[float] = []
+        self._memory_allocated_mib: list[float] = []
+        self._gpu_util_curve_enabled = _get_bool_env(
+            "FROST_GPU_UTIL_CURVE_BENCH", False
+        )
+        self._cpu_util_enabled = _get_bool_env("FROST_CPU_UTIL_BENCH", False)
+        self._cpu_pid_list: list[int] = []
+        self._cpu_logical_count = 0
+        self._cpu_prev_total_s: float | None = None
+        self._cpu_used_cores: list[float] = []
+        self._cpu_utilization_pct: list[float] = []
+        self._cpu_wall_interval_s: list[float] = []
+        if self._cpu_util_enabled:
+            if self.env.local_rank == 0:
+                self._cpu_pid_list = (
+                    [int(pid) for pid in cpu_benchmark_pid_list]
+                    if cpu_benchmark_pid_list
+                    else _discover_sibling_rank_pids()
+                )
+                if psutil is not None:
+                    logical_cpu_count = int(psutil.cpu_count(logical=True) or 1)
+                else:
+                    logical_cpu_count = int(os.cpu_count() or 1)
+                self._cpu_logical_count = max(logical_cpu_count, 1)
+        self._shutdown_done = False
 
         # --- Synchronization primitives ---
         self.stop_ev = threading.Event()
         self.h2d_sem = BatchAwareCreditManager()
         self.p2p_sem = threading.Semaphore(0)
+        if (
+            self.mem_box_store is not None
+            and self.dynamic_state_ablation.uses_direct_cpu_writeback
+        ):
+            self.direct_state_writer = DirectDynamicStateWriter(
+                mem_box_store=self.mem_box_store,
+                h2d_sem=self.h2d_sem,
+            )
 
         self._init_pipeline(ring_buf, nfeat, efeat)
         self._init_model(
@@ -427,7 +418,11 @@ class Worker:
     ) -> None:
         """Create all queues and background pipeline threads."""
         has_mem = self.mem_box_store is not None
-        stateless_q_size = self.no_memory_queue_size if not has_mem else 1
+        use_async_dynamic_state_pipeline = (
+            has_mem and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
+        )
+        memory_q_size = _get_memory_worker_queue_size_env(default=1)
+        stateless_q_size = self.no_memory_queue_size if not has_mem else memory_q_size
         self.result_q = Q(maxsize=1)
         self.received_q = Q(maxsize=stateless_q_size)
         self.full_q = Q(maxsize=stateless_q_size)
@@ -442,9 +437,11 @@ class Worker:
 
         if has_mem:
             assert self.mem_box_store is not None
-            self.delta_queue = Q(maxsize=1)
-            self.h2d_out_q = Q(maxsize=1)
-            self._init_mem_box_threads()
+            if use_async_dynamic_state_pipeline:
+                self.delta_queue = Q(maxsize=memory_q_size)
+            self.h2d_out_q = Q(maxsize=memory_q_size)
+            if use_async_dynamic_state_pipeline:
+                self._init_mem_box_threads()
             self.dy_asm = DynamicAssembler(
                 mem_box_store=self.mem_box_store,
                 h2d_out_q=self.h2d_out_q,
@@ -460,6 +457,7 @@ class Worker:
                 box_task_q=self.box_task_q,
                 mem_wr_q=self.mem_wr_q,
                 box_wr_q=self.box_wr_q,
+                dynamic_state_ablation=self.dynamic_state_ablation,
             )
             h2d_dest_q = self.h2d_out_q
         else:
@@ -482,13 +480,14 @@ class Worker:
         assert self.mem_box_store is not None
         assert self.delta_queue is not None
         assert self.mail_combine is not None
+        memory_q_size = _get_memory_worker_queue_size_env(default=1)
 
-        self.mem_task_q = Q(maxsize=1)
-        self.box_task_q = Q(maxsize=1)
-        self.mem_p2p_q = Q(maxsize=1)
-        self.box_p2p_q = Q(maxsize=1)
-        self.mem_wr_q = Q(maxsize=1)
-        self.box_wr_q = Q(maxsize=1)
+        self.mem_task_q = Q(maxsize=memory_q_size)
+        self.box_task_q = Q(maxsize=memory_q_size)
+        self.mem_p2p_q = Q(maxsize=memory_q_size)
+        self.box_p2p_q = Q(maxsize=memory_q_size)
+        self.mem_wr_q = Q(maxsize=memory_q_size)
+        self.box_wr_q = Q(maxsize=memory_q_size)
 
         self.mem_handler = MemTaskHandler(
             h2d_sem=self.h2d_sem,
@@ -560,6 +559,7 @@ class Worker:
             n_neg=self.n_neg,
             postman=postman,
             sample_4_neg=ring_buf.sample_4_neg,
+            dynamic_state_ablation=self.dynamic_state_ablation,
         )
 
         if optimizer == "adam":
@@ -594,7 +594,6 @@ class Worker:
 
     def _init_metrics(self) -> None:
         """Create torchmetrics trackers for training and evaluation."""
-        self.train_start2start_ms = MeanMetric(process_group=self.nccl).cuda()
         self.train_loss_tracker = MeanMetric(process_group=self.nccl).cuda()
         self.val_mrr_tracker = MeanMetric(process_group=self.nccl).cuda()
         self.test_mrr_tracker = MeanMetric(process_group=self.nccl).cuda()
@@ -643,8 +642,8 @@ class Worker:
             self.mem_wr_q,
             self.box_wr_q,
         ):
-            assert q is not None
-            q.join()
+            if q is not None:
+                q.join()
 
     def _drain_stale_p2p_guard_tokens(self) -> int:
         """Drop leftover epoch-end P2P guard tokens.
@@ -691,6 +690,29 @@ class Worker:
         self.mem_wr_q.join()
         self.box_wr_q.join()
 
+    def _write_direct_dynamic_state_request(self, request) -> None:
+        assert self.direct_state_writer is not None
+        self.direct_state_writer.write(
+            request,
+            release_h2d_credits=True,
+        )
+
+    def _flush_deferred_direct_dynamic_state(
+        self,
+        meta: Meta,
+        *,
+        release_h2d_credits: bool,
+    ) -> None:
+        request = meta.direct_writeback_request
+        if request is None:
+            return
+        assert self.direct_state_writer is not None
+        self.direct_state_writer.write(
+            request,
+            release_h2d_credits=release_h2d_credits,
+        )
+        meta.direct_writeback_request = None
+
     def on_train_epoch_end(self) -> Result:
         """Aggregate per-epoch metrics across all ranks and return a Result.
 
@@ -700,11 +722,6 @@ class Worker:
         Returns:
             Result dataclass containing the aggregated scalar metrics for this epoch.
         """
-        avg_s2s = self.train_start2start_ms.compute().item()
-        self.train_start2start_ms.reset()
-        logger.debug("Average train start->start (ms): %.2f", avg_s2s)
-        # Global sync happens only at epoch end for accurate average loss logging
-
         avg_loss = self.train_loss_tracker.compute()
         val_results = self.val_metrics.compute()
         test_results = self.test_metrics.compute()
@@ -739,8 +756,6 @@ class Worker:
             test_auc_batch_mean=test_auc_batch_mean,
             test_ap_batch_mean=test_ap_batch_mean,
         )
-        self._last_train_start_t = None
-        self._appendix_train_bench.reset_chain()
         return res
 
     def train(self, meta: Meta) -> None:
@@ -760,6 +775,7 @@ class Worker:
                 meta,
                 mem_task_q=self.mem_task_q,
                 box_task_q=self.box_task_q,
+                direct_writeback=self._write_direct_dynamic_state_request,
             )
 
             logits_flat = logits.squeeze(-1)
@@ -767,34 +783,18 @@ class Worker:
             loss = self.criterion(
                 logits_flat[:n_pos], meta.labels[:n_pos]
             ) + self.criterion(logits_flat[n_pos:], meta.labels[n_pos:])
-        if self.mem_box_store is not None and not _debug_sync_membox_after_train_step():
+        if (
+            self.mem_box_store is not None
+            and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
+        ):
             self.p2p_guard.arm()  # Arm guard: wait for P2P before the first AllReduce
-        if _debug_sync_train_step_boundaries():
-            torch.cuda.synchronize(self.device)
         self.grad_scaler.scale(loss).backward()
-        self._maybe_append_grad_checksums(
-            meta=meta,
-            loss=loss,
-            grad_scale=float(self.grad_scaler.get_scale()),
-        )
-        self._maybe_dump_step_tensors(meta=meta, phase="grad")
-
-        grad_scale_before = float(self.grad_scaler.get_scale())
         self.grad_scaler.step(self.optimizer)
         self.grad_scaler.update()
-        if _debug_sync_train_step_boundaries():
-            torch.cuda.synchronize(self.device)
-        if self.mem_box_store is not None and _debug_sync_membox_after_train_step():
-            self._flush_train_step_async_state()
-        grad_scale_after = float(self.grad_scaler.get_scale())
-        self._maybe_dump_step_tensors(meta=meta, phase="param")
-
-        self._maybe_append_param_checksums(
-            meta=meta,
-            loss=loss,
-            grad_scale_before=grad_scale_before,
-            grad_scale_after=grad_scale_after,
-        )
+        if self.dynamic_state_ablation.direct_cpu_writeback_after_optimizer_step:
+            self._flush_deferred_direct_dynamic_state(
+                meta, release_h2d_credits=True
+            )
 
         self.train_loss_tracker.update(loss.detach().float())
         self._release_meta_tensors(meta)
@@ -813,15 +813,22 @@ class Worker:
         """
         assert meta.labels is not None
         self.model.eval()
-        self._appendix_train_bench.reset_chain()
 
         with torch.amp.autocast("cuda", enabled=self.amp):
             logits = self.model(
                 meta,
                 mem_task_q=self.mem_task_q,
                 box_task_q=self.box_task_q,
+                direct_writeback=self._write_direct_dynamic_state_request,
             )
-        if self.mem_box_store is not None:
+        if self.dynamic_state_ablation.direct_cpu_writeback_after_optimizer_step:
+            self._flush_deferred_direct_dynamic_state(
+                meta, release_h2d_credits=True
+            )
+        if (
+            self.mem_box_store is not None
+            and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
+        ):
             self.p2p_sem.acquire()  # Ensure no other P2P task is in flight during eval
 
         y_pred = logits.float().sigmoid().squeeze(-1)
@@ -881,6 +888,7 @@ class Worker:
         meta.plan_set = None
         meta.labels = None
         meta.graph = None
+        meta.direct_writeback_request = None
 
     def start_all_threads(self) -> None:
         """Start all background pipeline threads.
@@ -893,17 +901,18 @@ class Worker:
         self.h2d.start()
         self.receiver.start()
         if self.mem_box_store is not None:
-            assert self.p2p_q_handler is not None
-            assert self.mem_handler is not None
-            assert self.box_handler is not None
-            assert self.box_wr is not None
-            assert self.mem_wr is not None
             assert self.dy_asm is not None
-            self.p2p_q_handler.start()
-            self.mem_handler.start()
-            self.box_handler.start()
-            self.box_wr.start()
-            self.mem_wr.start()
+            if self.dynamic_state_ablation.uses_async_dynamic_state_pipeline:
+                assert self.p2p_q_handler is not None
+                assert self.mem_handler is not None
+                assert self.box_handler is not None
+                assert self.box_wr is not None
+                assert self.mem_wr is not None
+                self.p2p_q_handler.start()
+                self.mem_handler.start()
+                self.box_handler.start()
+                self.box_wr.start()
+                self.mem_wr.start()
             self.dy_asm.start()
 
     def run(self) -> None:
@@ -918,17 +927,22 @@ class Worker:
         """
         self.start_all_threads()
         if self.mem_box_store is not None:
-            p2p_world_size = dist.get_world_size(self.nccl_p2p)
-            initial_slots = _initial_h2d_pipeline_slots(
-                debug_force_cpu_freshness_single_worker=_debug_force_cpu_freshness_single_worker(),
-                p2p_world_size=p2p_world_size,
-            )
+            if self.dynamic_state_ablation.max_in_flight_batches is not None:
+                max_in_flight_batches = (
+                    self.dynamic_state_ablation.max_in_flight_batches
+                )
+                initial_slots = max_in_flight_batches * 2
+            else:
+                p2p_world_size = dist.get_world_size(self.nccl_p2p)
+                initial_slots = _initial_h2d_pipeline_slots(
+                    p2p_world_size=p2p_world_size,
+                )
+                max_in_flight_batches = max(1, initial_slots // 2)
             if initial_slots % 2 != 0:
                 raise ValueError(
                     "initial h2d slots must be even because each batch consumes "
                     f"two writeback credits, got {initial_slots}"
                 )
-            max_in_flight_batches = max(1, initial_slots // 2)
             set_max_in_flight_batches = getattr(
                 self.h2d_sem, "set_max_in_flight_batches", None
             )
@@ -937,117 +951,159 @@ class Worker:
             else:
                 for _ in range(initial_slots):
                     self.h2d_sem.release()
-            assert self.delta_queue is not None
-            self.delta_queue.put("nothing")
-
-        def trace_handler(p):
-            rank = dist.get_rank() if dist.is_initialized() else 0
-            output_filename = f"trace_epoch2_rank_{rank}.json"
-            p.export_chrome_trace(output_filename)
-            logger.debug("Rank %s: Trace saved to %s", rank, output_filename)
-
-        prof = profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            schedule=None,  # None = manual step control
-            on_trace_ready=trace_handler,
-            record_shapes=True,
-            with_stack=True,
-            with_flops=False,
-        )
-
-        # Number of steps captured in the target epoch
-        epoch2_steps_recorded = 0
-        total_wait_ms = 0.0
-        wait_steps = 0
+            if self.delta_queue is not None:
+                self.delta_queue.put("nothing")
         while self.stop_ev.is_set() is False:
-            # torch.cuda.synchronize()  # Ensure prior CUDA ops are done for accurate timing
-            t_wait_start = time.perf_counter()
             full = self.full_q.get()
-
-            t_wait_end = time.perf_counter()
-            wait_ms = (t_wait_end - t_wait_start) * 1000.0
-
-            total_wait_ms += wait_ms
-            wait_steps += 1
-
-            # if wait_ms > 5.0:  # Skip epoch 0 warmup
-            #     logger.debug(
-            #         f"[Rank {self.env.local_rank}] Data Starvation! Main loop waited {wait_ms:.2f}ms for full_q"
-            #     )
 
             if isinstance(full, tuple):
                 meta, ready_event = full
                 torch.cuda.current_stream().wait_event(ready_event)
                 if meta.split == "train":  # if training
-                    # Throughput tracking: count events before train() releases labels
+                    # Throughput tracking on train start->start intervals.
                     assert meta.labels is not None
-                    self._throughput_batch_count += 1
-                    if self._throughput_batch_count == 5:
-                        self._throughput_start_time = time.perf_counter()
-                    if self._throughput_batch_count >= 5:
-                        self._throughput_events += meta.labels.numel() // (
-                            1 + self.n_neg
+                    self._throughput_epoch_train_batch_count += 1
+                    self._throughput_total_train_batch_count += 1
+                    batch_events = meta.labels.numel() // (1 + self.n_neg)
+                    curr_start_event = torch.cuda.Event(enable_timing=True)
+                    curr_start_event.record(torch.cuda.current_stream())
+                    curr_start_wall_s = time.perf_counter()
+                    curr_start_wall_unix_s = time.time()
+                    curr_cpu_total_s: float | None = None
+                    if self._cpu_util_enabled and self.env.local_rank == 0:
+                        curr_cpu_total_s, self._cpu_pid_list = _sample_total_cpu_time_s(
+                            self._cpu_pid_list
                         )
 
-                    # Profiling remains disabled by default.
-                    should_profile = False
-                    if should_profile:
-                        # Start profiler on the first captured step of the target epoch
-                        if epoch2_steps_recorded == 0:
-                            prof.start()
-
-                    with record_function("Model_Train_Step"):
-                        now = time.perf_counter()
-                        if self._last_train_start_t is not None:
-                            interval_ms = (now - self._last_train_start_t) * 1000.0
-                            self.train_start2start_ms.update(
-                                torch.tensor(interval_ms, device=self.device)
+                    target = self._throughput_measure_batches_target
+                    can_measure_more = (
+                        target == 0 or self._throughput_measured_batches < target
+                    )
+                    interval_count_so_far = self._throughput_total_train_batch_count - 1
+                    if self._throughput_warmup_batches_total is not None:
+                        past_warmup = (
+                            interval_count_so_far
+                            > self._throughput_warmup_batches_total
+                        )
+                    else:
+                        past_warmup = (
+                            self._throughput_epoch_train_batch_count
+                            - 1
+                            > self._throughput_warmup_batches_per_epoch
+                        )
+                    # Interval k spans [start_{k-1}, start_k), i.e. it corresponds to
+                    # the previous batch. Skip either the per-epoch warmup
+                    # (legacy behavior) or the one-time global warmup.
+                    should_measure_interval = (
+                        can_measure_more
+                        and self._throughput_prev_start_event is not None
+                        and self._throughput_prev_start_wall_s is not None
+                        and self._throughput_prev_batch_events is not None
+                        and past_warmup
+                    )
+                    if should_measure_interval:
+                        self._throughput_gpu_pairs.append(
+                            (self._throughput_prev_start_event, curr_start_event)
+                        )
+                        self._throughput_wall_intervals_s.append(
+                            curr_start_wall_s - self._throughput_prev_start_wall_s
+                        )
+                        if self._throughput_prev_start_wall_unix_s is not None:
+                            self._throughput_interval_start_unix_s.append(
+                                self._throughput_prev_start_wall_unix_s
                             )
-                        self._last_train_start_t = now
-                        self._appendix_train_bench.on_train_batch_start(
-                            epoch=self.curr_epoch,
-                            now=now,
+                            self._throughput_interval_end_unix_s.append(
+                                curr_start_wall_unix_s
+                            )
+                        self._throughput_events += self._throughput_prev_batch_events
+                        self._throughput_measured_batches += 1
+                        if self._throughput_window_start_unix_s is None:
+                            self._throughput_window_start_unix_s = (
+                                self._throughput_prev_start_wall_unix_s
+                            )
+                        self._throughput_window_end_unix_s = curr_start_wall_unix_s
+                        if (
+                            self._cpu_util_enabled
+                            and self.env.local_rank == 0
+                            and curr_cpu_total_s is not None
+                            and self._cpu_prev_total_s is not None
+                        ):
+                            wall_interval_s = (
+                                curr_start_wall_s - self._throughput_prev_start_wall_s
+                            )
+                            if wall_interval_s > 0:
+                                cpu_delta_s = max(
+                                    0.0,
+                                    curr_cpu_total_s - self._cpu_prev_total_s,
+                                )
+                                used_cores = cpu_delta_s / wall_interval_s
+                                util_pct = (
+                                    used_cores / self._cpu_logical_count * 100.0
+                                )
+                                self._cpu_used_cores.append(used_cores)
+                                self._cpu_utilization_pct.append(util_pct)
+                                self._cpu_wall_interval_s.append(wall_interval_s)
+                    self._throughput_prev_start_event = curr_start_event
+                    self._throughput_prev_start_wall_s = curr_start_wall_s
+                    self._throughput_prev_start_wall_unix_s = curr_start_wall_unix_s
+                    self._throughput_prev_batch_events = batch_events
+                    if self._cpu_util_enabled and self.env.local_rank == 0:
+                        self._cpu_prev_total_s = curr_cpu_total_s
+                    self.train(meta)
+                    can_measure_memory = (
+                        self._throughput_measure_batches_target == 0
+                        or len(self._memory_reserved_mib)
+                        < self._throughput_measure_batches_target
+                    )
+                    if self._throughput_warmup_batches_total is not None:
+                        memory_past_warmup = (
+                            self._throughput_total_train_batch_count
+                            > self._throughput_warmup_batches_total
                         )
-                        self.train(meta)
-                    if should_profile:
-                        prof.step()  # Mark end of one profiling step
-                        epoch2_steps_recorded += 1
-
-                        # Stop and save after capturing 100 batches
-                        if epoch2_steps_recorded >= 100:
-                            prof.stop()
+                    else:
+                        memory_past_warmup = (
+                            self._throughput_epoch_train_batch_count
+                            > self._throughput_warmup_batches_per_epoch
+                        )
+                    if (
+                        can_measure_memory
+                        and memory_past_warmup
+                    ):
+                        self._memory_reserved_mib.append(
+                            torch.cuda.memory_reserved(self.device) / (1024**2)
+                        )
+                        self._memory_allocated_mib.append(
+                            torch.cuda.memory_allocated(self.device) / (1024**2)
+                        )
 
                 elif meta.split in ["val", "test"]:  # if evaluating
-                    self._last_train_start_t = None
                     self.eval(meta)
             if full == "end_of_epoch":
-                avg_wait = total_wait_ms / max(1, wait_steps)
-                logger.debug(
-                    "[Rank %s] Epoch %s Avg Data Wait: %.2fms",
-                    self.env.local_rank,
-                    self.curr_epoch,
-                    avg_wait,
+                self._throughput_epoch_train_batch_count = 0
+                self._throughput_last_completed_window_start_unix_s = (
+                    self._throughput_window_start_unix_s
                 )
-                # print total_wait_ms
-                logger.debug(
-                    "[Rank %s] Epoch %s Total Data Wait: %.2fms over %s waits",
-                    self.env.local_rank,
-                    self.curr_epoch,
-                    total_wait_ms,
-                    wait_steps,
+                self._throughput_last_completed_window_end_unix_s = (
+                    self._throughput_window_end_unix_s
                 )
-
-                total_wait_ms = 0.0
-                wait_steps = 0
-
+                self._throughput_last_completed_measured_batches = (
+                    self._throughput_measured_batches
+                )
+                self._throughput_prev_start_event = None
+                self._throughput_prev_start_wall_s = None
+                self._throughput_prev_start_wall_unix_s = None
+                self._throughput_prev_batch_events = None
+                self._throughput_window_start_unix_s = None
+                self._throughput_window_end_unix_s = None
+                if self._cpu_util_enabled and self.env.local_rank == 0:
+                    self._cpu_prev_total_s = None
                 result = self.on_train_epoch_end()
 
                 self.result_q.put(result)
                 val_ap = result.val_ap if result is not None else 0.0
                 if val_ap > self.local_best_ap:
                     self.local_best_ap = val_ap
-                    if not _debug_disable_best_ckpt_save():
-                        self.save_model(os.path.join(self.save_to, "best.ckpt"))
+                    self.save_model(os.path.join(self.save_to, "best.ckpt"))
                 # dist.barrier() is redundant: on_train_epoch_end() compute() calls
                 # already performed 7 NCCL all-reduces that synchronize all ranks.
                 self.curr_epoch += 1
@@ -1062,20 +1118,249 @@ class Worker:
                         )
                     self.mem_box_store.reset()
             if full is None:
-                if (
-                    self._throughput_start_time is not None
-                    and self._throughput_events > 0
-                ):
-                    elapsed = time.perf_counter() - self._throughput_start_time
-                    throughput = self._throughput_events / elapsed
+                wall_elapsed_s = sum(self._throughput_wall_intervals_s)
+                gpu_elapsed_s = 0.0
+                if self._throughput_gpu_pairs:
+                    torch.cuda.synchronize()
+                    gpu_elapsed_s = sum(
+                        ev_prev.elapsed_time(ev_curr)
+                        for ev_prev, ev_curr in self._throughput_gpu_pairs
+                    ) / 1000.0
+                wall_throughput = (
+                    self._throughput_events / wall_elapsed_s
+                    if self._throughput_events > 0 and wall_elapsed_s > 0
+                    else 0.0
+                )
+                gpu_throughput = (
+                    self._throughput_events / gpu_elapsed_s
+                    if self._throughput_events > 0 and gpu_elapsed_s > 0
+                    else 0.0
+                )
+                if wall_throughput > 0:
                     print(
-                        f"[GPU {self.env.local_rank}] Training throughput: "
-                        f"{throughput:.1f} events/sec "
-                        f"({self._throughput_events} events in {elapsed:.1f}s, "
-                        f"excluding first 4 warm-up batches)"
+                        f"TRAIN_THROUGHPUT_PER_GPU rank={self.env.local_rank} "
+                        f"events_per_sec_per_gpu={wall_throughput:.1f} "
+                        f"events_per_sec_per_gpu_gpu_clock={gpu_throughput:.1f} "
+                        f"events={self._throughput_events} "
+                        f"elapsed_s={wall_elapsed_s:.3f} "
+                        f"gpu_elapsed_s={gpu_elapsed_s:.3f} "
+                        "warmup_batches_per_epoch="
+                        f"{self._throughput_warmup_batches_per_epoch} "
+                        f"warmup_batches_total={self._throughput_warmup_batches_total} "
+                        f"measured_batches={self._throughput_measured_batches} "
+                        f"measure_target={self._throughput_measure_batches_target}"
                     )
-                self._appendix_train_bench.emit_summary()
-                if self.mem_box_store is not None:
+                window_start_unix_s = (
+                    self._throughput_window_start_unix_s
+                    if self._throughput_window_start_unix_s is not None
+                    else self._throughput_last_completed_window_start_unix_s
+                )
+                window_end_unix_s = (
+                    self._throughput_window_end_unix_s
+                    if self._throughput_window_end_unix_s is not None
+                    else self._throughput_last_completed_window_end_unix_s
+                )
+                window_measured_batches = (
+                    self._throughput_measured_batches
+                    if self._throughput_measured_batches > 0
+                    else self._throughput_last_completed_measured_batches
+                )
+                if (
+                    window_start_unix_s is not None
+                    and window_end_unix_s is not None
+                ):
+                    window_payload = {
+                        "system": "frost",
+                        "rank": self.env.local_rank,
+                        "window_start_unix_s": window_start_unix_s,
+                        "window_end_unix_s": window_end_unix_s,
+                        "measured_batches": window_measured_batches,
+                    }
+                    print(
+                        "APPENDIX_TRAIN_WINDOW "
+                        f"{json.dumps(window_payload, sort_keys=True)}"
+                    )
+                if (
+                    self._throughput_interval_start_unix_s
+                    and self._throughput_interval_end_unix_s
+                ):
+                    interval_payload = {
+                        "system": "frost",
+                        "rank": self.env.local_rank,
+                        "measured_batches": len(
+                            self._throughput_interval_start_unix_s
+                        ),
+                        "interval_start_unix_s": self._throughput_interval_start_unix_s,
+                        "interval_end_unix_s": self._throughput_interval_end_unix_s,
+                    }
+                    print(
+                        "APPENDIX_TRAIN_INTERVALS "
+                        f"{json.dumps(interval_payload, sort_keys=True)}"
+                    )
+                if self._gpu_util_curve_enabled and self._throughput_wall_intervals_s:
+                    gpu_ms_curve = [
+                        ev_prev.elapsed_time(ev_curr)
+                        for ev_prev, ev_curr in self._throughput_gpu_pairs
+                    ]
+                    wall_ms_curve = [
+                        interval_s * 1000.0
+                        for interval_s in self._throughput_wall_intervals_s
+                    ]
+                    gpu_busy_pct_curve = [
+                        (gpu_ms / wall_ms * 100.0) if wall_ms > 0 else 0.0
+                        for gpu_ms, wall_ms in zip(gpu_ms_curve, wall_ms_curve)
+                    ]
+                    gpu_payload: dict[str, int | float | str | list[float]] = {
+                        "system": "frost",
+                        "rank": self.env.local_rank,
+                        "measured_batches": len(gpu_busy_pct_curve),
+                        "gpu_ms_curve": [round(v, 4) for v in gpu_ms_curve],
+                        "wall_ms_curve": [round(v, 4) for v in wall_ms_curve],
+                        "gpu_busy_pct_curve": [
+                            round(v, 4) for v in gpu_busy_pct_curve
+                        ],
+                    }
+                    if gpu_busy_pct_curve:
+                        ordered_gpu_busy = sorted(gpu_busy_pct_curve)
+                        n_gpu_busy = len(ordered_gpu_busy)
+                        gpu_payload.update(
+                            {
+                                "gpu_busy_pct_mean": sum(ordered_gpu_busy)
+                                / n_gpu_busy,
+                                "gpu_busy_pct_p50": ordered_gpu_busy[
+                                    int(0.50 * (n_gpu_busy - 1))
+                                ],
+                                "gpu_busy_pct_p90": ordered_gpu_busy[
+                                    int(0.90 * (n_gpu_busy - 1))
+                                ],
+                                "gpu_busy_pct_max": ordered_gpu_busy[-1],
+                            }
+                        )
+                    print(
+                        "APPENDIX_TRAIN_GPU_UTIL_CURVE "
+                        f"{json.dumps(gpu_payload, sort_keys=True)}"
+                    )
+                memory_payload: dict[str, int | float | str] = {
+                    "system": "frost",
+                    "rank": self.env.local_rank,
+                    "warmup_batches_per_epoch": self._throughput_warmup_batches_per_epoch,
+                    "warmup_batches_total": self._throughput_warmup_batches_total,
+                    "measure_batches_target": self._throughput_measure_batches_target,
+                    "memory_measured_batches": len(self._memory_reserved_mib),
+                }
+                if self._memory_reserved_mib:
+                    ordered_reserved = sorted(self._memory_reserved_mib)
+                    n_reserved = len(ordered_reserved)
+                    memory_payload.update(
+                        {
+                            "reserved_mib_mean": sum(ordered_reserved) / n_reserved,
+                            "reserved_mib_p50": ordered_reserved[
+                                int(0.50 * (n_reserved - 1))
+                            ],
+                            "reserved_mib_p90": ordered_reserved[
+                                int(0.90 * (n_reserved - 1))
+                            ],
+                            "reserved_mib_max": ordered_reserved[-1],
+                        }
+                    )
+                if self._memory_allocated_mib:
+                    ordered_allocated = sorted(self._memory_allocated_mib)
+                    n_allocated = len(ordered_allocated)
+                    memory_payload.update(
+                        {
+                            "allocated_mib_mean": sum(ordered_allocated) / n_allocated,
+                            "allocated_mib_p50": ordered_allocated[
+                                int(0.50 * (n_allocated - 1))
+                            ],
+                            "allocated_mib_p90": ordered_allocated[
+                                int(0.90 * (n_allocated - 1))
+                            ],
+                            "allocated_mib_max": ordered_allocated[-1],
+                        }
+                    )
+                print(
+                    f"APPENDIX_TRAIN_MEMORY_SUMMARY {json.dumps(memory_payload, sort_keys=True)}"
+                )
+                if self._memory_reserved_mib or self._memory_allocated_mib:
+                    memory_curve_payload: dict[
+                        str, int | float | str | list[float] | None
+                    ] = {
+                        "system": "frost",
+                        "rank": self.env.local_rank,
+                        "warmup_batches_per_epoch": self._throughput_warmup_batches_per_epoch,
+                        "warmup_batches_total": self._throughput_warmup_batches_total,
+                        "measure_batches_target": self._throughput_measure_batches_target,
+                        "measured_batches": len(self._memory_reserved_mib),
+                        "reserved_mib_curve": [
+                            round(v, 4) for v in self._memory_reserved_mib
+                        ],
+                        "allocated_mib_curve": [
+                            round(v, 4) for v in self._memory_allocated_mib
+                        ],
+                    }
+                    print(
+                        "APPENDIX_TRAIN_MEMORY_CURVE "
+                        f"{json.dumps(memory_curve_payload, sort_keys=True)}"
+                    )
+                if self._cpu_util_enabled and self.env.local_rank == 0:
+                    cpu_payload: dict[str, int | float | str | list[int] | list[float]] = {
+                        "system": "frost",
+                        "rank": self.env.local_rank,
+                        "warmup_batches_per_epoch": self._throughput_warmup_batches_per_epoch,
+                        "warmup_batches_total": self._throughput_warmup_batches_total,
+                        "measure_batches_target": self._throughput_measure_batches_target,
+                        "logical_cpu_count": self._cpu_logical_count,
+                        "tracked_pid_count": len(self._cpu_pid_list),
+                        "tracked_pids": self._cpu_pid_list,
+                        "measured_batches": len(self._cpu_used_cores),
+                        "used_cores_curve": [
+                            round(v, 4) for v in self._cpu_used_cores
+                        ],
+                        "utilization_pct_curve": [
+                            round(v, 4) for v in self._cpu_utilization_pct
+                        ],
+                        "wall_interval_s_curve": [
+                            round(v, 6) for v in self._cpu_wall_interval_s
+                        ],
+                    }
+                    if self._cpu_used_cores:
+                        ordered_used = sorted(self._cpu_used_cores)
+                        n_used = len(ordered_used)
+                        cpu_payload.update(
+                            {
+                                "used_cores_mean": sum(ordered_used) / n_used,
+                                "used_cores_p50": ordered_used[
+                                    int(0.50 * (n_used - 1))
+                                ],
+                                "used_cores_p90": ordered_used[
+                                    int(0.90 * (n_used - 1))
+                                ],
+                                "used_cores_max": ordered_used[-1],
+                            }
+                        )
+                    if self._cpu_utilization_pct:
+                        ordered_util = sorted(self._cpu_utilization_pct)
+                        n_util = len(ordered_util)
+                        cpu_payload.update(
+                            {
+                                "utilization_pct_mean": sum(ordered_util) / n_util,
+                                "utilization_pct_p50": ordered_util[
+                                    int(0.50 * (n_util - 1))
+                                ],
+                                "utilization_pct_p90": ordered_util[
+                                    int(0.90 * (n_util - 1))
+                                ],
+                                "utilization_pct_max": ordered_util[-1],
+                            }
+                        )
+                    print(
+                        "APPENDIX_TRAIN_CPU_UTIL_CURVE "
+                        f"{json.dumps(cpu_payload, sort_keys=True)}"
+                    )
+                if (
+                    self.mem_box_store is not None
+                    and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
+                ):
                     assert self.box_task_q is not None
                     assert self.mem_task_q is not None
                     assert self.mem_p2p_q is not None
@@ -1194,172 +1479,6 @@ class Worker:
         if isinstance(model, DDP):
             model = model.module
         return cast(AssembledModel, model)
-
-    def _maybe_append_param_checksums(
-        self,
-        *,
-        meta: Meta,
-        loss: torch.Tensor,
-        grad_scale_before: float,
-        grad_scale_after: float,
-    ) -> None:
-        path = _debug_param_checksums_path()
-        if path is None:
-            return
-
-        batches = _debug_param_checksum_batches()
-        if batches is not None and meta.mini_batch_idx not in batches:
-            return
-
-        total_sum = 0.0
-        total_abs_sum = 0.0
-        total_sq_sum = 0.0
-        total_numel = 0
-        param_records: list[dict[str, float | int | str]] = []
-
-        with torch.no_grad():
-            for name, value in self._unwrap_model().named_parameters():
-                tensor = value.detach().float()
-                sum_value = float(tensor.sum().item())
-                abs_sum_value = float(tensor.abs().sum().item())
-                sq_sum_value = float(tensor.square().sum().item())
-                numel_value = int(tensor.numel())
-                total_sum += sum_value
-                total_abs_sum += abs_sum_value
-                total_sq_sum += sq_sum_value
-                total_numel += numel_value
-                param_records.append(
-                    {
-                        "name": name,
-                        "numel": numel_value,
-                        "sum": sum_value,
-                        "abs_sum": abs_sum_value,
-                        "sq_sum": sq_sum_value,
-                    }
-                )
-
-        record = {
-            "mini_batch_idx": int(meta.mini_batch_idx),
-            "cur_epoch": int(meta.cur_epoch),
-            "split": meta.split,
-            "cur_macro_of_split": int(meta.cur_macro_of_split),
-            "cur_macro_of_epoch": int(meta.cur_macro_of_epoch),
-            "loss": float(loss.detach().float().item()),
-            "grad_scale_before": grad_scale_before,
-            "grad_scale_after": grad_scale_after,
-            "lr": float(self.optimizer.param_groups[0]["lr"]),
-            "num_params": total_numel,
-            "param_sum": total_sum,
-            "param_abs_sum": total_abs_sum,
-            "param_sq_sum": total_sq_sum,
-            "params": param_records,
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, sort_keys=True) + "\n")
-
-    def _maybe_append_grad_checksums(
-        self,
-        *,
-        meta: Meta,
-        loss: torch.Tensor,
-        grad_scale: float,
-    ) -> None:
-        path = _debug_grad_checksums_path()
-        if path is None:
-            return
-
-        batches = _debug_grad_checksum_batches()
-        if batches is not None and meta.mini_batch_idx not in batches:
-            return
-
-        total_sum = 0.0
-        total_abs_sum = 0.0
-        total_sq_sum = 0.0
-        total_numel = 0
-        grad_records: list[dict[str, float | int | str]] = []
-
-        with torch.no_grad():
-            for name, value in self._unwrap_model().named_parameters():
-                if value.grad is None:
-                    continue
-                tensor = value.grad.detach().float()
-                sum_value = float(tensor.sum().item())
-                abs_sum_value = float(tensor.abs().sum().item())
-                sq_sum_value = float(tensor.square().sum().item())
-                numel_value = int(tensor.numel())
-                total_sum += sum_value
-                total_abs_sum += abs_sum_value
-                total_sq_sum += sq_sum_value
-                total_numel += numel_value
-                grad_records.append(
-                    {
-                        "name": name,
-                        "numel": numel_value,
-                        "sum": sum_value,
-                        "abs_sum": abs_sum_value,
-                        "sq_sum": sq_sum_value,
-                    }
-                )
-
-        record = {
-            "mini_batch_idx": int(meta.mini_batch_idx),
-            "cur_epoch": int(meta.cur_epoch),
-            "split": meta.split,
-            "cur_macro_of_split": int(meta.cur_macro_of_split),
-            "cur_macro_of_epoch": int(meta.cur_macro_of_epoch),
-            "loss": float(loss.detach().float().item()),
-            "grad_scale": grad_scale,
-            "num_grad_params": total_numel,
-            "grad_sum": total_sum,
-            "grad_abs_sum": total_abs_sum,
-            "grad_sq_sum": total_sq_sum,
-            "grads": grad_records,
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, sort_keys=True) + "\n")
-
-    def _maybe_dump_step_tensors(
-        self,
-        *,
-        meta: Meta,
-        phase: Literal["grad", "param"],
-    ) -> None:
-        dump_dir = _debug_step_tensor_dump_dir()
-        if dump_dir is None:
-            return
-
-        batches = _debug_step_tensor_dump_batches()
-        if batches is not None and meta.mini_batch_idx not in batches:
-            return
-
-        names = _debug_step_tensor_dump_names()
-        if names is None or len(names) == 0:
-            return
-
-        dump_dir.mkdir(parents=True, exist_ok=True)
-        for name, value in self._unwrap_model().named_parameters():
-            if name not in names:
-                continue
-            if phase == "grad":
-                if value.grad is None:
-                    continue
-                tensor = value.grad.detach()
-            else:
-                tensor = value.detach()
-            safe_name = name.replace(".", "__")
-            torch.save(
-                {
-                    "mini_batch_idx": int(meta.mini_batch_idx),
-                    "cur_epoch": int(meta.cur_epoch),
-                    "split": meta.split,
-                    "phase": phase,
-                    "name": name,
-                    "tensor": tensor.cpu(),
-                },
-                dump_dir / f"batch_{meta.mini_batch_idx}_{phase}_{safe_name}.pt",
-            )
 
     # Public model save/load interface
     def save_model(self, path: str) -> None:

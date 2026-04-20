@@ -29,8 +29,8 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | `optimizer` | `adam` | Worker optimizer. Supported values: `adam` and `sgd`. |
 | `lr` | `0.0001` | Learning rate. |
 | `n_neg` | `1` | Number of negative samples per positive edge. Propagates into the negative sampler and related components. |
-| `ring_buf_size` | `32` | Number of shared-memory ring-buffer slots per worker GPU. |
-| `handle_stale` | `false` | Allows planner fallback to stale leftovers when next-batch needs cannot be fully satisfied. |
+| `ring_buf_size` | `64` | Number of shared-memory ring-buffer slots per worker GPU. |
+| `if_carry_over_route` | `false` | Allows planner fallback to stale leftovers when next-batch needs cannot be fully satisfied. |
 | `compile` | `false` | Enables `torch.compile` for the assembled worker model. |
 | `tf32` | `false` | Enables TF32 matmul and cuDNN behavior globally. |
 

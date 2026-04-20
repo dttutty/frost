@@ -9,6 +9,7 @@ from typing import Literal
 import torch
 
 from frost.datatypes.graph import FlatGraph, HierGraph
+from frost.datatypes.tasks import DirectWritebackRequest
 
 from .plan import PlanSet
 
@@ -57,6 +58,7 @@ class Meta:
     labels: torch.Tensor | None = None
     fanout: list[int] | None = None
     flat_nid_cpu: torch.Tensor | None = None  # CPU nids for APAN writeback
+    direct_writeback_request: DirectWritebackRequest | None = None
 
     @cached_property
     def macro_position_of_split(self) -> str | None:

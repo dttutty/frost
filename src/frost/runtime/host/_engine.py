@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
+from frost.ablation import DynamicStateAblation
 from frost.aliases.host import (
     DynamicPlanOutQ,
     LayoutBundle,
@@ -33,25 +34,25 @@ from frost.neg_sampler import PrecomputedNegSampler
 
 logger = logging.getLogger(__name__)
 
-
-def _debug_tgl_parity_metrics() -> bool:
-    flag = os.getenv("FROST_DEBUG_TGL_PARITY_METRICS")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
-
-
-def _debug_reset_train_sampler_each_epoch() -> bool:
-    flag = os.getenv("FROST_DEBUG_RESET_TRAIN_SAMPLER_EACH_EPOCH")
-    if flag is None:
-        return False
-    return flag.lower() in {"1", "true", "yes", "on"}
+MEMORY_SCATTER_QUEUE_SIZE = 64
+MEMORY_MEM_PLAN_OUT_QUEUE_SIZE = 32
+MEMORY_MAIL_PLAN_OUT_QUEUE_SIZE = 32
+MEMORY_NFEAT_PLAN_OUT_QUEUE_SIZE = 32
 
 
 def _disable_tqdm_monitor_thread() -> None:
     """Disable tqdm's monitor thread to avoid debugger/threading instability."""
     if getattr(tqdm, "monitor_interval", 0) != 0:
         tqdm.monitor_interval = 0
+
+
+def _timing_enabled() -> bool:
+    return os.environ.get("FROST_HOST_TIMING_BENCH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _prepare_sampler_inputs(
@@ -124,7 +125,7 @@ class Host:
         time_dtype: torch.dtype,
         n_epoch: int,
         patience: int,
-        handle_stale: bool = False,
+        if_carry_over_route: bool = False,
         show_tqdm: bool = False,
         no_memory_queue_size: int = 4,
         output_dir: str | None = None,
@@ -132,6 +133,7 @@ class Host:
         share_neg_sampler_across_splits: bool = False,
         normalize_event_time: bool = False,
         persist_all_updates_to_cpu: bool = False,
+        dynamic_state_ablation: DynamicStateAblation | None = None,
     ) -> None:
         self.neg_sampler_train = neg_sampler_train
         self.neg_sampler_eval = neg_sampler_eval
@@ -149,6 +151,11 @@ class Host:
         self.reset_eval_neg_sampler_each_epoch = reset_eval_neg_sampler_each_epoch
         self.share_neg_sampler_across_splits = share_neg_sampler_across_splits
         self.normalize_event_time = normalize_event_time
+        self.dynamic_state_ablation = (
+            dynamic_state_ablation
+            if dynamic_state_ablation is not None
+            else DynamicStateAblation(name="baseline")
+        )
         if no_memory_queue_size < 1:
             raise ValueError("no_memory_queue_size must be >= 1.")
         self.no_memory_queue_size = no_memory_queue_size
@@ -171,11 +178,14 @@ class Host:
         self.patience_counter = 0
         self.last_epoch_result: Result | None = None
         self._shutdown_done = False
+        self._timing_enabled = _timing_enabled()
+        self._dispatch_s_curve: list[float] = []
+        self._scatter_q_put_s_curve: list[float] = []
 
         self._init_pipeline(
             env,
             gpu_topo,
-            handle_stale,
+            if_carry_over_route,
             output_dir,
             persist_all_updates_to_cpu,
         )
@@ -185,7 +195,7 @@ class Host:
         self,
         env: Env,
         gpu_topo: list,
-        handle_stale: bool,
+        if_carry_over_route: bool,
         output_dir: str | None,
         persist_all_updates_to_cpu: bool,
     ) -> None:
@@ -196,17 +206,28 @@ class Host:
         No dedicated thread for routing — it is inlined into the main thread.
         """
         has_planner = self.has_nfeat or self.has_mem
+        enable_mem_mail_planner = self.has_mem and not self.dynamic_state_ablation.disable_mem_mail_planner
         stateless_q_size = self.no_memory_queue_size if not self.has_mem else 2
+        memory_scatter_q_size = MEMORY_SCATTER_QUEUE_SIZE
+        memory_mem_plan_out_q_size = MEMORY_MEM_PLAN_OUT_QUEUE_SIZE
+        memory_mail_plan_out_q_size = MEMORY_MAIL_PLAN_OUT_QUEUE_SIZE
+        memory_nfeat_plan_out_q_size = MEMORY_NFEAT_PLAN_OUT_QUEUE_SIZE
 
         self.result_q: Q[Result] = Q(maxsize=10)
-        self.scatter_q = Q(maxsize=stateless_q_size)
+        self.scatter_q = Q(
+            maxsize=stateless_q_size if not self.has_mem else memory_scatter_q_size
+        )
 
         if has_planner:
-            if self.has_mem:
-                self.mem_plan_out_q = Q(maxsize=1)
-                self.mail_plan_out_q = Q(maxsize=1)
+            if enable_mem_mail_planner:
+                self.mem_plan_out_q = Q(maxsize=memory_mem_plan_out_q_size)
+                self.mail_plan_out_q = Q(maxsize=memory_mail_plan_out_q_size)
             if self.has_nfeat:
-                nfeat_q_size = 1 if self.has_mem else self.no_memory_queue_size
+                nfeat_q_size = (
+                    memory_nfeat_plan_out_q_size
+                    if self.has_mem
+                    else self.no_memory_queue_size
+                )
                 self.nfeat_plan_out_q = Q(maxsize=nfeat_q_size)
 
             self.plan_router = PlanRouter(
@@ -216,9 +237,10 @@ class Host:
                 mail_plan_out_q=self.mail_plan_out_q,
                 nfeat_plan_out_q=self.nfeat_plan_out_q,
                 stop_ev=self.stop_ev,
-                handle_stale=handle_stale,
+                if_carry_over_route=if_carry_over_route,
                 output_dir=output_dir,
                 persist_all_updates_to_cpu=persist_all_updates_to_cpu,
+                dynamic_state_ablation=self.dynamic_state_ablation,
             )
 
         self.scatter = Scatter(
@@ -280,15 +302,6 @@ class Host:
             f"Test AUC: {res.test_auc:.4f} | "
             f"Test AP: {res.test_ap:.4f}"
         )
-        if _debug_tgl_parity_metrics():
-            print(
-                f"[Epoch {self.curr_epoch}][TGL-style batch mean] "
-                f"Val AP: {res.val_ap_batch_mean:.4f} | "
-                f"Val AUC: {res.val_auc_batch_mean:.4f} | "
-                f"Test AUC: {res.test_auc_batch_mean:.4f} | "
-                f"Test AP: {res.test_ap_batch_mean:.4f}"
-            )
-
     def early_stop_check(self, cur_epoch: int) -> bool:
         """
         Check whether early stopping should be triggered and update the best-model record.
@@ -378,15 +391,15 @@ class Host:
 
         if len(df) == 0:
             return
+        timing_enabled = getattr(self, "_timing_enabled", False)
 
-        if split == "train":
-            if _debug_reset_train_sampler_each_epoch():
-                reset = getattr(self.neg_sampler_train, "reset", None)
-                if callable(reset):
-                    reset()
-        elif not self.share_neg_sampler_across_splits:
+        if split != "train" and not getattr(
+            self, "share_neg_sampler_across_splits", False
+        ):
             reset = getattr(self.neg_sampler_eval, "reset", None)
-            if self.reset_eval_neg_sampler_each_epoch and callable(reset):
+            if getattr(self, "reset_eval_neg_sampler_each_epoch", True) and callable(
+                reset
+            ):
                 reset()
 
         # Use make_balance_plan for balanced GPU distribution
@@ -426,9 +439,35 @@ class Host:
                 layout_bundle.append(layout)
                 self.mini_batch_idx += 1
             if self.plan_router is not None:
+                dispatch_start = time.perf_counter()
                 self.plan_router.dispatch(meta_bundle, layout_bundle)
+                dispatch_end = time.perf_counter()
+                if timing_enabled and split == "train":
+                    self._dispatch_s_curve.append(dispatch_end - dispatch_start)
+            scatter_put_start = time.perf_counter()
             self.scatter_q.put(meta_bundle)
+            scatter_put_end = time.perf_counter()
+            if timing_enabled and split == "train":
+                self._scatter_q_put_s_curve.append(scatter_put_end - scatter_put_start)
             self.cur_macro_of_epoch += 1
+
+        if timing_enabled and split == "train" and self._scatter_q_put_s_curve:
+            import json
+
+            payload = {
+                "system": "frost",
+                "split": split,
+                "epoch": cur_epoch,
+                "batch_count": len(self._scatter_q_put_s_curve),
+                "dispatch_s_curve": [round(v, 6) for v in self._dispatch_s_curve],
+                "scatter_q_put_s_curve": [
+                    round(v, 6) for v in self._scatter_q_put_s_curve
+                ],
+            }
+            print(
+                "APPENDIX_HOST_ENGINE_TIMING_CURVE "
+                f"{json.dumps(payload, sort_keys=True)}"
+            )
 
         if split == "test":
             self._cleanup_per_epoch()

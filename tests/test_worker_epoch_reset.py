@@ -1,15 +1,11 @@
-import json
 import threading
 import time
 from queue import Queue
 
 import torch
-import torch.nn as nn
 
 from frost.runtime.worker._engine import (
     Worker,
-    _debug_sync_train_step_boundaries,
-    _debug_initial_h2d_slots_override,
     _initial_h2d_pipeline_slots,
 )
 from frost.runtime.worker._h2d_credit import BatchAwareCreditManager
@@ -164,27 +160,8 @@ def test_drain_stale_p2p_guard_tokens_clears_epoch_end_leftover():
 
 
 def test_initial_h2d_pipeline_slots_use_single_batch_for_single_worker_memory_runs():
-    assert (
-        _initial_h2d_pipeline_slots(
-            debug_force_cpu_freshness_single_worker=True,
-            p2p_world_size=1,
-        )
-        == 2
-    )
-    assert (
-        _initial_h2d_pipeline_slots(
-            debug_force_cpu_freshness_single_worker=False,
-            p2p_world_size=1,
-        )
-        == 2
-    )
-    assert (
-        _initial_h2d_pipeline_slots(
-            debug_force_cpu_freshness_single_worker=False,
-            p2p_world_size=2,
-        )
-        == 4
-    )
+    assert _initial_h2d_pipeline_slots(p2p_world_size=1) == 2
+    assert _initial_h2d_pipeline_slots(p2p_world_size=2) == 4
 
 
 def test_batch_aware_credit_manager_releases_batches_in_order():
@@ -228,210 +205,15 @@ def test_batch_aware_credit_manager_normalizes_strided_global_batch_ids():
     assert not mgr.wait_for_batch(9, blocking=False)
 
 
-def test_initial_h2d_pipeline_slots_honors_env_override(monkeypatch):
-    monkeypatch.setenv("FROST_DEBUG_INITIAL_H2D_SLOTS", "2")
-    assert _debug_initial_h2d_slots_override() == 2
-    assert (
-        _initial_h2d_pipeline_slots(
-            debug_force_cpu_freshness_single_worker=False,
-            p2p_world_size=1,
-        )
-        == 2
-    )
+def test_batch_aware_credit_manager_single_inflight_batch_waits_for_both_writers():
+    mgr = BatchAwareCreditManager(max_in_flight_batches=1)
 
+    assert mgr.wait_for_batch(0, blocking=False)
+    assert not mgr.wait_for_batch(1, blocking=False)
 
-def test_debug_sync_train_step_boundaries_env(monkeypatch):
-    monkeypatch.setenv("FROST_DEBUG_SYNC_TRAIN_STEP_BOUNDARIES", "1")
-    assert _debug_sync_train_step_boundaries() is True
+    mgr.writer_done(batch_idx=0, kind="mem")
+    assert not mgr.wait_for_batch(1, blocking=False)
 
-
-def test_param_checksum_trace_writes_only_selected_batches(tmp_path, monkeypatch):
-    path = tmp_path / "param_checksums.jsonl"
-    monkeypatch.setenv("FROST_DEBUG_PARAM_CHECKSUMS_PATH", str(path))
-    monkeypatch.setenv("FROST_DEBUG_PARAM_CHECKSUM_BATCHES", "3")
-
-    worker = Worker.__new__(Worker)
-    worker.model = nn.Linear(2, 1, bias=False)
-    with torch.no_grad():
-        worker.model.weight.copy_(torch.tensor([[1.5, -2.0]]))
-    worker.optimizer = torch.optim.SGD(worker.model.parameters(), lr=0.125)
-
-    meta_skip = type(
-        "MetaStub",
-        (),
-        {
-            "mini_batch_idx": 2,
-            "cur_epoch": 0,
-            "split": "train",
-            "cur_macro_of_split": 2,
-            "cur_macro_of_epoch": 2,
-        },
-    )()
-    worker._maybe_append_param_checksums(
-        meta=meta_skip,
-        loss=torch.tensor(1.0),
-        grad_scale_before=1024.0,
-        grad_scale_after=1024.0,
-    )
-    assert not path.exists()
-
-    meta_take = type(
-        "MetaStub",
-        (),
-        {
-            "mini_batch_idx": 3,
-            "cur_epoch": 1,
-            "split": "train",
-            "cur_macro_of_split": 3,
-            "cur_macro_of_epoch": 7,
-        },
-    )()
-    worker._maybe_append_param_checksums(
-        meta=meta_take,
-        loss=torch.tensor(2.5),
-        grad_scale_before=2048.0,
-        grad_scale_after=1024.0,
-    )
-
-    records = [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    assert len(records) == 1
-    record = records[0]
-    assert record["mini_batch_idx"] == 3
-    assert record["cur_epoch"] == 1
-    assert record["loss"] == 2.5
-    assert record["grad_scale_before"] == 2048.0
-    assert record["grad_scale_after"] == 1024.0
-    assert record["lr"] == 0.125
-    assert record["num_params"] == 2
-    assert record["param_sum"] == -0.5
-    assert record["param_abs_sum"] == 3.5
-    assert record["param_sq_sum"] == 6.25
-    assert record["params"] == [
-        {
-            "name": "weight",
-            "numel": 2,
-            "sum": -0.5,
-            "abs_sum": 3.5,
-            "sq_sum": 6.25,
-        }
-    ]
-
-
-def test_grad_checksum_trace_writes_only_selected_batches(tmp_path, monkeypatch):
-    path = tmp_path / "grad_checksums.jsonl"
-    monkeypatch.setenv("FROST_DEBUG_GRAD_CHECKSUMS_PATH", str(path))
-    monkeypatch.setenv("FROST_DEBUG_GRAD_CHECKSUM_BATCHES", "5")
-
-    worker = Worker.__new__(Worker)
-    worker.model = nn.Linear(2, 1, bias=False)
-    worker.optimizer = torch.optim.SGD(worker.model.parameters(), lr=0.25)
-    worker.model.weight.grad = torch.tensor([[0.25, -0.5]])
-
-    meta_skip = type(
-        "MetaStub",
-        (),
-        {
-            "mini_batch_idx": 4,
-            "cur_epoch": 0,
-            "split": "train",
-            "cur_macro_of_split": 4,
-            "cur_macro_of_epoch": 4,
-        },
-    )()
-    worker._maybe_append_grad_checksums(
-        meta=meta_skip,
-        loss=torch.tensor(3.0),
-        grad_scale=512.0,
-    )
-    assert not path.exists()
-
-    meta_take = type(
-        "MetaStub",
-        (),
-        {
-            "mini_batch_idx": 5,
-            "cur_epoch": 2,
-            "split": "train",
-            "cur_macro_of_split": 5,
-            "cur_macro_of_epoch": 11,
-        },
-    )()
-    worker._maybe_append_grad_checksums(
-        meta=meta_take,
-        loss=torch.tensor(3.0),
-        grad_scale=512.0,
-    )
-
-    records = [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    assert len(records) == 1
-    record = records[0]
-    assert record["mini_batch_idx"] == 5
-    assert record["cur_epoch"] == 2
-    assert record["loss"] == 3.0
-    assert record["grad_scale"] == 512.0
-    assert record["num_grad_params"] == 2
-    assert record["grad_sum"] == -0.25
-    assert record["grad_abs_sum"] == 0.75
-    assert record["grad_sq_sum"] == 0.3125
-    assert record["grads"] == [
-        {
-            "name": "weight",
-            "numel": 2,
-            "sum": -0.25,
-            "abs_sum": 0.75,
-            "sq_sum": 0.3125,
-        }
-    ]
-
-
-def test_step_tensor_dump_writes_selected_name_and_batch(tmp_path, monkeypatch):
-    dump_dir = tmp_path / "step_dump"
-    monkeypatch.setenv("FROST_DEBUG_DUMP_STEP_TENSOR_DIR", str(dump_dir))
-    monkeypatch.setenv("FROST_DEBUG_DUMP_STEP_TENSOR_BATCHES", "2")
-    monkeypatch.setenv("FROST_DEBUG_DUMP_STEP_TENSOR_NAMES", "weight")
-
-    worker = Worker.__new__(Worker)
-    worker.model = nn.Linear(2, 1, bias=False)
-    with torch.no_grad():
-        worker.model.weight.copy_(torch.tensor([[2.0, -3.0]]))
-    worker.model.weight.grad = torch.tensor([[0.5, -0.75]])
-
-    meta_skip = type(
-        "MetaStub",
-        (),
-        {
-            "mini_batch_idx": 1,
-            "cur_epoch": 0,
-            "split": "train",
-        },
-    )()
-    worker._maybe_dump_step_tensors(meta=meta_skip, phase="grad")
-    assert not dump_dir.exists()
-
-    meta_take = type(
-        "MetaStub",
-        (),
-        {
-            "mini_batch_idx": 2,
-            "cur_epoch": 3,
-            "split": "train",
-        },
-    )()
-    worker._maybe_dump_step_tensors(meta=meta_take, phase="grad")
-    worker._maybe_dump_step_tensors(meta=meta_take, phase="param")
-
-    grad_payload = torch.load(dump_dir / "batch_2_grad_weight.pt")
-    param_payload = torch.load(dump_dir / "batch_2_param_weight.pt")
-    assert grad_payload["name"] == "weight"
-    assert grad_payload["phase"] == "grad"
-    assert torch.equal(grad_payload["tensor"], torch.tensor([[0.5, -0.75]]))
-    assert param_payload["phase"] == "param"
-    assert torch.equal(param_payload["tensor"], torch.tensor([[2.0, -3.0]]))
+    mgr.writer_done(batch_idx=0, kind="box")
+    assert mgr.wait_for_batch(1, blocking=False)
+    assert not mgr.wait_for_batch(2, blocking=False)

@@ -243,6 +243,7 @@ class DatasetManager:
         time_dtype: np.dtype,
         feature_dtype: torch.dtype,
         ignore_nfeat_on_disk: bool = False,
+        ignore_efeat_on_disk: bool = False,
     ):
         self.env = env
         self.run_id = run_id
@@ -251,6 +252,7 @@ class DatasetManager:
         self.time_dtype = np.dtype(time_dtype)
         self.feature_dtype = feature_dtype
         self.ignore_nfeat_on_disk = ignore_nfeat_on_disk
+        self.ignore_efeat_on_disk = ignore_efeat_on_disk
 
     def prepare(
         self,
@@ -387,6 +389,12 @@ class DatasetManager:
         if feat_type == "node" and self.ignore_nfeat_on_disk:
             logger.info(
                 "ignore_nfeat_on_disk=True; skipping on-disk node features for dataset %s.",
+                dataset,
+            )
+            return None, 0, None
+        if feat_type == "edge" and self.ignore_efeat_on_disk:
+            logger.info(
+                "ignore_efeat_on_disk=True; skipping on-disk edge features for dataset %s.",
                 dataset,
             )
             return None, 0, None

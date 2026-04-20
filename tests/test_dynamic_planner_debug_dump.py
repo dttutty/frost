@@ -1,4 +1,4 @@
-"""Tests for debug-only dynamic planner plan dumps."""
+"""Tests for dynamic planner writeback behavior."""
 import threading
 from queue import Queue
 
@@ -29,90 +29,6 @@ def _meta(mini_batch_idx: int) -> Meta:
         fanout=[10],
     )
 
-
-def test_dynamic_planner_appends_debug_dumps_per_batch(tmp_path, monkeypatch):
-    monkeypatch.setenv("FROST_DUMP_DYNAMIC_PLANS", "1")
-    metas = [_meta(7), _meta(8)]
-
-    mem_planner = DynamicPlanner(
-        gpus_distance=np.array([[0, 1], [1, 0]], dtype=np.int32),
-        in_q=Queue(),
-        out_q=Queue(),
-        stop_ev=threading.Event(),
-        output_dir=str(tmp_path),
-        plan_kind="mem",
-    )
-    mem_planner.fetch = [_ts([10]), _ts([20])]
-    mem_planner._plan(
-        all_list=[_ts([1, 2]), _ts([2, 3])],
-        update_list=[_ts([1]), _ts([3])],
-        next_all_list=[_ts([1, 3]), _ts([2])],
-        next_update_list=[_ts([1]), _ts([])],
-        metas=metas,
-    )
-
-    mail_planner = DynamicPlanner(
-        gpus_distance=np.array([[0, 1], [1, 0]], dtype=np.int32),
-        in_q=Queue(),
-        out_q=Queue(),
-        stop_ev=threading.Event(),
-        output_dir=str(tmp_path),
-        plan_kind="mail",
-    )
-    mail_planner.fetch = [_ts([30]), _ts([40])]
-    mail_planner._plan(
-        all_list=[_ts([4, 5]), _ts([5, 6])],
-        update_list=[_ts([4]), _ts([6])],
-        next_all_list=[_ts([4, 6]), _ts([5])],
-        next_update_list=[_ts([4]), _ts([])],
-        metas=metas,
-    )
-
-    dump0 = (tmp_path / "detail" / "7_plan.log").read_text(encoding="ascii")
-    dump1 = (tmp_path / "detail" / "8_plan.log").read_text(encoding="ascii")
-
-    assert "[mem]" in dump0
-    assert "[mail]" in dump0
-    assert "current_need: [1, 2]" in dump0
-    assert "plan_fetch: [10]" in dump0
-    assert "plan_send_counts: [1, 0]" in dump0
-    assert "plan_p2p_to_gpu_0: [1]" in dump0
-
-    assert "[mem]" in dump1
-    assert "[mail]" in dump1
-    assert "plan_fetch: [20]" in dump1
-    assert "plan_writeback: [3]" in dump1
-
-
-def test_dynamic_planner_debug_cpu_freshness_single_worker(monkeypatch):
-    monkeypatch.setenv("FROST_DEBUG_CPU_FRESHNESS_SINGLE_WORKER", "1")
-
-    planner = DynamicPlanner(
-        gpus_distance=np.array([[0]], dtype=np.int32),
-        in_q=Queue(),
-        out_q=Queue(),
-        stop_ev=threading.Event(),
-        plan_kind="mem",
-    )
-    planner.fetch = [_ts([1, 2, 3])]
-
-    plans = planner._plan(
-        all_list=[_ts([1, 2, 3])],
-        update_list=[_ts([2, 4, 4])],
-        next_all_list=[_ts([4, 5])],
-        next_update_list=[_ts([4])],
-        metas=[_meta(9)],
-    )
-
-    assert len(plans) == 1
-    plan = plans[0]
-    assert plan.fetch.data.tolist() == [1, 2, 3]
-    assert plan.writeback.data.tolist() == [2, 4]
-    assert plan.send_counts.tolist() == [0]
-    assert plan.recv_counts.tolist() == [0]
-    assert len(plan.p2p) == 1
-    assert plan.p2p[0].data.numel() == 0
-    assert planner.fetch[0].data.tolist() == [4, 5]
 
 
 def test_dynamic_planner_persist_all_updates_to_cpu_keeps_owned_updates():
@@ -147,7 +63,7 @@ def test_dynamic_planner_without_stale_handling_keeps_all_owned_updates():
         out_q=Queue(),
         stop_ev=threading.Event(),
         plan_kind="mem",
-        handle_stale=False,
+        if_carry_over_route=False,
     )
     planner.fetch = [_ts([10]), _ts([20])]
 
@@ -163,3 +79,30 @@ def test_dynamic_planner_without_stale_handling_keeps_all_owned_updates():
     assert plans[1].writeback is not None
     assert plans[0].writeback.data.tolist() == [1]
     assert plans[1].writeback.data.tolist() == [3]
+
+
+def test_dynamic_planner_current_batch_only_uses_dedup_fetch_writeback_and_no_p2p():
+    planner = DynamicPlanner(
+        gpus_distance=np.array([[0, 1], [1, 0]], dtype=np.int32),
+        in_q=Queue(),
+        out_q=Queue(),
+        stop_ev=threading.Event(),
+        plan_kind="mem",
+        current_batch_only=True,
+    )
+
+    plans = planner._plan_current_batch_only(
+        all_list=[_ts([1, 2, 3]), _ts([3, 4])],
+        update_list=[_ts([1, 1, 2]), _ts([4, 4])],
+    )
+
+    assert plans[0].fetch.data.tolist() == [1, 2, 3]
+    assert plans[1].fetch.data.tolist() == [3, 4]
+    assert plans[0].writeback is not None
+    assert plans[1].writeback is not None
+    assert plans[0].writeback.data.tolist() == [1, 2]
+    assert plans[1].writeback.data.tolist() == [4]
+    assert plans[0].recv_counts.tolist() == [0, 0]
+    assert plans[0].send_counts.tolist() == [0, 0]
+    assert all(ts.data.numel() == 0 for ts in plans[0].p2p)
+    assert all(ts.data.numel() == 0 for ts in plans[1].p2p)

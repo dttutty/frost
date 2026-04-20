@@ -202,6 +202,8 @@ class DyGFormer(nn.Module):
         dropout: float,
         max_input_sequence_length: int,
         n_neg: int,  # ${n_neg}
+        enable_dummy_node_features: bool = False,
+        dummy_node_dim: int | None = None,
         enable_dummy_edge_features: bool = True,
         dummy_edge_dim: int | None = None,
     ):
@@ -214,7 +216,38 @@ class DyGFormer(nn.Module):
         self.patch_size = patch_size
         self.max_input_sequence_length = max_input_sequence_length
         self.n_neg = n_neg
+        self.enable_dummy_node_features = enable_dummy_node_features
         self.enable_dummy_edge_features = enable_dummy_edge_features
+        if ndim > 0:
+            self.node_feat_dim = ndim
+            self.node_channel_enabled = True
+            self.uses_dummy_node_features = False
+        elif self.enable_dummy_node_features:
+            if dummy_node_dim is None:
+                raise ValueError(
+                    "dummy_node_dim must be resolved before constructing DyGFormer "
+                    "when enable_dummy_node_features=True and ndim=0."
+                )
+            if dummy_node_dim <= 0:
+                raise ValueError(
+                    "dummy_node_dim must be > 0 when DyGFormer synthesizes node features."
+                )
+            self.node_feat_dim = dummy_node_dim
+            self.node_channel_enabled = True
+            self.uses_dummy_node_features = True
+            logger.info(
+                "DyGFormer received ndim=0; synthesizing %d-D zero node features on GPU "
+                "to mirror DyGLib's dummy-feature path.",
+                self.node_feat_dim,
+            )
+        else:
+            self.node_feat_dim = 0
+            self.node_channel_enabled = False
+            self.uses_dummy_node_features = False
+            logger.info(
+                "DyGFormer received ndim=0 with enable_dummy_node_features=False; "
+                "disabling the node channel."
+            )
         if edim > 0:
             self.edge_feat_dim = edim
             self.edge_channel_enabled = True
@@ -249,7 +282,6 @@ class DyGFormer(nn.Module):
         self.time_encoder = TimeEncoder(d_time)
         self.neighbor_co_occurrence_encoder = NeighborCooccurrenceEncoder(C)
 
-        self.node_channel_enabled = ndim > 0
         self.projection_layer = nn.ModuleDict(
             {
                 "time": nn.Linear(patch_size * d_time, C),
@@ -257,7 +289,9 @@ class DyGFormer(nn.Module):
             }
         )
         if self.node_channel_enabled:
-            self.projection_layer["node"] = nn.Linear(patch_size * ndim, C)
+            self.projection_layer["node"] = nn.Linear(
+                patch_size * self.node_feat_dim, C
+            )
         if self.edge_channel_enabled:
             self.projection_layer["edge"] = nn.Linear(
                 patch_size * self.edge_feat_dim, C
@@ -385,7 +419,12 @@ class DyGFormer(nn.Module):
                 [graph.root_nfeat.unsqueeze(1), ngh_nfeat], dim=1
             )  # [n_root, keep_len, ndim]
         else:
-            seq_nfeat = torch.zeros(n_root, keep_len, self.ndim, device=dev)
+            seq_nfeat = torch.zeros(
+                n_root,
+                keep_len,
+                self.node_feat_dim,
+                device=dev,
+            )
 
         # Edge features (zero at root position — no edge to self). When the
         # dataset has no real edge features, we either synthesize a dummy

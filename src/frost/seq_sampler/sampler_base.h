@@ -135,12 +135,12 @@ public:
     BaseSampler(const TemporalGraph<ID_T, TIME_T>& g) 
         : graph_ref(g), indptr(g.indptr_ptr()), indices(g.indices_ptr()),
           edge_ids(g.eid_ptr()), edge_ts(g.ts_ptr()) {
-        // 假设 indptr 的长度是 num_nodes + 1
+        // Assume indptr has length num_nodes + 1.
         num_nodes = (ID_T)g.indptr.shape(0) - 1;
     }
 
     inline std::pair<ID_T, ID_T> find_edge_range_base(ID_T n, TIME_T upper) const {
-        // 防御性检查：如果 node ID 非法，返回一个空区间
+        // Defensive check: return an empty range for invalid node IDs.
         if (n < 0 || n >= num_nodes) return {1, 0};
         
         const ID_T b = indptr[n];

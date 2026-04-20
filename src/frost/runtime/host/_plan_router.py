@@ -8,6 +8,7 @@ from queue import Queue as Q
 
 import numpy as np
 
+from frost.ablation import DynamicStateAblation
 from frost.aliases.host import (
     DynamicPlanInQ,
     DynamicPlanOutQ,
@@ -297,7 +298,7 @@ class PlanRouter:
         gpu_topo:     flat or nested list of GPU IDs encoding NVLink topology.
         analyzer:     combined analyzer/planner object with ``create_mail_planner()``
                       plus ``get_*_plan_inputs()`` methods.
-        handle_stale: forwarded to DynamicPlanner instances.
+        if_carry_over_route: forwarded to DynamicPlanner instances.
     """
 
     mem_plan_in_q: DynamicPlanInQ | None
@@ -315,14 +316,20 @@ class PlanRouter:
         mail_plan_out_q: DynamicPlanOutQ | None,
         nfeat_plan_out_q: StaticPlanOutQ | None,
         stop_ev: threading.Event,
-        handle_stale: bool = False,
+        if_carry_over_route: bool = False,
         output_dir: str | None = None,
         persist_all_updates_to_cpu: bool = False,
+        dynamic_state_ablation: DynamicStateAblation | None = None,
     ) -> None:
         self.gpu_dist = build_gpu_distance_matrix(gpu_topo)
         self.n_gpus = len(self.gpu_dist)
         self.stop_ev = stop_ev
         self.analyzer = analyzer
+        self.dynamic_state_ablation = (
+            dynamic_state_ablation
+            if dynamic_state_ablation is not None
+            else DynamicStateAblation(name="baseline")
+        )
         self.mem_planner = None
         self.mail_planner = None
         self.nfeat_planner = None
@@ -335,10 +342,11 @@ class PlanRouter:
                 in_q=self.mem_plan_in_q,
                 out_q=mem_plan_out_q,
                 stop_ev=stop_ev,
-                handle_stale=handle_stale,
+                if_carry_over_route=if_carry_over_route,
                 output_dir=output_dir,
                 plan_kind="mem",
                 persist_all_updates_to_cpu=persist_all_updates_to_cpu,
+                current_batch_only=self.dynamic_state_ablation.current_batch_dedup_plan_only,
             )
 
         self.mail_plan_in_q: DynamicPlanInQ | None = None
@@ -349,9 +357,10 @@ class PlanRouter:
                 in_q=self.mail_plan_in_q,
                 out_q=mail_plan_out_q,
                 stop_ev=stop_ev,
-                handle_stale=handle_stale,
+                if_carry_over_route=if_carry_over_route,
                 output_dir=output_dir,
                 persist_all_updates_to_cpu=persist_all_updates_to_cpu,
+                current_batch_only=self.dynamic_state_ablation.current_batch_dedup_plan_only,
             )
 
         self.nfeat_plan_in_q: StaticPlanInQ | None = None

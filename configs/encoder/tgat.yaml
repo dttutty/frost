@@ -1,6 +1,6 @@
 _target_: frost.models.encoder.tgat.TGAT
 out_dim: 128
-fanout: [10, 10]
+fanout: [20, 20]
 ngh_sampler_strategy: uniform
 d_time: ${d_time}
 d_hid: ${.out_dim}

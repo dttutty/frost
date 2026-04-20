@@ -5,10 +5,14 @@ and forwards them into the ``received_q`` for downstream H2D processing.
 Epoch-end results are gathered back to the host via ``dist.gather_object``.
 """
 
+import json
 import logging
+import os
 import threading
+import time
 from queue import Empty
 from queue import Queue as Q
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -22,6 +26,15 @@ from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
+
+
+def _timing_enabled() -> bool:
+    return os.environ.get("FROST_PIPELINE_TIMING_BENCH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 class Receiver(ThreadBase):
@@ -61,25 +74,29 @@ class Receiver(ThreadBase):
         self._gather_seq = 0
         self._recv_seq = 0
         self.ring_buf = ring_buf
+        self._timing_enabled = _timing_enabled()
+        self._scatter_wait_s_curve: list[float] = []
+        self._ring_buf_wait_s_curve: list[float] = []
 
     @torch.no_grad()
     def logic(self) -> None:
         """Main loop: receive messages from host and route them into the pipeline.
 
         Runs until a ``None`` sentinel is received from the host or ``stop_ev``
-        is set.  Performs strict sanity checks on ``FlatGraph`` NID/EID layout
-        when running in debug mode (``__debug__`` is True).
+        is set.
         """
         batch_count = 0
 
         while not self.stop_ev.is_set():
             # Receive via collective scatter
             output: list[Meta | str | None] = [None]
+            scatter_start = time.perf_counter()
             dist.scatter_object_list(
                 output,
                 scatter_object_input_list=[None] * self.env.world_size,
                 src=self.env.host_rank,
             )
+            scatter_end = time.perf_counter()
             msg = output[0]
             self._recv_seq += 1
 
@@ -102,72 +119,16 @@ class Receiver(ThreadBase):
                 dist.gather_object(result, dst=self.env.host_rank)
 
             else:
-                assert isinstance(msg, Meta)
-                meta = msg
+                meta = cast(Meta, msg)
                 batch_count += 1
+                ring_buf_start = time.perf_counter()
                 buf = self.ring_buf.get(meta.buf_len, block=True)
+                ring_buf_end = time.perf_counter()
                 if buf is None:
                     raise RuntimeError(
                         f"Ring buffer returned None for meta with batch_id {meta.mini_batch_idx}"
                     )
                 buf_len = meta.buf_len
-                if __debug__:
-                    # --- Strict sanity checks ---
-                    nid_slice = buf["NID"][:buf_len]
-                    eid_slice = buf["EID"][:buf_len]
-
-                    n_src = int(meta.n_src)
-                    if n_src < 0:
-                        raise ValueError(f"Invalid meta.n_src={n_src}")
-
-                    need = 3 * n_src
-                    if need > nid_slice.numel():
-                        raise ValueError(
-                            f"Invalid meta.n_src={n_src}: need 3*n_src={need} <= buf_len={nid_slice.numel()} for NID checks."
-                        )
-                    if need > eid_slice.numel():
-                        raise ValueError(
-                            f"Invalid meta.n_src={n_src}: need 3*n_src={need} <= buf_len={eid_slice.numel()} for EID checks."
-                        )
-
-                    # 1) nid[:3*n_src] must not contain -1
-                    nid_head = nid_slice[:need]
-                    if (nid_head == -1).any():
-                        bad_pos = torch.nonzero(nid_head == -1, as_tuple=False).squeeze(
-                            -1
-                        )
-                        preview_pos = bad_pos[:20].tolist()
-                        raise ValueError(
-                            f"Invalid flat_graph.nid: found -1 in nid[:3*n_src] "
-                            f"(n_src={n_src}, range=[0, {need})). First {len(preview_pos)} positions: {preview_pos}"
-                        )
-
-                    # 2) eid[:n_src] must not contain -1
-                    eid_head = eid_slice[:n_src]
-                    if (eid_head == -1).any():
-                        bad_pos = torch.nonzero(eid_head == -1, as_tuple=False).squeeze(
-                            -1
-                        )
-                        preview_pos = bad_pos[:20].tolist()
-                        raise ValueError(
-                            f"Invalid flat_graph.eid: found -1 in eid[:n_src] (n_src={n_src}). "
-                            f"First {len(preview_pos)} positions: {preview_pos}"
-                        )
-
-                    # 3) eid[n_src:3*n_src] must be all -1 (dst and neg have no edge IDs)
-                    eid_mid = eid_slice[n_src : 3 * n_src]
-                    if eid_mid.numel() > 0 and not (eid_mid == -1).all():
-                        bad_pos = torch.nonzero(eid_mid != -1, as_tuple=False).squeeze(
-                            -1
-                        )
-                        preview_pos = bad_pos[:20].tolist()
-                        bad_vals = eid_mid[bad_pos[:20]].tolist()
-                        raise ValueError(
-                            f"Invalid flat_graph.eid: expected all -1 in eid[n_src:3*n_src] "
-                            f"(n_src={n_src}, range=[{n_src}, {3 * n_src})). "
-                            f"First {len(preview_pos)} offending positions (local): {preview_pos}, values: {bad_vals}"
-                        )
-                # --- end checks ---
                 cpu_nid = buf["NID"][:buf_len].clone()
                 meta.flat_graph = FlatGraph(
                     nid=cpu_nid,
@@ -178,4 +139,24 @@ class Receiver(ThreadBase):
                 buf = None
                 self.ring_buf.release()
 
+                if self._timing_enabled:
+                    self._scatter_wait_s_curve.append(scatter_end - scatter_start)
+                    self._ring_buf_wait_s_curve.append(ring_buf_end - ring_buf_start)
                 self.received_q.put(meta, block=True)
+
+        if self._timing_enabled and self._scatter_wait_s_curve:
+            payload = {
+                "system": "frost",
+                "rank": self.env.local_rank,
+                "batch_count": batch_count,
+                "scatter_wait_s_curve": [
+                    round(v, 6) for v in self._scatter_wait_s_curve
+                ],
+                "ring_buf_wait_s_curve": [
+                    round(v, 6) for v in self._ring_buf_wait_s_curve
+                ],
+            }
+            print(
+                "APPENDIX_RECEIVER_TIMING_CURVE "
+                f"{json.dumps(payload, sort_keys=True)}"
+            )

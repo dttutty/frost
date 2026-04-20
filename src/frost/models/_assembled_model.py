@@ -5,49 +5,30 @@ optional APAN postman, and link predictor header) into a single forward pass
 used by the worker during training and evaluation.
 """
 
-import json
+from collections.abc import Callable
 import logging
-import os
 from queue import Queue
-from pathlib import Path
 from typing import cast
 
 import torch
 import torch.nn as nn
 
+from frost.ablation import DynamicStateAblation
 # Import the newly unified memory updaters
+from frost.datatypes.mem_mail_box._data_ops import keep_last, mail_to_box
+from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.meta import Meta
-from frost.datatypes.tasks import BoxTask, MemTask
+from frost.datatypes.tasks import BoxTask, DirectWritebackRequest, MemTask
 from frost.protocols.cuda_event_proto import CudaEvent
 from frost.protocols.mem_updater_proto import MemoryUpdaterProto
 from frost.protocols.postman_proto import PostmanProto
+from frost.runtime.worker.p2p_syncer.utils._interaction_ops import (
+    generate_interaction_mails,
+)
+from frost.utils.tensor_set import TensorSet
 
 logger = logging.getLogger(__name__)
-
-
-def _debug_dump_model_dir() -> Path | None:
-    raw = os.getenv("FROST_DEBUG_DUMP_MODEL_DIR")
-    if raw is None or raw == "":
-        return None
-    return Path(raw)
-
-
-def _debug_dump_model_batches() -> set[int] | None:
-    raw = os.getenv("FROST_DEBUG_DUMP_MODEL_BATCHES")
-    if raw is None or raw.strip() == "":
-        return None
-    return {int(token.strip()) for token in raw.split(",") if token.strip() != ""}
-
-
-def _debug_model_checksums_path() -> Path | None:
-    raw = os.getenv("FROST_DEBUG_MODEL_CHECKSUMS_PATH")
-    if raw is None:
-        return None
-    value = raw.strip()
-    if value == "":
-        return None
-    return Path(value)
 
 
 class AssembledModel(nn.Module):
@@ -85,20 +66,24 @@ class AssembledModel(nn.Module):
         postman: PostmanProto | None,
         n_neg: int,
         sample_4_neg: bool = True,
+        dynamic_state_ablation: DynamicStateAblation | None = None,
     ) -> None:
         super().__init__()
         self.encoder = encoder
         self.mem_updater = mem_updater
         self.header = header
         self.postman = postman
+        self.dynamic_state_ablation = (
+            dynamic_state_ablation
+            if dynamic_state_ablation is not None
+            else DynamicStateAblation(name="baseline")
+        )
 
         self.n_neg = n_neg  # from hydra config
         self.sample_4_neg = sample_4_neg  # from hydra config
         self._delay_box_task_for_structural_mail = self._encoder_uses_structural_mail(
             encoder
         )
-        self._debug_dump_model_dir = _debug_dump_model_dir()
-        self._debug_dump_model_batches = _debug_dump_model_batches()
 
     @staticmethod
     def _encoder_uses_structural_mail(encoder: nn.Module) -> bool:
@@ -107,85 +92,97 @@ class AssembledModel(nn.Module):
             getattr(encoder, "use_structural_attention", False)
         )
 
-    def _maybe_dump_model_state(
+    @staticmethod
+    def _union_planned_p2p_nids(plan) -> torch.Tensor:
+        if plan is None or len(plan.p2p) == 0:
+            return torch.empty(0, dtype=torch.long)
+
+        union = TensorSet.empty_like(plan.p2p[0].data)
+        for per_dst in plan.p2p:
+            union = union | per_dst
+        return union.data
+
+    @staticmethod
+    def _dedupe_box_entry(entry: BoxEntry) -> BoxEntry:
+        if entry.nid.numel() == 0:
+            entry.is_sorted = True
+            entry.is_unique = True
+            return entry
+
+        entry = entry.sort_by_nid()
+        if entry.is_unique:
+            return entry
+
+        keep = torch.ones(entry.nid.numel(), dtype=torch.bool, device=entry.nid.device)
+        if entry.nid.numel() > 1:
+            keep[:-1] = entry.nid[:-1] != entry.nid[1:]
+
+        if keep.sum().item() != entry.nid.numel():
+            entry = BoxEntry(
+                nid=entry.nid[keep],
+                data=entry.data[keep],
+                ts=entry.ts[keep],
+                is_sorted=True,
+                is_unique=True,
+            )
+        else:
+            entry.is_unique = True
+
+        return entry
+
+    def _select_stale_mem_source(
         self,
-        *,
         meta: Meta,
-        logits: torch.Tensor,
-        root_new_mem: MemEntry | None,
-    ) -> None:
-        dump_dir = self._debug_dump_model_dir
-        dump_batches = self._debug_dump_model_batches
-        if dump_dir is None or dump_batches is None:
-            return
-        if meta.mini_batch_idx not in dump_batches:
-            return
+        planned_send_nids: torch.Tensor,
+    ) -> MemEntry | None:
+        flat_graph = meta.flat_graph
+        if (
+            flat_graph is None
+            or flat_graph.mem is None
+            or flat_graph.mem_ts is None
+            or planned_send_nids.numel() == 0
+        ):
+            return None
 
-        dump_dir.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "mini_batch_idx": int(meta.mini_batch_idx),
-            "split": meta.split,
-            "logits": logits.detach().cpu(),
-        }
-        if root_new_mem is not None:
-            payload["root_new_mem_nid"] = root_new_mem.nid.detach().cpu()
-            payload["root_new_mem_ts"] = root_new_mem.ts.detach().cpu()
-            payload["root_new_mem_data"] = root_new_mem.data.detach().cpu()
-        torch.save(payload, dump_dir / f"batch_{meta.mini_batch_idx}.pt")
+        valid_mask = (flat_graph.nid != -1) & torch.isin(
+            flat_graph.nid, planned_send_nids
+        )
+        if not torch.any(valid_mask):
+            return None
 
-    def _maybe_append_model_checksums(
+        stale_mem = MemEntry(
+            nid=flat_graph.nid[valid_mask],
+            data=flat_graph.mem[valid_mask],
+            ts=flat_graph.mem_ts[valid_mask],
+        )
+        return keep_last(stale_mem)
+
+    def _select_stale_box_source(
         self,
-        *,
         meta: Meta,
-        logits: torch.Tensor,
-        root_new_mem: MemEntry | None,
-    ) -> None:
-        path = _debug_model_checksums_path()
-        if path is None:
-            return
+        planned_send_nids: torch.Tensor,
+    ) -> BoxEntry | None:
+        flat_graph = meta.flat_graph
+        if (
+            flat_graph is None
+            or flat_graph.box is None
+            or flat_graph.box_ts is None
+            or planned_send_nids.numel() == 0
+        ):
+            return None
 
-        def _sum_or_zero(t: torch.Tensor | None) -> float:
-            if t is None or t.numel() == 0:
-                return 0.0
-            return float(t.detach().float().sum().item())
+        valid_mask = (flat_graph.nid != -1) & torch.isin(
+            flat_graph.nid, planned_send_nids
+        )
+        if not torch.any(valid_mask):
+            return None
 
-        def _abssum_or_zero(t: torch.Tensor | None) -> float:
-            if t is None or t.numel() == 0:
-                return 0.0
-            return float(t.detach().float().abs().sum().item())
-
-        def _len_or_zero(t: torch.Tensor | None) -> int:
-            if t is None:
-                return 0
-            return int(t.numel())
-
-        record = {
-            "mini_batch_idx": int(meta.mini_batch_idx),
-            "cur_epoch": int(meta.cur_epoch),
-            "split": meta.split,
-            "cur_macro_of_split": int(meta.cur_macro_of_split),
-            "cur_macro_of_epoch": int(meta.cur_macro_of_epoch),
-            "logits_sum": _sum_or_zero(logits),
-            "logits_abs_sum": _abssum_or_zero(logits),
-            "root_new_mem_len": _len_or_zero(
-                None if root_new_mem is None else root_new_mem.nid
-            ),
-            "root_new_mem_nid_sum": _sum_or_zero(
-                None if root_new_mem is None else root_new_mem.nid
-            ),
-            "root_new_mem_ts_sum": _sum_or_zero(
-                None if root_new_mem is None else root_new_mem.ts
-            ),
-            "root_new_mem_sum": _sum_or_zero(
-                None if root_new_mem is None else root_new_mem.data
-            ),
-            "root_new_mem_abs_sum": _abssum_or_zero(
-                None if root_new_mem is None else root_new_mem.data
-            ),
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, sort_keys=True) + "\n")
+        stale_box = BoxEntry(
+            nid=flat_graph.nid[valid_mask],
+            data=flat_graph.box[valid_mask],
+            ts=flat_graph.box_ts[valid_mask],
+        )
+        return self._dedupe_box_entry(stale_box)
 
     def forward(
         self,
@@ -193,6 +190,7 @@ class AssembledModel(nn.Module):
         *,
         mem_task_q: Queue | None = None,
         box_task_q: Queue | None = None,
+        direct_writeback: Callable[[DirectWritebackRequest], None] | None = None,
     ) -> torch.Tensor:
         """Run a full forward pass for one batch.
 
@@ -216,7 +214,7 @@ class AssembledModel(nn.Module):
             Logit tensor of shape ``[n_src * (1 + n_neg), 1]`` containing
             concatenated positive and negative edge scores.
         """
-        logger.debug(f"Processing meta with meta.batch_idx={meta.mini_batch_idx}")
+        logger.debug("Processing meta with meta.batch_idx=%s", meta.mini_batch_idx)
 
         # 1. Update memory using the flattened FlatGraph
 
@@ -230,10 +228,24 @@ class AssembledModel(nn.Module):
         pending_box_plan = None
         pending_box_graph = None
         pending_box_flat_nid_cpu = None
+        pending_box_stale_box: BoxEntry | None = None
+        meta.direct_writeback_request = None
 
         if self.mem_updater is not None:
-            assert mem_task_q is not None, "mem_task_q required when mem_updater is set"
-            assert box_task_q is not None, "box_task_q required when mem_updater is set"
+            plan_set = meta.plan_set
+            if self.dynamic_state_ablation.uses_async_dynamic_state_pipeline:
+                assert mem_task_q is not None, "mem_task_q required when mem_updater is set"
+                assert box_task_q is not None, "box_task_q required when mem_updater is set"
+                assert plan_set is not None
+                assert plan_set.box_plan is not None
+                assert plan_set.mem_plan is not None
+                mem_send_nids = self._union_planned_p2p_nids(plan_set.mem_plan)
+                box_send_nids = self._union_planned_p2p_nids(plan_set.box_plan)
+                stale_mem_source = self._select_stale_mem_source(meta, mem_send_nids)
+                stale_box_source = self._select_stale_box_source(meta, box_send_nids)
+            else:
+                stale_mem_source = None
+                stale_box_source = None
 
             # Run unified memory update on the flattened FlatGraph
             meta.flat_graph = self.mem_updater(
@@ -263,28 +275,8 @@ class AssembledModel(nn.Module):
                 )
                 root_new_mem_for_dump = root_new_mem
 
-                plan_set = meta.plan_set
-
-                assert plan_set is not None
-                assert plan_set.box_plan is not None
-                assert plan_set.mem_plan is not None
                 root_new_mem_clone = root_new_mem.clone()
 
-                ready_event = cast(CudaEvent, torch.cuda.Event())
-                ready_event.record(stream=torch.cuda.current_stream())
-
-                # Handle mem sync
-                mem_task = MemTask(
-                    mini_batch_idx=meta.mini_batch_idx,
-                    root_new_mem=root_new_mem,
-                    mem_plan=plan_set.mem_plan,
-                    is_last=meta.is_last_macro_of_epoch,
-                )
-                # Avoid in-place modification issues
-                mem_task_q.put((mem_task, ready_event))
-
-                assert meta.flat_graph.box is not None
-                assert meta.flat_graph.box_ts is not None
                 box_pos_efeat = (
                     meta.flat_graph.efeat[0:n_src].clone()
                     if meta.flat_graph.efeat is not None
@@ -292,25 +284,86 @@ class AssembledModel(nn.Module):
                 )
                 box_graph = meta.graph if self.postman else None
                 box_flat_nid_cpu = meta.flat_nid_cpu if self.postman else None
+                if self.dynamic_state_ablation.uses_async_dynamic_state_pipeline:
+                    ready_event = cast(CudaEvent, torch.cuda.Event())
+                    ready_event.record(stream=torch.cuda.current_stream())
 
-                if delay_box_task:
-                    pending_box_root_new_mem = root_new_mem_clone
-                    pending_box_pos_efeat = box_pos_efeat
-                    pending_box_plan = plan_set.box_plan
-                    pending_box_graph = box_graph
-                    pending_box_flat_nid_cpu = box_flat_nid_cpu
-                else:
-                    box_task = BoxTask(
-                        pos_efeat=box_pos_efeat,
-                        root_new_mem=root_new_mem_clone,
-                        mail_peer_mem=None,
+                    # Handle mem sync
+                    assert mem_task_q is not None
+                    assert plan_set is not None
+                    assert plan_set.mem_plan is not None
+                    mem_task = MemTask(
                         mini_batch_idx=meta.mini_batch_idx,
-                        box_plan=plan_set.box_plan,
+                        root_new_mem=root_new_mem,
+                        stale_mem=stale_mem_source,
+                        mem_plan=plan_set.mem_plan,
                         is_last=meta.is_last_macro_of_epoch,
-                        graph=box_graph,
-                        flat_nid_cpu=box_flat_nid_cpu,
                     )
-                    box_task_q.put((box_task, ready_event))
+                    # Avoid in-place modification issues
+                    mem_task_q.put((mem_task, ready_event))
+
+                    if delay_box_task:
+                        assert plan_set.box_plan is not None
+                        pending_box_root_new_mem = root_new_mem_clone
+                        pending_box_pos_efeat = box_pos_efeat
+                        pending_box_plan = plan_set.box_plan
+                        pending_box_graph = box_graph
+                        pending_box_flat_nid_cpu = box_flat_nid_cpu
+                        pending_box_stale_box = stale_box_source
+                    else:
+                        assert box_task_q is not None
+                        assert plan_set is not None
+                        assert plan_set.box_plan is not None
+                        box_task = BoxTask(
+                            pos_efeat=box_pos_efeat,
+                            root_new_mem=root_new_mem_clone,
+                            stale_box=stale_box_source,
+                            mail_peer_mem=None,
+                            mini_batch_idx=meta.mini_batch_idx,
+                            box_plan=plan_set.box_plan,
+                            is_last=meta.is_last_macro_of_epoch,
+                            graph=box_graph,
+                            flat_nid_cpu=box_flat_nid_cpu,
+                        )
+                        box_task_q.put((box_task, ready_event))
+                elif self.dynamic_state_ablation.uses_direct_cpu_writeback:
+                    if delay_box_task:
+                        raise ValueError(
+                            "dynamic_state_ablation does not support delayed structural mailbox writes."
+                        )
+                    direct_mem_filter = None
+                    direct_box_filter = None
+                    if self.dynamic_state_ablation.filter_writeback_by_plan:
+                        assert plan_set is not None
+                        assert plan_set.mem_plan is not None
+                        assert plan_set.box_plan is not None
+                        assert plan_set.mem_plan.writeback is not None
+                        assert plan_set.box_plan.writeback is not None
+                        direct_mem_filter = plan_set.mem_plan.writeback.data
+                        direct_box_filter = plan_set.box_plan.writeback.data
+                    direct_box_entry = mail_to_box(
+                        generate_interaction_mails(
+                            root_new_mem_clone,
+                            box_pos_efeat,
+                            None,
+                        )
+                    )
+                    request = DirectWritebackRequest(
+                        mini_batch_idx=meta.mini_batch_idx,
+                        mem_entry=root_new_mem.clone(),
+                        box_entry=direct_box_entry,
+                        mem_filter_nids=direct_mem_filter,
+                        box_filter_nids=direct_box_filter,
+                    )
+                    if self.dynamic_state_ablation.direct_cpu_writeback_after_mem_update:
+                        assert direct_writeback is not None
+                        direct_writeback(request)
+                    else:
+                        meta.direct_writeback_request = request
+                else:
+                    raise RuntimeError(
+                        "Unsupported dynamic_state_ablation runtime configuration."
+                    )
         else:
             meta.graph = meta.flat_graph.unflatten(
                 n_src=n_src,
@@ -330,7 +383,11 @@ class AssembledModel(nn.Module):
             h = encoder_out
         h = cast(torch.Tensor, h)
 
-        if self.mem_updater is not None and delay_box_task:
+        if (
+            self.mem_updater is not None
+            and delay_box_task
+            and not self.dynamic_state_ablation.uses_direct_cpu_writeback
+        ):
             assert box_task_q is not None
             assert pending_box_root_new_mem is not None
             assert pending_box_plan is not None
@@ -343,6 +400,7 @@ class AssembledModel(nn.Module):
                 box_task = BoxTask(
                     pos_efeat=pending_box_pos_efeat,
                     root_new_mem=pending_box_root_new_mem,
+                    stale_box=pending_box_stale_box,
                     mail_peer_mem=mail_peer_mem_for_box,
                     mini_batch_idx=meta.mini_batch_idx,
                     box_plan=pending_box_plan,
@@ -356,14 +414,4 @@ class AssembledModel(nn.Module):
 
         # 4. Predict edges
         ret = self.header(h)
-        self._maybe_dump_model_state(
-            meta=meta,
-            logits=cast(torch.Tensor, ret),
-            root_new_mem=root_new_mem_for_dump,
-        )
-        self._maybe_append_model_checksums(
-            meta=meta,
-            logits=cast(torch.Tensor, ret),
-            root_new_mem=root_new_mem_for_dump,
-        )
         return cast(torch.Tensor, ret)

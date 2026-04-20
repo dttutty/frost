@@ -34,7 +34,7 @@ uv run pytest tests/ -v
 | CAWN | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=cawn predictor=dygformer` |
 | EdgeBank | `uv run python eval_edgebank.py --dataset LASTFM` |
 
-**Config defaults** (`configs/config.yaml`): `access_analyzer` omitted on non-memory runs, `mem_updater=null`, `n_neg=1`, `ring_buf_size=32`, `macro_batch_size=4000`, `d_time=128`, `no_memory_queue_size=4`.
+**Config defaults** (`configs/config.yaml`): `access_analyzer` omitted on non-memory runs, `mem_updater=null`, `n_neg=1`, `ring_buf_size=64`, `macro_batch_size=4000`, `d_time=128`, `no_memory_queue_size=4`.
 
 **Pair-aware predictor auto-switches** (`launcher.py`): if the user leaves the default `predictor=link`, `DyGFormer` and `CAWN` are auto-switched to `DyGFormerLinkPredictor`, and `TCL` is auto-switched to `PairAwareMergeLayerPredictor`.
 
@@ -140,11 +140,16 @@ Host process
 | `Worker.full_q` | 4 | 1 |
 | `Worker.received_q` | 4 | 1 |
 | `Host.meta_in_q` | 4 | 2 |
-| `Host.scatter_q` | 4 | 1 |
+| `Host.scatter_q` | 4 | 64 |
+| `Host.mem_plan_out_q` | n/a | 32 |
+| `Host.mail_plan_out_q` | n/a | 32 |
+| `Host.nfeat_plan_out_q` | 4 | 32 |
 
 For stateless/no-memory models, `no_memory_queue_size` defaults to `4` and currently fans out to `Worker.full_q`, `Worker.received_q`, `Host.scatter_q`, and `Host.nfeat_plan_out_q` when feature planning is enabled.
 
 For memory models, `full_q=1` is intentional: `DynamicAssembler` must wait for P2P completion (`delta_q`) before putting assembled batches in `full_q`. Pipeline depth controlled by `h2d_sem` (released 4× at startup).
+
+For memory models, the host-side queue defaults are fixed in code to `scatter=64` and `mem/mail/nfeat=32`. These values are intentionally not overridable via environment variables.
 
 ## Sweep Scripts
 

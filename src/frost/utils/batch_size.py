@@ -1,24 +1,25 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from numbers import Real
 from pathlib import Path
 
 
-DEFAULT_SPLIT = (8, 1, 1)
+DEFAULT_SPLIT = (7, 1.5, 1.5)
 DEFAULT_DATA_DIR = Path(__file__).resolve().parents[3] / "DATA"
 
 
-def _normalize_split(split: Sequence[int]) -> tuple[int, ...]:
+def _normalize_split(split: Sequence[Real]) -> tuple[float, ...]:
     if len(split) < 2:
         raise ValueError("split must contain at least a train and one eval partition.")
 
-    normalized: list[int] = []
+    normalized: list[float] = []
     for weight in split:
-        if isinstance(weight, bool) or not isinstance(weight, int):
-            raise TypeError("split weights must be integers.")
+        if isinstance(weight, bool) or not isinstance(weight, Real):
+            raise TypeError("split weights must be real numbers.")
         if weight <= 0:
             raise ValueError("split weights must be positive.")
-        normalized.append(weight)
+        normalized.append(float(weight))
     return tuple(normalized)
 
 
@@ -73,7 +74,7 @@ def _resolve_num_edges(dataset_or_num_edges: str | int, data_dir: Path) -> int:
 
 def get_max_macro_batch_size(
     dataset_or_num_edges: str | int,
-    split: Sequence[int] = DEFAULT_SPLIT,
+    split: Sequence[Real] = DEFAULT_SPLIT,
     data_dir: str | Path = DEFAULT_DATA_DIR,
 ) -> int:
     """Return a conservative upper bound for ``macro_batch_size``.
@@ -85,7 +86,7 @@ def get_max_macro_batch_size(
 
     Args:
         dataset_or_num_edges: Dataset name under ``DATA/`` or a known ``num_edges``.
-        split: Relative train/eval split weights. Default is ``(8, 1, 1)``.
+        split: Relative train/eval split weights. Default is ``(7, 1.5, 1.5)``.
         data_dir: Dataset root used when ``dataset_or_num_edges`` is a name.
 
     Returns:

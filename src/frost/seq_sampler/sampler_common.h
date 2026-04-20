@@ -10,7 +10,7 @@ namespace nb = nanobind;
 template <typename T>
 constexpr T kEps = static_cast<T>(1e-7);
 
-// 1. 修正后的核心转换函数
+// 1. Corrected core conversion helper.
 template <typename T>
 inline nb::ndarray<nb::numpy, T> vec2npy_generic(std::vector<T>& vec, size_t ndim, const size_t* shape_ptr) {
     // Keep ownership semantics uniform for both empty and non-empty arrays.
@@ -22,7 +22,7 @@ inline nb::ndarray<nb::numpy, T> vec2npy_generic(std::vector<T>& vec, size_t ndi
         delete reinterpret_cast<std::vector<T>*>(p);
     });
 
-    // nanobind 会在构造函数内拷贝 shape_ptr 指向的值
+    // nanobind copies the values pointed to by shape_ptr inside the constructor.
     return nb::ndarray<nb::numpy, T>(v_ptr->data(), ndim, shape_ptr, deleter);
 }
 template <typename T>
@@ -33,7 +33,7 @@ inline nb::ndarray<nb::numpy, T> vec2npy(std::vector<T>& vec) {
 
 template <typename T>
 inline nb::ndarray<nb::numpy, T> vec2npy_2d(std::vector<T>& vec, size_t d1, size_t d2) {
-    size_t s[2] = { d1, d2 }; // 栈内存，构造期间有效
+    size_t s[2] = { d1, d2 }; // Stack memory is fine here because it is only needed during construction.
     return vec2npy_generic(vec, 2, s);
 }
 
@@ -43,7 +43,7 @@ inline nb::ndarray<nb::numpy, T> vec2npy_3d(std::vector<T>& vec, size_t d1, size
     return vec2npy_generic(vec, 3, s);
 }
 
-// 3. TemporalGraph 结构保持不变
+// 3. TemporalGraph remains unchanged.
 template <typename ID_T, typename TIME_T>
 struct TemporalGraph {
     using IntArray = nb::ndarray<ID_T, nb::ndim<1>, nb::c_contig, nb::device::cpu>;

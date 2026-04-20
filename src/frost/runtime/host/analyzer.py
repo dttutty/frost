@@ -59,7 +59,7 @@ class StaticAnalyzer:
         in_q: DynamicPlanInQ,
         out_q: DynamicPlanOutQ,
         stop_ev: threading.Event,
-        handle_stale: bool,
+        if_carry_over_route: bool,
         output_dir: str | None,
         persist_all_updates_to_cpu: bool = False,
     ) -> None:
@@ -141,19 +141,21 @@ class MemoryAnalyzer(StaticAnalyzer):
         in_q: DynamicPlanInQ,
         out_q: DynamicPlanOutQ,
         stop_ev: threading.Event,
-        handle_stale: bool,
+        if_carry_over_route: bool,
         output_dir: str | None,
         persist_all_updates_to_cpu: bool = False,
+        current_batch_only: bool = False,
     ) -> ThreadBase:
         return DynamicPlanner(
             gpus_distance=gpu_dist,
             in_q=in_q,
             out_q=out_q,
             stop_ev=stop_ev,
-            handle_stale=handle_stale,
+            if_carry_over_route=if_carry_over_route,
             output_dir=output_dir,
             plan_kind="mail",
             persist_all_updates_to_cpu=persist_all_updates_to_cpu,
+            current_batch_only=current_batch_only,
         )
 
 
@@ -228,17 +230,19 @@ class APANMemoryAnalyzer(MemoryAnalyzer):
         in_q: DynamicPlanInQ,
         out_q: DynamicPlanOutQ,
         stop_ev: threading.Event,
-        handle_stale: bool,
+        if_carry_over_route: bool,
         output_dir: str | None,
         persist_all_updates_to_cpu: bool = False,
+        current_batch_only: bool = False,
     ) -> ThreadBase:
         return APANDynamicPlanner(
             gpus_distance=gpu_dist,
             in_q=in_q,
             out_q=out_q,
             stop_ev=stop_ev,
-            handle_stale=handle_stale,
+            if_carry_over_route=if_carry_over_route,
             output_dir=output_dir,
             plan_kind="mail",
             persist_all_updates_to_cpu=persist_all_updates_to_cpu,
+            current_batch_only=current_batch_only,
         )
