@@ -85,6 +85,8 @@ tmp/
 
 # Generated experiment artifacts
 seed_sweeps/**
+seed_sweeps_old/**
+experiments/**/latest_*
 experiments/**/configs/
 experiments/**/logs/
 experiments/**/progress*.md
