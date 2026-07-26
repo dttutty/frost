@@ -1,4 +1,10 @@
 {
+  "git.detectSubmodules": true,
+  "git.detectSubmodulesLimit": 30,
+  "git.autoRepositoryDetection": true,
+  "scm.alwaysShowRepositories": true,
+  "scm.repositories.selectionMode": "multiple",
+
   "ruff.nativeServer": "auto",
   "python.languageServer": "Pylance",
   "python.analysis.typeCheckingMode": "basic",
