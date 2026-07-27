@@ -1,5 +1,4 @@
 import logging
-import os
 import re
 import subprocess
 import threading
@@ -17,10 +16,10 @@ from frost.aliases.host import (
     StaticPlanInQ,
     StaticPlanOutQ,
 )
-from frost.protocols.analyzer_proto import AnalyzerProto
 from frost.runtime._thread_base import join_thread, put_shutdown_sentinel
 from frost.runtime.host.p2p_planner._dynamic_planner import DynamicPlanner
 from frost.runtime.host.p2p_planner._static_planner import StaticPlanner
+from frost.runtime.host.protocols import AnalyzerProto
 
 logger = logging.getLogger(__name__)
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")

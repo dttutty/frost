@@ -21,7 +21,6 @@ from frost.datatypes.env import Env
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.datatypes.sampled_layout import SampledLayoutView
-from frost.protocols.analyzer_proto import AnalyzerProto
 from frost.protocols.ngh_sampler_proto import NghSamplerProto
 from frost.runtime._thread_base import (
     destroy_process_group,
@@ -30,6 +29,7 @@ from frost.runtime._thread_base import (
 )
 from frost.runtime.host import PlanRouter, Scatter
 from frost.runtime.host._batch_balance import make_balance_plan
+from frost.runtime.host.protocols import AnalyzerProto
 from frost.neg_sampler import PrecomputedNegSampler
 
 logger = logging.getLogger(__name__)
