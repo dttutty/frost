@@ -26,6 +26,8 @@ dependencies = [
     "scikit-learn>=1.0",
 ]
 
+[project.scripts]
+
 [dependency-groups]
 dev = [
     "build",
@@ -51,13 +53,13 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.ruff]
-extend-exclude = ["overleaf", "third_party", "third_party_paper"]
+extend-exclude = ["third_party", "third_party_papers"]
 
 [tool.ruff.lint]
-exclude = ["overleaf", "third_party", "third_party_paper"]
+exclude = ["third_party", "third_party_papers"]
 
 [tool.ruff.format]
-exclude = ["overleaf", "third_party", "third_party_paper"]
+exclude = ["third_party", "third_party_papers"]
 
 [tool.mypy]
 python_version = "3.12"
