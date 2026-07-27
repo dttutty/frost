@@ -46,6 +46,7 @@ ENV/
 # Logs & outputs
 outputs/
 logs/
+artifacts/
 *.log
 
 # Experiment

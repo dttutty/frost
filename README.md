@@ -95,8 +95,9 @@ uv run torchrun --nproc_per_node=3 run.py <hydra overrides...>
 | [`run.py`](run.py) | Hydra entry point for distributed experiments |
 | [`configs/`](configs/) | Experiment configuration and Hydra config groups |
 | [`src/frost/`](src/frost/) | Runtime, samplers, memory system, and model implementations |
-| [`scripts/`](scripts/) | Utility scripts for presets, sweeps, and dataset helpers |
+| [`scripts/`](scripts/) | Thin CLI wrappers plus legacy experiment entry points being migrated |
 | [`tests/`](tests/) | Test suite |
+| `artifacts/` | Ignored benchmark outputs; override with `FROST_ARTIFACT_ROOT` |
 | `DATA/` | Locally ignored dataset bundle or link to shared storage |
 | [`eval_edgebank.py`](eval_edgebank.py) | Standalone EdgeBank baseline evaluator |
 
