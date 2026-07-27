@@ -80,6 +80,8 @@ Launch a preset:
 
 Inspect the equivalent `torchrun` command without launching:
 
+Run a declared seed or model/dataset sweep sequentially:
+
 Run a manual experiment:
 
 ```bash
@@ -95,6 +97,7 @@ uv run torchrun --nproc_per_node=3 run.py <hydra overrides...>
 | [`run.py`](run.py) | Hydra entry point for distributed experiments |
 | [`configs/`](configs/) | Experiment configuration and Hydra config groups |
 | [`src/frost/`](src/frost/) | Runtime, samplers, memory system, and model implementations |
+| [`scripts/`](scripts/) | Specialized experiment and measurement frontends |
 | [`tests/`](tests/) | Test suite |
 | `artifacts/` | Ignored benchmark outputs; override with `FROST_ARTIFACT_ROOT` |
 | `DATA/` | Locally ignored dataset bundle or link to shared storage |

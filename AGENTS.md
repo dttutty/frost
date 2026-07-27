@@ -154,7 +154,7 @@ For memory models, `full_q=1` is intentional: `DynamicAssembler` must wait for P
 
 For memory models, the host-side queue defaults are fixed in code to `scatter=64` and `mem/mail/nfeat=32`. These values are intentionally not overridable via environment variables.
 
-## Sweep Scripts
+## Sweeps
 
 ## Adding a New Encoder
 
