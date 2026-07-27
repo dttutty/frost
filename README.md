@@ -23,7 +23,7 @@ uv sync --python 3.12
 
 ### Datasets
 
-Mirror the prepared dataset bundle into [`DATA/`](DATA/) so runtime paths match `DATA/<dataset>/...`. If you host the datasets on Hugging Face, set the repository id via an environment variable before downloading.
+Mirror the prepared dataset bundle into the locally ignored `DATA/` path so runtime paths match `DATA/<dataset>/...`. `DATA/` may be a directory or a symbolic link to shared storage. If you host the datasets on Hugging Face, set the repository id via an environment variable before downloading.
 
 ```bash
 export HF_DATASET_REPO=<your-dataset-repo>
@@ -83,7 +83,7 @@ uv run torchrun --nproc_per_node=3 run.py <hydra overrides...>
 | [`src/frost/`](src/frost/) | Runtime, samplers, memory system, and model implementations |
 | [`scripts/`](scripts/) | Utility scripts for presets, sweeps, and dataset helpers |
 | [`tests/`](tests/) | Test suite |
-| [`DATA/`](DATA/) | Curated dataset bundle mirrored from Hugging Face |
+| `DATA/` | Locally ignored dataset bundle or link to shared storage |
 | [`eval_edgebank.py`](eval_edgebank.py) | Standalone EdgeBank baseline evaluator |
 
 ## Notes

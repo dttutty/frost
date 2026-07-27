@@ -79,6 +79,7 @@ DATA/DGB*
 DATA/.temp
 DATA/TGL*
 TGL_DATA/
+/DATA
 tmp/
 *.tar
 *.tar.gz
@@ -99,6 +100,8 @@ experiments/**/*.csv
 experiments/**/*.tsv
 experiments/**/*.txt
 experiments/**/*.json
+experiments/**/*.pid
+experiments/**/*.stdout
 
 download_data.sh
 *.txt
