@@ -19,9 +19,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Initialize benchmark baselines
-        run: git submodule update --init --depth 1 third_party/tgl third_party/DyGLib
-
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
