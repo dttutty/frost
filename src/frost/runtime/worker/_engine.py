@@ -266,7 +266,6 @@ class Worker(
         )
         self._init_metrics()
 
-    @torch.no_grad()
     def run(self) -> None:
         """Main training loop: consume ``full_q`` and dispatch train/eval/epoch-end.
 

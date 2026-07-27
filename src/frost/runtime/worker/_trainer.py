@@ -371,6 +371,7 @@ class WorkerTrainerMixin:
         self.train_loss_tracker.update(loss.detach().float())
         self._release_meta_tensors(meta)
 
+    @torch.no_grad()
     def eval(self, meta: Meta) -> None:
         """Execute one evaluation step (val or test) for the given batch.
 
