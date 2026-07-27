@@ -1,10 +1,15 @@
 """DyGLib-style historical negative sampler (eval only, train uses random)."""
+
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 
 class HistoricalNegLinkSampler:
@@ -76,7 +81,7 @@ class HistoricalNegLinkSampler:
     # Setup helpers
     # ------------------------------------------------------------------
 
-    def init_from_df(self, df: "pd.DataFrame") -> None:  # type: ignore[name-defined]
+    def init_from_df(self, df: pd.DataFrame) -> None:
         """Must be called once after the edge DataFrame is available."""
         self._src_np = df["src"].to_numpy(dtype=np.int64)
         self._dst_np = df["dst"].to_numpy(dtype=np.int64)
@@ -85,9 +90,7 @@ class HistoricalNegLinkSampler:
         self._earliest_time = float(self._ts_np.min())
         unique_src = np.unique(self._src_np)
         self._possible_edges = {
-            (s, d)
-            for s in unique_src.tolist()
-            for d in self._unique_dst.tolist()
+            (s, d) for s in unique_src.tolist() for d in self._unique_dst.tolist()
         }
 
     def set_batch_context(
@@ -107,7 +110,11 @@ class HistoricalNegLinkSampler:
     # ------------------------------------------------------------------
 
     def _edges_in_interval(self, t_start: float, t_end: float) -> set[tuple[int, int]]:
-        assert self._ts_np is not None and self._src_np is not None and self._dst_np is not None
+        assert (
+            self._ts_np is not None
+            and self._src_np is not None
+            and self._dst_np is not None
+        )
         mask = (self._ts_np >= t_start) & (self._ts_np <= t_end)
         return set(zip(self._src_np[mask].tolist(), self._dst_np[mask].tolist()))
 
@@ -118,7 +125,9 @@ class HistoricalNegLinkSampler:
         candidates = list(self._possible_edges - batch_edges)
         if not candidates:
             raise RuntimeError("No valid negative edges remain after collision check.")
-        idx = self._rng.choice(len(candidates), size=size, replace=len(candidates) < size)
+        idx = self._rng.choice(
+            len(candidates), size=size, replace=len(candidates) < size
+        )
         srcs = np.array([candidates[i][0] for i in idx], dtype=np.int64)
         dsts = np.array([candidates[i][1] for i in idx], dtype=np.int64)
         return srcs, dsts
@@ -148,7 +157,10 @@ class HistoricalNegLinkSampler:
             return torch.from_numpy(self._unique_dst[idx])
 
         batch_edges = set(zip(self._batch_src.tolist(), self._batch_dst.tolist()))
-        historical = self._edges_in_interval(self._earliest_time, self._batch_start_time)
+        assert self._earliest_time is not None
+        historical = self._edges_in_interval(
+            self._earliest_time, self._batch_start_time
+        )
         current = self._edges_in_interval(self._batch_start_time, self._batch_end_time)
         unique_hist = historical - current
 

@@ -1,9 +1,11 @@
 """Random negative link sampler — on-the-fly uniform or dst-partition sampling."""
+
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 import torch
 
 from frost.neg_sampler._utils import _load_unique_dst_nodes, resolve_dataset_dir
@@ -34,7 +36,7 @@ class RandomNegLinkSampler:
         self.seed = seed
         self.collision_check = collision_check
         self.replacement = replacement
-        
+
         # State to store true destinations of the current batch for collision check
         self._batch_dst: torch.Tensor | None = None
 
@@ -50,7 +52,9 @@ class RandomNegLinkSampler:
             )
 
         if self.candidates.numel() == 0:
-            raise ValueError("RandomNegLinkSampler requires at least one candidate node.")
+            raise ValueError(
+                "RandomNegLinkSampler requires at least one candidate node."
+            )
 
         self._generator: torch.Generator | None = None
         self.reset()
@@ -110,35 +114,52 @@ class RandomNegLinkSampler:
             return self.candidates[sampled_indices]
 
         # Slower path: enforces no-replacement and/or collision checking
-        if self.collision_check and (self._batch_dst is None or self._batch_dst.numel() != n_src):
+        if self.collision_check and (
+            self._batch_dst is None or self._batch_dst.numel() != n_src
+        ):
             raise RuntimeError(
                 "collision_check=True requires set_batch_context() to be called before "
                 "sample() with the exact same batch size."
             )
 
         sampled_indices = torch.empty(n_samples, dtype=torch.long)
+        batch_dst = self._batch_dst
+        if self.collision_check:
+            assert batch_dst is not None
 
         for i in range(n_src):
-            pos_dst = self._batch_dst[i].item() if self.collision_check else -1
+            pos_dst = batch_dst[i].item() if batch_dst is not None else -1
 
             if self.replacement:
                 # With replacement, but avoid pos_dst
-                row_indices = []
+                row_indices: list[int] = []
                 while len(row_indices) < self.n_neg:
-                    idx = torch.randint(0, self.candidates.numel(), (self.n_neg,), generator=self._generator)
+                    idx = torch.randint(
+                        0,
+                        self.candidates.numel(),
+                        (self.n_neg,),
+                        generator=self._generator,
+                    )
                     if self.collision_check:
                         cands = self.candidates[idx]
                         idx = idx[cands != pos_dst]
                     row_indices.extend(idx.tolist())
                 # Take exactly n_neg
-                sampled_indices[i * self.n_neg : (i + 1) * self.n_neg] = torch.tensor(row_indices[:self.n_neg])
-            
+                sampled_indices[i * self.n_neg : (i + 1) * self.n_neg] = torch.tensor(
+                    row_indices[: self.n_neg]
+                )
+
             else:
                 # Without replacement, optionally avoid pos_dst
-                row_indices_set = set()
+                row_indices_set: set[int] = set()
                 row_indices = []
                 while len(row_indices) < self.n_neg:
-                    idx = torch.randint(0, self.candidates.numel(), (self.n_neg * 2,), generator=self._generator)
+                    idx = torch.randint(
+                        0,
+                        self.candidates.numel(),
+                        (self.n_neg * 2,),
+                        generator=self._generator,
+                    )
                     if self.collision_check:
                         cands = self.candidates[idx]
                         idx = idx[cands != pos_dst]
@@ -148,6 +169,8 @@ class RandomNegLinkSampler:
                             row_indices.append(x)
                             if len(row_indices) == self.n_neg:
                                 break
-                sampled_indices[i * self.n_neg : (i + 1) * self.n_neg] = torch.tensor(row_indices)
+                sampled_indices[i * self.n_neg : (i + 1) * self.n_neg] = torch.tensor(
+                    row_indices
+                )
 
         return self.candidates[sampled_indices]

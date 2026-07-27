@@ -15,7 +15,7 @@ import threading
 
 import numpy as np
 
-from frost.aliases.host import DynamicPlanInQ, DynamicPlanOutQ
+from frost.runtime.host.types import DynamicPlanInQ, DynamicPlanOutQ
 from frost.datatypes.sampled_layout import SampledLayoutView
 from frost.runtime._thread_base import ThreadBase
 from frost.runtime.host.p2p_planner._dynamic_planner import (
@@ -62,7 +62,8 @@ class StaticAnalyzer:
         if_carry_over_route: bool,
         output_dir: str | None,
         persist_all_updates_to_cpu: bool = False,
-    ) -> None:
+        current_batch_only: bool = False,
+    ) -> ThreadBase | None:
         return None
 
     def get_mail_plan_inputs(

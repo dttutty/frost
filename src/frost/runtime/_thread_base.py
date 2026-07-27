@@ -52,7 +52,9 @@ def join_thread(
         logger_.warning("Thread %s did not exit within %.1fs", thread.name, timeout_s)
 
 
-def destroy_process_group(sync: bool, logger_: logging.Logger, timeout_s: float = 5.0) -> None:
+def destroy_process_group(
+    sync: bool, logger_: logging.Logger, timeout_s: float = 5.0
+) -> None:
     """Best-effort distributed teardown that avoids hanging forever."""
     if not dist.is_available() or not dist.is_initialized():
         return
@@ -122,7 +124,6 @@ class ThreadBase(threading.Thread):
                     rank = dist.get_rank()
             except Exception:
                 pass
-            import os
             import sys
 
             sys.stderr.write(
@@ -187,7 +188,6 @@ class StreamThreadBase(threading.Thread):
                     rank = dist.get_rank()
             except Exception:
                 pass
-            import os
             import sys
 
             sys.stderr.write(

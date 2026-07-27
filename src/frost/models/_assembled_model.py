@@ -22,9 +22,9 @@ from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.meta import Meta
 from frost.datatypes.tasks import BoxTask, DirectWritebackRequest, MemTask
-from frost.protocols.cuda_event_proto import CudaEvent
-from frost.protocols.mem_updater_proto import MemoryUpdaterProto
-from frost.protocols.postman_proto import PostmanProto
+from frost.runtime.protocols import CudaEvent
+from frost.models.protocols import MemoryUpdaterProto
+from frost.models.protocols import PostmanProto
 from frost.runtime.worker.p2p_syncer.utils._interaction_ops import (
     generate_interaction_mails,
 )
@@ -236,7 +236,6 @@ class AssembledModel(nn.Module):
         n_src = meta.n_src
         fanout = meta.fanout if meta.fanout is not None else []
         assert meta.flat_graph is not None
-        root_new_mem_for_dump: MemEntry | None = None
         delay_box_task = self._delay_box_task_for_structural_mail
         pending_box_root_new_mem: MemEntry | None = None
         pending_box_pos_efeat: torch.Tensor | None = None
@@ -292,8 +291,6 @@ class AssembledModel(nn.Module):
                     ts=meta.flat_graph.detached_ts,
                     data=meta.flat_graph.detached_mem,
                 )
-                root_new_mem_for_dump = root_new_mem
-
                 root_new_mem_clone = root_new_mem.clone()
 
                 box_pos_efeat = (

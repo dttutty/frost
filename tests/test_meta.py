@@ -2,9 +2,8 @@
 
 import torch
 
-from frost.datatypes.graph import FlatGraph, HierGraph
+from frost.datatypes.graph import FlatGraph
 from frost.datatypes.meta import Meta
-from frost.datatypes.plan import PlanSet
 
 
 class TestMetaBasic:

@@ -8,7 +8,7 @@ from queue import Queue as Q
 import numpy as np
 
 from frost.ablation import DynamicStateAblation
-from frost.aliases.host import (
+from frost.runtime.host.types import (
     DynamicPlanInQ,
     DynamicPlanOutQ,
     LayoutBundle,
@@ -98,7 +98,9 @@ def _resolve_visible_gpu_ids(
 def _parse_nvidia_smi_topology(
     topo_output: str,
 ) -> tuple[dict[int, dict[int, str]], dict[int, int | None]]:
-    lines = [_ANSI_ESCAPE_RE.sub("", line).rstrip() for line in topo_output.splitlines()]
+    lines = [
+        _ANSI_ESCAPE_RE.sub("", line).rstrip() for line in topo_output.splitlines()
+    ]
     content: list[str] = []
     for line in lines:
         stripped = line.strip()
@@ -110,9 +112,7 @@ def _parse_nvidia_smi_topology(
     if not content:
         raise ValueError("nvidia-smi topo output is empty")
 
-    header_tokens = [
-        tok.strip() for tok in re.split(r"\t+", content[0]) if tok.strip()
-    ]
+    header_tokens = [tok.strip() for tok in re.split(r"\t+", content[0]) if tok.strip()]
     gpu_headers = []
     for token in header_tokens:
         match = _GPU_LABEL_RE.match(token)
@@ -391,7 +391,9 @@ class PlanRouter:
         if self.mail_plan_in_q is not None:
             box_needs, box_updates = self.analyzer.get_mail_plan_inputs(layouts)
             box_raw_need_counts = self.analyzer.get_mail_plan_raw_need_counts(layouts)
-            self.mail_plan_in_q.put((box_needs, box_updates, box_raw_need_counts, metas))
+            self.mail_plan_in_q.put(
+                (box_needs, box_updates, box_raw_need_counts, metas)
+            )
 
         if self.nfeat_plan_in_q is not None:
             nfeat_needs = self.analyzer.get_feat_plan_inputs(layouts)

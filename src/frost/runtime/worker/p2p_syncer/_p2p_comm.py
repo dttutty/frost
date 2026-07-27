@@ -4,12 +4,14 @@ import threading
 import torch
 import torch.distributed as dist
 
-from frost.aliases.syncer import BoxP2PQ, MemP2PQ
-from frost.aliases.worker import DeltaQueue
+from frost.runtime.worker.types import BoxP2PQ, MemP2PQ
+from frost.runtime.worker.types import DeltaQueue
 from frost.datatypes.env import Env
 from frost.runtime._thread_base import StreamThreadBase
 
 logger = logging.getLogger(__name__)
+
+
 def _copy_single_rank_p2p_round(mem_p2p, box_p2p) -> None:
     """Bypass NCCL when the P2P group has a single rank.
 

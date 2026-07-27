@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Literal
+from typing import Literal, Protocol
+
+
+class CreditGate(Protocol):
+    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool: ...
+
+    def release(self, n: int = 1) -> None: ...
 
 
 class BatchAwareCreditManager:

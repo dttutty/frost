@@ -6,7 +6,7 @@ from typing import Literal
 import numpy as np
 import torch
 
-from frost.aliases.host import MetasStNeed
+from frost.runtime.host.types import MetasStNeed
 from frost.datatypes.plan import StaticPlan
 from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 from frost.utils.tensor_set import TensorSet

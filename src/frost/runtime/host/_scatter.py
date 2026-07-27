@@ -8,7 +8,7 @@ from typing import Literal, cast
 
 import torch.distributed as dist
 
-from frost.aliases.host import MetaBundle
+from frost.runtime.host.types import MetaBundle
 from frost.datatypes.env import Env
 from frost.datatypes.meta import Meta
 from frost.datatypes.plan import DynamicPlan, PlanSet, StaticPlan
@@ -108,7 +108,9 @@ class Scatter(ThreadBase):
         # Return result from worker rank 0
         worker_ranks = [r for r in range(self.world_size) if r != self.host_rank]
         result = gather_list[worker_ranks[0]]
-        assert isinstance(result, Result), "Object gathered from worker must be a Result"
+        assert isinstance(result, Result), (
+            "Object gathered from worker must be a Result"
+        )
         return result
 
     def logic(self) -> None:
@@ -144,7 +146,9 @@ class Scatter(ThreadBase):
                     mem_plan = self.mem_plan_out_q.get(block=True)
                     mem_wait_end = time.perf_counter()
                     if self._timing_enabled:
-                        self._mem_plan_wait_s_curve.append(mem_wait_end - mem_wait_start)
+                        self._mem_plan_wait_s_curve.append(
+                            mem_wait_end - mem_wait_start
+                        )
                     if mem_plan is None and self.stop_ev.is_set():
                         self._scatter_to_workers([None] * self.n_gpu)
                         break

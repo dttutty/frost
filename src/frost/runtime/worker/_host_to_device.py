@@ -14,7 +14,7 @@ from typing import Literal, cast
 import torch
 
 from frost.datatypes.meta import Meta
-from frost.protocols.cuda_event_proto import CudaEvent
+from frost.runtime.protocols import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
 from frost.runtime.worker._static_assembler import StaticAssembler
 from frost.shm.ring_buf import RingBuf

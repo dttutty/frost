@@ -1,9 +1,8 @@
 """Tests for MemBoxStore and MemBoxStoreManager."""
 
 from dataclasses import dataclass
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 import torch
 
 from frost.shm.mem_mgr import MemBoxStore

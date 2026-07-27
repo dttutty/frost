@@ -11,30 +11,17 @@ import json
 import os
 import threading
 import time
-from pathlib import Path
 from queue import Queue as Q
-from typing import Literal, cast
+from typing import Literal
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-try:
-    import psutil
-except ImportError:  # pragma: no cover - optional dependency in prod envs
-    psutil = None  # type: ignore[assignment]
-from torch.distributed.algorithms.ddp_comm_hooks.default_hooks import allreduce_hook
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torchmetrics import MetricCollection
-from torchmetrics.aggregation import MeanMetric
-from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
-from torchmetrics.functional.classification import (
-    binary_auroc,
-    binary_average_precision,
-)
 
 from frost.ablation import DynamicStateAblation
-from frost.aliases.syncer import (
+from frost.runtime.worker.types import (
     BoxP2PQ,
     BoxTaskQ,
     BoxWrQ,
@@ -42,23 +29,33 @@ from frost.aliases.syncer import (
     MemTaskQ,
     MemWrQ,
 )
-from frost.aliases.worker import AssembledQ, DeltaQueue, H2DOutQ, ReceivedQ
+from frost.runtime.worker.types import AssembledQ, DeltaQueue, H2DOutQ, ReceivedQ
 from frost.datatypes.env import Env
-from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.models._assembled_model import AssembledModel
-from frost.protocols.mem_updater_proto import MemoryUpdaterProto
-from frost.protocols.postman_proto import PostmanProto
+from frost.models.protocols import MemoryUpdaterProto
+from frost.models.protocols import PostmanProto
 from frost.runtime._thread_base import (
     destroy_process_group,
-    join_thread,
-    put_shutdown_sentinel,
 )
 from frost.runtime.worker._direct_writeback import DirectDynamicStateWriter
+from frost.runtime.worker._checkpoint import WorkerCheckpointMixin
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
 from frost.runtime.worker._h2d_credit import BatchAwareCreditManager
-from frost.runtime.worker._host_to_device import H2D
+from frost.runtime.worker._pipeline import (
+    WorkerPipelineMixin,
+    _initial_h2d_pipeline_slots,
+)
 from frost.runtime.worker._receiver import Receiver as Receiver
+from frost.runtime.worker._trainer import WorkerTrainerMixin
+from frost.runtime.worker._telemetry import (
+    _discover_sibling_rank_pids,
+    _get_bool_env,
+    _get_non_negative_int_env,
+    _get_optional_non_negative_int_env,
+    _sample_total_cpu_time_s,
+    logical_cpu_count,
+)
 from frost.runtime.worker.p2p_syncer._p2p_comm import P2PQHandler
 from frost.runtime.worker.p2p_syncer._task_handlers import (
     MemTaskHandler,
@@ -69,203 +66,13 @@ from frost.shm.mem_mgr import MemBoxStore
 from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
-_CLOCK_TICKS_PER_SEC = max(int(os.sysconf("SC_CLK_TCK")), 1)
 
 
-def _tgb_reciprocal_ranks(
-    positive_scores: torch.Tensor,
-    negative_scores: torch.Tensor,
-    negative_valid_mask: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Return TGB tie-aware reciprocal ranks for fixed-width candidates."""
-    if positive_scores.dim() != 1:
-        raise ValueError(
-            f"positive_scores must be 1D, got shape {tuple(positive_scores.shape)}"
-        )
-    if negative_scores.dim() != 2:
-        raise ValueError(
-            f"negative_scores must be 2D, got shape {tuple(negative_scores.shape)}"
-        )
-    if positive_scores.shape[0] != negative_scores.shape[0]:
-        raise ValueError(
-            "positive_scores and negative_scores must contain the same number "
-            f"of queries, got {positive_scores.shape[0]} and {negative_scores.shape[0]}"
-        )
-    if negative_valid_mask is not None:
-        if negative_valid_mask.shape != negative_scores.shape:
-            raise ValueError(
-                "negative_valid_mask must match negative_scores, got "
-                f"{tuple(negative_valid_mask.shape)} and "
-                f"{tuple(negative_scores.shape)}"
-            )
-        negative_valid_mask = negative_valid_mask.to(
-            device=negative_scores.device, dtype=torch.bool
-        )
-
-    positive_scores = positive_scores.unsqueeze(1)
-    if negative_valid_mask is None:
-        negative_valid_mask = torch.ones_like(negative_scores, dtype=torch.bool)
-    optimistic_rank = ((negative_scores > positive_scores) & negative_valid_mask).sum(
-        dim=1
-    )
-    pessimistic_rank = ((negative_scores >= positive_scores) & negative_valid_mask).sum(
-        dim=1
-    )
-    rank = 0.5 * (optimistic_rank + pessimistic_rank).float() + 1.0
-    return rank.reciprocal()
-
-
-def _get_non_negative_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    value = int(raw)
-    if value < 0:
-        raise ValueError(f"{name} must be >= 0")
-    return value
-
-
-def _get_optional_non_negative_int_env(name: str) -> int | None:
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return None
-    value = int(raw)
-    if value < 0:
-        raise ValueError(f"{name} must be >= 0")
-    return value
-
-
-def _get_bool_env(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _get_memory_worker_queue_size_env(default: int = 1) -> int:
-    raw = os.getenv("FROST_MEMORY_WORKER_QUEUE_SIZE")
-    if raw is None or raw.strip() == "":
-        return default
-    value = int(raw)
-    if value < 1:
-        raise ValueError("FROST_MEMORY_WORKER_QUEUE_SIZE must be >= 1")
-    return value
-
-
-def _discover_sibling_rank_pids() -> list[int]:
-    """Return all sibling rank PIDs launched under the same torchrun parent.
-
-    We rely on the launcher parent rather than distributed collectives so the
-    benchmark can include both worker ranks and the host process without adding
-    any extra synchronization requirements to the host runtime.
-    """
-
-    pid = os.getpid()
-    if psutil is None:  # pragma: no cover - guarded by benchmark flag
-        return [pid]
-    try:
-        if psutil is not None:
-            proc = psutil.Process(pid)
-            parent = proc.parent()
-            if parent is None:
-                return [pid]
-            child_pids = sorted(
-                {child.pid for child in parent.children(recursive=False)}
-            )
-            return child_pids or [pid]
-
-        stat_path = Path(f"/proc/{pid}/stat")
-        text = stat_path.read_text(encoding="utf-8")
-        rparen = text.rfind(")")
-        if rparen == -1:
-            return [pid]
-        tail = text[rparen + 2 :].split()
-        parent_pid = int(tail[1])
-        if parent_pid <= 1:
-            return [pid]
-        child_pids: list[int] = []
-        for entry in Path("/proc").iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                sibling_text = (entry / "stat").read_text(encoding="utf-8")
-                sibling_rparen = sibling_text.rfind(")")
-                if sibling_rparen == -1:
-                    continue
-                sibling_tail = sibling_text[sibling_rparen + 2 :].split()
-                if int(sibling_tail[1]) == parent_pid:
-                    child_pids.append(int(entry.name))
-            except (OSError, ValueError):
-                continue
-        return sorted(set(child_pids)) or [pid]
-    except (psutil.Error, OSError, ValueError):
-        return [pid]
-
-
-def _sample_total_cpu_time_s(pid_list: list[int]) -> tuple[float, list[int]]:
-    """Return summed user+system CPU time over tracked processes."""
-
-    total = 0.0
-    live_pids: list[int] = []
-    for pid in pid_list:
-        try:
-            if psutil is not None:
-                proc = psutil.Process(pid)
-                cpu_times = proc.cpu_times()
-                total += float(cpu_times.user) + float(cpu_times.system)
-            else:
-                text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-                rparen = text.rfind(")")
-                if rparen == -1:
-                    continue
-                tail = text[rparen + 2 :].split()
-                utime_ticks = int(tail[11])
-                stime_ticks = int(tail[12])
-                total += (utime_ticks + stime_ticks) / _CLOCK_TICKS_PER_SEC
-        except (
-            psutil.NoSuchProcess if psutil is not None else ProcessLookupError,
-            psutil.AccessDenied if psutil is not None else PermissionError,
-            psutil.ZombieProcess if psutil is not None else ChildProcessError,
-            OSError,
-            ValueError,
-        ):
-            continue
-        live_pids.append(pid)
-    return total, live_pids
-
-
-def _initial_h2d_pipeline_slots(
-    *,
-    p2p_world_size: int,
-) -> int:
-    # Single-worker memory runs have no cross-GPU overlap benefit, and
-    # allowing two batches in flight has proven much more timing-sensitive
-    # than the serialized one-batch path. Keep that configuration at one
-    # batch in flight by default.
-    if p2p_world_size == 1:
-        return 2
-    return 4
-
-
-class P2PGuardCommHook:
-    """Wait for P2P memory sync to finish before the first AllReduce of each training step."""
-
-    def __init__(self, p2p_sem: threading.Semaphore) -> None:
-        self.p2p_sem = p2p_sem
-        self._need_acquire = False
-
-    def arm(self) -> None:
-        """Call at the start of each training step to arm the guard for this round."""
-        self._need_acquire = True
-
-    def __call__(self, state: dist.ProcessGroup, bucket: dist.GradBucket):  # type: ignore
-        if self._need_acquire:
-            self.p2p_sem.acquire()
-            self._need_acquire = False
-        return allreduce_hook(state, bucket)
-
-
-class Worker:
+class Worker(
+    WorkerPipelineMixin,
+    WorkerTrainerMixin,
+    WorkerCheckpointMixin,
+):
     """Distributed training worker that owns the GPU-side pipeline.
 
     Each worker process corresponds to one GPU rank. It manages a chain of
@@ -317,6 +124,7 @@ class Worker:
     direct_state_writer: DirectDynamicStateWriter | None = None
 
     model: AssembledModel | DDP
+    optimizer: torch.optim.Optimizer
     result_q: Q[Result]
 
     def __init__(
@@ -429,11 +237,7 @@ class Worker:
                     if cpu_benchmark_pid_list
                     else _discover_sibling_rank_pids()
                 )
-                if psutil is not None:
-                    logical_cpu_count = int(psutil.cpu_count(logical=True) or 1)
-                else:
-                    logical_cpu_count = int(os.cpu_count() or 1)
-                self._cpu_logical_count = max(logical_cpu_count, 1)
+                self._cpu_logical_count = logical_cpu_count()
         self._shutdown_done = False
 
         # --- Synchronization primitives ---
@@ -462,544 +266,7 @@ class Worker:
         )
         self._init_metrics()
 
-    def _init_pipeline(
-        self,
-        ring_buf: RingBuf,
-        nfeat: torch.Tensor | None,
-        efeat: torch.Tensor | None,
-    ) -> None:
-        """Create all queues and background pipeline threads."""
-        has_mem = self.mem_box_store is not None
-        use_async_dynamic_state_pipeline = (
-            has_mem and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
-        )
-        memory_q_size = _get_memory_worker_queue_size_env(default=1)
-        stateless_q_size = self.no_memory_queue_size if not has_mem else memory_q_size
-        self.result_q = Q(maxsize=1)
-        self.received_q = Q(maxsize=stateless_q_size)
-        self.full_q = Q(maxsize=stateless_q_size)
-
-        self.receiver = Receiver(
-            env=self.env,
-            received_q=self.received_q,
-            result_q=self.result_q,
-            stop_ev=self.stop_ev,
-            ring_buf=ring_buf,
-        )
-
-        if has_mem:
-            assert self.mem_box_store is not None
-            if use_async_dynamic_state_pipeline:
-                self.delta_queue = Q(maxsize=memory_q_size)
-            self.h2d_out_q = Q(maxsize=memory_q_size)
-            if use_async_dynamic_state_pipeline:
-                self._init_mem_box_threads()
-            self.dy_asm = DynamicAssembler(
-                mem_box_store=self.mem_box_store,
-                h2d_out_q=self.h2d_out_q,
-                delta_queue=self.delta_queue,
-                full_q=self.full_q,
-                stop_ev=self.stop_ev,
-                device=self.device,
-                h2d_sem=self.h2d_sem,
-                n_neg=self.n_neg,
-                sample_4_neg=ring_buf.sample_4_neg,
-                use_shm_instead=self.use_shm_instead,
-                mem_task_q=self.mem_task_q,
-                box_task_q=self.box_task_q,
-                mem_wr_q=self.mem_wr_q,
-                box_wr_q=self.box_wr_q,
-                dynamic_state_ablation=self.dynamic_state_ablation,
-            )
-            h2d_dest_q = self.h2d_out_q
-        else:
-            h2d_dest_q = self.full_q
-
-        self.h2d = H2D(
-            ring_buf=ring_buf,
-            nfeat=nfeat,
-            efeat=efeat,
-            device=self.device,
-            n_neg=self.n_neg,
-            in_q=self.received_q,
-            out_q=h2d_dest_q,
-            stop_ev=self.stop_ev,
-        )
-
-    def _init_mem_box_threads(self) -> None:
-        """Create memory/box sync threads. Called only when mem_box_store is present."""
-        assert self.mem_updater is not None
-        assert self.mem_box_store is not None
-        assert self.delta_queue is not None
-        assert self.mail_combine is not None
-        memory_q_size = _get_memory_worker_queue_size_env(default=1)
-
-        self.mem_task_q = Q(maxsize=memory_q_size)
-        self.box_task_q = Q(maxsize=memory_q_size)
-        self.mem_p2p_q = Q(maxsize=memory_q_size)
-        self.box_p2p_q = Q(maxsize=memory_q_size)
-        self.mem_wr_q = Q(maxsize=memory_q_size)
-        self.box_wr_q = Q(maxsize=memory_q_size)
-
-        self.mem_handler = MemTaskHandler(
-            h2d_sem=self.h2d_sem,
-            mem_task_q=self.mem_task_q,
-            mem_p2p_q=self.mem_p2p_q,
-            stop_ev=self.stop_ev,
-            device=self.device,
-            mem_wr_q=self.mem_wr_q,
-        )
-        self.mem_wr = SharedMemWriter(
-            shared_data=self.mem_box_store.mem,
-            shared_ts=self.mem_box_store.mem_ts,
-            h2d_sem=self.h2d_sem,
-            stop_ev=self.stop_ev,
-            wr_q=self.mem_wr_q,
-            device=self.device,
-            name="mem_wr",
-        )
-        self.box_handler = MessageHandler(
-            h2d_sem=self.h2d_sem,
-            box_task_q=self.box_task_q,
-            box_p2p_q=self.box_p2p_q,
-            stop_ev=self.stop_ev,
-            mail_combine=self.mail_combine,
-            device=self.device,
-            box_wr_q=self.box_wr_q,
-            postman=self.postman,
-            n_neg=self.n_neg,
-            fanout=self.ring_buf.fanout,
-        )
-        self.box_wr = BoxMailWriter(
-            mem_box_store=self.mem_box_store,
-            h2d_sem=self.h2d_sem,
-            stop_ev=self.stop_ev,
-            wr_q=self.box_wr_q,
-            device=self.device,
-            name="box_wr",
-            n_neg=self.n_neg,
-            fanout=self.ring_buf.fanout,
-        )
-        self.p2p_q_handler = P2PQHandler(
-            env=self.env,
-            mem_p2p_q=self.mem_p2p_q,
-            box_p2p_q=self.box_p2p_q,
-            nccl_p2p=self.nccl_p2p,
-            p2p_sem=self.p2p_sem,
-            stop_ev=self.stop_ev,
-            delta_queue=self.delta_queue,
-            device=self.device,
-            use_shm_instead=self.use_shm_instead,
-        )
-
-    def _init_model(
-        self,
-        encoder: nn.Module,
-        mem_updater: MemoryUpdaterProto | None,
-        predictor: nn.Module,
-        postman: PostmanProto | None,
-        criterion: torch.nn.Module,
-        optimizer: Literal["adam", "sgd"],
-        ring_buf: RingBuf,
-        compile_model: bool = True,
-    ) -> None:
-        """Create model, optimizer, and wrap with DDP."""
-        self.model = AssembledModel(
-            encoder=encoder,
-            mem_updater=mem_updater,
-            header=predictor,
-            n_neg=self.n_neg,
-            postman=postman,
-            sample_4_neg=ring_buf.sample_4_neg,
-            dynamic_state_ablation=self.dynamic_state_ablation,
-        )
-
-        if optimizer == "adam":
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
-        elif optimizer == "sgd":
-            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.lr)
-        else:
-            raise ValueError(f"Unsupported optimizer: {optimizer}")
-
-        self.model = self.model.cuda()
-        self.model = DDP(
-            self.model, process_group=self.nccl, find_unused_parameters=False
-        )
-        self.p2p_guard = P2PGuardCommHook(self.p2p_sem)
-        _guard = self.p2p_guard
-
-        def p2p_guard_comm_hook(state, bucket):
-            return _guard(state, bucket)
-
-        self.model.register_comm_hook(state=self.nccl, hook=p2p_guard_comm_hook)
-        if compile_model:
-            # Compile only the pure-compute submodules (encoder, mem_updater, header).
-            # AssembledModel.forward has too many non-tensor operations (Queue puts,
-            # CUDA events, dataclass access) that cause graph breaks and recompilation.
-            bare = self.model.module
-            bare.encoder = torch.compile(bare.encoder)
-            if bare.mem_updater is not None:
-                bare.mem_updater = torch.compile(bare.mem_updater)
-            bare.header = torch.compile(bare.header)
-        self.criterion = criterion
-        self.grad_scaler = torch.amp.GradScaler("cuda", enabled=self.amp)
-
-    def _init_metrics(self) -> None:
-        """Create torchmetrics trackers for training and evaluation."""
-        self.train_loss_tracker = MeanMetric(process_group=self.nccl).cuda()
-        self.val_mrr_tracker = MeanMetric(process_group=self.nccl).cuda()
-        self.test_mrr_tracker = MeanMetric(process_group=self.nccl).cuda()
-        self.val_mrr_loss_tracker = MeanMetric(process_group=self.nccl).cuda()
-        self.val_auc_batch_mean = MeanMetric(process_group=self.nccl).cuda()
-        self.val_ap_batch_mean = MeanMetric(process_group=self.nccl).cuda()
-        self.test_auc_batch_mean = MeanMetric(process_group=self.nccl).cuda()
-        self.test_ap_batch_mean = MeanMetric(process_group=self.nccl).cuda()
-
-        self.val_metrics = MetricCollection(
-            {
-                "val_loss": MeanMetric(process_group=self.nccl),
-                # Use exact distributed metrics here. The binned approximation
-                # can shift the selected best epoch enough to materially change
-                # the reported JODIE parity numbers.
-                "val_auc": BinaryAUROC(thresholds=None, process_group=self.nccl),
-                "val_ap": BinaryAveragePrecision(
-                    thresholds=None, process_group=self.nccl
-                ),
-            }
-        ).cuda()
-
-        self.test_metrics = MetricCollection(
-            {
-                "test_auc": BinaryAUROC(thresholds=None, process_group=self.nccl),
-                "test_ap": BinaryAveragePrecision(
-                    thresholds=None, process_group=self.nccl
-                ),
-            }
-        ).cuda()
-
-    def _flush_epoch_writebacks(self) -> None:
-        """Block until async mem/mail handlers, P2P routing, and writers drain.
-
-        Without this flush, the main loop can call ``mem_box_store.reset()``
-        while the last batch's async writeback is still in flight, allowing late
-        test-split writes or stale P2P guard tokens to leak into the next epoch.
-        """
-        if self.mem_box_store is None:
-            return
-
-        for q in (
-            self.mem_task_q,
-            self.box_task_q,
-            self.mem_p2p_q,
-            self.box_p2p_q,
-            self.mem_wr_q,
-            self.box_wr_q,
-        ):
-            if q is not None:
-                q.join()
-
-    def _drain_stale_p2p_guard_tokens(self) -> int:
-        """Drop leftover epoch-end P2P guard tokens.
-
-        The final batch of an epoch still posts one P2P completion token even
-        though there is no subsequent train/eval step in the same epoch to
-        consume it. If left in the semaphore, the next epoch's first train
-        backward can acquire a stale token and skip waiting for its own batch's
-        P2P completion.
-        """
-        drained = 0
-        while self.p2p_sem.acquire(blocking=False):
-            drained += 1
-        return drained
-
-    def _flush_train_step_async_state(self) -> None:
-        """Wait until the current train step's async mem/mail sync fully drains.
-
-        This debug path preserves the normal P2P/writeback pipeline, but removes
-        cross-step overlap by waiting for:
-
-        - mem/box task handlers to consume the current batch
-        - P2P routing to finish the current round
-        - mem/box writers to persist local shared-memory updates
-
-        That approximates TGL's step-local memory/mailbox update semantics
-        without disabling P2P transport itself.
-        """
-        if self.mem_box_store is None:
-            return
-
-        assert self.mem_task_q is not None
-        assert self.box_task_q is not None
-        assert self.mem_p2p_q is not None
-        assert self.box_p2p_q is not None
-        assert self.mem_wr_q is not None
-        assert self.box_wr_q is not None
-
-        self.mem_task_q.join()
-        self.box_task_q.join()
-        self.mem_p2p_q.join()
-        self.box_p2p_q.join()
-        self.p2p_sem.acquire()
-        self.mem_wr_q.join()
-        self.box_wr_q.join()
-
-    def _write_direct_dynamic_state_request(self, request) -> None:
-        assert self.direct_state_writer is not None
-        self.direct_state_writer.write(
-            request,
-            release_h2d_credits=True,
-        )
-
-    def _flush_deferred_direct_dynamic_state(
-        self,
-        meta: Meta,
-        *,
-        release_h2d_credits: bool,
-    ) -> None:
-        request = meta.direct_writeback_request
-        if request is None:
-            return
-        assert self.direct_state_writer is not None
-        self.direct_state_writer.write(
-            request,
-            release_h2d_credits=release_h2d_credits,
-        )
-        meta.direct_writeback_request = None
-
-    def on_train_epoch_end(self) -> Result:
-        """Aggregate per-epoch metrics across all ranks and return a Result.
-
-        Computes synchronized AP/AUC metrics by default, or TGB-compatible MRR
-        when ``eval_metric="mrr"``, then resets all accumulators.
-
-        Returns:
-            Result dataclass containing the aggregated scalar metrics for this epoch.
-        """
-        avg_loss = self.train_loss_tracker.compute()
-        if self.eval_metric == "ap":
-            val_results = self.val_metrics.compute()
-            test_results = self.test_metrics.compute()
-            val_loss = val_results["val_loss"].item()
-            val_auc = val_results["val_auc"].item()
-            val_ap = val_results["val_ap"].item()
-            test_auc = test_results["test_auc"].item()
-            test_ap = test_results["test_ap"].item()
-            val_mrr = test_mrr = 0.0
-            val_auc_batch_mean = self.val_auc_batch_mean.compute().item()
-            val_ap_batch_mean = self.val_ap_batch_mean.compute().item()
-            test_auc_batch_mean = self.test_auc_batch_mean.compute().item()
-            test_ap_batch_mean = self.test_ap_batch_mean.compute().item()
-        else:
-            val_loss = self.val_mrr_loss_tracker.compute().item()
-            val_auc = val_ap = test_auc = test_ap = 0.0
-            val_mrr = self.val_mrr_tracker.compute().item()
-            test_mrr = self.test_mrr_tracker.compute().item()
-            val_auc_batch_mean = val_ap_batch_mean = 0.0
-            test_auc_batch_mean = test_ap_batch_mean = 0.0
-
-        self.val_metrics.reset()
-        self.test_metrics.reset()
-        self.train_loss_tracker.reset()
-        self.val_mrr_tracker.reset()
-        self.test_mrr_tracker.reset()
-        self.val_mrr_loss_tracker.reset()
-        self.val_auc_batch_mean.reset()
-        self.val_ap_batch_mean.reset()
-        self.test_auc_batch_mean.reset()
-        self.test_ap_batch_mean.reset()
-
-        res = Result(
-            train_loss=avg_loss.item(),
-            val_loss=val_loss,
-            val_auc=val_auc,
-            val_ap=val_ap,
-            test_auc=test_auc,
-            test_ap=test_ap,
-            val_mrr=val_mrr,
-            test_mrr=test_mrr,
-            val_auc_batch_mean=val_auc_batch_mean,
-            val_ap_batch_mean=val_ap_batch_mean,
-            test_auc_batch_mean=test_auc_batch_mean,
-            test_ap_batch_mean=test_ap_batch_mean,
-        )
-        return res
-
-    def train(self, meta: Meta) -> None:
-        """Execute one training step for the given batch.
-
-        Runs a forward pass through the assembled model, computes loss, runs
-        backward, steps the optimizer, updates the running loss tracker, and
-        frees per-batch tensors immediately afterward.
-
-        Args:
-            meta: Batch metadata carrying the flat graph, labels, and plan set.
-        """
-        self.model.train()
-        self.optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast("cuda", enabled=self.amp):
-            logits = self.model(
-                meta,
-                mem_task_q=self.mem_task_q,
-                box_task_q=self.box_task_q,
-                direct_writeback=self._write_direct_dynamic_state_request,
-            )
-
-            logits_flat = logits.squeeze(-1)
-            n_pos = meta.n_src
-            loss = self.criterion(logits_flat[:n_pos], meta.labels[:n_pos])
-            negative_logits = logits_flat[n_pos:]
-            negative_labels = meta.labels[n_pos:]
-            if meta.neg_valid_mask is not None:
-                negative_logits = negative_logits[meta.neg_valid_mask]
-                negative_labels = negative_labels[meta.neg_valid_mask]
-            loss = loss + self.criterion(negative_logits, negative_labels)
-        if (
-            self.mem_box_store is not None
-            and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
-        ):
-            self.p2p_guard.arm()  # Arm guard: wait for P2P before the first AllReduce
-        self.grad_scaler.scale(loss).backward()
-        self.grad_scaler.step(self.optimizer)
-        self.grad_scaler.update()
-        if self.dynamic_state_ablation.direct_cpu_writeback_after_optimizer_step:
-            self._flush_deferred_direct_dynamic_state(meta, release_h2d_credits=True)
-
-        self.train_loss_tracker.update(loss.detach().float())
-        self._release_meta_tensors(meta)
-
     @torch.no_grad()
-    def eval(self, meta: Meta) -> None:
-        """Execute one evaluation step (val or test) for the given batch.
-
-        Runs a forward pass in no-grad mode, applies sigmoid, and feeds
-        predictions into the appropriate torchmetrics collectors.  For memory
-        models, acquires the P2P semaphore to ensure no concurrent P2P I/O
-        interferes with the eval state.
-
-        Args:
-            meta: Batch metadata; ``meta.split`` must be ``"val"`` or ``"test"``.
-        """
-        assert meta.labels is not None
-        self.model.eval()
-
-        with torch.amp.autocast("cuda", enabled=self.amp):
-            logits = self.model(
-                meta,
-                mem_task_q=self.mem_task_q,
-                box_task_q=self.box_task_q,
-                direct_writeback=self._write_direct_dynamic_state_request,
-            )
-        if self.dynamic_state_ablation.direct_cpu_writeback_after_optimizer_step:
-            self._flush_deferred_direct_dynamic_state(meta, release_h2d_credits=True)
-        if (
-            self.mem_box_store is not None
-            and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
-        ):
-            self.p2p_sem.acquire()  # Ensure no other P2P task is in flight during eval
-
-        y_pred = logits.float().sigmoid().squeeze(-1)
-        if self.eval_metric == "ap":
-            if meta.n_neg != 1:
-                raise ValueError(
-                    "eval_metric='ap' currently requires exactly one evaluation "
-                    f"negative per positive edge, got n_neg={meta.n_neg}."
-                )
-            batch_ap = binary_average_precision(
-                y_pred, meta.labels.long(), thresholds=None
-            )
-            batch_auc = binary_auroc(y_pred, meta.labels.long(), thresholds=None)
-
-        if meta.split == "val":
-            logits_flat = logits.float().squeeze(-1)
-            n_pos = meta.n_src
-            loss = self.criterion(logits_flat[:n_pos], meta.labels[:n_pos])
-            negative_logits = logits_flat[n_pos:]
-            negative_labels = meta.labels[n_pos:]
-            if meta.neg_valid_mask is not None:
-                negative_logits = negative_logits[meta.neg_valid_mask]
-                negative_labels = negative_labels[meta.neg_valid_mask]
-            loss = loss + self.criterion(negative_logits, negative_labels)
-
-            if self.eval_metric == "ap":
-                self.val_metrics.update(
-                    preds=y_pred,
-                    target=meta.labels.long(),
-                    value=loss,
-                )
-                self.val_ap_batch_mean.update(batch_ap)
-                self.val_auc_batch_mean.update(batch_auc)
-            else:
-                self.val_mrr_loss_tracker.update(loss, weight=n_pos)
-                y_pos = logits_flat[:n_pos].unsqueeze(1)
-                y_neg = logits_flat[n_pos:].view(n_pos, meta.n_neg)
-                neg_valid_mask = (
-                    None
-                    if meta.neg_valid_mask is None
-                    else meta.neg_valid_mask.view(n_pos, meta.n_neg)
-                )
-                reciprocal_ranks = _tgb_reciprocal_ranks(
-                    y_pos.squeeze(1), y_neg, neg_valid_mask
-                )
-                self.val_mrr_tracker.update(reciprocal_ranks.mean(), weight=n_pos)
-
-        else:
-            assert meta.split == "test"
-            if self.eval_metric == "ap":
-                self.test_metrics.update(preds=y_pred, target=meta.labels.long())
-                self.test_ap_batch_mean.update(batch_ap)
-                self.test_auc_batch_mean.update(batch_auc)
-            else:
-                logits_flat = logits.float().squeeze(-1)
-                n_pos = meta.n_src
-                y_pos = logits_flat[:n_pos].unsqueeze(1)
-                y_neg = logits_flat[n_pos:].view(n_pos, meta.n_neg)
-                neg_valid_mask = (
-                    None
-                    if meta.neg_valid_mask is None
-                    else meta.neg_valid_mask.view(n_pos, meta.n_neg)
-                )
-                reciprocal_ranks = _tgb_reciprocal_ranks(
-                    y_pos.squeeze(1), y_neg, neg_valid_mask
-                )
-                self.test_mrr_tracker.update(reciprocal_ranks.mean(), weight=n_pos)
-
-        self._release_meta_tensors(meta)
-
-    def _release_meta_tensors(self, meta: Meta) -> None:
-        """Drop per-batch GPU tensors ASAP to reduce delayed CUDA memory recycling."""
-
-        meta.flat_graph = None
-        meta.plan_set = None
-        meta.labels = None
-        meta.neg_valid_mask = None
-        meta.graph = None
-        meta.direct_writeback_request = None
-
-    def start_all_threads(self) -> None:
-        """Start all background pipeline threads.
-
-        Must be called once before invoking ``run()``.  Threads are started in
-        dependency order: H2D and Receiver first, then the optional memory/box
-        sync threads (P2PQHandler, MemTaskHandler, MessageHandler, writers,
-        DynamicAssembler) when a ``MemBoxStore`` is present.
-        """
-        self.h2d.start()
-        self.receiver.start()
-        if self.mem_box_store is not None:
-            assert self.dy_asm is not None
-            if self.dynamic_state_ablation.uses_async_dynamic_state_pipeline:
-                assert self.p2p_q_handler is not None
-                assert self.mem_handler is not None
-                assert self.box_handler is not None
-                assert self.box_wr is not None
-                assert self.mem_wr is not None
-                self.p2p_q_handler.start()
-                self.mem_handler.start()
-                self.box_handler.start()
-                self.box_wr.start()
-                self.mem_wr.start()
-            self.dy_asm.start()
-
     def run(self) -> None:
         """Main training loop: consume ``full_q`` and dispatch train/eval/epoch-end.
 
@@ -1086,11 +353,17 @@ class Worker:
                         and past_warmup
                     )
                     if should_measure_interval:
+                        prev_event = self._throughput_prev_start_event
+                        prev_wall_s = self._throughput_prev_start_wall_s
+                        prev_batch_events = self._throughput_prev_batch_events
+                        assert prev_event is not None
+                        assert prev_wall_s is not None
+                        assert prev_batch_events is not None
                         self._throughput_gpu_pairs.append(
-                            (self._throughput_prev_start_event, curr_start_event)
+                            (prev_event, curr_start_event)
                         )
                         self._throughput_wall_intervals_s.append(
-                            curr_start_wall_s - self._throughput_prev_start_wall_s
+                            curr_start_wall_s - prev_wall_s
                         )
                         if self._throughput_prev_start_wall_unix_s is not None:
                             self._throughput_interval_start_unix_s.append(
@@ -1099,7 +372,7 @@ class Worker:
                             self._throughput_interval_end_unix_s.append(
                                 curr_start_wall_unix_s
                             )
-                        self._throughput_events += self._throughput_prev_batch_events
+                        self._throughput_events += prev_batch_events
                         self._throughput_measured_batches += 1
                         if self._throughput_window_start_unix_s is None:
                             self._throughput_window_start_unix_s = (
@@ -1112,9 +385,7 @@ class Worker:
                             and curr_cpu_total_s is not None
                             and self._cpu_prev_total_s is not None
                         ):
-                            wall_interval_s = (
-                                curr_start_wall_s - self._throughput_prev_start_wall_s
-                            )
+                            wall_interval_s = curr_start_wall_s - prev_wall_s
                             if wall_interval_s > 0:
                                 cpu_delta_s = max(
                                     0.0,
@@ -1316,7 +587,7 @@ class Worker:
                         "APPENDIX_TRAIN_GPU_UTIL_CURVE "
                         f"{json.dumps(gpu_payload, sort_keys=True)}"
                     )
-                memory_payload: dict[str, int | float | str] = {
+                memory_payload: dict[str, int | float | str | None] = {
                     "system": "frost",
                     "rank": self.env.local_rank,
                     "warmup_batches_per_epoch": self._throughput_warmup_batches_per_epoch,
@@ -1380,7 +651,7 @@ class Worker:
                     )
                 if self._cpu_util_enabled and self.env.local_rank == 0:
                     cpu_payload: dict[
-                        str, int | float | str | list[int] | list[float]
+                        str, int | float | str | list[int] | list[float] | None
                     ] = {
                         "system": "frost",
                         "rank": self.env.local_rank,
@@ -1444,37 +715,6 @@ class Worker:
                     self.mem_task_q.put(None)
                     self.mem_p2p_q.put(None)
                 break
-
-    def _request_thread_shutdown(self) -> None:
-        put_shutdown_sentinel(self.received_q, None)
-        put_shutdown_sentinel(self.full_q, None)
-
-        if self.h2d_out_q is not None:
-            put_shutdown_sentinel(self.h2d_out_q, None)
-        if self.delta_queue is not None:
-            put_shutdown_sentinel(self.delta_queue, None)
-        if self.mem_task_q is not None:
-            put_shutdown_sentinel(self.mem_task_q, None)
-        if self.box_task_q is not None:
-            put_shutdown_sentinel(self.box_task_q, None)
-        if self.mem_p2p_q is not None:
-            put_shutdown_sentinel(self.mem_p2p_q, None)
-        if self.box_p2p_q is not None:
-            put_shutdown_sentinel(self.box_p2p_q, None)
-        if self.mem_wr_q is not None:
-            put_shutdown_sentinel(self.mem_wr_q, None)
-        if self.box_wr_q is not None:
-            put_shutdown_sentinel(self.box_wr_q, None)
-
-    def _join_pipeline_threads(self, timeout_s: float) -> None:
-        join_thread(self.h2d, timeout_s, logger)
-        join_thread(self.receiver, timeout_s, logger)
-        join_thread(self.mem_handler, timeout_s, logger)
-        join_thread(self.mem_wr, timeout_s, logger)
-        join_thread(self.box_wr, timeout_s, logger)
-        join_thread(self.box_handler, timeout_s, logger)
-        join_thread(self.p2p_q_handler, timeout_s, logger)
-        join_thread(self.dy_asm, timeout_s, logger)
 
     def cleanup(self, graceful: bool = True, join_timeout_s: float = 5.0) -> None:
         """Best-effort worker shutdown for both normal and aborted runs."""
@@ -1545,71 +785,4 @@ class Worker:
             )
             os._exit(1)
 
-    def _unwrap_model(self) -> AssembledModel:
-        """Return the bare AssembledModel, stripping torch.compile and DDP wrappers."""
-        model = self.model
-        # torch.compile wraps the model in an OptimizedModule
-        if hasattr(model, "_orig_mod"):
-            model = model._orig_mod
-        # DDP wraps the model in a DistributedDataParallel
-        if isinstance(model, DDP):
-            model = model.module
-        return cast(AssembledModel, model)
-
     # Public model save/load interface
-    def save_model(self, path: str) -> None:
-        """Save a consistent CPU snapshot of the unwrapped model (rank 0 only).
-
-        The DDP wrapper is stripped so the checkpoint can be loaded without a
-        distributed context. The snapshot is materialized on CPU in the caller
-        thread before ``torch.save`` so training never overlaps with a
-        background thread reading live GPU parameters.
-
-        Args:
-            path: File path where the state dict will be written.
-        """
-        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
-
-        if rank == 0:
-            torch.cuda.synchronize(self.device)
-            with torch.no_grad():
-                cpu_state_dict = {
-                    key: value.detach().cpu().clone()
-                    for key, value in self._unwrap_model().state_dict().items()
-                }
-            torch.save(cpu_state_dict, path)
-
-    def load_model(self, path: str) -> None:
-        """Load model weights into the existing model / DDP wrapper in place.
-
-        A barrier before loading ensures the file is fully written by rank 0
-        before any rank reads it.  A second barrier after loading keeps all
-        ranks in sync.
-
-        Args:
-            path: File path to the state dict checkpoint.
-        """
-        # Barrier ensures the file is fully written before any rank reads it
-        if dist.is_available() and dist.is_initialized():
-            dist.barrier(group=self.nccl)
-
-        state = torch.load(path, map_location="cpu")
-
-        bare_model = self._unwrap_model()
-        bare_model.load_state_dict(state, strict=True)
-        bare_model.to(self.device)
-
-        if dist.is_available() and dist.is_initialized():
-            dist.barrier(group=self.nccl)
-
-    def load_memory(self, memory_state: dict) -> None:
-        """Restore the model's in-memory state from a previously saved dict.
-
-        Delegates to ``AssembledModel.load_memory_state`` via the DDP module
-        unwrap.  No-op when ``mem_box_store`` is absent.
-
-        Args:
-            memory_state: Dict produced by a prior ``save_memory_state()`` call.
-        """
-        if self.mem_box_store is not None:
-            self._unwrap_model().load_memory_state(memory_state)

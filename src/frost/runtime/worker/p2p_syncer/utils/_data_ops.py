@@ -3,7 +3,7 @@ import logging
 import numpy
 import torch
 
-from frost.aliases.syncer import AllType
+from frost.runtime.worker.types import AllType
 from frost.datatypes.plan import DynamicPlan
 from frost.datatypes.tasks import P2PTask
 

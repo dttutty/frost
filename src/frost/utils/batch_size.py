@@ -5,11 +5,11 @@ from numbers import Real
 from pathlib import Path
 
 
-DEFAULT_SPLIT = (7, 1.5, 1.5)
+DEFAULT_SPLIT: tuple[float, ...] = (7.0, 1.5, 1.5)
 DEFAULT_DATA_DIR = Path(__file__).resolve().parents[3] / "DATA"
 
 
-def _normalize_split(split: Sequence[Real]) -> tuple[float, ...]:
+def _normalize_split(split: Sequence[int | float]) -> tuple[float, ...]:
     if len(split) < 2:
         raise ValueError("split must contain at least a train and one eval partition.")
 
@@ -74,7 +74,7 @@ def _resolve_num_edges(dataset_or_num_edges: str | int, data_dir: Path) -> int:
 
 def get_max_macro_batch_size(
     dataset_or_num_edges: str | int,
-    split: Sequence[Real] = DEFAULT_SPLIT,
+    split: Sequence[int | float] = DEFAULT_SPLIT,
     data_dir: str | Path = DEFAULT_DATA_DIR,
 ) -> int:
     """Return a conservative upper bound for ``macro_batch_size``.
@@ -97,4 +97,4 @@ def get_max_macro_batch_size(
     min_eval_weight = min(normalized_split[1:])
     num_edges = _resolve_num_edges(dataset_or_num_edges, Path(data_dir))
     min_eval_edges = (num_edges * min_eval_weight) // total_weight
-    return min_eval_edges
+    return int(min_eval_edges)

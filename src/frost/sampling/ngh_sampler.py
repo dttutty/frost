@@ -17,7 +17,8 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from typing import Literal, cast
+from collections.abc import Sequence
+from typing import Any, Literal, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -25,7 +26,6 @@ import torch
 
 from frost.seq_sampler import SeqSampler, TemporalGraphType
 from frost.shm.ring_buf import RingBuf
-from frost.utils.tensor_set import TensorSet
 
 Int64Array = npt.NDArray[np.int64]
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ def _enable_tgl_sampler_parity_if_requested(tgl_sampler_parity: bool) -> None:
 class NoSampler:
     """Zero-hop sampler that writes only seed nodes into the ring buffer.
 
-    Implements the :class:`~frost.protocols.ngh_sampler_proto.NghSamplerProto`
+    Implements the :class:`~frost.sampling.protocols.NghSamplerProto`
     interface.  ``fanout`` is always ``None`` regardless of any configuration
     value passed at construction time; downstream code treats ``None`` as an
     empty neighbor list.
@@ -330,7 +330,9 @@ class NghSampler:
         else:
             # Get neighbors from C++ nanobind backend
             ngh_nid, ngh_eid, ngh_ts = self.seq_sampler.get_historical_neighbors(
-                nid_np_safe, ts_np_safe, self.n_ngh
+                cast(Sequence[int], nid_np_safe),
+                cast(Any, ts_np_safe),
+                self.n_ngh,
             )
 
             # Safely convert nanobind outputs to plain tensors

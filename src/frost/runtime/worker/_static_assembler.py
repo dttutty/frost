@@ -4,6 +4,7 @@ Manages the incremental transfer of node and edge features from shared CPU
 memory to GPU.  Node features are cached across batches via a rolling delta
 (``nfeat_delta``) so that only newly required features are fetched each step.
 """
+
 import logging
 
 import torch

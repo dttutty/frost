@@ -4,10 +4,16 @@ import threading
 import numpy as np
 import torch
 
-from frost.aliases.host import DynamicPlanInQ, DynamicPlanOutQ, MetaBundle, MetasDyNeed
+from frost.runtime.host.types import (
+    DynamicPlanInQ,
+    DynamicPlanOutQ,
+    MetaBundle,
+    MetasDyNeed,
+)
 from frost.datatypes.plan import DynamicPlan
 from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 from frost.utils.tensor_set import TensorSet
+
 
 def compute_p2p_transfer_plan(
     needs: list[TensorSet],
@@ -253,9 +259,7 @@ class DynamicPlanner(ThreadBase):
                 if in_q_data == "end_of_epoch":
                     continue
                 all_needs, all_pos_root, _raw_need_counts, _metas = in_q_data
-                self.out_q.put(
-                    self._plan_current_batch_only(all_needs, all_pos_root)
-                )
+                self.out_q.put(self._plan_current_batch_only(all_needs, all_pos_root))
             return
 
         while not self.stop_ev.is_set():

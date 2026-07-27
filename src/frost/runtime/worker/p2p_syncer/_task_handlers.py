@@ -4,7 +4,14 @@ from typing import Literal, cast
 
 import torch
 
-from frost.aliases.syncer import BoxP2PQ, BoxTaskQ, BoxWrQ, MemP2PQ, MemTaskQ, MemWrQ
+from frost.runtime.worker.types import (
+    BoxP2PQ,
+    BoxTaskQ,
+    BoxWrQ,
+    MemP2PQ,
+    MemTaskQ,
+    MemWrQ,
+)
 from frost.datatypes.mem_mail_box._data_ops import (
     keep_last,
     keep_mean,
@@ -15,9 +22,10 @@ from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mail import MailEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.tasks import BoxTask, P2PTask
-from frost.protocols.cuda_event_proto import CudaEvent
-from frost.protocols.postman_proto import PostmanProto
+from frost.runtime.protocols import CudaEvent
+from frost.models.protocols import PostmanProto
 from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
+from frost.runtime.worker._h2d_credit import CreditGate
 
 from .utils._interaction_ops import generate_interaction_mails
 from .utils._p2p_task_maker import make_p2p_task
@@ -95,7 +103,7 @@ class MemTaskHandler(StreamThreadBase):
         stop_ev: threading.Event,
         device: torch.device,
         mem_wr_q: MemWrQ,
-        h2d_sem: threading.Semaphore,
+        h2d_sem: CreditGate,
     ) -> None:
         super().__init__(name="mem_handler", stop_ev=stop_ev)
         self.device = device
@@ -167,7 +175,7 @@ class MessageHandler(StreamThreadBase):
         mail_combine: Literal["last", "mean"],
         device: torch.device,
         box_wr_q: BoxWrQ,
-        h2d_sem: threading.Semaphore,
+        h2d_sem: CreditGate,
         postman: PostmanProto | None,
         n_neg: int = 1,
         fanout: list[int] | None = None,

@@ -5,6 +5,7 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
+
 @runtime_checkable
 class NghSamplerProto(Protocol):
     @property

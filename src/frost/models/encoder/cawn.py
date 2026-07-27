@@ -377,27 +377,31 @@ class CAWN(nn.Module):
         res["efeat"] = [torch.zeros((hi - lo, 1, self.edge_feat_dim), device=dev)]
 
         # Neighbors
+        if graph.neighbors is None:
+            raise ValueError("CAWN requires sampled neighbors")
+        neighbors = graph.neighbors
         for i, f in enumerate(fanout):
             chunk = 1
             for k in range(i + 1):
                 chunk *= fanout[k]
 
             # Slice flattened representation via view
-            nid_slice = graph.neighbors[i].nid.view(n_root, chunk)[lo:hi]
-            ts_slice = graph.neighbors[i].ts.view(n_root, chunk)[lo:hi]
+            neighbor = neighbors[i]
+            nid_slice = neighbor.nid.view(n_root, chunk)[lo:hi]
+            ts_slice = neighbor.ts.view(n_root, chunk)[lo:hi]
             res["nid"].append(nid_slice)
             res["ts"].append(ts_slice)
 
-            if graph.neighbors[i].nfeat is not None:
-                nfeat_slice = graph.neighbors[i].nfeat.view(n_root, chunk, -1)[lo:hi]
+            if neighbor.nfeat is not None:
+                nfeat_slice = neighbor.nfeat.view(n_root, chunk, -1)[lo:hi]
                 res["nfeat"].append(nfeat_slice)
             else:
                 res["nfeat"].append(
                     torch.zeros((hi - lo, chunk, self.ndim), device=dev)
                 )
 
-            if graph.neighbors[i].efeat is not None:
-                efeat_slice = graph.neighbors[i].efeat.view(n_root, chunk, -1)[lo:hi]
+            if neighbor.efeat is not None:
+                efeat_slice = neighbor.efeat.view(n_root, chunk, -1)[lo:hi]
                 res["efeat"].append(efeat_slice)
             else:
                 res["efeat"].append(
@@ -461,8 +465,6 @@ class CAWN(nn.Module):
         """
         arr dict contains values of shape [B, num_walks, H, ...]
         """
-        dev = arr["nid"].device
-
         # Valid lengths
         walks_valid_lengths = (arr["nid"] != -1).sum(dim=-1)
 

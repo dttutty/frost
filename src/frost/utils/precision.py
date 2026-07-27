@@ -19,7 +19,7 @@ class PrecisionSpec:
     mailbox_torch: torch.dtype
 
 
-_NP_DTYPES = {
+_NP_DTYPES: dict[str, np.dtype[Any]] = {
     "int64": np.dtype(np.int64),
     "float32": np.dtype(np.float32),
 }

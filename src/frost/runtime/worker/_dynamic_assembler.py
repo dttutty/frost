@@ -27,13 +27,14 @@ from typing import Literal, cast
 import torch
 
 from frost.ablation import DynamicStateAblation
-from frost.aliases.worker import AssembledQ, DeltaQueue, H2DOutQ
+from frost.runtime.worker.types import AssembledQ, DeltaQueue, H2DOutQ
 from frost.datatypes.graph import FlatGraph
 from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.plan import DynamicPlan
-from frost.protocols.cuda_event_proto import CudaEvent
+from frost.runtime.protocols import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
+from frost.runtime.worker._h2d_credit import CreditGate
 from frost.shm.mem_mgr import MemBoxStore
 
 logger = logging.getLogger(__name__)
@@ -110,7 +111,7 @@ class DynamicAssembler(StreamThreadBase):
         full_q: AssembledQ,
         stop_ev: threading.Event,
         device: torch.device,
-        h2d_sem: threading.Semaphore,  # Optional semaphore for H2D synchronization
+        h2d_sem: CreditGate,
         mem_box_store: MemBoxStore,  # Pass shared memory instance here
         n_neg: int = 1,
         sample_4_neg: bool = True,
@@ -304,6 +305,12 @@ class DynamicAssembler(StreamThreadBase):
         pos = torch.searchsorted(delta_source.nid, valid_nids)
         in_bound = pos < delta_source.nid.numel()
         pos_safe = pos.clamp(max=delta_source.nid.numel() - 1)
+        found = in_bound & (delta_source.nid[pos_safe] == valid_nids)
+        if not bool(found.all()):
+            missing = valid_nids[~found]
+            raise RuntimeError(
+                f"Delta source is missing {missing.numel()} planned node ids"
+            )
 
         global_positions = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
         local_positions = pos_safe

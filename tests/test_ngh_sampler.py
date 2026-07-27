@@ -2,7 +2,6 @@
 
 import os
 from dataclasses import dataclass
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -287,7 +286,7 @@ class TestMultiHopNghSamplerInit:
         mock_graph.indices = np.array([1, 2], dtype=np.int64)
         mock_graph.ts = np.array([100, 200], dtype=np.int64)
 
-        with patch("frost.sampling.ngh_sampler.SeqSampler") as MockSeqSampler:
+        with patch("frost.sampling.ngh_sampler.SeqSampler"):
             from frost.sampling.ngh_sampler import MultiHopNghSampler
 
             sampler = MultiHopNghSampler(

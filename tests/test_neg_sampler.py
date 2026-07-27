@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 
-from frost.sampling.neg_sampler import (
+from frost.neg_sampler import (
     PRECOMPUTED_NEGATIVE_FILENAME,
     PrecomputedNegSampler,
     RandomNegLinkSampler,
@@ -24,7 +24,9 @@ def _write_edges_csv(path: Path, rows: list[tuple[int, int, int]]) -> None:
 
 
 class TestPrecomputedNegSampler:
-    def test_generate_precomputed_negative_file_excludes_seen_neighbors(self, tmp_path: Path):
+    def test_generate_precomputed_negative_file_excludes_seen_neighbors(
+        self, tmp_path: Path
+    ):
         dataset_dir = tmp_path / "MOCK"
         dataset_dir.mkdir()
         edges_path = dataset_dir / "edges.csv"
@@ -145,7 +147,9 @@ class TestPrecomputedNegSampler:
         assert int(sampled.min().item()) >= 0
         assert int(sampled.max().item()) < 6
 
-    def test_random_sampler_dst_partition_mode_uses_only_dst_nodes(self, tmp_path: Path):
+    def test_random_sampler_dst_partition_mode_uses_only_dst_nodes(
+        self, tmp_path: Path
+    ):
         dataset_dir = tmp_path / "mock"
         dataset_dir.mkdir()
         _write_edges_csv(

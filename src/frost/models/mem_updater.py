@@ -11,7 +11,6 @@ without holding gradient references.
 """
 # worker/trainer.py
 
-
 import logging
 from typing import Literal
 
@@ -56,6 +55,7 @@ class MemoryUpdater(nn.Module):
         super().__init__()
         self.cell = cell
         # Use self. to save it as an instance attribute
+        rnn: nn.GRUCell | nn.RNNCell
         if self.cell == "gru":
             rnn = torch.nn.GRUCell(d_mail + d_time, d_mem)
         elif self.cell == "rnn":
@@ -189,6 +189,7 @@ class TransformerMemoryUpdater(nn.Module):
         ts = flat_graph.ts  # [N_total]
         box = flat_graph.box  # [N_total, boxsize, dim_mail]
         box_ts = flat_graph.box_ts  # [N_total, boxsize]
+        assert box_ts is not None
 
         if n_root_nodes is None:
             n_root_nodes = mem.size(0)

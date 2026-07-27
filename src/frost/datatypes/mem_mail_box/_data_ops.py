@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import logging
+from typing import TypeVar
 
 import torch
 
-from frost.aliases.syncer import Mem_or_Mail
-
 from .box import BoxEntry
 from .mail import MailEntry
+from .mem import MemEntry
+
+MemOrMail = TypeVar("MemOrMail", MemEntry, MailEntry)
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +63,7 @@ def compute_last_indices(nid: torch.Tensor, ts: torch.Tensor) -> torch.Tensor:
     return argmax
 
 
-def keep_last(data: Mem_or_Mail) -> Mem_or_Mail:
+def keep_last(data: MemOrMail) -> MemOrMail:
     assert data.ts is not None, "TS must be provided for keep_last"
     indices = compute_last_indices(data.nid, data.ts)
 
@@ -186,7 +188,7 @@ def merge_1_mail(box: BoxEntry, mail: MailEntry) -> BoxEntry:
     )
 
 
-def keep_mean(data: Mem_or_Mail) -> Mem_or_Mail:
+def keep_mean(data: MemOrMail) -> MemOrMail:
     """
     Deduplicate by nid using a uniform-weight mean (no count tensor).
     - Duplicate nids: data and ts are averaged with equal weights.
@@ -228,7 +230,7 @@ def keep_mean(data: Mem_or_Mail) -> Mem_or_Mail:
     return data
 
 
-def _ensure_sorted_unique_nid(x: Mem_or_Mail) -> Mem_or_Mail:
+def _ensure_sorted_unique_nid(x: MemOrMail) -> MemOrMail:
     """
     Ensure x.nid is sorted in ascending order and contains no duplicates.
     Modifies x in place.
@@ -267,8 +269,8 @@ def _mask_not_in_sorted_unique(
 
 
 def merge_with_priority(
-    high_priority_data: Mem_or_Mail, low_priority_data: Mem_or_Mail
-) -> Mem_or_Mail:
+    high_priority_data: MemOrMail, low_priority_data: MemOrMail
+) -> MemOrMail:
     """
     Merge two entries, preferring high_priority_data on conflict.
     Any nid in low_priority_data that also appears in high_priority_data is discarded.

@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-import threading
-
 import torch
 
 from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.tasks import DirectWritebackRequest
+from frost.runtime.worker._h2d_credit import CreditGate
 from frost.shm.mem_mgr import MemBoxStore
 
 
-def _writer_done(h2d_sem: threading.Semaphore, *, batch_idx: int, kind: str) -> None:
+def _writer_done(h2d_sem: CreditGate, *, batch_idx: int, kind: str) -> None:
     writer_done = getattr(h2d_sem, "writer_done", None)
     if callable(writer_done):
         writer_done(batch_idx=batch_idx, kind=kind)
@@ -25,7 +24,7 @@ class DirectDynamicStateWriter:
         self,
         *,
         mem_box_store: MemBoxStore,
-        h2d_sem: threading.Semaphore,
+        h2d_sem: CreditGate,
     ) -> None:
         self.mem_box_store = mem_box_store
         self.h2d_sem = h2d_sem

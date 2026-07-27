@@ -17,7 +17,7 @@ from typing import cast
 import torch
 import torch.distributed as dist
 
-from frost.aliases.worker import ReceivedQ
+from frost.runtime.worker.types import ReceivedQ
 from frost.datatypes.env import Env
 from frost.datatypes.graph import FlatGraph
 from frost.datatypes.meta import Meta
@@ -157,6 +157,5 @@ class Receiver(ThreadBase):
                 ],
             }
             print(
-                "APPENDIX_RECEIVER_TIMING_CURVE "
-                f"{json.dumps(payload, sort_keys=True)}"
+                f"APPENDIX_RECEIVER_TIMING_CURVE {json.dumps(payload, sort_keys=True)}"
             )

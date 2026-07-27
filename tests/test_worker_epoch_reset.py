@@ -4,10 +4,8 @@ from queue import Queue
 
 import torch
 
-from frost.runtime.worker._engine import (
-    Worker,
-    _initial_h2d_pipeline_slots,
-)
+from frost.runtime.worker._engine import Worker
+from frost.runtime.worker._pipeline import _initial_h2d_pipeline_slots
 from frost.runtime.worker._h2d_credit import BatchAwareCreditManager
 from frost.shm.mem_mgr import MemBoxStore
 

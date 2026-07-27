@@ -1,10 +1,6 @@
 """Tests for RingBuf shared-memory circular buffer."""
 
-import pytest
-import torch
-
 from frost.shm.ring_buf import (
-    RingBuf,
     cal_max_buf_size,
     cal_max_buf_size_for_layouts,
 )

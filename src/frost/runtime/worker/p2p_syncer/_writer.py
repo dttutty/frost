@@ -9,6 +9,7 @@ from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mail import MailEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.runtime._thread_base import ThreadBase
+from frost.runtime.worker._h2d_credit import CreditGate
 from frost.shm.mem_mgr import MemBoxStore
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ class SharedMemWriter(ThreadBase):
         self,
         shared_data: torch.Tensor,
         shared_ts: torch.Tensor,
-        h2d_sem: threading.Semaphore,
+        h2d_sem: CreditGate,
         stop_ev: threading.Event,
         wr_q: Queue,
         device: torch.device,
@@ -121,7 +122,7 @@ class BoxMailWriter(ThreadBase):
     def __init__(
         self,
         mem_box_store: MemBoxStore,
-        h2d_sem: threading.Semaphore,
+        h2d_sem: CreditGate,
         stop_ev: threading.Event,
         wr_q: Queue,
         device: torch.device,
@@ -265,8 +266,6 @@ class BoxMailWriter(ThreadBase):
         if N > 1:
             is_last[:-1] = nbr_nids[:-1] != nbr_nids[1:]
         last_idx = torch.nonzero(is_last, as_tuple=False).squeeze(-1)
-        unique_nids = nbr_nids[last_idx]
-
         dedup_nids = nbr_nids[last_idx]
         dedup_data = nbr_data[last_idx]
         dedup_ts = nbr_ts[last_idx]

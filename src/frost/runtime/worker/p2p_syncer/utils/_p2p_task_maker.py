@@ -5,7 +5,7 @@ import numpy
 import torch
 import torch.distributed as dist
 
-from frost.aliases.syncer import AllType
+from frost.runtime.worker.types import AllType
 from frost.datatypes.plan import DynamicPlan
 from frost.datatypes.tasks import P2PTask
 
@@ -27,9 +27,9 @@ def make_p2p_task(
     recv_counts = plan.recv_counts
     send_counts = plan.send_counts
 
-    nid = entry.nid
-    data = entry.data
-    ts = entry.ts
+    nid: torch.Tensor = entry.nid
+    data: torch.Tensor = entry.data
+    ts: torch.Tensor = entry.ts
 
     # entry.nid must be sorted for searchsorted to work correctly
     if not getattr(entry, "is_sorted", False):
@@ -97,7 +97,7 @@ def make_p2p_task(
 
     if total_planned_send != real_shape:
         try:
-            rank = dist.get_rank()
+            rank: int | str = dist.get_rank()
         except Exception:
             rank = "Unknown"
 

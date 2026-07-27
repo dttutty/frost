@@ -7,7 +7,7 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
-from frost.aliases.host import DynamicPlanInQ, DynamicPlanOutQ
+from frost.runtime.host.types import DynamicPlanInQ, DynamicPlanOutQ
 from frost.datatypes.sampled_layout import SampledLayoutView
 from frost.runtime._thread_base import ThreadBase
 from frost.utils.tensor_set import TensorSet

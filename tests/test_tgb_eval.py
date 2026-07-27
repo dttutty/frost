@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from frost.neg_sampler import TGBEvalNegSampler
-from frost.runtime.worker._engine import _tgb_reciprocal_ranks
+from frost.runtime.worker._trainer import _tgb_reciprocal_ranks
 
 
 def _write_negative_file(

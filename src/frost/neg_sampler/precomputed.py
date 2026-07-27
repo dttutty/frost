@@ -1,7 +1,9 @@
 """Precomputed negative sampler — reads negatives from a pre-generated CSV file."""
+
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -30,7 +32,7 @@ class PrecomputedNegSampler:
         if self.n_neg != 1:
             raise ValueError(
                 "PrecomputedNegSampler currently requires n_neg=1 because it reads "
-                f"a precomputed file with one negative per edge."
+                "a precomputed file with one negative per edge."
             )
 
         dataset_dir = resolve_dataset_dir(self.dataset, data_root=self.data_root)
@@ -41,6 +43,12 @@ class PrecomputedNegSampler:
                 data_root=self.data_root,
             )
         self.precomputed_negatives = _load_precomputed_negatives(self.precomputed_path)
+
+    def init_from_df(self, df: Any) -> None:
+        """Accept the common sampler lifecycle hook; data is already file-backed."""
+
+    def set_batch_context(self, **context: Any) -> None:
+        """Accept the common per-batch hook; edge ids select negatives directly."""
 
     def sample(self, src_ids: torch.Tensor, edge_ids: torch.Tensor) -> torch.Tensor:
         if src_ids.numel() != edge_ids.numel():

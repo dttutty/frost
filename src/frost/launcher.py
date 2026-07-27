@@ -1,29 +1,35 @@
 import faulthandler
 import logging
-import math
 import os
 import time
-from collections.abc import Iterable
-from pathlib import Path
-from typing import Any
 from uuid import uuid4
 
-import numpy as np
-import torch
-import torch.distributed as dist
-import torch.nn as nn
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf, open_dict
 
 from frost.ablation import resolve_dynamic_state_ablation
 from frost.datatypes.env import Env
-from frost.protocols.mem_updater_proto import MemoryUpdaterProto
-from frost.protocols.ngh_sampler_proto import NghSamplerProto
-from frost.protocols.postman_proto import PostmanProto
-from frost.runtime._thread_base import destroy_process_group
+from frost.launch.config import (
+    APAN_ENCODER_TARGET,
+    TGN_ENCODER_TARGET,
+    normalize_fanout,
+    resolve_dynamic_state_fetch_mode,
+    resolve_eval_metric,
+    resolve_no_memory_queue_size,
+    resolve_time_scaling_factor,
+    stable_mode_enabled,
+)
+from frost.launch.distributed import (
+    configure_torch_backends,
+    create_worker_process_groups,
+    gather_cpu_benchmark_pids,
+    initialize_process_group,
+)
+from frost.launch.dispatch import dispatch_host, dispatch_worker
+from frost.launch.factory import build_worker_modules
+from frost.sampling.protocols import NghSamplerProto
 from frost.runtime.host._plan_router import detect_gpu_topology
-from frost.runtime.worker.postman import Postman
 from frost.neg_sampler import PrecomputedNegSampler
 from frost.sampling.ngh_sampler import MultiHopNghSampler, NghSampler, NoSampler
 from frost.shm.dataset_mgr import DatasetManager
@@ -35,236 +41,6 @@ from frost.utils.utils import broadcast_data, set_seed
 
 faulthandler.enable()
 logger = logging.getLogger(__name__)
-APAN_ENCODER_TARGET = "frost.models.encoder.apan.APAN"
-TGAT_ENCODER_TARGET = "frost.models.encoder.tgat.TGAT"
-DYGFORMER_ENCODER_TARGET = "frost.models.encoder.dygformer.DyGFormer"
-CAWN_ENCODER_TARGET = "frost.models.encoder.cawn.CAWN"
-TGN_ENCODER_TARGET = "frost.models.encoder.tgn.TGN"
-GRAPH_MIXER_ENCODER_TARGET = "frost.models.encoder.graph_mixer.GraphMixer"
-TCL_ENCODER_TARGET = "frost.models.encoder.tcl.TCL"
-LINK_PREDICTOR_TARGET = "frost.models.header.LinkPredictor"
-PAIR_AWARE_PREDICTOR_TARGET = "frost.models.header.DyGFormerLinkPredictor"
-TCL_PAIR_AWARE_PREDICTOR_TARGET = "frost.models.header.PairAwareMergeLayerPredictor"
-PAIR_AWARE_ENCODER_TARGETS = frozenset(
-    {DYGFORMER_ENCODER_TARGET, CAWN_ENCODER_TARGET, TCL_ENCODER_TARGET}
-)
-DYGLIB_ALIGNED_FEATURE_DIM = 172
-DEFAULT_NO_MEMORY_QUEUE_SIZE = 4
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DYGLIB_PROCESSED_DATA_ROOT = REPO_ROOT / "third_party" / "DyGLib" / "processed_data"
-
-
-def _normalize_fanout(raw_fanout: object) -> list[int]:
-    if raw_fanout is None:
-        return []
-    if isinstance(raw_fanout, int):
-        return [raw_fanout]
-    if isinstance(raw_fanout, Iterable) and not isinstance(raw_fanout, str | bytes):
-        return [int(n_ngh) for n_ngh in raw_fanout]
-    raise TypeError(f"Unsupported fanout config type: {type(raw_fanout)!r}")
-
-
-def _set_nested_attr(root: object, path: tuple[str, ...], value: Any) -> None:
-    target: Any = root
-    for attr in path[:-1]:
-        target = getattr(target, attr)
-    setattr(target, path[-1], value)
-
-
-def _stable_mode_enabled(cfg: DictConfig) -> bool:
-    return bool(cfg.get("stable_mode", False))
-
-
-def _resolve_dummy_feature_dim(
-    dataset: str,
-    requested_dim: object,
-    *,
-    model_name: str,
-    feature_name: str,
-    feature_file_name: str,
-    processed_data_root: Path | None = None,
-) -> int:
-    """Resolve a synthetic feature width for DyGLib-style zero-feature parity.
-
-    DyGLib pads link-prediction node/edge features to a shared width of 172.
-    If a processed feature file is available locally, use its raw width but
-    still apply the DyGLib floor so datasets with missing features (for example
-    our generated LASTFM zeros with width 1) resolve to 172.
-    """
-    if requested_dim is not None:
-        return int(requested_dim)
-
-    dataset_key = dataset.strip().lower()
-    data_root = processed_data_root or DYGLIB_PROCESSED_DATA_ROOT
-    feature_path = (
-        data_root / dataset_key / feature_file_name.format(dataset_key=dataset_key)
-    )
-
-    raw_feature_dim: int | None = None
-    if feature_path.exists():
-        try:
-            raw_features = np.load(feature_path, mmap_mode="r")
-            if raw_features.ndim == 2:
-                raw_feature_dim = int(raw_features.shape[1])
-        except Exception as exc:
-            logger.warning(
-                "Failed to inspect DyGLib %s features at %s: %s",
-                feature_name,
-                feature_path,
-                exc,
-            )
-
-    if raw_feature_dim is not None:
-        resolved_dim = max(raw_feature_dim, DYGLIB_ALIGNED_FEATURE_DIM)
-        logger.info(
-            "Resolved %s dummy_%s_dim=%d for dataset=%s from DyGLib %s features "
-            "(raw=%d, aligned floor=%d).",
-            model_name,
-            feature_name,
-            resolved_dim,
-            dataset,
-            feature_name,
-            raw_feature_dim,
-            DYGLIB_ALIGNED_FEATURE_DIM,
-        )
-        return resolved_dim
-
-    logger.info(
-        "Resolved %s dummy_%s_dim=%d for dataset=%s using DyGLib's "
-        "default aligned feature width.",
-        model_name,
-        feature_name,
-        DYGLIB_ALIGNED_FEATURE_DIM,
-        dataset,
-    )
-    return DYGLIB_ALIGNED_FEATURE_DIM
-
-
-def _resolve_dygformer_dummy_edge_dim(
-    dataset: str,
-    requested_dim: object,
-    *,
-    processed_data_root: Path | None = None,
-) -> int:
-    return _resolve_dummy_feature_dim(
-        dataset=dataset,
-        requested_dim=requested_dim,
-        model_name="DyGFormer",
-        feature_name="edge",
-        feature_file_name="ml_{dataset_key}.npy",
-        processed_data_root=processed_data_root,
-    )
-
-
-def _resolve_dygformer_dummy_node_dim(
-    dataset: str,
-    requested_dim: object,
-    *,
-    processed_data_root: Path | None = None,
-) -> int:
-    return _resolve_dummy_feature_dim(
-        dataset=dataset,
-        requested_dim=requested_dim,
-        model_name="DyGFormer",
-        feature_name="node",
-        feature_file_name="ml_{dataset_key}_node.npy",
-        processed_data_root=processed_data_root,
-    )
-
-
-def _resolve_tgat_dummy_edge_dim(
-    dataset: str,
-    requested_dim: object,
-    *,
-    processed_data_root: Path | None = None,
-) -> int:
-    return _resolve_dummy_feature_dim(
-        dataset=dataset,
-        requested_dim=requested_dim,
-        model_name="TGAT",
-        feature_name="edge",
-        feature_file_name="ml_{dataset_key}.npy",
-        processed_data_root=processed_data_root,
-    )
-
-
-def _resolve_tgat_dummy_node_dim(
-    dataset: str,
-    requested_dim: object,
-    *,
-    processed_data_root: Path | None = None,
-) -> int:
-    return _resolve_dummy_feature_dim(
-        dataset=dataset,
-        requested_dim=requested_dim,
-        model_name="TGAT",
-        feature_name="node",
-        feature_file_name="ml_{dataset_key}_node.npy",
-        processed_data_root=processed_data_root,
-    )
-
-
-def _resolve_predictor_cfg(
-    encoder_target: str,
-    predictor_cfg: dict[str, Any],
-) -> tuple[dict[str, Any], bool]:
-    """Swap in the pair-aware predictor for encoders that emit pair-specific layouts."""
-    resolved = dict(predictor_cfg)
-    switched = (
-        encoder_target in PAIR_AWARE_ENCODER_TARGETS
-        and resolved.get("_target_") == LINK_PREDICTOR_TARGET
-    )
-    if switched:
-        if encoder_target == TCL_ENCODER_TARGET:
-            resolved["_target_"] = TCL_PAIR_AWARE_PREDICTOR_TARGET
-        else:
-            resolved["_target_"] = PAIR_AWARE_PREDICTOR_TARGET
-    return resolved, switched
-
-
-def _resolve_no_memory_queue_size(configured_size: object | None) -> int:
-    """Return the runtime queue depth used by stateless/no-memory models."""
-    if configured_size is None:
-        return DEFAULT_NO_MEMORY_QUEUE_SIZE
-    try:
-        resolved = int(configured_size)
-    except (TypeError, ValueError) as exc:
-        raise TypeError(
-            f"no_memory_queue_size must be an integer, got {configured_size!r}"
-        ) from exc
-    if resolved < 1:
-        raise ValueError("no_memory_queue_size must be >= 1.")
-    return resolved
-
-
-def _resolve_time_scaling_factor(configured_factor: object | None) -> float:
-    """Return a validated time-scaling factor for time_interval_aware sampling."""
-    if configured_factor is None:
-        return 0.0
-    try:
-        resolved = float(configured_factor)
-    except (TypeError, ValueError) as exc:
-        raise TypeError(
-            f"time_scaling_factor must be a float, got {configured_factor!r}"
-        ) from exc
-    if not math.isfinite(resolved):
-        raise ValueError("time_scaling_factor must be finite.")
-    return resolved
-
-
-def _resolve_dynamic_state_fetch_mode(
-    cfg: DictConfig,
-    *,
-    has_mem: bool,
-    fanout: list[int],
-) -> bool:
-    """Return whether workers should bypass P2P delta and read remote state from SHM.
-
-    This remains an explicit debug mode only. Root-only memory models such as
-    JODIE still rely on Frost's normal planner/P2P path by default.
-    """
-    del has_mem, fanout
-    return bool(cfg.get("__debug_use_shm_instead", False))
 
 
 def launch(cfg: DictConfig):
@@ -279,38 +55,12 @@ def launch(cfg: DictConfig):
         cfg: Hydra DictConfig containing all experiment hyperparameters including
             dataset, model, sampler, optimizer, and runtime settings.
     """
-    _rank = int(os.environ.get("RANK", 0))
-    _world_size = int(os.environ.get("WORLD_SIZE", 1))
-    _is_host = _rank == _world_size - 1
-    dist.init_process_group(backend="gloo")
-
-    # Control TF32 globally so experiments can isolate TF32 vs compile speedups.
-    # Use both the canonical set_float32_matmul_precision (sets old+new APIs
-    # consistently) and the new fp32_precision attrs for cudnn paths.
-    use_tf32 = bool(cfg.get("tf32", True))
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore", message=".*new API settings to control TF32.*"
-        )
-        torch.set_float32_matmul_precision("high" if use_tf32 else "highest")
-    fp32_precision = "tf32" if use_tf32 else "ieee"
-    _set_nested_attr(torch.backends, ("cudnn", "fp32_precision"), fp32_precision)
-    _set_nested_attr(
-        torch.backends, ("cudnn", "conv", "fp32_precision"), fp32_precision
+    _, _, is_host = initialize_process_group()
+    configure_torch_backends(
+        use_tf32=bool(cfg.get("tf32", True)),
+        stable_mode=stable_mode_enabled(cfg),
+        is_host=is_host,
     )
-    _set_nested_attr(torch.backends, ("cudnn", "rnn", "fp32_precision"), fp32_precision)
-
-    if _stable_mode_enabled(cfg):
-        torch.backends.cudnn.benchmark = False
-        if _is_host:
-            logger.info(
-                "Enabled stable mode. CUDA_DEVICE_MAX_CONNECTIONS=%s, "
-                "CUBLAS_WORKSPACE_CONFIG=%s",
-                os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS"),
-                os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
-            )
 
     env: Env = Env.initial()
     dynamic_state_ablation = resolve_dynamic_state_ablation(
@@ -322,11 +72,9 @@ def launch(cfg: DictConfig):
         "yes",
         "on",
     }
-    cpu_benchmark_pid_list: list[int] | None = None
-    if cpu_util_bench_enabled:
-        gathered_pids: list[int | None] = [None] * env.world_size
-        dist.all_gather_object(gathered_pids, os.getpid())
-        cpu_benchmark_pid_list = [int(pid) for pid in gathered_pids if pid is not None]
+    cpu_benchmark_pid_list = gather_cpu_benchmark_pids(
+        env, enabled=cpu_util_bench_enabled
+    )
     per_gpu_batch_size = cfg.macro_batch_size // env.n_gpu
     if cfg.macro_batch_size % env.n_gpu != 0:
         raise ValueError(
@@ -448,19 +196,17 @@ def launch(cfg: DictConfig):
             if OmegaConf.is_config(encoder_fanout_cfg)
             else encoder_fanout_cfg
         )
-        fanout = _normalize_fanout(raw_fanout)
+        fanout = normalize_fanout(raw_fanout)
         sample_4_neg = bool(fanout)
         ngh_sampler_strategy = cfg.ngh_sampler.strategy
-    time_scaling_factor = _resolve_time_scaling_factor(
+    time_scaling_factor = resolve_time_scaling_factor(
         None if is_apan else cfg.ngh_sampler.get("time_scaling_factor", 0.0)
     )
     tgl_sampler_parity = bool(cfg.ngh_sampler.get("tgl_sampler_parity", False))
 
     postman_enabled = mail_recipients > 0
-    no_memory_queue_size = _resolve_no_memory_queue_size(
-        cfg.get("no_memory_queue_size")
-    )
-    use_shm_instead = _resolve_dynamic_state_fetch_mode(
+    no_memory_queue_size = resolve_no_memory_queue_size(cfg.get("no_memory_queue_size"))
+    use_shm_instead = resolve_dynamic_state_fetch_mode(
         cfg,
         has_mem=has_mem,
         fanout=fanout,
@@ -473,9 +219,7 @@ def launch(cfg: DictConfig):
     if has_mem:
         d_mail = 2 * cfg.mem_updater.d_mem + cfg.edim
 
-    worker_ranks = list(range(0, env.world_size - 1))
-    nccl_ddp = dist.new_group(ranks=worker_ranks, backend="nccl")
-    nccl_p2p = dist.new_group(ranks=worker_ranks, backend="nccl")
+    nccl_ddp, nccl_p2p = create_worker_process_groups(env)
     idx_dtype = precision.index_torch
 
     # Determine maximum n_neg between train and eval for shared memory sizing
@@ -489,11 +233,7 @@ def launch(cfg: DictConfig):
     else:
         train_n_neg = cfg.n_neg
         eval_n_neg = cfg.n_neg
-    eval_metric = str(cfg.get("eval_metric", "ap")).strip().lower()
-    if eval_metric not in {"ap", "mrr"}:
-        raise ValueError(
-            f"Unsupported eval_metric={eval_metric!r}; expected 'ap' or 'mrr'."
-        )
+    eval_metric = resolve_eval_metric(cfg.get("eval_metric", "ap"))
     if eval_metric == "ap" and eval_n_neg != 1:
         raise ValueError(
             "eval_metric='ap' currently requires neg_sampler.eval.n_neg=1; "
@@ -541,7 +281,7 @@ def launch(cfg: DictConfig):
         # Launch host process
         from frost.runtime.host._engine import Host
         from frost.runtime.host.analyzer import StaticAnalyzer
-        from frost.shm._core import cleanup_all_shm, set_as_host
+        from frost.shm._core import set_as_host
 
         set_as_host()
         start = time.time()
@@ -620,10 +360,8 @@ def launch(cfg: DictConfig):
         has_efeat = edim > 0
 
         if_carry_over_route: bool = bool(cfg.get("if_carry_over_route", False))
-        host: Host | None = None
-        host_failed = True
-        try:
-            host = Host(
+        dispatch_host(
+            lambda: Host(
                 has_nfeat=has_nfeat,
                 has_efeat=has_efeat,
                 has_mem=has_mem,
@@ -659,16 +397,7 @@ def launch(cfg: DictConfig):
                 eval_metric=eval_metric,
                 eval_batch_size=eval_per_gpu_batch_size,
             )
-            host.run()
-            host_failed = False
-        except BaseException:
-            raise
-        finally:
-            if host is not None:
-                host.shutdown(graceful=not host_failed)
-            else:
-                destroy_process_group(sync=False, logger_=logger)
-            cleanup_all_shm(is_host=True)
+        )
 
     else:
         # Launch worker process
@@ -677,98 +406,22 @@ def launch(cfg: DictConfig):
         assert nccl_ddp is not None, "Worker rank must be in nccl group"
         assert nccl_p2p is not None, "Worker rank must be in nccl_p2p group"
 
-        mem_updater_cfg = cfg.get("mem_updater")
-        if mem_updater_cfg is not None:
-            mem_updater_cfg = OmegaConf.to_container(mem_updater_cfg, resolve=True)
-            assert isinstance(mem_updater_cfg, dict)
-            mem_updater_cfg.pop("mail_recipients", None)
-            mem_updater_cfg.pop("mail_combine", None)
-
-        mem_updater: None | MemoryUpdaterProto = instantiate(
-            mem_updater_cfg, d_mail=d_mail
+        mem_updater, encoder, predictor, postman, loss_fn = build_worker_modules(
+            cfg,
+            encoder_target=encoder_target,
+            fanout=fanout,
+            d_mail=d_mail,
+            max_n_neg=max_n_neg,
+            postman_enabled=postman_enabled,
         )
-        encoder_cfg = OmegaConf.to_container(cfg.encoder, resolve=True)
-        assert isinstance(encoder_cfg, dict)
-        encoder_cfg.pop("out_dim", None)
-        encoder_cfg.pop("fanout", None)
-        encoder_cfg.pop("ngh_sampler_strategy", None)
-        if (
-            encoder_target == DYGFORMER_ENCODER_TARGET
-            and cfg.ndim == 0
-            and bool(encoder_cfg.get("enable_dummy_node_features", False))
-        ):
-            encoder_cfg["dummy_node_dim"] = _resolve_dygformer_dummy_node_dim(
-                dataset=cfg.dataset,
-                requested_dim=encoder_cfg.get("dummy_node_dim"),
-            )
-        if (
-            encoder_target == DYGFORMER_ENCODER_TARGET
-            and cfg.edim == 0
-            and bool(encoder_cfg.get("enable_dummy_edge_features", True))
-        ):
-            encoder_cfg["dummy_edge_dim"] = _resolve_dygformer_dummy_edge_dim(
-                dataset=cfg.dataset,
-                requested_dim=encoder_cfg.get("dummy_edge_dim"),
-            )
-        if (
-            encoder_target == TGAT_ENCODER_TARGET
-            and cfg.ndim == 0
-            and bool(encoder_cfg.get("enable_dummy_node_features", True))
-        ):
-            encoder_cfg["dummy_node_dim"] = _resolve_tgat_dummy_node_dim(
-                dataset=cfg.dataset,
-                requested_dim=encoder_cfg.get("dummy_node_dim"),
-            )
-        if (
-            encoder_target == TGAT_ENCODER_TARGET
-            and cfg.edim == 0
-            and bool(encoder_cfg.get("enable_dummy_edge_features", True))
-        ):
-            encoder_cfg["dummy_edge_dim"] = _resolve_tgat_dummy_edge_dim(
-                dataset=cfg.dataset,
-                requested_dim=encoder_cfg.get("dummy_edge_dim"),
-            )
-        if (
-            encoder_target == GRAPH_MIXER_ENCODER_TARGET
-            and bool(encoder_cfg.get("align_dyglib_zero_features", False))
-            and encoder_cfg.get("dyglib_feature_dim") is None
-        ):
-            encoder_cfg["dyglib_feature_dim"] = DYGLIB_ALIGNED_FEATURE_DIM
-            logger.info(
-                "Resolved GraphMixer dyglib_feature_dim=%d for encoder=%s.",
-                DYGLIB_ALIGNED_FEATURE_DIM,
-                GRAPH_MIXER_ENCODER_TARGET,
-            )
-        if encoder_target == TGAT_ENCODER_TARGET:
-            encoder: nn.Module = instantiate(encoder_cfg, fanout=fanout)
-        else:
-            encoder = instantiate(encoder_cfg)
-        predictor_cfg = OmegaConf.to_container(cfg.predictor, resolve=True)
-        assert isinstance(predictor_cfg, dict)
-        predictor_cfg, predictor_switched = _resolve_predictor_cfg(
-            encoder_target,
-            predictor_cfg,
-        )
-        if predictor_switched:
-            logger.info(
-                "Auto-switched predictor to DyGFormerLinkPredictor for pair-aware encoder=%s.",
-                encoder_target,
-            )
-        predictor: nn.Module = instantiate(predictor_cfg)
-        postman: None | PostmanProto = (
-            Postman(n_neg=max_n_neg) if postman_enabled else None
-        )
-        loss_fn: torch.nn.Module = instantiate(cfg.loss_fn)
-        worker: Worker | None = None
-        worker_failed = True
         if use_shm_instead and not bool(cfg.get("__debug_use_shm_instead", False)):
             logger.info(
                 "Auto-enabled shared-memory dynamic-state fetch path for root-only memory model "
                 "encoder=%s.",
                 encoder_target,
             )
-        try:
-            worker = Worker(
+        dispatch_worker(
+            lambda: Worker(
                 n_neg=max_n_neg,
                 mem_box_store=shared,
                 ring_buf=ring_buf,
@@ -794,15 +447,4 @@ def launch(cfg: DictConfig):
                 cpu_benchmark_pid_list=cpu_benchmark_pid_list,
                 eval_metric=eval_metric,
             )
-            worker.run()
-            worker_failed = False
-        except BaseException:
-            raise
-        finally:
-            from frost.shm._core import cleanup_all_shm
-
-            if worker is not None:
-                worker.cleanup(graceful=not worker_failed)
-            else:
-                destroy_process_group(sync=False, logger_=logger)
-            cleanup_all_shm(is_host=False)
+        )

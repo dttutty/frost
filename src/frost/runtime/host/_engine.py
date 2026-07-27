@@ -11,7 +11,7 @@ import torch
 from tqdm import tqdm
 
 from frost.ablation import DynamicStateAblation
-from frost.aliases.host import (
+from frost.runtime.host.types import (
     DynamicPlanOutQ,
     LayoutBundle,
     MetaBundle,
@@ -21,7 +21,7 @@ from frost.datatypes.env import Env
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.datatypes.sampled_layout import SampledLayoutView
-from frost.protocols.ngh_sampler_proto import NghSamplerProto
+from frost.sampling.protocols import NghSamplerProto
 from frost.runtime._thread_base import (
     destroy_process_group,
     join_thread,
@@ -618,11 +618,16 @@ class Host:
             pos_eid=eid,
             gpu_id=gpu_id,
         )
+        fanout = (
+            list(self.ngh_sampler.fanout)
+            if self.ngh_sampler.fanout is not None
+            else None
+        )
         layout = SampledLayoutView(
             nid=sampled_nid,
             n_src=src.shape[0],
             n_neg=neg_sampler.n_neg,
-            fanout=self.ngh_sampler.fanout,
+            fanout=fanout,
             sample_4_neg=self.ngh_sampler.sample_4_neg,
         )
 
@@ -639,7 +644,7 @@ class Host:
             buf_len=len,
             n_neg=neg_sampler.n_neg,
             neg_valid_mask=neg_valid_mask,
-            fanout=self.ngh_sampler.fanout,
+            fanout=fanout,
         )
 
         return meta, layout
@@ -673,7 +678,9 @@ class Host:
         logger.info("Elapsed time: %.2f seconds", elapsed)
 
         # Force-exit if any thread is stuck on a blocking collective op.
-        still_alive = [t for t in (self.scatter,) if t is not None and t.is_alive()]
+        still_alive: list[threading.Thread] = [
+            t for t in (self.scatter,) if t is not None and t.is_alive()
+        ]
         if self.plan_router is not None:
             still_alive.extend(
                 t

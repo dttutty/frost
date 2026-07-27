@@ -51,13 +51,13 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.ruff]
-extend-exclude = ["third_party", "third_party_paper"]
+extend-exclude = ["overleaf", "third_party", "third_party_paper"]
 
 [tool.ruff.lint]
-exclude = ["third_party", "third_party_paper"]
+exclude = ["overleaf", "third_party", "third_party_paper"]
 
 [tool.ruff.format]
-exclude = ["third_party", "third_party_paper"]
+exclude = ["overleaf", "third_party", "third_party_paper"]
 
 [tool.mypy]
 python_version = "3.12"
