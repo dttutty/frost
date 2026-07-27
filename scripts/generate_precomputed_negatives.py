@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from frost.sampling.neg_sampler import (
+from frost.neg_sampler import (
     PRECOMPUTED_NEGATIVE_FILENAME,
     generate_precomputed_negative_file,
 )

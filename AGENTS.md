@@ -36,13 +36,13 @@ uv run pytest tests/ -v
 
 **Config defaults** (`configs/config.yaml`): `access_analyzer` omitted on non-memory runs, `mem_updater=null`, `n_neg=1`, `ring_buf_size=64`, `macro_batch_size=4000`, `d_time=128`, `no_memory_queue_size=4`.
 
-**Pair-aware predictor auto-switches** (`launcher.py`): if the user leaves the default `predictor=link`, `DyGFormer` and `CAWN` are auto-switched to `DyGFormerLinkPredictor`, and `TCL` is auto-switched to `PairAwareMergeLayerPredictor`.
+**Pair-aware predictor auto-switches** (`src/frost/launch/config.py`): if the user leaves the default `predictor=link`, `DyGFormer` and `CAWN` are auto-switched to `DyGFormerLinkPredictor`, and `TCL` is auto-switched to `PairAwareMergeLayerPredictor`.
 
 ## Architecture Overview
 
 FROST is a distributed Temporal GNN training framework. Rank assignment: workers = ranks `0..n_gpus-1`, host/master = rank `world_size-1`.
 
-**Entry point:** `run.py` → `frost.launcher.launch(cfg)` — initializes process group (gloo), splits into Host vs Worker based on rank.
+**Entry point:** `run.py` → `frost.launcher.launch(cfg)`. The thin launcher coordinates `frost.launch.config`, `factory`, `distributed`, and `dispatch`, then selects Host vs Worker by rank.
 
 ### Host process (`src/frost/runtime/host/`)
 - `_engine.py` — `Host` class: drives sampling, batching, and scatter to workers
@@ -52,12 +52,15 @@ FROST is a distributed Temporal GNN training framework. Rank assignment: workers
 - `_scatter.py` — `Scatter` thread (dist to workers via `scatter_object_list`)
 
 ### Worker process (`src/frost/runtime/worker/`)
-- `_engine.py` — `Worker` class: train/eval loops
+- `_engine.py` — `Worker` orchestration and main event loop
+- `_pipeline.py` — queue/thread construction and shutdown
+- `_trainer.py` — model/optimizer setup and train/eval steps
+- `_telemetry.py` — benchmark environment and CPU-process sampling
+- `_checkpoint.py` — DDP-safe model save/load
 - `_receiver.py` — `Receiver` thread (receives from host)
-- `_h2d.py` — `H2D` thread (loads features to GPU)
+- `_host_to_device.py` — `H2D` thread (loads features to GPU)
 - `_dynamic_assembler.py` — `DynamicAssembler` (merges shared + P2P memory)
 - `_static_assembler.py` — `StaticAssembler`
-- `_host_to_device.py` — H2D thread (loads features to GPU)
 - `p2p_syncer/` — `MemHandler`, `BoxHandler`, `P2PQHandler`, writers
 
 ### Models (`src/frost/models/`)
