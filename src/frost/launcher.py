@@ -28,13 +28,16 @@ from frost.launch.distributed import (
 )
 from frost.launch.dispatch import dispatch_host, dispatch_worker
 from frost.launch.factory import build_worker_modules
+from frost.launch.storage import (
+    prepare_dynamic_store,
+    prepare_launch_dataset,
+    prepare_ring_buffer,
+    resolve_batch_layout,
+)
 from frost.sampling.protocols import NghSamplerProto
 from frost.runtime.host._plan_router import detect_gpu_topology
 from frost.neg_sampler import PrecomputedNegSampler
 from frost.sampling.ngh_sampler import MultiHopNghSampler, NghSampler, NoSampler
-from frost.shm.dataset_mgr import DatasetManager
-from frost.shm.mem_mgr import MemBoxStoreManager
-from frost.shm.ring_buf import RingBuf, cal_max_buf_size_for_layouts
 from frost.utils._logger import init_logging
 from frost.utils.precision import resolve_precision
 from frost.utils.utils import broadcast_data, set_seed
@@ -75,27 +78,14 @@ def launch(cfg: DictConfig):
     cpu_benchmark_pid_list = gather_cpu_benchmark_pids(
         env, enabled=cpu_util_bench_enabled
     )
-    per_gpu_batch_size = cfg.macro_batch_size // env.n_gpu
-    if cfg.macro_batch_size % env.n_gpu != 0:
-        raise ValueError(
-            f"macro_batch_size ({cfg.macro_batch_size}) must be divisible by "
-            f"n_gpu ({env.n_gpu})."
-        )
-    eval_macro_batch_size = cfg.get("eval_macro_batch_size")
-    if eval_macro_batch_size is None:
-        eval_macro_batch_size = cfg.macro_batch_size
-    eval_macro_batch_size = int(eval_macro_batch_size)
-    if eval_macro_batch_size < env.n_gpu:
-        raise ValueError(
-            f"eval_macro_batch_size ({eval_macro_batch_size}) must be at least "
-            f"n_gpu ({env.n_gpu})."
-        )
-    if eval_macro_batch_size % env.n_gpu != 0:
-        raise ValueError(
-            f"eval_macro_batch_size ({eval_macro_batch_size}) must be divisible by "
-            f"n_gpu ({env.n_gpu})."
-        )
-    eval_per_gpu_batch_size = eval_macro_batch_size // env.n_gpu
+    batch_layout = resolve_batch_layout(
+        macro_batch_size=int(cfg.macro_batch_size),
+        eval_macro_batch_size=cfg.get("eval_macro_batch_size"),
+        n_gpu=env.n_gpu,
+    )
+    per_gpu_batch_size = batch_layout.train_per_gpu
+    eval_macro_batch_size = batch_layout.eval_macro
+    eval_per_gpu_batch_size = batch_layout.eval_per_gpu
     if cfg.seed is not None:
         set_seed(cfg.seed)
     output_dir = HydraConfig.get().runtime.output_dir
@@ -119,29 +109,16 @@ def launch(cfg: DictConfig):
         )
         logger.info("Using shared-memory run_id=%s", run_id)
     precision = resolve_precision(cfg)
-    dataset_mgr = DatasetManager(
-        env=env,
-        run_id=run_id,
-        dataset=cfg.dataset,
-        index_dtype=precision.index_np,
-        time_dtype=precision.time_preprocessing_np,
-        feature_dtype=precision.feature_torch,
-        ignore_nfeat_on_disk=bool(cfg.get("ignore_nfeat_on_disk", False)),
-        ignore_efeat_on_disk=bool(cfg.get("ignore_efeat_on_disk", False)),
+    dataset = prepare_launch_dataset(
+        cfg=cfg, env=env, run_id=run_id, precision=precision
     )
-    (
-        graph,
-        df,
-        n_nodes,
-        n_edges,
-        ndim,
-        edim,
-        ndtype,
-        edtype,
-        nfeat,
-        efeat,
-        port,
-    ) = dataset_mgr.prepare()
+    graph = dataset.graph
+    df = dataset.frame
+    n_nodes = dataset.n_nodes
+    ndim = dataset.ndim
+    edim = dataset.edim
+    nfeat = dataset.nfeat
+    efeat = dataset.efeat
     with open_dict(cfg):
         cfg.ndim = ndim
         cfg.edim = edim
@@ -220,7 +197,6 @@ def launch(cfg: DictConfig):
         d_mail = 2 * cfg.mem_updater.d_mem + cfg.edim
 
     nccl_ddp, nccl_p2p = create_worker_process_groups(env)
-    idx_dtype = precision.index_torch
 
     # Determine maximum n_neg between train and eval for shared memory sizing
     neg_sampler_cfg = cfg.get("neg_sampler", {})
@@ -240,42 +216,29 @@ def launch(cfg: DictConfig):
             f"got {eval_n_neg}. Use eval_metric=mrr for one-vs-many evaluation."
         )
     max_n_neg = max(train_n_neg, eval_n_neg)
-    ring_slot_capacity = cal_max_buf_size_for_layouts(
-        [
-            (per_gpu_batch_size, train_n_neg),
-            (eval_per_gpu_batch_size, eval_n_neg),
-        ],
-        fanout=fanout,
-        sample_4_neg=sample_4_neg,
-    )
-
-    ring_buf = RingBuf(
-        run_id=run_id,
+    ring_buf = prepare_ring_buffer(
         env=env,
-        ndtype=idx_dtype,
-        edtype=idx_dtype,
-        tsdtype=precision.time_preprocessing_torch,
+        run_id=run_id,
+        precision=precision,
         fanout=fanout,
-        max_batch_size=per_gpu_batch_size,
-        n_neg=max_n_neg,
         sample_4_neg=sample_4_neg,
-        max_size=cfg.ring_buf_size,
-        slot_capacity=ring_slot_capacity,
+        train_batch_size=per_gpu_batch_size,
+        eval_batch_size=eval_per_gpu_batch_size,
+        train_n_neg=train_n_neg,
+        eval_n_neg=eval_n_neg,
+        ring_buf_size=int(cfg.ring_buf_size),
     )
 
-    shared = None
-    if has_mem:
-        mem_box_store = MemBoxStoreManager(
-            env=env,
-            mdtype=precision.memory_torch,
-            tdtype=precision.time_preprocessing_torch,
-            run_id=run_id,
-            n_nodes=n_nodes,
-            boxsize=cfg.mem_updater.boxsize,
-            d_mem=cfg.mem_updater.d_mem,
-            edim=cfg.edim,
-        )
-        shared = mem_box_store.prepare()
+    shared = prepare_dynamic_store(
+        enabled=has_mem,
+        env=env,
+        run_id=run_id,
+        precision=precision,
+        n_nodes=n_nodes,
+        boxsize=int(cfg.mem_updater.boxsize) if has_mem else 0,
+        d_mem=int(cfg.mem_updater.d_mem) if has_mem else 0,
+        edim=int(cfg.edim),
+    )
 
     if env.is_host:
         # Launch host process

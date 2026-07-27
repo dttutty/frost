@@ -44,6 +44,8 @@ FROST is a distributed Temporal GNN training framework. Rank assignment: workers
 
 **Entry point:** `run.py` → `frost.launcher.launch(cfg)`. The thin launcher coordinates `frost.launch.config`, `factory`, `distributed`, and `dispatch`, then selects Host vs Worker by rank.
 
+Dataset attachment, per-GPU batch layout, ring-buffer sizing, and dynamic-state shared-memory allocation live in `frost.launch.storage`.
+
 ### Host process (`src/frost/runtime/host/`)
 - `_engine.py` — `Host` class: drives sampling, batching, and scatter to workers
 - `analyzer.py` — `StaticAnalyzer`, `MemoryAnalyzer`, `APANMemoryAnalyzer`: compute `Access` (which nodes need mem/box/nfeat fetched)
@@ -59,7 +61,8 @@ FROST is a distributed Temporal GNN training framework. Rank assignment: workers
 - `_checkpoint.py` — DDP-safe model save/load
 - `_receiver.py` — `Receiver` thread (receives from host)
 - `_host_to_device.py` — `H2D` thread (loads features to GPU)
-- `_dynamic_assembler.py` — `DynamicAssembler` (merges shared + P2P memory)
+- `_dynamic_assembler.py` — `DynamicAssembler` control loop
+- `_dynamic_state.py` — shared-memory and P2P memory/mailbox tensor assembly
 - `_static_assembler.py` — `StaticAssembler`
 - `p2p_syncer/` — `MemHandler`, `BoxHandler`, `P2PQHandler`, writers
 

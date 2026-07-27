@@ -18,6 +18,7 @@ from frost.launch.config import (
     resolve_tgat_dummy_edge_dim,
     resolve_time_scaling_factor,
 )
+from frost.launch.storage import resolve_batch_layout
 
 
 class TestResolveDyGFormerDummyEdgeDim:
@@ -166,6 +167,39 @@ class TestResolveNoMemoryQueueSize:
 
         with pytest.raises(ValueError, match="no_memory_queue_size must be >= 1"):
             resolve_no_memory_queue_size(0)
+
+
+class TestResolveBatchLayout:
+    def test_resolves_train_and_eval_batch_sizes(self):
+        layout = resolve_batch_layout(
+            macro_batch_size=4000,
+            eval_macro_batch_size=1200,
+            n_gpu=2,
+        )
+
+        assert layout.train_per_gpu == 2000
+        assert layout.eval_macro == 1200
+        assert layout.eval_per_gpu == 600
+
+    def test_eval_defaults_to_training_macro_batch_size(self):
+        layout = resolve_batch_layout(
+            macro_batch_size=600,
+            eval_macro_batch_size=None,
+            n_gpu=2,
+        )
+
+        assert layout.eval_macro == 600
+        assert layout.eval_per_gpu == 300
+
+    def test_rejects_non_divisible_batch_sizes(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="macro_batch_size"):
+            resolve_batch_layout(
+                macro_batch_size=601,
+                eval_macro_batch_size=None,
+                n_gpu=2,
+            )
 
 
 class TestResolveTimeScalingFactor:
