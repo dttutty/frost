@@ -7,6 +7,7 @@ from frost.models.encoder.dygformer import DyGFormer
 from frost.models.header import (
     DyGFormerLinkPredictor,
     LinkPredictor,
+    MergeLayerPredictor,
     NodeClassificationHeader,
 )
 from frost.models.modules.time_encoder import TimeEncoder
@@ -47,6 +48,43 @@ class TestLinkPredictor:
         assert pos_scores.shape == (n_src, 1)
         assert neg_scores.shape == (n_src * n_neg, 1)
 
+    def test_multi_neg_pairs_each_source_with_its_own_row(self):
+        pred = LinkPredictor(d_in=1, n_neg=2)
+        with torch.no_grad():
+            for layer in (pred.src_fc, pred.dst_fc, pred.out_fc):
+                layer.weight.fill_(1.0)
+                layer.bias.zero_()
+
+        # [src | pos_dst | per-edge negatives]
+        h = torch.tensor(
+            [[1.0], [10.0], [0.0], [0.0], [100.0], [200.0], [300.0], [400.0]]
+        )
+        logits = pred(h).squeeze(1)
+
+        assert torch.equal(logits[2:], torch.tensor([101.0, 201.0, 310.0, 410.0]))
+
+    def test_runtime_n_neg_can_differ_from_constructor_default(self):
+        pred = LinkPredictor(d_in=4, n_neg=1)
+        h = torch.randn(2 * (2 + 3), 4)
+        assert pred(h, n_neg=3).shape == (2 * (1 + 3), 1)
+
+
+class TestMergeLayerPredictor:
+    def test_multi_neg_pairs_each_source_with_its_own_row(self):
+        pred = MergeLayerPredictor(d_in=1, n_neg=2)
+        with torch.no_grad():
+            pred.fc1.weight.fill_(1.0)
+            pred.fc1.bias.zero_()
+            pred.fc2.weight.fill_(1.0)
+            pred.fc2.bias.zero_()
+
+        h = torch.tensor(
+            [[1.0], [10.0], [0.0], [0.0], [100.0], [200.0], [300.0], [400.0]]
+        )
+        logits = pred(h).squeeze(1)
+
+        assert torch.equal(logits[2:], torch.tensor([101.0, 201.0, 310.0, 410.0]))
+
 
 class TestNodeClassificationHeader:
     def test_output_shape(self):
@@ -82,6 +120,11 @@ class TestDyGFormerLinkPredictor:
         neg_src_hi = neg_src_lo + n_src * n_neg
         assert h.grad is not None
         assert torch.count_nonzero(h.grad[neg_src_lo:neg_src_hi]).item() > 0
+
+    def test_runtime_n_neg_can_differ_from_constructor_default(self):
+        pred = DyGFormerLinkPredictor(d_in=8, n_neg=1)
+        h = torch.randn(2 * 2 * (1 + 3), 8)
+        assert pred(h, n_neg=3).shape == (2 * (1 + 3), 1)
 
 
 class TestTimeEncoder:
@@ -162,7 +205,18 @@ class TestDyGFormer:
                         [0, 0, 0, 8, 9, 14, 15, 16, 17, 18], dtype=torch.int64
                     ),
                     nfeat=torch.tensor(
-                        [[0.0], [0.0], [0.0], [12.0], [13.0], [14.0], [15.0], [16.0], [17.0], [18.0]]
+                        [
+                            [0.0],
+                            [0.0],
+                            [0.0],
+                            [12.0],
+                            [13.0],
+                            [14.0],
+                            [15.0],
+                            [16.0],
+                            [17.0],
+                            [18.0],
+                        ]
                     ),
                     efeat=None,
                     mem=None,
@@ -219,9 +273,7 @@ class TestDyGFormer:
                     nid=torch.tensor([-1, 11, -1, 21, -1, 31], dtype=torch.int64),
                     eid=torch.full((6,), -1, dtype=torch.int64),
                     ts=torch.tensor([0, 9, 0, 8, 0, 7], dtype=torch.int64),
-                    nfeat=torch.tensor(
-                        [[0.0], [11.0], [0.0], [21.0], [0.0], [31.0]]
-                    ),
+                    nfeat=torch.tensor([[0.0], [11.0], [0.0], [21.0], [0.0], [31.0]]),
                     efeat=None,
                     mem=None,
                     mem_ts=None,

@@ -1,5 +1,6 @@
 import logging
 import pickle
+import re
 from pathlib import Path
 
 import numpy as np
@@ -11,11 +12,12 @@ logger = logging.getLogger(__name__)
 
 
 class TGBEvalNegSampler:
-    """TGB evaluation sampler loading precomputed `{dataset}_[val|test]_ns.pkl` files.
-    
-    TGB link property prediction benchmark generates 100 negative examples for each
-    positive test/val edge. This sampler loads the precomputed dictionary and returns
-    the pre-designated negative destinations via exact (src, dst, timestamp) matching.
+    """Load official TGB negatives into a fixed-capacity runtime layout.
+
+    Strict mode requires every query to have exactly ``n_neg`` destinations.
+    ``allow_variable_width`` permits shorter queries by padding with ``-1`` and
+    exposing a validity mask; queries wider than the configured capacity still
+    fail. Missing benchmark queries never fall back to random negatives.
     """
 
     def __init__(
@@ -24,44 +26,99 @@ class TGBEvalNegSampler:
         n_neg: int,
         dataset: str,
         data_root: str | Path = "DATA",
+        seed: int | None = None,
+        allow_variable_width: bool = False,
     ) -> None:
+        del seed  # Accepted so nested train/eval sampler configs share one interface.
+        if n_neg <= 0:
+            raise ValueError(f"n_neg must be positive, got {n_neg}")
         self.n_nodes = n_nodes
         self.n_neg = n_neg
         self.dataset = dataset
+        self.allow_variable_width = allow_variable_width
 
         dataset_dir = resolve_dataset_dir(self.dataset, data_root=data_root)
 
         # Load val and test dictionaries into a unified evaluation set
         # Schema: (src, dst, ts) -> numpy.ndarray of neg_dsts
         self.evaluation_dict: dict[tuple[int, int, int | float], np.ndarray] = {}
-        
-        # Datasets often have prefixes or lowercase names in TGB e.g. tgbl-wiki
-        base_names = [dataset, dataset.lower()]
-        if not dataset.startswith("tgbl-"):
-            base_names.append(f"tgbl-{dataset.lower()}")
-            
+
+        base_names = self._candidate_base_names(dataset)
+        requested_version = self._requested_version(dataset)
+
         for split in ["val", "test"]:
-            file_loaded = False
-            for bname in base_names:
-                pkl_path = dataset_dir / f"{bname}_{split}_ns.pkl"
-                if pkl_path.exists():
-                    logger.info(f"TGBEvalNegSampler: Loading {pkl_path}")
-                    with open(pkl_path, "rb") as f:
-                        eval_set = pickle.load(f)
-                        self.evaluation_dict.update(eval_set)
-                    logger.info(f"Loaded {len(eval_set)} {split} query records.")
-                    file_loaded = True
-                    break
-            
-            if not file_loaded:
-                logger.warning(
-                    f"TGB eval file for '{split}' not found in {dataset_dir} for names {base_names}. "
-                    "TGB evaluation will fallback to random if queries miss."
+            pkl_path = self._resolve_negative_file(
+                dataset_dir,
+                base_names,
+                split,
+                requested_version=requested_version,
+            )
+            logger.info("TGBEvalNegSampler: loading %s", pkl_path)
+            with pkl_path.open("rb") as f:
+                eval_set = pickle.load(f)
+            if not isinstance(eval_set, dict):
+                raise TypeError(
+                    f"Expected a dictionary in {pkl_path}, got {type(eval_set)!r}."
                 )
+            self.evaluation_dict.update(eval_set)
+            logger.info("Loaded %d %s query records.", len(eval_set), split)
 
         self._batch_src: np.ndarray | None = None
         self._batch_dst: np.ndarray | None = None
         self._batch_ts: np.ndarray | None = None
+        self._last_negative_mask: torch.Tensor | None = None
+
+    @staticmethod
+    def _candidate_base_names(dataset: str) -> list[str]:
+        normalized = dataset.strip().lower().replace("_", "-")
+        normalized = re.sub(r"-v\d+$", "", normalized)
+        candidates = [normalized]
+        if not normalized.startswith("tgbl-"):
+            candidates.append(f"tgbl-{normalized}")
+        return list(dict.fromkeys(candidates))
+
+    @staticmethod
+    def _requested_version(dataset: str) -> int | None:
+        normalized = dataset.strip().lower().replace("_", "-")
+        match = re.search(r"-v(\d+)$", normalized)
+        return int(match.group(1)) if match else None
+
+    @staticmethod
+    def _version_number(path: Path) -> int:
+        match = re.search(r"_v(\d+)\.pkl$", path.name)
+        return int(match.group(1)) if match else -1
+
+    @classmethod
+    def _resolve_negative_file(
+        cls,
+        dataset_dir: Path,
+        base_names: list[str],
+        split: str,
+        requested_version: int | None = None,
+    ) -> Path:
+        checked: list[Path] = []
+        for base_name in base_names:
+            if requested_version is not None:
+                exact = dataset_dir / f"{base_name}_{split}_ns_v{requested_version}.pkl"
+                checked.append(exact)
+                if exact.is_file():
+                    return exact
+                continue
+            versioned = sorted(
+                dataset_dir.glob(f"{base_name}_{split}_ns_v*.pkl"),
+                key=cls._version_number,
+                reverse=True,
+            )
+            unversioned = dataset_dir / f"{base_name}_{split}_ns.pkl"
+            checked.extend(versioned)
+            checked.append(unversioned)
+            for path in [*versioned, unversioned]:
+                if path.is_file():
+                    return path
+        raise FileNotFoundError(
+            f"Could not find official TGB negatives for split={split!r} in "
+            f"{dataset_dir}. Checked: {[str(path) for path in checked]}"
+        )
 
     def set_batch_context(
         self,
@@ -75,6 +132,7 @@ class TGBEvalNegSampler:
         """Capture batch specifics for exact Dict lookup."""
         self._batch_src = batch_src
         self._batch_dst = batch_dst
+        self._last_negative_mask = None
         if batch_ts is None:
             raise ValueError(
                 "TGBEvalNegSampler requires batch_ts array to lookup exact timestamps. "
@@ -84,17 +142,30 @@ class TGBEvalNegSampler:
 
     def sample(self, src_ids: torch.Tensor, edge_ids: torch.Tensor) -> torch.Tensor:
         n_src = src_ids.numel()
+        if edge_ids.numel() != n_src:
+            raise ValueError(
+                "src_ids and edge_ids must have the same length, got "
+                f"{n_src} and {edge_ids.numel()}."
+            )
         if n_src == 0:
+            self._last_negative_mask = torch.empty(0, dtype=torch.bool)
             return torch.empty(0, dtype=torch.long)
 
-        if self._batch_src is None or self._batch_ts is None or len(self._batch_src) != n_src:
+        if (
+            self._batch_src is None
+            or self._batch_dst is None
+            or self._batch_ts is None
+            or len(self._batch_src) != n_src
+            or len(self._batch_dst) != n_src
+            or len(self._batch_ts) != n_src
+        ):
             raise RuntimeError(
                 "TGBEvalNegSampler: set_batch_context must be called with exact arrays "
                 "before sample."
             )
 
-        result = torch.empty((n_src, self.n_neg), dtype=torch.long)
-        misses = 0
+        result = torch.full((n_src, self.n_neg), -1, dtype=torch.long)
+        valid_mask = torch.zeros((n_src, self.n_neg), dtype=torch.bool)
 
         for i in range(n_src):
             s = int(self._batch_src[i])
@@ -102,33 +173,47 @@ class TGBEvalNegSampler:
             t = self._batch_ts[i].item()
 
             # The timestamp in TGB pickle might be float or int depending on generation.
-            # Try float first, then int.
+            # Try the integer representation first, then the float representation.
             key_f = (s, d, float(t))
             key_i = (s, d, int(t))
-            
+
             neg_arr = None
             if key_i in self.evaluation_dict:
                 neg_arr = self.evaluation_dict[key_i]
             elif key_f in self.evaluation_dict:
                 neg_arr = self.evaluation_dict[key_f]
-                
+
             if neg_arr is not None:
-                available = len(neg_arr)
-                if available < self.n_neg:
-                    # Pad if the precomputed set has fewer negatives than requested
-                    padded = np.pad(neg_arr, (0, self.n_neg - available), mode="edge")
-                    result[i] = torch.from_numpy(padded)
-                else:
-                    result[i] = torch.from_numpy(neg_arr[: self.n_neg])
+                neg_arr = np.asarray(neg_arr, dtype=np.int64).reshape(-1)
+                available = int(neg_arr.shape[0])
+                if not self.allow_variable_width and available != self.n_neg:
+                    raise ValueError(
+                        "FROST currently supports fixed-width TGB negatives only: "
+                        f"configured n_neg={self.n_neg}, but query {(s, d, t)} has "
+                        f"{available}. Variable-width candidate sets are not supported."
+                    )
+                if available > self.n_neg:
+                    raise ValueError(
+                        f"TGB query {(s, d, t)} has {available} negatives, which "
+                        f"exceeds configured capacity n_neg={self.n_neg}."
+                    )
+                result[i, :available] = torch.from_numpy(neg_arr)
+                valid_mask[i, :available] = True
             else:
-                misses += 1
-                # Fallback: random fallback
-                result[i] = torch.randint(0, self.n_nodes, (self.n_neg,))
+                raise KeyError(
+                    "Official TGB negatives are missing for query "
+                    f"(src={s}, dst={d}, timestamp={t}). Refusing to use random "
+                    "fallback because it would invalidate benchmark MRR."
+                )
 
-        if misses > 0:
-            logger.warning(
-                f"TGBEvalNegSampler: {misses}/{n_src} queries missed. "
-                f"Key (src, dst, ts) not found in .pkl! Used random fallback. Example key: (s={s}, d={d}, t={t})"
+        # Row-major layout: all negatives for edge 0, then edge 1, etc.
+        self._last_negative_mask = valid_mask.reshape(-1)
+        return result.reshape(-1)
+
+    def get_last_negative_mask(self) -> torch.Tensor:
+        """Return the validity mask produced by the immediately preceding sample."""
+        if self._last_negative_mask is None:
+            raise RuntimeError(
+                "sample() must be called before reading its negative mask."
             )
-
-        return result.view(-1)
+        return self._last_negative_mask

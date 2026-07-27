@@ -8,8 +8,10 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | --- | --- |
 | `dataset` | `LASTFM` |
 | `macro_batch_size` | `4000` |
+| `eval_macro_batch_size` | `null` |
 | `access_analyzer` | omitted |
 | `n_neg` | `1` |
+| `eval_metric` | `ap` |
 | `d_time` | `128` |
 | `compile` | `false` |
 | `tf32` | `false` |
@@ -20,6 +22,7 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | --- | --- | --- |
 | `epoch` | `100` | Number of training epochs. |
 | `macro_batch_size` | `4000` | Total batch size across all GPUs. The launcher auto-computes `per_gpu_batch_size = macro_batch_size // n_gpu`. |
+| `eval_macro_batch_size` | `null` | Total validation/test batch size across GPUs. Defaults to `macro_batch_size`; use a smaller value for TGB one-vs-many evaluation. |
 | `patience` | `100` | Early stopping patience in epochs. |
 | `dropout` | `0.2` | Shared dropout hyperparameter forwarded into several encoders and memory modules. |
 | `seed` | `42` | Shared random seed for sampling and reproducibility. |
@@ -29,6 +32,7 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | `optimizer` | `adam` | Worker optimizer. Supported values: `adam` and `sgd`. |
 | `lr` | `0.0001` | Learning rate. |
 | `n_neg` | `1` | Number of negative samples per positive edge. Propagates into the negative sampler and related components. |
+| `eval_metric` | `ap` | Evaluation, checkpoint-selection, logging, and early-stopping metric. Supported values are `ap` and `mrr`; AP remains the default. |
 | `ring_buf_size` | `64` | Number of shared-memory ring-buffer slots per worker GPU. |
 | `if_carry_over_route` | `false` | Allows planner fallback to stale leftovers when next-batch needs cannot be fully satisfied. |
 | `compile` | `false` | Enables `torch.compile` for the assembled worker model. |
@@ -42,7 +46,7 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | `encoder` | TGNN encoder architecture | `tgn`, `jodie`, `apan`, `dyrep`, `tgat`, `dygformer`, `graph_mixer`, `tcl` | Yes |
 | `loss_fn` | Training loss | `bce` | Fixed |
 | `mem_updater` | Memory update module | `gru`, `rnn`, `apan` or `null` | Memory models only |
-| `neg_sampler` | Negative destination sampling | `precomputed`, `rnd_then_rnd`, `rnd_then_hist`, `rnd_then_ind` | Yes |
+| `neg_sampler` | Negative destination sampling | `precomputed`, `rnd_then_rnd`, `rnd_then_hist`, `rnd_then_ind`, `tgb`, `tgb_wiki` | Yes |
 | `predictor` | Downstream prediction head | `link` | Fixed |
 
 ## Parameter Flow and Coupling
@@ -52,6 +56,9 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 - `neg_sampler=rnd_then_rnd` uses `RandomNegLinkSampler` for both train and eval; override `neg_sampler.train.candidate_mode` and `neg_sampler.eval.candidate_mode` independently to switch between `all` and `dst_partition`.
 - `neg_sampler=rnd_then_hist` uses random negatives during training and `HistoricalNegLinkSampler` during eval.
 - `neg_sampler=rnd_then_ind` uses random negatives during training and `InductiveNegLinkSampler` during eval.
+- `neg_sampler=tgb` uses one random training negative and official TGB validation/test pickle files. Run with `eval_metric=mrr`; set `neg_sampler.eval.n_neg=100` for `tgbl-review`, or `20` for `tgbl-coin`, `tgbl-comment`, and `tgbl-flight`.
+- The runtime keeps a fixed negative capacity. Generic `neg_sampler=tgb` requires every query to have exactly that width. `neg_sampler=tgb_wiki` uses capacity 999 and masks the four official wiki-v2 queries that contain 998 negatives; it does not introduce ragged tensors or random replacements.
+- AP mode remains the default and currently requires one evaluation negative per positive edge. MRR is opt-in and uses TGB's optimistic/pessimistic average tie rank for checkpoint selection, logging, and early stopping.
 - Omitting `access_analyzer` selects `StaticAnalyzer` only on non-memory runs. Memory runs must still provide an access-analyzer override.
 - `fanout` is derived, not stored at the root: APAN uses `mem_updater.mail_recipients`, while every other model uses `encoder.fanout`. `null` selects 0-hop, a 1-element list selects 1-hop, and a longer list selects multi-hop.
 - `encoder.out_dim` is the shared embedding size used by the predictor and, for memory models, the default source of `mem_updater.d_mem`.
@@ -64,3 +71,19 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 - `mem_updater.mail_recipients>0` enables APAN-style neighbor-directed mail routing. The shipped `apan` updater sets `10`; the other memory updaters must keep it at `0`.
 - `mem_updater.mail_combine` controls mailbox aggregation for memory models. Supported values are `last` and `mean`; the shipped updaters default to `last`.
 
+## TGB Link Prediction
+
+After preparing `DATA/TGBL_WIKI` with
+[`scripts/prepare_tgbl_wiki.py`](../scripts/prepare_tgbl_wiki.py), a two-GPU
+TGN run is:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --nproc_per_node=3 run.py \
+  access_analyzer=memory_analyzer dataset=TGBL_WIKI encoder=tgn \
+  mem_updater=gru neg_sampler=tgb_wiki eval_metric=mrr \
+  macro_batch_size=4096 eval_macro_batch_size=128
+```
+
+Training still uses one random negative per positive. Only validation and test
+use the official 998/999-candidate sets. The smaller evaluation batch is
+independent of the training batch and bounds ring-buffer and GPU memory use.

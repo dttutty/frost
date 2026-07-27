@@ -47,9 +47,7 @@ def compute_last_indices(nid: torch.Tensor, ts: torch.Tensor) -> torch.Tensor:
     else:
         fill_val = torch.iinfo(ts.dtype).min
     max_ts = ts.new_full((M,), fill_val)
-    max_ts.scatter_reduce_(
-        0, compact_idx, ts, reduce="amax", include_self=False
-    )
+    max_ts.scatter_reduce_(0, compact_idx, ts, reduce="amax", include_self=False)
 
     # Step 2: mask entries that match the per-group maximum
     is_max = ts == max_ts[compact_idx]
@@ -67,10 +65,15 @@ def keep_last(data: Mem_or_Mail) -> Mem_or_Mail:
     assert data.ts is not None, "TS must be provided for keep_last"
     indices = compute_last_indices(data.nid, data.ts)
 
-    if indices.numel() < data.nid.numel():
-        data.nid = data.nid[indices]
-        data.data = data.data[indices]
-        data.ts = data.ts[indices]
+    # ``indices`` is ordered by the sorted unique node IDs returned by
+    # ``torch.unique``.  Apply it even when every input node is unique: in that
+    # case it is still the permutation that turns an arbitrary root layout
+    # (for example ``[src | dst]``) into sorted order.  Skipping the indexing
+    # while setting ``is_sorted=True`` makes downstream ``searchsorted`` calls
+    # silently miss nodes.
+    data.nid = data.nid[indices]
+    data.data = data.data[indices]
+    data.ts = data.ts[indices]
 
     # compute_last_indices relies on unique's group order (sorted by nid by default)
     data.is_sorted = True
@@ -200,11 +203,15 @@ def keep_mean(data: Mem_or_Mail) -> Mem_or_Mail:
 
     # Count per group
     ct = torch.zeros(M, dtype=data.ts.dtype, device=data.ts.device)
-    ct.scatter_reduce_(0, compact_idx, torch.ones_like(data.ts), reduce="sum", include_self=False)
+    ct.scatter_reduce_(
+        0, compact_idx, torch.ones_like(data.ts), reduce="sum", include_self=False
+    )
 
     # Sum data and timestamps
     idx_data = compact_idx.unsqueeze(-1).expand_as(data.data)
-    sum_data = torch.zeros(M, data.data.shape[1], dtype=data.data.dtype, device=data.data.device)
+    sum_data = torch.zeros(
+        M, data.data.shape[1], dtype=data.data.dtype, device=data.data.device
+    )
     sum_data.scatter_reduce_(0, idx_data, data.data, reduce="sum", include_self=False)
     sum_ts = torch.zeros(M, dtype=data.ts.dtype, device=data.ts.device)
     sum_ts.scatter_reduce_(0, compact_idx, data.ts, reduce="sum", include_self=False)

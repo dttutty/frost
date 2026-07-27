@@ -3,7 +3,11 @@
 import pytest
 import torch
 
-from frost.shm.ring_buf import RingBuf, cal_max_buf_size
+from frost.shm.ring_buf import (
+    RingBuf,
+    cal_max_buf_size,
+    cal_max_buf_size_for_layouts,
+)
 
 
 class TestCalMaxBufSize:
@@ -54,3 +58,8 @@ class TestCalMaxBufSize:
         size = cal_max_buf_size(n_src, fanout=[], n_neg=n_neg)
         expected = n_src * (2 + n_neg)
         assert size == expected
+
+    def test_multiple_layouts_use_largest_actual_slot(self):
+        size = cal_max_buf_size_for_layouts([(2_000, 1), (4, 999)], fanout=[10])
+
+        assert size == cal_max_buf_size(2_000, fanout=[10], n_neg=1)

@@ -5,6 +5,7 @@ into slots of a circular buffer backed by POSIX shared memory.  Each GPU
 worker has its own independent head/tail pair so the host can push data to
 multiple workers without coordination between workers.
 """
+
 import logging
 import time
 
@@ -59,6 +60,19 @@ def cal_max_buf_size(
     return total
 
 
+def cal_max_buf_size_for_layouts(
+    layouts: list[tuple[int, int]],
+    fanout: list[int] | None,
+    sample_4_neg: bool = True,
+) -> int:
+    """Return one slot capacity covering multiple ``(n_src, n_neg)`` layouts."""
+    if not layouts:
+        raise ValueError("At least one batch layout is required.")
+    return max(
+        cal_max_buf_size(n_src, fanout, n_neg, sample_4_neg) for n_src, n_neg in layouts
+    )
+
+
 class RingBuf:
     """Shared-memory circular buffer for host-to-worker sampling transfer.
 
@@ -92,6 +106,7 @@ class RingBuf:
         ndtype: torch.dtype,
         edtype: torch.dtype,
         tsdtype: torch.dtype,
+        slot_capacity: int | None = None,
     ) -> None:
         self.env = env
         self.n_gpu = env.n_gpu
@@ -105,7 +120,14 @@ class RingBuf:
         self.sample_4_neg = sample_4_neg
         self.fanout = fanout  # store for downstream use (e.g. APAN writeback)
 
-        total = cal_max_buf_size(max_batch_size, fanout, n_neg, sample_4_neg)
+        total = (
+            cal_max_buf_size(max_batch_size, fanout, n_neg, sample_4_neg)
+            if slot_capacity is None
+            else int(slot_capacity)
+        )
+        if total < 1:
+            raise ValueError(f"slot_capacity must be positive, got {total}.")
+        self.slot_capacity = total
 
         self.schema = {
             "NID": ((total,), ndtype),

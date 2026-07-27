@@ -122,9 +122,7 @@ class TCL(nn.Module):
         # zeros are used instead.
         self.has_node_proj = ndim > 0
         self.has_edge_proj = edim > 0
-        self.projection_layer = nn.ModuleDict(
-            {"time": nn.Linear(d_time, self.d_model)}
-        )
+        self.projection_layer = nn.ModuleDict({"time": nn.Linear(d_time, self.d_model)})
         if self.has_node_proj:
             self.projection_layer["node"] = nn.Linear(ndim, self.d_model)
         if self.has_edge_proj:
@@ -154,7 +152,7 @@ class TCL(nn.Module):
         assert graph.fanout is not None, "TCL requires fanout metadata"
         n_root = graph.root_nid.shape[0]
         K = graph.fanout[0]
-        n_src = n_root // (2 + self.n_neg)
+        n_src = n_root // (2 + graph.n_neg)
 
         # Build per-node sequences [n_root, L, d_model] -----------------
         seq, pad_mask = self._build_sequences(graph, n_root, K)
@@ -222,7 +220,11 @@ class TCL(nn.Module):
         pad_mask = seq_nid == -1  # [n_root, L]
 
         # --- Node features ----------------------------------------------
-        if self.has_node_proj and graph.root_nfeat is not None and nbr.nfeat is not None:
+        if (
+            self.has_node_proj
+            and graph.root_nfeat is not None
+            and nbr.nfeat is not None
+        ):
             ngh_nfeat = nbr.nfeat.reshape(n_root, K, -1)[:, :use_K, :]
             seq_nfeat = torch.cat([graph.root_nfeat.unsqueeze(1), ngh_nfeat], dim=1)
             seq_nfeat = seq_nfeat.masked_fill(pad_mask.unsqueeze(-1), 0.0)
@@ -247,9 +249,7 @@ class TCL(nn.Module):
         time_proj = self.projection_layer["time"](time_feat)
 
         # --- Depth embedding: [L, d_model], broadcast over batch --------
-        depth_feat = self.depth_embedding(
-            torch.arange(L, device=dev)
-        ).unsqueeze(0)
+        depth_feat = self.depth_embedding(torch.arange(L, device=dev)).unsqueeze(0)
 
         seq = node_proj + edge_proj + time_proj + depth_feat  # [n_root, L, d_model]
 

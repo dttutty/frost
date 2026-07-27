@@ -28,7 +28,7 @@ from frost.neg_sampler import PrecomputedNegSampler
 from frost.sampling.ngh_sampler import MultiHopNghSampler, NghSampler, NoSampler
 from frost.shm.dataset_mgr import DatasetManager
 from frost.shm.mem_mgr import MemBoxStoreManager
-from frost.shm.ring_buf import RingBuf
+from frost.shm.ring_buf import RingBuf, cal_max_buf_size_for_layouts
 from frost.utils._logger import init_logging
 from frost.utils.precision import resolve_precision
 from frost.utils.utils import broadcast_data, set_seed
@@ -96,8 +96,8 @@ def _resolve_dummy_feature_dim(
 
     dataset_key = dataset.strip().lower()
     data_root = processed_data_root or DYGLIB_PROCESSED_DATA_ROOT
-    feature_path = data_root / dataset_key / feature_file_name.format(
-        dataset_key=dataset_key
+    feature_path = (
+        data_root / dataset_key / feature_file_name.format(dataset_key=dataset_key)
     )
 
     raw_feature_dim: int | None = None
@@ -289,8 +289,11 @@ def launch(cfg: DictConfig):
     # consistently) and the new fp32_precision attrs for cudnn paths.
     use_tf32 = bool(cfg.get("tf32", True))
     import warnings
+
     with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*new API settings to control TF32.*")
+        warnings.filterwarnings(
+            "ignore", message=".*new API settings to control TF32.*"
+        )
         torch.set_float32_matmul_precision("high" if use_tf32 else "highest")
     fp32_precision = "tf32" if use_tf32 else "ieee"
     _set_nested_attr(torch.backends, ("cudnn", "fp32_precision"), fp32_precision)
@@ -323,15 +326,28 @@ def launch(cfg: DictConfig):
     if cpu_util_bench_enabled:
         gathered_pids: list[int | None] = [None] * env.world_size
         dist.all_gather_object(gathered_pids, os.getpid())
-        cpu_benchmark_pid_list = [
-            int(pid) for pid in gathered_pids if pid is not None
-        ]
+        cpu_benchmark_pid_list = [int(pid) for pid in gathered_pids if pid is not None]
     per_gpu_batch_size = cfg.macro_batch_size // env.n_gpu
     if cfg.macro_batch_size % env.n_gpu != 0:
         raise ValueError(
             f"macro_batch_size ({cfg.macro_batch_size}) must be divisible by "
             f"n_gpu ({env.n_gpu})."
         )
+    eval_macro_batch_size = cfg.get("eval_macro_batch_size")
+    if eval_macro_batch_size is None:
+        eval_macro_batch_size = cfg.macro_batch_size
+    eval_macro_batch_size = int(eval_macro_batch_size)
+    if eval_macro_batch_size < env.n_gpu:
+        raise ValueError(
+            f"eval_macro_batch_size ({eval_macro_batch_size}) must be at least "
+            f"n_gpu ({env.n_gpu})."
+        )
+    if eval_macro_batch_size % env.n_gpu != 0:
+        raise ValueError(
+            f"eval_macro_batch_size ({eval_macro_batch_size}) must be divisible by "
+            f"n_gpu ({env.n_gpu})."
+        )
+    eval_per_gpu_batch_size = eval_macro_batch_size // env.n_gpu
     if cfg.seed is not None:
         set_seed(cfg.seed)
     output_dir = HydraConfig.get().runtime.output_dir
@@ -344,7 +360,14 @@ def launch(cfg: DictConfig):
     if env.is_host:
         logger.info(
             "macro_batch_size=%d, n_gpu=%d -> per_gpu_batch_size=%d",
-            cfg.macro_batch_size, env.n_gpu, per_gpu_batch_size,
+            cfg.macro_batch_size,
+            env.n_gpu,
+            per_gpu_batch_size,
+        )
+        logger.info(
+            "eval_macro_batch_size=%d -> eval_per_gpu_batch_size=%d",
+            eval_macro_batch_size,
+            eval_per_gpu_batch_size,
         )
         logger.info("Using shared-memory run_id=%s", run_id)
     precision = resolve_precision(cfg)
@@ -454,7 +477,7 @@ def launch(cfg: DictConfig):
     nccl_ddp = dist.new_group(ranks=worker_ranks, backend="nccl")
     nccl_p2p = dist.new_group(ranks=worker_ranks, backend="nccl")
     idx_dtype = precision.index_torch
-    
+
     # Determine maximum n_neg between train and eval for shared memory sizing
     neg_sampler_cfg = cfg.get("neg_sampler", {})
     if "_target_" in neg_sampler_cfg:
@@ -466,7 +489,25 @@ def launch(cfg: DictConfig):
     else:
         train_n_neg = cfg.n_neg
         eval_n_neg = cfg.n_neg
+    eval_metric = str(cfg.get("eval_metric", "ap")).strip().lower()
+    if eval_metric not in {"ap", "mrr"}:
+        raise ValueError(
+            f"Unsupported eval_metric={eval_metric!r}; expected 'ap' or 'mrr'."
+        )
+    if eval_metric == "ap" and eval_n_neg != 1:
+        raise ValueError(
+            "eval_metric='ap' currently requires neg_sampler.eval.n_neg=1; "
+            f"got {eval_n_neg}. Use eval_metric=mrr for one-vs-many evaluation."
+        )
     max_n_neg = max(train_n_neg, eval_n_neg)
+    ring_slot_capacity = cal_max_buf_size_for_layouts(
+        [
+            (per_gpu_batch_size, train_n_neg),
+            (eval_per_gpu_batch_size, eval_n_neg),
+        ],
+        fanout=fanout,
+        sample_4_neg=sample_4_neg,
+    )
 
     ring_buf = RingBuf(
         run_id=run_id,
@@ -479,6 +520,7 @@ def launch(cfg: DictConfig):
         n_neg=max_n_neg,
         sample_4_neg=sample_4_neg,
         max_size=cfg.ring_buf_size,
+        slot_capacity=ring_slot_capacity,
     )
 
     shared = None
@@ -614,6 +656,8 @@ def launch(cfg: DictConfig):
                 )
                 or use_shm_instead,
                 dynamic_state_ablation=dynamic_state_ablation,
+                eval_metric=eval_metric,
+                eval_batch_size=eval_per_gpu_batch_size,
             )
             host.run()
             host_failed = False
@@ -748,6 +792,7 @@ def launch(cfg: DictConfig):
                 amp=bool(cfg.get("amp", False)),
                 no_memory_queue_size=no_memory_queue_size,
                 cpu_benchmark_pid_list=cpu_benchmark_pid_list,
+                eval_metric=eval_metric,
             )
             worker.run()
             worker_failed = False

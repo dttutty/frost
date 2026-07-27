@@ -78,7 +78,7 @@ def _prepare_sampler_inputs(
         raise ValueError(f"ts length must equal n_src={n_src}, got {ts.shape[0]}")
 
     if sample_4_neg:
-        return roots, ts.repeat(root_width)
+        return roots, torch.cat([ts, ts, ts.repeat_interleave(n_neg)])
 
     return roots[: n_src * 2], ts.repeat(2)
 
@@ -134,6 +134,8 @@ class Host:
         normalize_event_time: bool = False,
         persist_all_updates_to_cpu: bool = False,
         dynamic_state_ablation: DynamicStateAblation | None = None,
+        eval_metric: Literal["ap", "mrr"] = "ap",
+        eval_batch_size: int | None = None,
     ) -> None:
         self.neg_sampler_train = neg_sampler_train
         self.neg_sampler_eval = neg_sampler_eval
@@ -145,12 +147,22 @@ class Host:
         self.mail_same_plan_as_mem = mail_same_plan_as_mem
         self.n_gpu = env.n_gpu
         self.batch_size = batch_size
+        self.eval_batch_size = (
+            batch_size if eval_batch_size is None else eval_batch_size
+        )
+        if self.eval_batch_size < 1:
+            raise ValueError("eval_batch_size must be >= 1.")
         self.analyzer = planner
         self.show_tqdm = show_tqdm
         self.time_dtype = time_dtype
         self.reset_eval_neg_sampler_each_epoch = reset_eval_neg_sampler_each_epoch
         self.share_neg_sampler_across_splits = share_neg_sampler_across_splits
         self.normalize_event_time = normalize_event_time
+        if eval_metric not in {"ap", "mrr"}:
+            raise ValueError(
+                f"Unsupported eval_metric={eval_metric!r}; expected 'ap' or 'mrr'."
+            )
+        self.eval_metric = eval_metric
         self.dynamic_state_ablation = (
             dynamic_state_ablation
             if dynamic_state_ablation is not None
@@ -164,8 +176,9 @@ class Host:
         self.cur_macro_of_epoch = 0
         self.mini_batch_idx = 0
         self.curr_epoch = 0
-        self.best_ap_epoch: int = -1
-        self.best_ap_result: Result = Result(
+        self.best_metric_epoch: int = -1
+        self.best_metric_score = float("-inf")
+        self.best_metric_result: Result = Result(
             train_loss=float("inf"),
             val_loss=float("inf"),
             val_auc=0.0,
@@ -206,7 +219,9 @@ class Host:
         No dedicated thread for routing — it is inlined into the main thread.
         """
         has_planner = self.has_nfeat or self.has_mem
-        enable_mem_mail_planner = self.has_mem and not self.dynamic_state_ablation.disable_mem_mail_planner
+        enable_mem_mail_planner = (
+            self.has_mem and not self.dynamic_state_ablation.disable_mem_mail_planner
+        )
         stateless_q_size = self.no_memory_queue_size if not self.has_mem else 2
         memory_scatter_q_size = MEMORY_SCATTER_QUEUE_SIZE
         memory_mem_plan_out_q_size = MEMORY_MEM_PLAN_OUT_QUEUE_SIZE
@@ -289,19 +304,35 @@ class Host:
 
         # Cache result so early_stop_check can read it
         self.last_epoch_result = res
-        val_ap_label = (
-            "Val AP(New high)" if res.val_ap > self.best_ap_result.val_ap else "Val AP"
+        selection_score = self._selection_score(res)
+        metric_name = self.eval_metric.upper()
+        metric_label = (
+            f"Val {metric_name}(New high)"
+            if selection_score > self.best_metric_score
+            else f"Val {metric_name}"
         )
 
         # Host prints the epoch summary; workers stay silent
-        print(
-            f"[Epoch {self.curr_epoch}] "
-            f"Train Loss: {res.train_loss:.4f} | "
-            f"{val_ap_label}: {res.val_ap:.4f} | "
-            f"Val AUC: {res.val_auc:.4f} | "
-            f"Test AUC: {res.test_auc:.4f} | "
-            f"Test AP: {res.test_ap:.4f}"
-        )
+        if self.eval_metric == "ap":
+            print(
+                f"[Epoch {self.curr_epoch}] "
+                f"Train Loss: {res.train_loss:.4f} | "
+                f"{metric_label}: {res.val_ap:.4f} | "
+                f"Val AUC: {res.val_auc:.4f} | "
+                f"Test AUC: {res.test_auc:.4f} | "
+                f"Test AP: {res.test_ap:.4f}"
+            )
+        else:
+            print(
+                f"[Epoch {self.curr_epoch}] "
+                f"Train Loss: {res.train_loss:.4f} | "
+                f"{metric_label}: {res.val_mrr:.4f} | "
+                f"Test MRR: {res.test_mrr:.4f}"
+            )
+
+    def _selection_score(self, result: Result) -> float:
+        return result.val_ap if self.eval_metric == "ap" else result.val_mrr
+
     def early_stop_check(self, cur_epoch: int) -> bool:
         """
         Check whether early stopping should be triggered and update the best-model record.
@@ -313,10 +344,11 @@ class Host:
 
         is_best = False
 
-        # Check AP improvement
-        if res.val_ap > self.best_ap_result.val_ap if self.best_ap_result else -1:
-            self.best_ap_epoch = cur_epoch + 1
-            self.best_ap_result = res
+        selection_score = self._selection_score(res)
+        if selection_score > self.best_metric_score:
+            self.best_metric_epoch = cur_epoch + 1
+            self.best_metric_score = selection_score
+            self.best_metric_result = res
             is_best = True
         if is_best:
             self.patience_counter = 0
@@ -326,7 +358,8 @@ class Host:
         if self.patience_counter >= self.patience:
             logger.info(
                 f"🛑 Early stopping triggered at epoch {cur_epoch + 1}. "
-                f"Best AP was {self.best_ap_result.val_ap:.4f} at epoch {self.best_ap_epoch}."
+                f"Best {self.eval_metric.upper()} was {self.best_metric_score:.4f} "
+                f"at epoch {self.best_metric_epoch}."
             )
             return True
 
@@ -349,13 +382,20 @@ class Host:
             if self.early_stop_check(e):
                 break
 
-        # Print final test results for the best-AP checkpoint
-        print(
-            f"Best Val AP: {self.best_ap_result.val_ap:.4f} @ Epoch {self.best_ap_epoch} | "
-            f"Val AUC: {self.best_ap_result.val_auc:.4f} | "
-            f"Test AP: {self.best_ap_result.test_ap:.4f} | "
-            f"Test AUC: {self.best_ap_result.test_auc:.4f}"
-        )
+        if self.eval_metric == "ap":
+            print(
+                f"Best Val AP: {self.best_metric_result.val_ap:.4f} "
+                f"@ Epoch {self.best_metric_epoch} | "
+                f"Val AUC: {self.best_metric_result.val_auc:.4f} | "
+                f"Test AP: {self.best_metric_result.test_ap:.4f} | "
+                f"Test AUC: {self.best_metric_result.test_auc:.4f}"
+            )
+        else:
+            print(
+                f"Best Val MRR: {self.best_metric_result.val_mrr:.4f} "
+                f"@ Epoch {self.best_metric_epoch} | "
+                f"Test MRR: {self.best_metric_result.test_mrr:.4f}"
+            )
         self.shutdown(graceful=True)
         # wandb.finish()
 
@@ -403,12 +443,24 @@ class Host:
                 reset()
 
         # Use make_balance_plan for balanced GPU distribution
+        per_gpu_batch_size = (
+            self.batch_size
+            if split == "train"
+            else getattr(self, "eval_batch_size", self.batch_size)
+        )
         df_out, step_id, gpu_id = make_balance_plan(
-            df, org_batch_size=self.batch_size, n_gpu=self.n_gpu
+            df, org_batch_size=per_gpu_batch_size, n_gpu=self.n_gpu
         )
         df_out = df_out.assign(step_id=step_id, gpu_id=gpu_id)
 
         n_macro_of_split = df_out["step_id"].nunique()
+        debug_max_batches = int(
+            os.environ.get("FROST_DEBUG_MAX_BATCHES_PER_SPLIT", "0")
+        )
+        if debug_max_batches < 0:
+            raise ValueError("FROST_DEBUG_MAX_BATCHES_PER_SPLIT must be >= 0.")
+        if debug_max_batches > 0:
+            n_macro_of_split = min(n_macro_of_split, debug_max_batches)
         step_desc_map = {
             "train": "Train Step",
             "val": "Val Step",
@@ -422,6 +474,8 @@ class Host:
             disable=not self.show_tqdm,
         ):
             assert isinstance(cur_macro_of_split, int)
+            if cur_macro_of_split >= n_macro_of_split:
+                break
             meta_bundle: MetaBundle = []
             layout_bundle: LayoutBundle = []
             for gpu, edges in step_df.groupby("gpu_id", sort=False):
@@ -529,6 +583,7 @@ class Host:
         # which edges are "current" vs "historical".  Feed it if supported.
         if callable(getattr(neg_sampler, "set_batch_context", None)):
             import numpy as np
+
             neg_sampler.set_batch_context(
                 batch_src=edges["src"].to_numpy(dtype=np.int64),
                 batch_dst=edges["dst"].to_numpy(dtype=np.int64),
@@ -537,6 +592,15 @@ class Host:
                 batch_ts=edges["time"].to_numpy(dtype=np.float64),
             )
         neg_dst = neg_sampler.sample(src, eid)
+        neg_valid_mask = None
+        get_negative_mask = getattr(neg_sampler, "get_last_negative_mask", None)
+        if callable(get_negative_mask):
+            neg_valid_mask = get_negative_mask()
+            if neg_valid_mask.shape != neg_dst.shape:
+                raise ValueError(
+                    "Negative validity mask must match sampled negatives: "
+                    f"got {tuple(neg_valid_mask.shape)} and {tuple(neg_dst.shape)}."
+                )
 
         # handle different model types
         roots = torch.cat([src, dst, neg_dst])
@@ -574,6 +638,7 @@ class Host:
             plan_set=None,
             buf_len=len,
             n_neg=neg_sampler.n_neg,
+            neg_valid_mask=neg_valid_mask,
             fanout=self.ngh_sampler.fanout,
         )
 
@@ -608,16 +673,16 @@ class Host:
         logger.info("Elapsed time: %.2f seconds", elapsed)
 
         # Force-exit if any thread is stuck on a blocking collective op.
-        still_alive = [
-            t for t in (self.scatter,) if t is not None and t.is_alive()
-        ]
+        still_alive = [t for t in (self.scatter,) if t is not None and t.is_alive()]
         if self.plan_router is not None:
             still_alive.extend(
-                t for t in (
+                t
+                for t in (
                     self.plan_router.mem_planner,
                     self.plan_router.mail_planner,
                     self.plan_router.nfeat_planner,
-                ) if t is not None and t.is_alive()
+                )
+                if t is not None and t.is_alive()
             )
         if still_alive:
             logger.warning(
@@ -625,4 +690,5 @@ class Host:
                 [t.name for t in still_alive],
             )
             import os
+
             os._exit(1)

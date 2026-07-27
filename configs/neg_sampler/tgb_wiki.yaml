@@ -1,0 +1,11 @@
+# Official tgbl-wiki-v2 has 999 negatives for almost every query and 998 for
+# four queries. Pad to capacity 999 and carry a validity mask into TGB MRR.
+seed: ${seed}
+train:
+  _target_: frost.neg_sampler.RandomNegLinkSampler
+  n_neg: 1
+  candidate_mode: dst_partition
+eval:
+  _target_: frost.neg_sampler.TGBEvalNegSampler
+  n_neg: 999
+  allow_variable_width: true

@@ -150,7 +150,9 @@ class DynamicAssembler(StreamThreadBase):
         self._p2p_work_wait_s_curve: list[float] = []
         self._apply_delta_s_curve: list[float] = []
 
-    def _strict_assembly_mask(self, graph: FlatGraph, n_src: int) -> torch.Tensor:
+    def _strict_assembly_mask(
+        self, graph: FlatGraph, n_src: int, n_neg: int
+    ) -> torch.Tensor:
         """Return the positions whose mem/box state must be assembled this step.
 
         APAN layouts sample 1-hop neighbors only for ``src`` and ``pos_dst`` but
@@ -162,7 +164,7 @@ class DynamicAssembler(StreamThreadBase):
         if self.sample_4_neg:
             return valid_mask
 
-        n_root = min(graph.nid.numel(), n_src * (2 + self.n_neg))
+        n_root = min(graph.nid.numel(), n_src * (2 + n_neg))
         root_mask = torch.zeros_like(valid_mask)
         root_mask[:n_root] = valid_mask[:n_root]
         return root_mask
@@ -317,6 +319,7 @@ class DynamicAssembler(StreamThreadBase):
         mem_plan: DynamicPlan | None,
         box_plan: DynamicPlan | None,
         n_src: int,
+        n_neg: int | None = None,
     ) -> None:
         """Step 1: Initialize tensors and fill local shared memory data."""
         num_nodes = graph.nid.shape[0]
@@ -344,7 +347,8 @@ class DynamicAssembler(StreamThreadBase):
                 device=self.device,
             )
 
-        valid_mask = self._strict_assembly_mask(graph, n_src)
+        batch_n_neg = self.n_neg if n_neg is None else n_neg
+        valid_mask = self._strict_assembly_mask(graph, n_src, batch_n_neg)
 
         # Fill local unique data immediately
         if mem_plan is not None:
@@ -398,12 +402,15 @@ class DynamicAssembler(StreamThreadBase):
                     graph._box_pos_delta = None
                     graph._box_delta_mask = None
 
-    def _fill_all_required_from_shm(self, graph: FlatGraph, n_src: int) -> None:
+    def _fill_all_required_from_shm(
+        self, graph: FlatGraph, n_src: int, n_neg: int | None = None
+    ) -> None:
         assert graph.mem is not None
         assert graph.mem_ts is not None
         assert graph.box is not None
         assert graph.box_ts is not None
-        strict_mask = self._strict_assembly_mask(graph, n_src)
+        batch_n_neg = self.n_neg if n_neg is None else n_neg
+        strict_mask = self._strict_assembly_mask(graph, n_src, batch_n_neg)
         self._fill_from_shm(
             "mem",
             graph.mem,
@@ -532,6 +539,7 @@ class DynamicAssembler(StreamThreadBase):
         mem_plan: DynamicPlan | None,
         box_plan: DynamicPlan | None,
         n_src: int,
+        n_neg: int | None = None,
     ) -> None:
         """Step 2: Apply network delta data to positions not covered by local shared."""
         assert graph.mem is not None
@@ -539,7 +547,8 @@ class DynamicAssembler(StreamThreadBase):
         assert graph.box is not None
         assert graph.box_ts is not None
 
-        strict_mask = self._strict_assembly_mask(graph, n_src)
+        batch_n_neg = self.n_neg if n_neg is None else n_neg
+        strict_mask = self._strict_assembly_mask(graph, n_src, batch_n_neg)
         mem_delta_mask = self._build_delta_mask(graph, mem_plan, strict_mask)
         box_delta_mask = self._build_delta_mask(graph, box_plan, strict_mask)
 
@@ -653,12 +662,15 @@ class DynamicAssembler(StreamThreadBase):
                 mem_plan=meta.plan_set.mem_plan,
                 box_plan=meta.plan_set.box_plan,
                 n_src=meta.n_src,
+                n_neg=meta.n_neg,
             )
             prepare_end = time.perf_counter()
 
             if dynamic_state_ablation.disable_p2p_delta:
                 if dynamic_state_ablation.direct_cpu_read_all_positions:
-                    self._fill_all_required_from_shm(meta.flat_graph, meta.n_src)
+                    self._fill_all_required_from_shm(
+                        meta.flat_graph, meta.n_src, meta.n_neg
+                    )
                 if timing_enabled:
                     self._delta_queue_wait_s_curve.append(0.0)
                     self._p2p_work_wait_s_curve.append(0.0)
@@ -716,6 +728,7 @@ class DynamicAssembler(StreamThreadBase):
                     mem_plan=meta.plan_set.mem_plan,
                     box_plan=meta.plan_set.box_plan,
                     n_src=meta.n_src,
+                    n_neg=meta.n_neg,
                 )
                 apply_delta_end = time.perf_counter()
             else:
@@ -726,9 +739,7 @@ class DynamicAssembler(StreamThreadBase):
             if timing_enabled:
                 self._h2d_credit_wait_s_curve.append(h2d_wait_end - h2d_wait_start)
                 self._prepare_shared_s_curve.append(prepare_end - prepare_start)
-                self._delta_queue_wait_s_curve.append(
-                    delta_wait_end - delta_wait_start
-                )
+                self._delta_queue_wait_s_curve.append(delta_wait_end - delta_wait_start)
                 self._p2p_work_wait_s_curve.append(p2p_wait_s)
                 self._apply_delta_s_curve.append(
                     0.0
@@ -761,9 +772,7 @@ class DynamicAssembler(StreamThreadBase):
                 "p2p_work_wait_s_curve": [
                     round(v, 6) for v in self._p2p_work_wait_s_curve
                 ],
-                "apply_delta_s_curve": [
-                    round(v, 6) for v in self._apply_delta_s_curve
-                ],
+                "apply_delta_s_curve": [round(v, 6) for v in self._apply_delta_s_curve],
             }
             print(
                 "APPENDIX_DYNAMIC_ASSEMBLER_TIMING_CURVE "

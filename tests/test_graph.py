@@ -217,6 +217,7 @@ class TestFlatGraphUnflatten:
             mem=torch.randn(total, 8),
         )
         hg = fg.unflatten(n_src=n_src, n_neg=n_neg, fanout=fanout, sample_4_neg=True)
+        assert hg.n_neg == n_neg
         assert hg.root_nfeat.shape == (n_root, 4)
         assert hg.root_mem.shape == (n_root, 8)
         assert hg.neighbors[0].nfeat.shape == (n_nbr, 4)

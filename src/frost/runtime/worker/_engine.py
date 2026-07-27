@@ -18,6 +18,7 @@ from typing import Literal, cast
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+
 try:
     import psutil
 except ImportError:  # pragma: no cover - optional dependency in prod envs
@@ -69,6 +70,49 @@ from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
 _CLOCK_TICKS_PER_SEC = max(int(os.sysconf("SC_CLK_TCK")), 1)
+
+
+def _tgb_reciprocal_ranks(
+    positive_scores: torch.Tensor,
+    negative_scores: torch.Tensor,
+    negative_valid_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Return TGB tie-aware reciprocal ranks for fixed-width candidates."""
+    if positive_scores.dim() != 1:
+        raise ValueError(
+            f"positive_scores must be 1D, got shape {tuple(positive_scores.shape)}"
+        )
+    if negative_scores.dim() != 2:
+        raise ValueError(
+            f"negative_scores must be 2D, got shape {tuple(negative_scores.shape)}"
+        )
+    if positive_scores.shape[0] != negative_scores.shape[0]:
+        raise ValueError(
+            "positive_scores and negative_scores must contain the same number "
+            f"of queries, got {positive_scores.shape[0]} and {negative_scores.shape[0]}"
+        )
+    if negative_valid_mask is not None:
+        if negative_valid_mask.shape != negative_scores.shape:
+            raise ValueError(
+                "negative_valid_mask must match negative_scores, got "
+                f"{tuple(negative_valid_mask.shape)} and "
+                f"{tuple(negative_scores.shape)}"
+            )
+        negative_valid_mask = negative_valid_mask.to(
+            device=negative_scores.device, dtype=torch.bool
+        )
+
+    positive_scores = positive_scores.unsqueeze(1)
+    if negative_valid_mask is None:
+        negative_valid_mask = torch.ones_like(negative_scores, dtype=torch.bool)
+    optimistic_rank = ((negative_scores > positive_scores) & negative_valid_mask).sum(
+        dim=1
+    )
+    pessimistic_rank = ((negative_scores >= positive_scores) & negative_valid_mask).sum(
+        dim=1
+    )
+    rank = 0.5 * (optimistic_rank + pessimistic_rank).float() + 1.0
+    return rank.reciprocal()
 
 
 def _get_non_negative_int_env(name: str, default: int) -> int:
@@ -125,7 +169,9 @@ def _discover_sibling_rank_pids() -> list[int]:
             parent = proc.parent()
             if parent is None:
                 return [pid]
-            child_pids = sorted({child.pid for child in parent.children(recursive=False)})
+            child_pids = sorted(
+                {child.pid for child in parent.children(recursive=False)}
+            )
             return child_pids or [pid]
 
         stat_path = Path(f"/proc/{pid}/stat")
@@ -298,6 +344,7 @@ class Worker:
         amp: bool = False,
         no_memory_queue_size: int = 4,
         cpu_benchmark_pid_list: list[int] | None = None,
+        eval_metric: Literal["ap", "mrr"] = "ap",
     ) -> None:
         # --- Basic config ---
         self.ring_buf = ring_buf
@@ -320,11 +367,16 @@ class Worker:
         self.compile_model = compile_model
         self.amp = amp
         self.lr = lr
+        if eval_metric not in {"ap", "mrr"}:
+            raise ValueError(
+                f"Unsupported eval_metric={eval_metric!r}; expected 'ap' or 'mrr'."
+            )
+        self.eval_metric = eval_metric
         if no_memory_queue_size < 1:
             raise ValueError("no_memory_queue_size must be >= 1.")
         self.no_memory_queue_size = no_memory_queue_size
         self.curr_epoch = 0
-        self.local_best_ap = 0.0
+        self.local_best_metric = float("-inf")
 
         # Throughput benchmark controls:
         # - legacy mode: warmup is applied at the start of every epoch
@@ -597,6 +649,7 @@ class Worker:
         self.train_loss_tracker = MeanMetric(process_group=self.nccl).cuda()
         self.val_mrr_tracker = MeanMetric(process_group=self.nccl).cuda()
         self.test_mrr_tracker = MeanMetric(process_group=self.nccl).cuda()
+        self.val_mrr_loss_tracker = MeanMetric(process_group=self.nccl).cuda()
         self.val_auc_batch_mean = MeanMetric(process_group=self.nccl).cuda()
         self.val_ap_batch_mean = MeanMetric(process_group=self.nccl).cuda()
         self.test_auc_batch_mean = MeanMetric(process_group=self.nccl).cuda()
@@ -716,27 +769,40 @@ class Worker:
     def on_train_epoch_end(self) -> Result:
         """Aggregate per-epoch metrics across all ranks and return a Result.
 
-        Computes synchronized mean train loss, validation loss/AUC/AP, and test
-        AUC/AP via torchmetrics all-reduce, then resets all accumulators.
+        Computes synchronized AP/AUC metrics by default, or TGB-compatible MRR
+        when ``eval_metric="mrr"``, then resets all accumulators.
 
         Returns:
             Result dataclass containing the aggregated scalar metrics for this epoch.
         """
         avg_loss = self.train_loss_tracker.compute()
-        val_results = self.val_metrics.compute()
-        test_results = self.test_metrics.compute()
-        val_mrr = self.val_mrr_tracker.compute().item()
-        test_mrr = self.test_mrr_tracker.compute().item()
-        val_auc_batch_mean = self.val_auc_batch_mean.compute().item()
-        val_ap_batch_mean = self.val_ap_batch_mean.compute().item()
-        test_auc_batch_mean = self.test_auc_batch_mean.compute().item()
-        test_ap_batch_mean = self.test_ap_batch_mean.compute().item()
+        if self.eval_metric == "ap":
+            val_results = self.val_metrics.compute()
+            test_results = self.test_metrics.compute()
+            val_loss = val_results["val_loss"].item()
+            val_auc = val_results["val_auc"].item()
+            val_ap = val_results["val_ap"].item()
+            test_auc = test_results["test_auc"].item()
+            test_ap = test_results["test_ap"].item()
+            val_mrr = test_mrr = 0.0
+            val_auc_batch_mean = self.val_auc_batch_mean.compute().item()
+            val_ap_batch_mean = self.val_ap_batch_mean.compute().item()
+            test_auc_batch_mean = self.test_auc_batch_mean.compute().item()
+            test_ap_batch_mean = self.test_ap_batch_mean.compute().item()
+        else:
+            val_loss = self.val_mrr_loss_tracker.compute().item()
+            val_auc = val_ap = test_auc = test_ap = 0.0
+            val_mrr = self.val_mrr_tracker.compute().item()
+            test_mrr = self.test_mrr_tracker.compute().item()
+            val_auc_batch_mean = val_ap_batch_mean = 0.0
+            test_auc_batch_mean = test_ap_batch_mean = 0.0
 
         self.val_metrics.reset()
         self.test_metrics.reset()
         self.train_loss_tracker.reset()
         self.val_mrr_tracker.reset()
         self.test_mrr_tracker.reset()
+        self.val_mrr_loss_tracker.reset()
         self.val_auc_batch_mean.reset()
         self.val_ap_batch_mean.reset()
         self.test_auc_batch_mean.reset()
@@ -744,11 +810,11 @@ class Worker:
 
         res = Result(
             train_loss=avg_loss.item(),
-            val_loss=val_results["val_loss"].item(),
-            val_auc=val_results["val_auc"].item(),
-            val_ap=val_results["val_ap"].item(),
-            test_auc=test_results["test_auc"].item(),
-            test_ap=test_results["test_ap"].item(),
+            val_loss=val_loss,
+            val_auc=val_auc,
+            val_ap=val_ap,
+            test_auc=test_auc,
+            test_ap=test_ap,
             val_mrr=val_mrr,
             test_mrr=test_mrr,
             val_auc_batch_mean=val_auc_batch_mean,
@@ -780,9 +846,13 @@ class Worker:
 
             logits_flat = logits.squeeze(-1)
             n_pos = meta.n_src
-            loss = self.criterion(
-                logits_flat[:n_pos], meta.labels[:n_pos]
-            ) + self.criterion(logits_flat[n_pos:], meta.labels[n_pos:])
+            loss = self.criterion(logits_flat[:n_pos], meta.labels[:n_pos])
+            negative_logits = logits_flat[n_pos:]
+            negative_labels = meta.labels[n_pos:]
+            if meta.neg_valid_mask is not None:
+                negative_logits = negative_logits[meta.neg_valid_mask]
+                negative_labels = negative_labels[meta.neg_valid_mask]
+            loss = loss + self.criterion(negative_logits, negative_labels)
         if (
             self.mem_box_store is not None
             and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
@@ -792,9 +862,7 @@ class Worker:
         self.grad_scaler.step(self.optimizer)
         self.grad_scaler.update()
         if self.dynamic_state_ablation.direct_cpu_writeback_after_optimizer_step:
-            self._flush_deferred_direct_dynamic_state(
-                meta, release_h2d_credits=True
-            )
+            self._flush_deferred_direct_dynamic_state(meta, release_h2d_credits=True)
 
         self.train_loss_tracker.update(loss.detach().float())
         self._release_meta_tensors(meta)
@@ -822,9 +890,7 @@ class Worker:
                 direct_writeback=self._write_direct_dynamic_state_request,
             )
         if self.dynamic_state_ablation.direct_cpu_writeback_after_optimizer_step:
-            self._flush_deferred_direct_dynamic_state(
-                meta, release_h2d_credits=True
-            )
+            self._flush_deferred_direct_dynamic_state(meta, release_h2d_credits=True)
         if (
             self.mem_box_store is not None
             and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
@@ -832,7 +898,12 @@ class Worker:
             self.p2p_sem.acquire()  # Ensure no other P2P task is in flight during eval
 
         y_pred = logits.float().sigmoid().squeeze(-1)
-        if meta.n_neg == 1:
+        if self.eval_metric == "ap":
+            if meta.n_neg != 1:
+                raise ValueError(
+                    "eval_metric='ap' currently requires exactly one evaluation "
+                    f"negative per positive edge, got n_neg={meta.n_neg}."
+                )
             batch_ap = binary_average_precision(
                 y_pred, meta.labels.long(), thresholds=None
             )
@@ -841,11 +912,15 @@ class Worker:
         if meta.split == "val":
             logits_flat = logits.float().squeeze(-1)
             n_pos = meta.n_src
-            loss = self.criterion(
-                logits_flat[:n_pos], meta.labels[:n_pos]
-            ) + self.criterion(logits_flat[n_pos:], meta.labels[n_pos:])
+            loss = self.criterion(logits_flat[:n_pos], meta.labels[:n_pos])
+            negative_logits = logits_flat[n_pos:]
+            negative_labels = meta.labels[n_pos:]
+            if meta.neg_valid_mask is not None:
+                negative_logits = negative_logits[meta.neg_valid_mask]
+                negative_labels = negative_labels[meta.neg_valid_mask]
+            loss = loss + self.criterion(negative_logits, negative_labels)
 
-            if meta.n_neg == 1:
+            if self.eval_metric == "ap":
                 self.val_metrics.update(
                     preds=y_pred,
                     target=meta.labels.long(),
@@ -854,18 +929,22 @@ class Worker:
                 self.val_ap_batch_mean.update(batch_ap)
                 self.val_auc_batch_mean.update(batch_auc)
             else:
-                # 100-negative evaluation logic (MRR)
-                # logits_flat is [n_pos * (1 + n_neg)] where first chunk is positives
+                self.val_mrr_loss_tracker.update(loss, weight=n_pos)
                 y_pos = logits_flat[:n_pos].unsqueeze(1)
                 y_neg = logits_flat[n_pos:].view(n_pos, meta.n_neg)
-                scores = torch.cat([y_pos, y_neg], dim=1)
-                ranks = (scores >= scores[:, 0:1]).sum(dim=1)
-                mrr = (1.0 / ranks).mean()
-                self.val_mrr_tracker.update(mrr)
+                neg_valid_mask = (
+                    None
+                    if meta.neg_valid_mask is None
+                    else meta.neg_valid_mask.view(n_pos, meta.n_neg)
+                )
+                reciprocal_ranks = _tgb_reciprocal_ranks(
+                    y_pos.squeeze(1), y_neg, neg_valid_mask
+                )
+                self.val_mrr_tracker.update(reciprocal_ranks.mean(), weight=n_pos)
 
         else:
             assert meta.split == "test"
-            if meta.n_neg == 1:
+            if self.eval_metric == "ap":
                 self.test_metrics.update(preds=y_pred, target=meta.labels.long())
                 self.test_ap_batch_mean.update(batch_ap)
                 self.test_auc_batch_mean.update(batch_auc)
@@ -874,10 +953,15 @@ class Worker:
                 n_pos = meta.n_src
                 y_pos = logits_flat[:n_pos].unsqueeze(1)
                 y_neg = logits_flat[n_pos:].view(n_pos, meta.n_neg)
-                scores = torch.cat([y_pos, y_neg], dim=1)
-                ranks = (scores >= scores[:, 0:1]).sum(dim=1)
-                mrr = (1.0 / ranks).mean()
-                self.test_mrr_tracker.update(mrr)
+                neg_valid_mask = (
+                    None
+                    if meta.neg_valid_mask is None
+                    else meta.neg_valid_mask.view(n_pos, meta.n_neg)
+                )
+                reciprocal_ranks = _tgb_reciprocal_ranks(
+                    y_pos.squeeze(1), y_neg, neg_valid_mask
+                )
+                self.test_mrr_tracker.update(reciprocal_ranks.mean(), weight=n_pos)
 
         self._release_meta_tensors(meta)
 
@@ -887,6 +971,7 @@ class Worker:
         meta.flat_graph = None
         meta.plan_set = None
         meta.labels = None
+        meta.neg_valid_mask = None
         meta.graph = None
         meta.direct_writeback_request = None
 
@@ -964,7 +1049,7 @@ class Worker:
                     assert meta.labels is not None
                     self._throughput_epoch_train_batch_count += 1
                     self._throughput_total_train_batch_count += 1
-                    batch_events = meta.labels.numel() // (1 + self.n_neg)
+                    batch_events = meta.n_src
                     curr_start_event = torch.cuda.Event(enable_timing=True)
                     curr_start_event.record(torch.cuda.current_stream())
                     curr_start_wall_s = time.perf_counter()
@@ -987,8 +1072,7 @@ class Worker:
                         )
                     else:
                         past_warmup = (
-                            self._throughput_epoch_train_batch_count
-                            - 1
+                            self._throughput_epoch_train_batch_count - 1
                             > self._throughput_warmup_batches_per_epoch
                         )
                     # Interval k spans [start_{k-1}, start_k), i.e. it corresponds to
@@ -1037,9 +1121,7 @@ class Worker:
                                     curr_cpu_total_s - self._cpu_prev_total_s,
                                 )
                                 used_cores = cpu_delta_s / wall_interval_s
-                                util_pct = (
-                                    used_cores / self._cpu_logical_count * 100.0
-                                )
+                                util_pct = used_cores / self._cpu_logical_count * 100.0
                                 self._cpu_used_cores.append(used_cores)
                                 self._cpu_utilization_pct.append(util_pct)
                                 self._cpu_wall_interval_s.append(wall_interval_s)
@@ -1065,10 +1147,7 @@ class Worker:
                             self._throughput_epoch_train_batch_count
                             > self._throughput_warmup_batches_per_epoch
                         )
-                    if (
-                        can_measure_memory
-                        and memory_past_warmup
-                    ):
+                    if can_measure_memory and memory_past_warmup:
                         self._memory_reserved_mib.append(
                             torch.cuda.memory_reserved(self.device) / (1024**2)
                         )
@@ -1100,12 +1179,14 @@ class Worker:
                 result = self.on_train_epoch_end()
 
                 self.result_q.put(result)
-                val_ap = result.val_ap if result is not None else 0.0
-                if val_ap > self.local_best_ap:
-                    self.local_best_ap = val_ap
+                selection_metric = (
+                    result.val_ap if self.eval_metric == "ap" else result.val_mrr
+                )
+                if selection_metric > self.local_best_metric:
+                    self.local_best_metric = selection_metric
                     self.save_model(os.path.join(self.save_to, "best.ckpt"))
-                # dist.barrier() is redundant: on_train_epoch_end() compute() calls
-                # already performed 7 NCCL all-reduces that synchronize all ranks.
+                # Metric compute() calls above synchronize all worker ranks, so
+                # an additional barrier here would be redundant.
                 self.curr_epoch += 1
                 if self.mem_box_store:
                     self._flush_epoch_writebacks()
@@ -1122,10 +1203,13 @@ class Worker:
                 gpu_elapsed_s = 0.0
                 if self._throughput_gpu_pairs:
                     torch.cuda.synchronize()
-                    gpu_elapsed_s = sum(
-                        ev_prev.elapsed_time(ev_curr)
-                        for ev_prev, ev_curr in self._throughput_gpu_pairs
-                    ) / 1000.0
+                    gpu_elapsed_s = (
+                        sum(
+                            ev_prev.elapsed_time(ev_curr)
+                            for ev_prev, ev_curr in self._throughput_gpu_pairs
+                        )
+                        / 1000.0
+                    )
                 wall_throughput = (
                     self._throughput_events / wall_elapsed_s
                     if self._throughput_events > 0 and wall_elapsed_s > 0
@@ -1165,10 +1249,7 @@ class Worker:
                     if self._throughput_measured_batches > 0
                     else self._throughput_last_completed_measured_batches
                 )
-                if (
-                    window_start_unix_s is not None
-                    and window_end_unix_s is not None
-                ):
+                if window_start_unix_s is not None and window_end_unix_s is not None:
                     window_payload = {
                         "system": "frost",
                         "rank": self.env.local_rank,
@@ -1187,9 +1268,7 @@ class Worker:
                     interval_payload = {
                         "system": "frost",
                         "rank": self.env.local_rank,
-                        "measured_batches": len(
-                            self._throughput_interval_start_unix_s
-                        ),
+                        "measured_batches": len(self._throughput_interval_start_unix_s),
                         "interval_start_unix_s": self._throughput_interval_start_unix_s,
                         "interval_end_unix_s": self._throughput_interval_end_unix_s,
                     }
@@ -1216,17 +1295,14 @@ class Worker:
                         "measured_batches": len(gpu_busy_pct_curve),
                         "gpu_ms_curve": [round(v, 4) for v in gpu_ms_curve],
                         "wall_ms_curve": [round(v, 4) for v in wall_ms_curve],
-                        "gpu_busy_pct_curve": [
-                            round(v, 4) for v in gpu_busy_pct_curve
-                        ],
+                        "gpu_busy_pct_curve": [round(v, 4) for v in gpu_busy_pct_curve],
                     }
                     if gpu_busy_pct_curve:
                         ordered_gpu_busy = sorted(gpu_busy_pct_curve)
                         n_gpu_busy = len(ordered_gpu_busy)
                         gpu_payload.update(
                             {
-                                "gpu_busy_pct_mean": sum(ordered_gpu_busy)
-                                / n_gpu_busy,
+                                "gpu_busy_pct_mean": sum(ordered_gpu_busy) / n_gpu_busy,
                                 "gpu_busy_pct_p50": ordered_gpu_busy[
                                     int(0.50 * (n_gpu_busy - 1))
                                 ],
@@ -1303,7 +1379,9 @@ class Worker:
                         f"{json.dumps(memory_curve_payload, sort_keys=True)}"
                     )
                 if self._cpu_util_enabled and self.env.local_rank == 0:
-                    cpu_payload: dict[str, int | float | str | list[int] | list[float]] = {
+                    cpu_payload: dict[
+                        str, int | float | str | list[int] | list[float]
+                    ] = {
                         "system": "frost",
                         "rank": self.env.local_rank,
                         "warmup_batches_per_epoch": self._throughput_warmup_batches_per_epoch,
@@ -1313,9 +1391,7 @@ class Worker:
                         "tracked_pid_count": len(self._cpu_pid_list),
                         "tracked_pids": self._cpu_pid_list,
                         "measured_batches": len(self._cpu_used_cores),
-                        "used_cores_curve": [
-                            round(v, 4) for v in self._cpu_used_cores
-                        ],
+                        "used_cores_curve": [round(v, 4) for v in self._cpu_used_cores],
                         "utilization_pct_curve": [
                             round(v, 4) for v in self._cpu_utilization_pct
                         ],

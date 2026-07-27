@@ -41,6 +41,7 @@ def make_p2p_task(
 
     buckets_ids, buckets_data, buckets_ts = [], [], []
     sizes = numpy.zeros(len(p2p), dtype=int)
+    missing_by_dst: list[torch.Tensor] = []
 
     src_len = nid.numel()
 
@@ -50,6 +51,7 @@ def make_p2p_task(
 
         if expected_count == 0:
             sizes[dst_gpu_id] = 0
+            missing_by_dst.append(nids_to_send_tensor)
             continue
 
         # 1. Find insertion positions via binary search (nid must be 1D sorted)
@@ -65,6 +67,7 @@ def make_p2p_task(
         valid_gather_indices = indices_clamped[mask_found]
 
         matched_count = valid_gather_indices.numel()
+        missing_by_dst.append(nids_to_send_tensor[~mask_found])
 
         if matched_count != expected_count:
             logger.warning(
@@ -106,6 +109,15 @@ def make_p2p_task(
         logger.debug("  > Tensor Full Shape: %s", send_nid.shape)
         logger.debug("  > Send Cts List (Planned): %s", send_counts)
         logger.debug("  > Actual Gathered Sizes: %s", sizes)
+        logger.error(
+            "P2P plan/data mismatch: batch=%s rank=%s entry_nids=%s "
+            "planned_by_dst=%s missing_by_dst=%s",
+            mini_batch_idx,
+            rank,
+            nid[:32].detach().cpu().tolist(),
+            [ts.data[:32].detach().cpu().tolist() for ts in p2p],
+            [missing[:32].detach().cpu().tolist() for missing in missing_by_dst],
+        )
         sys.stdout.flush()
 
         raise RuntimeError(

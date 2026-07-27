@@ -110,9 +110,12 @@ class H2D(StreamThreadBase):
                     meta.flat_graph, n_src=meta.n_src, meta=meta
                 )
 
-            meta.flat_graph.eid[
-                0 : meta.n_src * self.n_neg
-            ] = -1  # set negative edge id to -1 to prevent info leakage, because we don't need eid for root nodes after h2d
+            # Root edge features have already been gathered above. Clear every
+            # root EID before model execution to prevent the target interaction
+            # from leaking through later consumers. The batch can use a
+            # different n_neg from the ring buffer's configured maximum.
+            n_root = meta.n_src * (2 + meta.n_neg)
+            meta.flat_graph.eid[:n_root] = -1
 
             # move gnn_mfgs to gpu
             meta.flat_graph = meta.flat_graph.to(self.device)
@@ -120,8 +123,10 @@ class H2D(StreamThreadBase):
             # init x
 
             one_labels = torch.ones(meta.n_src, device=self.device)
-            zero_labels = torch.zeros(meta.n_src * self.n_neg, device=self.device)
+            zero_labels = torch.zeros(meta.n_src * meta.n_neg, device=self.device)
             meta.labels = torch.cat([one_labels, zero_labels])
+            if meta.neg_valid_mask is not None:
+                meta.neg_valid_mask = meta.neg_valid_mask.to(self.device)
 
             # move nfeat and efeat to gpu
             if self.nfeat is not None:

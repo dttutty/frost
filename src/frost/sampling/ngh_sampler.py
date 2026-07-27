@@ -11,6 +11,7 @@ Three sampler implementations are provided:
 All samplers share the same :meth:`sample` interface and write sampled data
 into a :class:`~frost.shm.ring_buf.RingBuf` slot before committing it.
 """
+
 from __future__ import annotations
 
 import logging
@@ -28,6 +29,28 @@ from frost.utils.tensor_set import TensorSet
 
 Int64Array = npt.NDArray[np.int64]
 logger = logging.getLogger(__name__)
+
+
+def _resolve_root_layout(
+    root_nid: torch.Tensor, root_ts: torch.Tensor
+) -> tuple[int, int, int]:
+    """Return ``(n_src, n_neg, n_root)`` for the current batch layout."""
+    n_src = int(root_ts.numel())
+    if n_src <= 0:
+        raise ValueError("root_ts must contain at least one positive edge timestamp")
+    if root_nid.numel() % n_src != 0:
+        raise ValueError(
+            f"root_nid length ({root_nid.numel()}) must be divisible by "
+            f"root_ts length ({n_src})."
+        )
+    root_width = root_nid.numel() // n_src
+    n_neg = root_width - 2
+    if n_neg <= 0:
+        raise ValueError(
+            f"Root layout must contain src, positive dst, and at least one negative; "
+            f"got width {root_width}."
+        )
+    return n_src, n_neg, int(root_nid.numel())
 
 
 def _ensure_seq_sampler_stable_mode() -> None:
@@ -114,8 +137,7 @@ class NoSampler:
             - ``valid_nid_raw``: Raw node-ID slice before deduplication.
             - ``length``: Total number of entries written into the slot.
         """
-        n_src = len(root_nid) // (2 + self.n_neg)
-        num_seeds = n_src * (2 + self.n_neg)
+        n_src, batch_n_neg, num_seeds = _resolve_root_layout(root_nid, root_ts)
 
         # Wait for an empty slot
         slot = self.ring_buf.acquire_slot(gpu_id)
@@ -127,7 +149,7 @@ class NoSampler:
         ts_cpu = root_ts.cpu().to(dtype=slot["TS"].dtype)
         slot["TS"][:n_src] = ts_cpu
         slot["TS"][n_src : 2 * n_src] = ts_cpu
-        slot["TS"][2 * n_src : num_seeds] = ts_cpu.repeat(self.n_neg)
+        slot["TS"][2 * n_src : num_seeds] = ts_cpu.repeat_interleave(batch_n_neg)
         slot["EID"][:n_src] = pos_eid.cpu()
         slot["EID"][n_src:num_seeds] = -1
 
@@ -193,7 +215,9 @@ class NghSampler:
         ring_buf: RingBuf,
         sample_4_neg: bool,  # from hydra config
         n_neg: int,  # from hydra config
-        strategy: Literal["uniform", "recent", "time_interval_aware"],  # from hydra config
+        strategy: Literal[
+            "uniform", "recent", "time_interval_aware"
+        ],  # from hydra config
         seed: int | None,  # from hydra config
         time_scaling_factor: float = 0.0,
         tgl_sampler_parity: bool = False,
@@ -267,8 +291,7 @@ class NghSampler:
             - ``valid_nid_raw``: Raw node-ID slice before deduplication.
             - ``length``: Total entries written into the slot.
         """
-        n_src = root_nid.shape[0] // (2 + self.n_neg)
-        num_seeds = n_src * (2 + self.n_neg)
+        n_src, batch_n_neg, num_seeds = _resolve_root_layout(root_nid, root_ts)
 
         if sample_nid.shape[0] != sample_ts.shape[0]:
             raise ValueError(
@@ -296,7 +319,7 @@ class NghSampler:
         ts_cpu = root_ts.cpu().to(dtype=slot["TS"].dtype)
         slot["TS"][:n_src] = ts_cpu
         slot["TS"][n_src : 2 * n_src] = ts_cpu
-        slot["TS"][2 * n_src : num_seeds] = ts_cpu.repeat(self.n_neg)
+        slot["TS"][2 * n_src : num_seeds] = ts_cpu.repeat_interleave(batch_n_neg)
         slot["EID"][:n_src] = pos_eid.cpu()
         slot["EID"][n_src:num_seeds] = -1
 
@@ -365,7 +388,9 @@ class MultiHopNghSampler:
         fanout: list[int],  # from hydra config
         ring_buf: RingBuf,
         n_neg: int,  # from hydra config
-        strategy: Literal["uniform", "recent", "time_interval_aware"],  # from hydra config
+        strategy: Literal[
+            "uniform", "recent", "time_interval_aware"
+        ],  # from hydra config
         seed: int | None,  # from hydra config
         time_scaling_factor: float = 0.0,
         sample_4_neg: bool = True,
@@ -407,8 +432,7 @@ class MultiHopNghSampler:
         """Sample multi-hop historical neighbors by repeatedly calling ``SeqSampler``."""
         padding_node_id = self.padding_node_id
         fanout = self.fanout
-        n_src = len(root_nid) // (2 + self.n_neg)
-        num_seeds = n_src * (2 + self.n_neg)
+        n_src, batch_n_neg, num_seeds = _resolve_root_layout(root_nid, root_ts)
 
         nid_np = np.ascontiguousarray(
             cast(np.ndarray, sample_nid.cpu().numpy()), dtype=self._node_np_dtype
@@ -437,7 +461,7 @@ class MultiHopNghSampler:
         ts_cpu = root_ts.cpu().to(dtype=slot["TS"].dtype)
         slot["TS"][:n_src] = ts_cpu
         slot["TS"][n_src : 2 * n_src] = ts_cpu
-        slot["TS"][2 * n_src : num_seeds] = ts_cpu.repeat(self.n_neg)
+        slot["TS"][2 * n_src : num_seeds] = ts_cpu.repeat_interleave(batch_n_neg)
         slot["EID"][:n_src] = pos_eid.cpu()
         slot["EID"][n_src:num_seeds] = -1
 
@@ -477,9 +501,7 @@ class MultiHopNghSampler:
                 )
                 out_times_tensor = dist_safe_tensor(
                     out_times, self._time_torch_dtype
-                ).reshape(
-                    -1, n_ngh
-                )
+                ).reshape(-1, n_ngh)
 
                 sampled_nodes[valid_mask] = out_nodes_tensor
                 sampled_edges[valid_mask] = out_edges_tensor

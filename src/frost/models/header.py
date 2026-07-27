@@ -4,6 +4,7 @@ This module provides ``LinkPredictor``, the standard link-prediction header
 used across all FROST encoder models, and ``NodeClassificationHeader`` for
 node-level tasks.
 """
+
 import logging
 from typing import cast
 
@@ -34,7 +35,7 @@ class LinkPredictor(nn.Module):
         self.dst_fc = nn.Linear(d_in, d_in)
         self.out_fc = nn.Linear(d_in, 1)
 
-    def forward(self, h: torch.Tensor) -> torch.Tensor:
+    def forward(self, h: torch.Tensor, n_neg: int | None = None) -> torch.Tensor:
         """Compute link-prediction logits from node embeddings.
 
         Expects ``h`` to be the concatenation of src, pos_dst, and neg_dst
@@ -50,15 +51,26 @@ class LinkPredictor(nn.Module):
             edge scores first, followed by negative edge scores.
         """
         # h contains: [True Edges Src, True Edges Dst, Neg Edges Dst]
-        num_edge = h.shape[0] // (self.neg_samples + 2)
+        runtime_n_neg = self.neg_samples if n_neg is None else n_neg
+        if runtime_n_neg <= 0:
+            raise ValueError(f"n_neg must be positive, got {runtime_n_neg}")
+        root_width = runtime_n_neg + 2
+        if h.shape[0] % root_width != 0:
+            raise ValueError(
+                f"Embedding rows ({h.shape[0]}) must be divisible by 2 + n_neg "
+                f"({root_width})."
+            )
+        num_edge = h.shape[0] // root_width
 
         h_src = self.src_fc(h[:num_edge])
         h_pos_dst = self.dst_fc(h[num_edge : 2 * num_edge])
         h_neg_dst = self.dst_fc(h[2 * num_edge :])
 
         h_pos_edge = F.relu(h_src + h_pos_dst)
-        # Tile src for negative samples: [src1, src2] -> [src1, src1, src2, src2] if neg=2
-        h_neg_edge = F.relu(h_src.tile(self.neg_samples, 1) + h_neg_dst)
+        # Negatives are row-major per positive edge:
+        # [src1-neg1, src1-neg2, src2-neg1, src2-neg2].
+        h_neg_src = h_src.repeat_interleave(runtime_n_neg, dim=0)
+        h_neg_edge = F.relu(h_neg_src + h_neg_dst)
 
         ret_1 = self.out_fc(h_pos_edge)
         ret_2 = self.out_fc(h_neg_edge)
@@ -83,15 +95,25 @@ class MergeLayerPredictor(nn.Module):
         self.fc1 = nn.Linear(2 * d_in, d_in)
         self.fc2 = nn.Linear(d_in, 1)
 
-    def forward(self, h: torch.Tensor) -> torch.Tensor:
-        num_edge = h.shape[0] // (self.neg_samples + 2)
+    def forward(self, h: torch.Tensor, n_neg: int | None = None) -> torch.Tensor:
+        runtime_n_neg = self.neg_samples if n_neg is None else n_neg
+        if runtime_n_neg <= 0:
+            raise ValueError(f"n_neg must be positive, got {runtime_n_neg}")
+        root_width = runtime_n_neg + 2
+        if h.shape[0] % root_width != 0:
+            raise ValueError(
+                f"Embedding rows ({h.shape[0]}) must be divisible by 2 + n_neg "
+                f"({root_width})."
+            )
+        num_edge = h.shape[0] // root_width
 
         h_src = h[:num_edge]
         h_pos_dst = h[num_edge : 2 * num_edge]
         h_neg_dst = h[2 * num_edge :]
 
         h_pos = torch.cat([h_src, h_pos_dst], dim=1)
-        h_neg = torch.cat([h_src.tile(self.neg_samples, 1), h_neg_dst], dim=1)
+        h_neg_src = h_src.repeat_interleave(runtime_n_neg, dim=0)
+        h_neg = torch.cat([h_neg_src, h_neg_dst], dim=1)
 
         pos_score = self.fc2(F.relu(self.fc1(h_pos)))
         neg_score = self.fc2(F.relu(self.fc1(h_neg)))
@@ -119,15 +141,24 @@ class DyGFormerLinkPredictor(nn.Module):
         self.dst_fc = nn.Linear(d_in, d_in)
         self.out_fc = nn.Linear(d_in, 1)
 
-    def forward(self, h: torch.Tensor) -> torch.Tensor:
+    def forward(self, h: torch.Tensor, n_neg: int | None = None) -> torch.Tensor:
         """Compute logits from DyGFormer's pair-specific embedding layout.
 
         Expects ``h`` laid out as:
         ``[pos_src | pos_dst | neg_src | neg_dst]``
         with lengths ``[n_src, n_src, n_src*n_neg, n_src*n_neg]``.
         """
-        num_edge = h.shape[0] // (2 * (self.neg_samples + 1))
-        neg_span = num_edge * self.neg_samples
+        runtime_n_neg = self.neg_samples if n_neg is None else n_neg
+        if runtime_n_neg <= 0:
+            raise ValueError(f"n_neg must be positive, got {runtime_n_neg}")
+        pair_width = 2 * (runtime_n_neg + 1)
+        if h.shape[0] % pair_width != 0:
+            raise ValueError(
+                f"Embedding rows ({h.shape[0]}) must be divisible by "
+                f"2 * (1 + n_neg) ({pair_width})."
+            )
+        num_edge = h.shape[0] // pair_width
+        neg_span = num_edge * runtime_n_neg
 
         h_pos_src = self.src_fc(h[:num_edge])
         h_pos_dst = self.dst_fc(h[num_edge : 2 * num_edge])
@@ -161,15 +192,24 @@ class PairAwareMergeLayerPredictor(nn.Module):
         self.fc1 = nn.Linear(2 * d_in, d_in)
         self.fc2 = nn.Linear(d_in, 1)
 
-    def forward(self, h: torch.Tensor) -> torch.Tensor:
+    def forward(self, h: torch.Tensor, n_neg: int | None = None) -> torch.Tensor:
         """Compute logits from pair-aware embedding layout.
 
         Expects ``h`` laid out as
         ``[pos_src | pos_dst | neg_src | neg_dst]``
         with lengths ``[n_src, n_src, n_src*n_neg, n_src*n_neg]``.
         """
-        num_edge = h.shape[0] // (2 * (self.neg_samples + 1))
-        neg_span = num_edge * self.neg_samples
+        runtime_n_neg = self.neg_samples if n_neg is None else n_neg
+        if runtime_n_neg <= 0:
+            raise ValueError(f"n_neg must be positive, got {runtime_n_neg}")
+        pair_width = 2 * (runtime_n_neg + 1)
+        if h.shape[0] % pair_width != 0:
+            raise ValueError(
+                f"Embedding rows ({h.shape[0]}) must be divisible by "
+                f"2 * (1 + n_neg) ({pair_width})."
+            )
+        num_edge = h.shape[0] // pair_width
+        neg_span = num_edge * runtime_n_neg
 
         h_pos_src = h[:num_edge]
         h_pos_dst = h[num_edge : 2 * num_edge]

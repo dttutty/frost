@@ -325,7 +325,7 @@ class DyGFormer(nn.Module):
         assert len(graph.fanout) == 1, "DyGFormer only supports 1-hop fanout"
         n_root = graph.root_nid.shape[0]
         K = graph.fanout[0]
-        n_src = n_root // (2 + self.n_neg)
+        n_src = n_root // (2 + graph.n_neg)
 
         # Build per-node sequence tensors --------------------------------
         # seq_nid  : [n_root, K+1]  (root at pos 0, then sampled neighbors)
@@ -443,9 +443,7 @@ class DyGFormer(nn.Module):
                 [root_efeat_0, ngh_efeat], dim=1
             )  # [n_root, keep_len, edge_feat_dim]
         else:
-            seq_efeat = torch.zeros(
-                n_root, keep_len, self.edge_feat_dim, device=dev
-            )
+            seq_efeat = torch.zeros(n_root, keep_len, self.edge_feat_dim, device=dev)
 
         # Zero out padding positions (nid == -1) -------------------------
         pad_mask = (seq_nid == -1).unsqueeze(-1)  # [n_root, keep_len, 1]

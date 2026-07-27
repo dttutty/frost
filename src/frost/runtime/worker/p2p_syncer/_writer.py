@@ -195,6 +195,7 @@ class BoxMailWriter(ThreadBase):
         writeback: torch.Tensor | None,
         seed_mail: MailEntry,
         flat_nid_cpu: torch.Tensor,
+        n_neg: int,
     ) -> None:
         """CPU-side scatter of seed mails to neighbor ring buffers.
 
@@ -222,9 +223,9 @@ class BoxMailWriter(ThreadBase):
         if fanout <= 0 or n_src <= 0:
             return
 
-        ngh_start = n_src * (2 + self.n_neg)
+        ngh_start = n_src * (2 + n_neg)
         ngh_len = n_pos * fanout  # n_src * 2 * fanout
-        ngh_nids = flat_nid_cpu[ngh_start: ngh_start + ngh_len]  # [n_pos * fanout]
+        ngh_nids = flat_nid_cpu[ngh_start : ngh_start + ngh_len]  # [n_pos * fanout]
 
         # Reshape to [n_pos, fanout]
         ngh_nids = ngh_nids.view(n_pos, fanout)
@@ -239,9 +240,9 @@ class BoxMailWriter(ThreadBase):
         expanded_ts = seed_mail.ts.unsqueeze(1).expand(n_pos, fanout)
 
         # Apply mask -> [K, D] and [K]
-        nbr_nids = ngh_nids[valid_mask]        # [K]
-        nbr_data = expanded_data[valid_mask]    # [K, D]
-        nbr_ts = expanded_ts[valid_mask]        # [K]
+        nbr_nids = ngh_nids[valid_mask]  # [K]
+        nbr_data = expanded_data[valid_mask]  # [K, D]
+        nbr_ts = expanded_ts[valid_mask]  # [K]
 
         if nbr_nids.numel() == 0:
             return
@@ -309,10 +310,10 @@ class BoxMailWriter(ThreadBase):
                         self.write_back(data, entry)
                     self.writer_stream.synchronize()
                 else:
-                    # APAN fast path: entry is (MailEntry, Tensor) tuple
+                    # APAN fast path: entry is (MailEntry, Tensor, n_neg) tuple
                     if isinstance(entry, tuple):
-                        seed_mail, flat_nid_cpu = entry
-                        self.write_back_apan(data, seed_mail, flat_nid_cpu)
+                        seed_mail, flat_nid_cpu, n_neg = entry
+                        self.write_back_apan(data, seed_mail, flat_nid_cpu, n_neg)
                     else:
                         self.write_back(data, entry)
                 _release_h2d_credit(self.h2d_sem, batch_idx=batch_idx, kind="box")

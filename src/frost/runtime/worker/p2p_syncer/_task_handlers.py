@@ -281,7 +281,13 @@ class MessageHandler(StreamThreadBase):
                             (
                                 box_task.box_plan.writeback.data,
                                 box_task.mini_batch_idx,
-                                (seed_mail_cpu, box_task.flat_nid_cpu),
+                                (
+                                    seed_mail_cpu,
+                                    box_task.flat_nid_cpu,
+                                    box_task.graph.n_neg
+                                    if box_task.graph is not None
+                                    else self.n_neg,
+                                ),
                                 writeback_event,
                             )
                         )

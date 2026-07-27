@@ -154,6 +154,7 @@ class FlatGraph:
             root_mem_ts=mem_tss[0],
             root_box=boxs[0],
             root_box_ts=box_tss[0],
+            n_neg=n_neg,
             neighbors=neighbors if neighbors else None,
             fanout=fanout,
         )
@@ -223,6 +224,7 @@ class HierGraph:
     root_mem_ts: Tensor | None = None
     root_box: Tensor | None = None
     root_box_ts: Tensor | None = None
+    n_neg: int = 1
 
     # Multi-hop neighbors. n_neighbor is a list like [10, 25].
     # Currently TGN only supports 1 hop, while TGAT supports multiple hops.

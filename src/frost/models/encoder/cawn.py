@@ -39,7 +39,10 @@ class CachedPositionEncoder(nn.Module):
         )
 
     def forward(
-        self, query_nids: torch.Tensor, src_tree: List[torch.Tensor], dst_tree: List[torch.Tensor]
+        self,
+        query_nids: torch.Tensor,
+        src_tree: List[torch.Tensor],
+        dst_tree: List[torch.Tensor],
     ) -> torch.Tensor:
         """
         Args:
@@ -62,7 +65,7 @@ class CachedPositionEncoder(nn.Module):
         # Chunk over batch size to restrict max memory during boolean broadcasting
         max_hop_size = max([t.shape[1] for t in src_tree])
         chunk = max(1, (1 << 24) // (Q * max_hop_size))
-        
+
         for lo in range(0, B, chunk):
             hi = min(lo + chunk, B)
             q_chunk = flat_query_nids[lo:hi]  # [C, Q]
@@ -131,7 +134,13 @@ class BiLSTMEncoder(nn.Module):
         )
 
         # Retrieve the final state (lengths - 1)
-        last_indices = (cpu_lengths - 1).to(inputs.device).unsqueeze(-1).unsqueeze(-1).expand(B_W, 1, self.model_dim)
+        last_indices = (
+            (cpu_lengths - 1)
+            .to(inputs.device)
+            .unsqueeze(-1)
+            .unsqueeze(-1)
+            .expand(B_W, 1, self.model_dim)
+        )
         final_features = torch.gather(encoded_features, 1, last_indices).squeeze(1)
 
         return final_features
@@ -169,7 +178,9 @@ class TransformerEncoder(nn.Module):
         x = inputs + self.dropout(attn_out.transpose(0, 1))
 
         ffn_in = self.norm_layers[1](x)
-        ffn_out = self.linear_layers[1](self.dropout(torch.nn.functional.relu(self.linear_layers[0](ffn_in))))
+        ffn_out = self.linear_layers[1](
+            self.dropout(torch.nn.functional.relu(self.linear_layers[0](ffn_in)))
+        )
         return x + self.dropout(ffn_out)
 
 
@@ -190,21 +201,28 @@ class WalkEncoder(nn.Module):
         self.num_walk_heads = num_walk_heads
 
         if self.attention_dim % self.num_walk_heads != 0:
-            self.attention_dim += (self.num_walk_heads - self.attention_dim % self.num_walk_heads)
+            self.attention_dim += (
+                self.num_walk_heads - self.attention_dim % self.num_walk_heads
+            )
 
-        self.feature_encoder = BiLSTMEncoder(input_dim=self.input_dim, hidden_dim=self.input_dim)
+        self.feature_encoder = BiLSTMEncoder(
+            input_dim=self.input_dim, hidden_dim=self.input_dim
+        )
         self.position_encoder = BiLSTMEncoder(
             input_dim=self.position_feat_dim, hidden_dim=self.position_feat_dim
         )
 
         self.transformer_encoder = TransformerEncoder(
-            attention_dim=self.attention_dim, num_heads=self.num_walk_heads, dropout=dropout
+            attention_dim=self.attention_dim,
+            num_heads=self.num_walk_heads,
+            dropout=dropout,
         )
 
         self.projection_layers = nn.ModuleList(
             [
                 nn.Linear(
-                    in_features=self.feature_encoder.model_dim + self.position_encoder.model_dim,
+                    in_features=self.feature_encoder.model_dim
+                    + self.position_encoder.model_dim,
                     out_features=self.attention_dim,
                 ),
                 nn.Linear(in_features=self.attention_dim, out_features=self.output_dim),
@@ -212,7 +230,10 @@ class WalkEncoder(nn.Module):
         )
 
     def forward(
-        self, combined_raw_feat: torch.Tensor, neighbor_position_features: torch.Tensor, walks_valid_lengths: torch.Tensor
+        self,
+        combined_raw_feat: torch.Tensor,
+        neighbor_position_features: torch.Tensor,
+        walks_valid_lengths: torch.Tensor,
     ):
         """
         combined_raw_feat: [B, num_walks, H, D_raw]
@@ -236,11 +257,11 @@ class WalkEncoder(nn.Module):
         combined_out = combined_out.view(B, num_walks, -1)
 
         combined_out = self.projection_layers[0](combined_out)
-        
+
         # Aggregate multiple random walks over num_walks dimension
         # [B, attention_dim]
         attn_out = self.transformer_encoder(combined_out).mean(dim=1)
-        
+
         outputs = self.projection_layers[1](attn_out)
         return outputs
 
@@ -283,7 +304,9 @@ class CAWN(nn.Module):
         self.time_encoder = TimeEncoder(dim=d_time)
         self.position_encoder = CachedPositionEncoder(position_feat_dim, walk_length)
 
-        walk_input_dim = self.ndim + self.edge_feat_dim + self.d_time + self.position_feat_dim
+        walk_input_dim = (
+            self.ndim + self.edge_feat_dim + self.d_time + self.position_feat_dim
+        )
         self.walk_encoder = WalkEncoder(
             input_dim=walk_input_dim,
             position_feat_dim=self.position_feat_dim,
@@ -302,10 +325,12 @@ class CAWN(nn.Module):
         """
         assert graph.neighbors is not None, "CAWN requires neighbors (at least 1 hop)"
         assert graph.fanout is not None, "CAWN requires fanout information"
-        assert len(graph.neighbors) == self.walk_length, f"CAWN requires exactly {self.walk_length} hops"
+        assert len(graph.neighbors) == self.walk_length, (
+            f"CAWN requires exactly {self.walk_length} hops"
+        )
 
         n_root = graph.root_nid.shape[0]
-        n_src = n_root // (2 + self.n_neg)
+        n_src = n_root // (2 + graph.n_neg)
 
         # 1. Build trees arrays sequentially
         src_tree = self._slice_tree(graph, 0, n_src, n_root, graph.fanout)
@@ -318,16 +343,25 @@ class CAWN(nn.Module):
         # 3. Pass 2: (src, neg_dst)
         n_neg_actual = n_root - 2 * n_src
         if n_neg_actual == n_src:
-            neg_src_emb, neg_dst_emb = self._forward_pair(src_tree, neg_tree, graph.fanout)
+            neg_src_emb, neg_dst_emb = self._forward_pair(
+                src_tree, neg_tree, graph.fanout
+            )
         else:
             # tile src sequences n_neg times
             rep = n_neg_actual // n_src
-            src_tiled = {k: [sub.repeat_interleave(rep, dim=0) for sub in v] for k, v in src_tree.items()}
-            neg_src_emb, neg_dst_emb = self._forward_pair(src_tiled, neg_tree, graph.fanout)
+            src_tiled = {
+                k: [sub.repeat_interleave(rep, dim=0) for sub in v]
+                for k, v in src_tree.items()
+            }
+            neg_src_emb, neg_dst_emb = self._forward_pair(
+                src_tiled, neg_tree, graph.fanout
+            )
 
         return torch.cat([pos_src_emb, pos_dst_emb, neg_src_emb, neg_dst_emb], dim=0)
 
-    def _slice_tree(self, graph: HierGraph, lo: int, hi: int, n_root: int, fanout: List[int]) -> Dict[str, List[torch.Tensor]]:
+    def _slice_tree(
+        self, graph: HierGraph, lo: int, hi: int, n_root: int, fanout: List[int]
+    ) -> Dict[str, List[torch.Tensor]]:
         """Extract multi-hop ego-graphs for a slice of the batch."""
         res = {
             "nid": [graph.root_nid[lo:hi].unsqueeze(1)],
@@ -347,7 +381,7 @@ class CAWN(nn.Module):
             chunk = 1
             for k in range(i + 1):
                 chunk *= fanout[k]
-            
+
             # Slice flattened representation via view
             nid_slice = graph.neighbors[i].nid.view(n_root, chunk)[lo:hi]
             ts_slice = graph.neighbors[i].ts.view(n_root, chunk)[lo:hi]
@@ -358,13 +392,17 @@ class CAWN(nn.Module):
                 nfeat_slice = graph.neighbors[i].nfeat.view(n_root, chunk, -1)[lo:hi]
                 res["nfeat"].append(nfeat_slice)
             else:
-                res["nfeat"].append(torch.zeros((hi - lo, chunk, self.ndim), device=dev))
+                res["nfeat"].append(
+                    torch.zeros((hi - lo, chunk, self.ndim), device=dev)
+                )
 
             if graph.neighbors[i].efeat is not None:
                 efeat_slice = graph.neighbors[i].efeat.view(n_root, chunk, -1)[lo:hi]
                 res["efeat"].append(efeat_slice)
             else:
-                res["efeat"].append(torch.zeros((hi - lo, chunk, self.edge_feat_dim), device=dev))
+                res["efeat"].append(
+                    torch.zeros((hi - lo, chunk, self.edge_feat_dim), device=dev)
+                )
 
         return res
 
@@ -383,22 +421,26 @@ class CAWN(nn.Module):
 
         return src_emb, dst_emb
 
-    def _tree_to_array(self, tree: Dict[str, List[torch.Tensor]], fanout: List[int]) -> Dict[str, torch.Tensor]:
+    def _tree_to_array(
+        self, tree: Dict[str, List[torch.Tensor]], fanout: List[int]
+    ) -> Dict[str, torch.Tensor]:
         """Aligns tree shape (lists of varied dimension) into uniform paths array `[B, num_walks, H, D]`."""
         num_walks = 1
         for f in fanout:
             num_walks *= f
         B = tree["nid"][0].shape[0]
         H = len(fanout) + 1
-        
+
         arr = {}
         for key, tensor_list in tree.items():
             first_shape = tensor_list[0].shape
             out_shape = (B, num_walks, H) + first_shape[2:]
-            out = torch.empty(out_shape, dtype=tensor_list[0].dtype, device=tensor_list[0].device)
-            
+            out = torch.empty(
+                out_shape, dtype=tensor_list[0].dtype, device=tensor_list[0].device
+            )
+
             out[:, :, 0] = tensor_list[0].repeat_interleave(num_walks, dim=1)
-            
+
             num_paths_at_hop = 1
             for i in range(len(fanout)):
                 h = i + 1
@@ -407,7 +449,7 @@ class CAWN(nn.Module):
                 repeats = num_walks // num_paths_at_hop
                 out[:, :, h] = tensor_list[h].repeat_interleave(repeats, dim=1)
             arr[key] = out
-            
+
         return arr
 
     def _encode_walk_array(

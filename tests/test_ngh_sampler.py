@@ -93,6 +93,31 @@ class TestNoSampler:
         assert length == n_src * (2 + n_neg)
         assert valid_nid_raw.tolist() == root_nid.tolist()
 
+    def test_sample_uses_batch_n_neg_instead_of_configured_maximum(self):
+        ring_buf = MockRingBuf(total_size=100)
+        sampler = NoSampler(
+            graph=MagicMock(),
+            ring_buf=ring_buf,  # type: ignore[arg-type]
+            n_neg=20,
+            fanout=None,
+            sample_4_neg=False,
+        )
+        root_nid = torch.arange(6)  # two positives, one negative each
+        root_ts = torch.tensor([10, 20])
+
+        valid_nid_raw, length = sampler.sample(
+            root_nid=root_nid,
+            root_ts=root_ts,
+            sample_nid=torch.tensor([]),
+            sample_ts=torch.tensor([]),
+            pos_eid=torch.tensor([1, 2]),
+            gpu_id=0,
+        )
+
+        assert length == 6
+        assert ring_buf.slot.TS[:length].tolist() == [10, 20, 10, 20, 10, 20]
+        assert valid_nid_raw.tolist() == root_nid.tolist()
+
     def test_sample_expands_timestamps_for_negatives(self):
         ring_buf = MockRingBuf(total_size=100)
         sampler = NoSampler(
@@ -121,6 +146,8 @@ class TestNoSampler:
         )
 
         assert length == n_src * (2 + n_neg)
+        assert ring_buf.slot.TS[:length].tolist() == [10, 20, 10, 20, 10, 10, 20, 20]
+        assert valid_nid_raw.tolist() == root_nid.tolist()
 
     def test_sample_sets_eid_for_seeds(self):
         ring_buf = MockRingBuf(total_size=100)

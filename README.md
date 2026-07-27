@@ -44,6 +44,20 @@ uvx --from huggingface_hub hf download \
   --local-dir DATA
 ```
 
+For `tgbl-wiki-v2`, keep the official TGB download outside the repository and
+convert only the FROST runtime files into `DATA/`:
+
+```bash
+# Expected official files: ~/datasets/tgb/raw/tgbl_wiki/{ml_tgbl-wiki.pkl,...}
+uv run python scripts/prepare_tgbl_wiki.py \
+  --raw-dir ~/datasets/tgb/raw/tgbl_wiki \
+  --output-dir DATA/TGBL_WIKI
+```
+
+`DATA/` can itself be a symlink such as `DATA -> ~/datasets/frost_dataset`.
+The converter links the large official negative-sample files instead of copying
+them. See the TGB command under [configuration](configs/README.md#tgb-link-prediction).
+
 ### Runtime Shape
 
 FROST uses `torchrun` with one extra rank reserved for the host/planner process:

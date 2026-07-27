@@ -11,6 +11,7 @@ defaults:
 
 epoch: 100
 macro_batch_size: 4000 # total batch size across all GPUs
+eval_macro_batch_size: null # defaults to macro_batch_size; reduce for TGB one-vs-many evaluation
 patience: 100
 dropout: 0.2
 seed: 42
@@ -19,6 +20,7 @@ dataset: "LASTFM"
 optimizer: "adam"
 lr: 0.0001
 n_neg: 1
+eval_metric: "ap" # ap | mrr; AP remains the default
 ring_buf_size: 64
 if_carry_over_route: false
 ignore_nfeat_on_disk: false

@@ -41,6 +41,8 @@ class Meta:
         labels: Binary link-prediction labels for this batch, or ``None``.
         fanout: Fanout list forwarded from the config, or ``None``.
         n_neg: Number of negative samples expected for this batch.
+        neg_valid_mask: Optional boolean mask over flattened negative scores.
+            Used when an evaluation sampler pads variable-width candidate sets.
     """
 
     cur_epoch: int
@@ -56,6 +58,7 @@ class Meta:
     graph: HierGraph | None = None
     plan_set: PlanSet | None = None
     labels: torch.Tensor | None = None
+    neg_valid_mask: torch.Tensor | None = None
     fanout: list[int] | None = None
     flat_nid_cpu: torch.Tensor | None = None  # CPU nids for APAN writeback
     direct_writeback_request: DirectWritebackRequest | None = None

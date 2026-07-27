@@ -6,6 +6,7 @@ used by the worker during training and evaluation.
 """
 
 from collections.abc import Callable
+import inspect
 import logging
 from queue import Queue
 from typing import cast
@@ -14,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from frost.ablation import DynamicStateAblation
+
 # Import the newly unified memory updaters
 from frost.datatypes.mem_mail_box._data_ops import keep_last, mail_to_box
 from frost.datatypes.mem_mail_box.box import BoxEntry
@@ -72,6 +74,7 @@ class AssembledModel(nn.Module):
         self.encoder = encoder
         self.mem_updater = mem_updater
         self.header = header
+        self._header_accepts_runtime_n_neg = self._accepts_runtime_n_neg(header)
         self.postman = postman
         self.dynamic_state_ablation = (
             dynamic_state_ablation
@@ -90,6 +93,18 @@ class AssembledModel(nn.Module):
         encoder = getattr(encoder, "_orig_mod", encoder)
         return encoder.__class__.__name__ == "DyRep" and bool(
             getattr(encoder, "use_structural_attention", False)
+        )
+
+    @staticmethod
+    def _accepts_runtime_n_neg(header: nn.Module) -> bool:
+        """Keep compatibility with custom headers that only accept ``h``."""
+        try:
+            parameters = inspect.signature(header.forward).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(
+            parameter.name == "n_neg" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
         )
 
     @staticmethod
@@ -234,8 +249,12 @@ class AssembledModel(nn.Module):
         if self.mem_updater is not None:
             plan_set = meta.plan_set
             if self.dynamic_state_ablation.uses_async_dynamic_state_pipeline:
-                assert mem_task_q is not None, "mem_task_q required when mem_updater is set"
-                assert box_task_q is not None, "box_task_q required when mem_updater is set"
+                assert mem_task_q is not None, (
+                    "mem_task_q required when mem_updater is set"
+                )
+                assert box_task_q is not None, (
+                    "box_task_q required when mem_updater is set"
+                )
                 assert plan_set is not None
                 assert plan_set.box_plan is not None
                 assert plan_set.mem_plan is not None
@@ -413,5 +432,8 @@ class AssembledModel(nn.Module):
                 box_task_q.put((box_task, box_ready_event))
 
         # 4. Predict edges
-        ret = self.header(h)
+        if self._header_accepts_runtime_n_neg:
+            ret = self.header(h, n_neg=meta.n_neg)
+        else:
+            ret = self.header(h)
         return cast(torch.Tensor, ret)

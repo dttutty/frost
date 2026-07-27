@@ -16,6 +16,8 @@ class Result:
         val_loss: Mean validation loss over the epoch.
         val_auc: Area-under-ROC-curve on the validation split.
         val_ap: Average precision on the validation split.
+        val_mrr: TGB-compatible validation mean reciprocal rank when enabled.
+        test_mrr: TGB-compatible test mean reciprocal rank when enabled.
         val_auc_batch_mean: TGL-style validation AUC computed as the mean of
             per-batch AUCs across the split.
         val_ap_batch_mean: TGL-style validation AP computed as the mean of

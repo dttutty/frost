@@ -4,6 +4,7 @@ These tests verify two bug fixes:
 1. compute_last_indices must be deterministic on CUDA (no scatter_ race).
 2. _apply_box_mail_delta must write to box_pos (next slot), not box_pos-1.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -16,6 +17,7 @@ from frost.datatypes.mem_mail_box.mem import MemEntry
 # ---------------------------------------------------------------------------
 # compute_last_indices: correctness
 # ---------------------------------------------------------------------------
+
 
 class TestComputeLastIndices:
     """Verify that compute_last_indices always returns the entry with the
@@ -78,6 +80,7 @@ class TestComputeLastIndices:
 # compute_last_indices: CUDA determinism (skipped if no GPU)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestComputeLastIndicesCUDA:
     """Same tests on CUDA tensors to verify determinism on GPU."""
@@ -110,6 +113,7 @@ class TestComputeLastIndicesCUDA:
 # keep_last: integration
 # ---------------------------------------------------------------------------
 
+
 class TestKeepLast:
     """Verify that keep_last correctly deduplicates MemEntry by max ts."""
 
@@ -138,10 +142,26 @@ class TestKeepLast:
         assert result.nid.tolist() == [10, 20, 30]
         assert result.ts.tolist() == [100, 200, 300]
 
+    def test_keep_last_sorts_unique_unsorted_input(self):
+        mem = MemEntry(
+            nid=torch.tensor([30, 10, 20]),
+            data=torch.tensor([[3.0], [1.0], [2.0]]),
+            ts=torch.tensor([300, 100, 200]),
+        )
+
+        result = keep_last(mem)
+
+        assert result.nid.tolist() == [10, 20, 30]
+        assert result.data.tolist() == [[1.0], [2.0], [3.0]]
+        assert result.ts.tolist() == [100, 200, 300]
+        assert result.is_sorted
+        assert result.is_unique
+
 
 # ---------------------------------------------------------------------------
 # Ring-buffer write position
 # ---------------------------------------------------------------------------
+
 
 class TestRingBufferWritePos:
     """Verify that the ring-buffer write position uses box_pos (next slot),
@@ -173,6 +193,4 @@ class TestRingBufferWritePos:
         boxsize = 1
         for pos_val in range(5):
             box_pos = torch.tensor([pos_val])
-            assert (box_pos % boxsize).item() == (
-                (box_pos - 1) % boxsize
-            ).item()
+            assert (box_pos % boxsize).item() == ((box_pos - 1) % boxsize).item()

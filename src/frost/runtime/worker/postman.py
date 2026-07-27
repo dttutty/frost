@@ -39,7 +39,7 @@ class Postman:
 
         # 1. Calculate the number of target nodes (first 2/3)
         N_total = graph.root_nid.numel()
-        target_len = (N_total // (2 + self.n_neg)) * 2
+        target_len = (N_total // (2 + graph.n_neg)) * 2
 
         # Ensure mail_data size matches the target length
         if mail_data.size(0) == N_total:
