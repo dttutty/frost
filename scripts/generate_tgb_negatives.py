@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 import argparse
 import logging
-import os
 import pickle
 import random
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
