@@ -10,7 +10,6 @@ void bind_samplers(nb::module_& m, const std::string& suffix) {
     // Create type aliases to keep the binding code readable.
     using TGraph = TemporalGraph<ID_T, TIME_T>;
     using S_Seq = SeqSampler<ID_T, TIME_T>;
-    using S_Win = WindowSeqSampler<ID_T, TIME_T>;
 
     // 1. Bind the suffixed TemporalGraph type.
     nb::class_<TGraph>(m, ("TemporalGraph_" + suffix).c_str())
@@ -32,9 +31,6 @@ void bind_samplers(nb::module_& m, const std::string& suffix) {
         .def("get_all_first_hop_neighbors", &S_Seq::get_all_first_hop_neighbors)
         .def("get_historical_neighbors", &S_Seq::get_historical_neighbors)
         .def("reset_random_state", &S_Seq::reset_random_state);
-
-    // 3. Bind WindowSeqSampler...
-    // nb::class_<S_Win>(m, ("WindowSeqSampler_" + suffix).c_str()) ... 
 }
 
 NB_MODULE(_core, m) {
