@@ -36,7 +36,7 @@ from frost.launch.storage import (
 )
 from frost.sampling.protocols import NghSamplerProto
 from frost.runtime.host._plan_router import detect_gpu_topology
-from frost.neg_sampler import PrecomputedNegSampler
+from frost.neg_sampler import PrecomputedNegSampler, RandomNegLinkSampler
 from frost.sampling.ngh_sampler import MultiHopNghSampler, NghSampler, NoSampler
 from frost.utils._logger import init_logging
 from frost.utils.precision import resolve_precision
@@ -44,6 +44,15 @@ from frost.utils.utils import broadcast_data, set_seed
 
 faulthandler.enable()
 logger = logging.getLogger(__name__)
+
+_RANDOM_NEG_LINK_SAMPLER_TARGET = "frost.neg_sampler.RandomNegLinkSampler"
+
+
+def _uses_dst_partition_random_sampler(sampler_cfg: DictConfig) -> bool:
+    return (
+        str(sampler_cfg.get("_target_", "")) == _RANDOM_NEG_LINK_SAMPLER_TARGET
+        and str(sampler_cfg.get("candidate_mode", "all")) == "dst_partition"
+    )
 
 
 def launch(cfg: DictConfig):
@@ -267,12 +276,42 @@ def launch(cfg: DictConfig):
             _common = dict(
                 seed=neg_sampler_cfg.get("seed"),
             )
+            train_uses_dst_partition = _uses_dst_partition_random_sampler(
+                neg_sampler_cfg.train
+            )
+            eval_uses_dst_partition = _uses_dst_partition_random_sampler(
+                neg_sampler_cfg.eval
+            )
+            candidate_nodes = None
+            if train_uses_dst_partition or eval_uses_dst_partition:
+                candidate_nodes = RandomNegLinkSampler.candidates_from_dst_nodes(
+                    df["dst"].to_numpy(copy=False), n_nodes=n_nodes
+                )
+                logger.info(
+                    "Built %d destination-partition negative candidates from the "
+                    "already loaded edge frame.",
+                    candidate_nodes.numel(),
+                )
+            train_candidate_kwargs = (
+                {"candidate_nodes": candidate_nodes} if train_uses_dst_partition else {}
+            )
+            eval_candidate_kwargs = (
+                {"candidate_nodes": candidate_nodes} if eval_uses_dst_partition else {}
+            )
             # Make sure n_neg uses the specific sub-config or falls back to global
             neg_sampler_train = instantiate(
-                neg_sampler_cfg.train, **_shared_kwargs, **_common, n_neg=train_n_neg
+                neg_sampler_cfg.train,
+                **_shared_kwargs,
+                **_common,
+                **train_candidate_kwargs,
+                n_neg=train_n_neg,
             )
             neg_sampler_eval = instantiate(
-                neg_sampler_cfg.eval, **_shared_kwargs, **_common, n_neg=eval_n_neg
+                neg_sampler_cfg.eval,
+                **_shared_kwargs,
+                **_common,
+                **eval_candidate_kwargs,
+                n_neg=eval_n_neg,
             )
         # Historical / inductive samplers need the full edge DataFrame to build
         # their candidate edge sets.  Call init_from_df() if the sampler supports it.

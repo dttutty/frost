@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from frost.neg_sampler import (
@@ -177,3 +178,28 @@ class TestPrecomputedNegSampler:
 
         assert sampled.shape == (6,)
         assert set(sampled.tolist()).issubset({100, 101, 103})
+
+    def test_random_sampler_uses_preloaded_dst_candidates_without_csv(
+        self, tmp_path: Path
+    ):
+        sampler = RandomNegLinkSampler(
+            n_nodes=200,
+            n_neg=2,
+            dataset="MISSING",
+            data_root=tmp_path,
+            candidate_mode="dst_partition",
+            candidate_nodes=torch.tensor([100, 101, 103]),
+            seed=7,
+        )
+
+        sampled = sampler.sample(torch.tensor([1, 2]), torch.tensor([1, 2]))
+
+        assert sampled.shape == (4,)
+        assert set(sampled.tolist()).issubset({100, 101, 103})
+
+    def test_builds_sorted_dst_candidates_from_loaded_column(self):
+        candidates = RandomNegLinkSampler.candidates_from_dst_nodes(
+            np.array([103, 100, 101, 101, 103], dtype=np.int64), n_nodes=200
+        )
+
+        assert torch.equal(candidates, torch.tensor([100, 101, 103]))

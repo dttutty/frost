@@ -22,6 +22,7 @@ class RandomNegLinkSampler:
         seed: int | None = None,
         collision_check: bool = False,
         replacement: bool = True,
+        candidate_nodes: np.ndarray | torch.Tensor | None = None,
     ) -> None:
         if n_nodes <= 0:
             raise ValueError(f"n_nodes must be > 0, got {n_nodes}")
@@ -41,10 +42,25 @@ class RandomNegLinkSampler:
         self._batch_dst: torch.Tensor | None = None
 
         if candidate_mode == "all":
+            if candidate_nodes is not None:
+                raise ValueError(
+                    "candidate_nodes is only valid with candidate_mode='dst_partition'."
+                )
             self.candidates = torch.arange(n_nodes, dtype=torch.long)
         elif candidate_mode == "dst_partition":
-            dataset_dir = resolve_dataset_dir(dataset, data_root=self.data_root)
-            self.candidates = _load_unique_dst_nodes(dataset_dir / "edges.csv")
+            if candidate_nodes is None:
+                dataset_dir = resolve_dataset_dir(dataset, data_root=self.data_root)
+                self.candidates = _load_unique_dst_nodes(dataset_dir / "edges.csv")
+            else:
+                self.candidates = torch.as_tensor(
+                    candidate_nodes, dtype=torch.long
+                ).reshape(-1)
+                if self.candidates.numel() > 1 and not bool(
+                    torch.all(self.candidates[1:] > self.candidates[:-1])
+                ):
+                    raise ValueError(
+                        "candidate_nodes must be sorted and contain unique node IDs."
+                    )
         else:
             raise ValueError(
                 f"Unsupported candidate_mode={candidate_mode!r}. "
@@ -55,9 +71,45 @@ class RandomNegLinkSampler:
             raise ValueError(
                 "RandomNegLinkSampler requires at least one candidate node."
             )
+        if int(self.candidates[0]) < 0 or int(self.candidates[-1]) >= n_nodes:
+            raise ValueError(
+                f"candidate node IDs must be within [0, {n_nodes}); got range "
+                f"[{int(self.candidates[0])}, {int(self.candidates[-1])}]"
+            )
 
         self._generator: torch.Generator | None = None
         self.reset()
+
+    @staticmethod
+    def candidates_from_dst_nodes(
+        dst_nodes: np.ndarray, *, n_nodes: int
+    ) -> torch.Tensor:
+        """Build a sorted destination candidate pool without rereading edges.csv.
+
+        The dataset loader already materializes the destination column.  A boolean
+        presence map turns it into the same sorted unique pool as
+        :func:`_load_unique_dst_nodes`, while avoiding another Python CSV pass.
+        """
+        dst = np.asarray(dst_nodes)
+        if dst.ndim != 1:
+            raise ValueError(f"dst_nodes must be 1-D, got shape {dst.shape}")
+        if dst.size == 0:
+            raise ValueError("dst_nodes must not be empty")
+        if n_nodes <= 0:
+            raise ValueError(f"n_nodes must be > 0, got {n_nodes}")
+
+        min_dst = int(dst.min())
+        max_dst = int(dst.max())
+        if min_dst < 0 or max_dst >= n_nodes:
+            raise ValueError(
+                f"destination node IDs must be within [0, {n_nodes}); got range "
+                f"[{min_dst}, {max_dst}]"
+            )
+
+        present = np.zeros(n_nodes, dtype=np.bool_)
+        present[dst] = True
+        candidates = np.flatnonzero(present).astype(np.int64, copy=False)
+        return torch.from_numpy(candidates)
 
     def reset(self) -> None:
         """Reset sampler RNG so eval splits reuse the same negatives every epoch."""
