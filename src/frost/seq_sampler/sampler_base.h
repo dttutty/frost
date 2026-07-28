@@ -60,6 +60,40 @@ protected:
             }
         } 
         else if (strategy == "uniform") {
+            const auto is_env_truthy = [](const char* value) {
+                if (value == nullptr) {
+                    return false;
+                }
+                std::string normalized(value);
+                std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+            };
+            const bool mimic_tgl_low_degree_recent = is_env_truthy(
+                std::getenv("FROST_DEBUG_TGL_UNIFORM_LOW_DEGREE_RECENT")
+            );
+
+            // TGL's uniform sampler switches to its recent-neighbor branch
+            // when the eligible history fits in the requested fanout.  That
+            // branch has an upstream off-by-one and therefore returns the
+            // newest ``eligible - 1`` edges, excluding the oldest one.  Keep
+            // this quirk behind the explicit parity flag: normal FROST
+            // uniform sampling remains sampling-with-replacement everywhere.
+            if (mimic_tgl_low_degree_recent && eligible <= static_cast<size_t>(n_ngh)) {
+                if (eligible <= 1) {
+                    return;
+                }
+                const size_t take = eligible - 1;
+                const size_t copy_start = end - take + 1;
+                const size_t pad_offset = n_ngh - take;
+                for (size_t k = 0; k < take; ++k) {
+                    out_n[pad_offset + k] = indices[copy_start + k];
+                    out_e[pad_offset + k] = edge_ids[copy_start + k];
+                    out_t[pad_offset + k] = edge_ts[copy_start + k];
+                }
+                return;
+            }
+
             std::vector<size_t> sampled_idx(n_ngh);
             for (int k = 0; k < n_ngh; ++k) {
                 sampled_idx[k] = start + (rng() % eligible);

@@ -42,12 +42,18 @@ class MockRingBuf:
 @pytest.fixture(autouse=True)
 def _restore_tgl_sampler_parity_env():
     old = os.environ.pop("FROST_DEBUG_TGL_BATCH_SHARED_RECENT", None)
+    old_uniform = os.environ.pop(
+        "FROST_DEBUG_TGL_UNIFORM_LOW_DEGREE_RECENT", None
+    )
     try:
         yield
     finally:
         os.environ.pop("FROST_DEBUG_TGL_BATCH_SHARED_RECENT", None)
+        os.environ.pop("FROST_DEBUG_TGL_UNIFORM_LOW_DEGREE_RECENT", None)
         if old is not None:
             os.environ["FROST_DEBUG_TGL_BATCH_SHARED_RECENT"] = old
+        if old_uniform is not None:
+            os.environ["FROST_DEBUG_TGL_UNIFORM_LOW_DEGREE_RECENT"] = old_uniform
 
 
 class TestNoSampler:
@@ -254,6 +260,9 @@ class TestNghSamplerInit:
         mock_graph.indices = np.array([1, 2, 3], dtype=np.int64)
         mock_graph.ts = np.array([100, 200, 300], dtype=np.int64)
         monkeypatch.delenv("FROST_DEBUG_TGL_BATCH_SHARED_RECENT", raising=False)
+        monkeypatch.delenv(
+            "FROST_DEBUG_TGL_UNIFORM_LOW_DEGREE_RECENT", raising=False
+        )
 
         with patch("frost.sampling.ngh_sampler.SeqSampler") as MockSeqSampler:
             from frost.sampling.ngh_sampler import NghSampler
@@ -271,6 +280,9 @@ class TestNghSamplerInit:
 
             assert sampler.tgl_sampler_parity is True
             assert os.environ["FROST_DEBUG_TGL_BATCH_SHARED_RECENT"] == "1"
+            assert (
+                os.environ["FROST_DEBUG_TGL_UNIFORM_LOW_DEGREE_RECENT"] == "1"
+            )
             MockSeqSampler.assert_called_once_with(
                 graph=mock_graph,
                 strategy="recent",

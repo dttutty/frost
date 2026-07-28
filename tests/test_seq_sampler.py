@@ -46,6 +46,30 @@ def test_recent_strategy_can_mimic_tgl_batch_shared_window(monkeypatch):
     assert out_ts.tolist() == [[0, 0, 0, 2], [0, 2, 3, 4]]
 
 
+def test_uniform_strategy_can_mimic_tgl_low_degree_recent_branch(monkeypatch):
+    monkeypatch.setenv("FROST_DEBUG_TGL_UNIFORM_LOW_DEGREE_RECENT", "1")
+    sampler = SeqSampler(_make_int64_graph(), strategy="uniform", seed=0)
+
+    out_nid, out_eid, out_ts = sampler.get_historical_neighbors([0], [4], 4)
+
+    # TGL enters its recent branch when eligible <= fanout and its loop omits
+    # the oldest eligible edge.
+    assert out_nid.tolist() == [[-1, -1, 11, 12]]
+    assert out_eid.tolist() == [[-1, -1, 101, 102]]
+    assert out_ts.tolist() == [[0, 0, 2, 3]]
+
+
+def test_uniform_tgl_low_degree_branch_returns_empty_for_one_edge(monkeypatch):
+    monkeypatch.setenv("FROST_DEBUG_TGL_UNIFORM_LOW_DEGREE_RECENT", "1")
+    sampler = SeqSampler(_make_int64_graph(), strategy="uniform", seed=0)
+
+    out_nid, out_eid, out_ts = sampler.get_historical_neighbors([0], [2], 4)
+
+    assert out_nid.tolist() == [[-1, -1, -1, -1]]
+    assert out_eid.tolist() == [[-1, -1, -1, -1]]
+    assert out_ts.tolist() == [[0, 0, 0, 0]]
+
+
 def test_time_interval_aware_outputs_sorted_sampled_times_without_padding():
     sampler = SeqSampler(
         _make_int64_graph(),

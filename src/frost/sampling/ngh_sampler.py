@@ -78,6 +78,7 @@ def _ensure_seq_sampler_stable_mode() -> None:
 def _enable_tgl_sampler_parity_if_requested(tgl_sampler_parity: bool) -> None:
     if tgl_sampler_parity:
         os.environ["FROST_DEBUG_TGL_BATCH_SHARED_RECENT"] = "1"
+        os.environ["FROST_DEBUG_TGL_UNIFORM_LOW_DEGREE_RECENT"] = "1"
 
 
 class NoSampler:
