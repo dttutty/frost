@@ -115,6 +115,21 @@ class TestTGN:
 
 
 class TestDyRep:
+    def test_structural_parameter_count_matches_tgl_parity(self):
+        model = DyRep(
+            ndim=1,
+            edim=172,
+            d_mem=128,
+            d_out=128,
+            d_time=128,
+            heads=2,
+            dropout=0.1,
+            use_structural_attention=True,
+        )
+
+        assert model.layer_norm is None
+        assert sum(parameter.numel() for parameter in model.parameters()) == 176384
+
     def test_structural_forward_output_shape(self):
         ndim, edim, d_mem, d_time, d_out, heads = 4, 0, 8, 4, 8, 2
         model = DyRep(
@@ -220,6 +235,7 @@ class TestDyRep:
 
         assert h.shape == (3, 8)
         assert mail_peer_mem is None
+        assert model.layer_norm is not None
 
 
 class TestTGAT:
@@ -295,8 +311,37 @@ class TestTGAT:
             ],
             fanout=fanout,
         )
+        layer_call_counts = [0, 0]
+
+        def count_layer_call(layer_index):
+            def hook(*_):
+                layer_call_counts[layer_index] += 1
+
+            return hook
+
+        hooks = [
+            layer.register_forward_hook(count_layer_call(layer_index))
+            for layer_index, layer in enumerate(model.layers)
+        ]
         out = model(graph)
+        for hook in hooks:
+            hook.remove()
+
         assert out.shape == (n_root, d_hid)
+        assert layer_call_counts == [2, 1]
+
+    def test_two_layer_parameter_count_matches_tgl_parity(self):
+        model = TGAT(
+            ndim=1,
+            edim=172,
+            d_time=128,
+            d_hid=128,
+            fanout=[10, 10],
+            heads=2,
+            dropout=0.1,
+        )
+
+        assert sum(parameter.numel() for parameter in model.parameters()) == 287232
 
     def test_with_memory(self):
         ndim, edim, d_time, d_hid, heads = 32, 16, 32, 64, 2

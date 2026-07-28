@@ -481,6 +481,15 @@ class MultiHopNghSampler:
             sampled_edges = slot["EID"][start:end].reshape(hop_size, n_ngh)
             sampled_times = slot["TS"][start:end].reshape(hop_size, n_ngh)
 
+            # Slots are reused by the ring buffer.  Rows whose parent is padding
+            # are deliberately skipped below, so clear the entire tier before
+            # writing valid rows; otherwise those skipped rows can retain nodes
+            # from an older batch and be expanded as real parents on the next
+            # hop.
+            sampled_nodes.fill_(padding_node_id)
+            sampled_edges.fill_(-1)
+            sampled_times.zero_()
+
             if np.any(valid_mask):
                 valid_nodes = cur_nid[valid_mask]
                 valid_times = cur_ts[valid_mask]

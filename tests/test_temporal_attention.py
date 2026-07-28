@@ -1,6 +1,7 @@
 """Tests for TemporalGraphAttentionLayer."""
 
 import torch
+import torch.nn as nn
 
 from frost.models.modules.temporal_graph_attention_layer import (
     TemporalGraphAttentionLayer,
@@ -8,6 +9,37 @@ from frost.models.modules.temporal_graph_attention_layer import (
 
 
 class TestTemporalGraphAttentionLayer:
+    def test_output_projection_concatenates_aggregate_before_target(self):
+        layer = TemporalGraphAttentionLayer(
+            dim_node=1,
+            dim_edge=1,
+            dim_time=0,
+            dim_out=3,
+            num_head=1,
+            dropout=0.0,
+        )
+        layer.layer_norm = nn.Identity()
+        with torch.no_grad():
+            layer.w_q.weight.zero_()
+            layer.w_q.bias.zero_()
+            layer.w_k.weight.zero_()
+            layer.w_k.bias.zero_()
+            layer.w_v.weight.zero_()
+            layer.w_v.bias.copy_(torch.tensor([2.0, 3.0, 5.0]))
+            layer.w_out.weight.zero_()
+            layer.w_out.bias.zero_()
+            layer.w_out.weight[:, :3] = torch.eye(3)
+
+        out = layer(
+            target_feat=torch.tensor([[7.0]]),
+            neighbor_feat=torch.tensor([[[11.0]]]),
+            edge_feat=torch.tensor([[[13.0]]]),
+            dt=torch.zeros(1, 1),
+            mask=torch.ones(1, 1, dtype=torch.bool),
+        )
+
+        assert torch.equal(out, torch.tensor([[2.0, 3.0, 5.0]]))
+
     def test_output_shape(self):
         dim_node, dim_edge, dim_time, dim_out, num_head = 32, 16, 8, 64, 4
         layer = TemporalGraphAttentionLayer(

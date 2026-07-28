@@ -32,8 +32,11 @@ class DyRep(nn.Module):
 
     Base memory representation:
         h = root_mem  (+  Linear(root_nfeat) if node features exist)
-        h = LayerNorm(h)
-        h = Dropout(h)
+
+    The structural path feeds this representation directly into temporal
+    attention, matching TGL's DyRep path.  The attention block already owns
+    the output dropout and LayerNorm.  Zero-hop mode retains the historical
+    IdentityNorm-style LayerNorm and dropout.
 
     Structural representation:
         h_struct = TemporalGraphAttention(h, neighbor_mem + neighbor_nfeat, dt)
@@ -80,7 +83,9 @@ class DyRep(nn.Module):
         if ndim > 0 and ndim != d_mem:
             self.node_feat_map = nn.Linear(ndim, d_mem)
 
-        self.layer_norm = nn.LayerNorm(d_mem)
+        self.layer_norm = (
+            None if use_structural_attention else nn.LayerNorm(d_mem)
+        )
         self.dropout = nn.Dropout(dropout)
 
         # Output projection (identity when d_mem == d_out)
@@ -106,7 +111,9 @@ class DyRep(nn.Module):
         if self.dim_node > 0 and nfeat is not None:
             nfeat_proj = self.node_feat_map(nfeat) if self.node_feat_map else nfeat
             h = h + nfeat_proj
-        return self.dropout(self.layer_norm(h))
+        if self.layer_norm is not None:
+            h = self.dropout(self.layer_norm(h))
+        return h
 
     def _structural_embedding(
         self,

@@ -155,8 +155,10 @@ class TemporalGraphAttentionLayer(nn.Module):
 
         agg_h = agg_h.view(N, self.dim_out)  # [N, dim_out]
 
-        # 6. Residual + Output Project
-        out = self.w_out(torch.cat([target_feat, agg_h], dim=1))
+        # 6. Residual + Output Project.  Keep the aggregate first to match the
+        # TGL/DGL implementation whose ``dstdata['h']`` precedes the target
+        # node features in the output projection input.
+        out = self.w_out(torch.cat([agg_h, target_feat], dim=1))
         out = F.relu(self.dropout(out))
         out = self.layer_norm(out)
 

@@ -111,12 +111,12 @@ class TGAT(nn.Module):
             )
         )
 
-        # --- Layer 2..N: Target (dim_node) with Neighbor (dim_hid) -> Hidden ---
+        # --- Layer 2..N: Hidden target and neighbor representations -> Hidden ---
         for _ in range(self.num_layers - 1):
             self.layers.append(
                 TemporalGraphAttentionLayer(
-                    dim_node=self.node_feat_dim,  # Target features are original node features
-                    dim_neighbor=d_hid,  # Neighbor features are from previous layer
+                    dim_node=d_hid,
+                    dim_neighbor=d_hid,
                     dim_edge=self.edge_feat_dim,
                     dim_time=d_time,
                     dim_out=d_hid,
@@ -264,51 +264,47 @@ class TGAT(nn.Module):
                 h_n = h_n + nbr.mem if h_n is not None else nbr.mem
             hidden_states.append(h_n)
 
-        # 2. Iterate through layers (bottom-up)
+        # 2. Apply every layer to every still-live hop level.  For a two-layer
+        # model, layer 0 embeds both roots from hop 1 and hop-1 nodes from hop
+        # 2; layer 1 then embeds roots from those two first-layer outputs.  This
+        # matches TGL's pair of nested message-flow blocks.
         for layer_idx in range(self.num_layers):
-            # Target hop index decreases as we move up the network
-            # For 2 layers:
-            # Layer 0 updates Hop 1 (using Hop 2 neighbors), then updates Hop 0 (using Hop 1)
-            hop_idx = self.num_layers - 1 - layer_idx
-
-            # The current target nodes we are embedding
-            target_feat = hidden_states[hop_idx]
-            num_targets = target_feat.shape[0]
-
-            # The neighbors of the current target nodes
-            S = graph.fanout[hop_idx]
-            nbr_level = graph.neighbors[hop_idx]
-
-            # Reshape neighbor inputs to [num_targets, S, dim]
-            neighbor_feat = hidden_states[hop_idx + 1].view(num_targets, S, -1)
-            e_feat = self._edge_features_for_hop(
-                edge_features=nbr_level.efeat,
-                num_targets=num_targets,
-                fanout=S,
-                device=neighbor_feat.device,
-                dtype=neighbor_feat.dtype,
-            )
-
-            # Get target timestamps to compute dt
-            if hop_idx == 0:
-                target_ts = graph.root_ts
-            else:
-                target_ts = graph.neighbors[hop_idx - 1].ts
-
-            dt = target_ts.unsqueeze(1) - nbr_level.ts.view(num_targets, S)
-            mask = nbr_level.nid.view(num_targets, S) != -1
-
-            # Apply temporal attention layer
-            updated_feat = self.layers[layer_idx](
-                target_feat=target_feat,
-                neighbor_feat=neighbor_feat,
-                edge_feat=e_feat,
-                dt=dt,
-                mask=mask,
-            )
-
-            # Update the target representations for the next layer
-            hidden_states[hop_idx] = updated_feat
+            next_hidden_states: list[torch.Tensor] = []
+            target_level_count = self.num_layers - layer_idx
+            for hop_idx in range(target_level_count):
+                target_feat = hidden_states[hop_idx]
+                num_targets = target_feat.shape[0]
+                fanout = graph.fanout[hop_idx]
+                nbr_level = graph.neighbors[hop_idx]
+                neighbor_feat = hidden_states[hop_idx + 1].view(
+                    num_targets, fanout, -1
+                )
+                e_feat = self._edge_features_for_hop(
+                    edge_features=nbr_level.efeat,
+                    num_targets=num_targets,
+                    fanout=fanout,
+                    device=neighbor_feat.device,
+                    dtype=neighbor_feat.dtype,
+                )
+                target_ts = (
+                    graph.root_ts
+                    if hop_idx == 0
+                    else graph.neighbors[hop_idx - 1].ts
+                )
+                dt = target_ts.unsqueeze(1) - nbr_level.ts.view(
+                    num_targets, fanout
+                )
+                mask = nbr_level.nid.view(num_targets, fanout) != -1
+                next_hidden_states.append(
+                    self.layers[layer_idx](
+                        target_feat=target_feat,
+                        neighbor_feat=neighbor_feat,
+                        edge_feat=e_feat,
+                        dt=dt,
+                        mask=mask,
+                    )
+                )
+            hidden_states = next_hidden_states
 
         # The final representation of the root nodes is at index 0
         return cast(torch.Tensor, hidden_states[0])
