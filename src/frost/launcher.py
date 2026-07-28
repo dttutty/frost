@@ -161,7 +161,9 @@ def launch(cfg: DictConfig):
             raise ValueError("APAN requires mem_updater.mail_recipients > 0.")
         fanout = [mail_recipients]
         sample_4_neg = False
-        ngh_sampler_strategy = cfg.ngh_sampler.strategy
+        ngh_sampler_strategy = cfg.mem_updater.get(
+            "postman_delivery_strategy", cfg.ngh_sampler.strategy
+        )
     else:
         if has_mem and mail_recipients != 0:
             raise ValueError(

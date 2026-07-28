@@ -48,6 +48,7 @@ def build_worker_modules(
             raise TypeError("mem_updater must resolve to a mapping")
         mem_updater_cfg.pop("mail_recipients", None)
         mem_updater_cfg.pop("mail_combine", None)
+        mem_updater_cfg.pop("postman_delivery_strategy", None)
     mem_updater: MemoryUpdaterProto | None = instantiate(mem_updater_cfg, d_mail=d_mail)
 
     encoder_cfg = string_keyed_dict(
