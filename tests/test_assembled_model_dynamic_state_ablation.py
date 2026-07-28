@@ -11,6 +11,7 @@ from frost.ablation import (
 from frost.datatypes.meta import Meta
 from frost.datatypes.plan import PlanSet
 from frost.models._assembled_model import AssembledModel
+from frost.utils.tensor_set import TensorSet
 
 
 class _FakeFlatGraph:
@@ -71,6 +72,24 @@ def _make_meta() -> Meta:
         plan_set=PlanSet(),
         fanout=[],
     )
+
+
+def test_planned_p2p_union_deduplicates_once_across_peers():
+    first = TensorSet(torch.tensor([5, 1, 3], dtype=torch.long))
+    second = TensorSet(torch.tensor([7, 3, 1], dtype=torch.long))
+    plan = SimpleNamespace(p2p=[first, second])
+
+    actual = AssembledModel._union_planned_p2p_nids(plan)
+
+    assert torch.equal(actual, torch.tensor([1, 3, 5, 7], dtype=torch.long))
+
+
+def test_single_peer_union_reuses_sorted_tensor():
+    peer = TensorSet(torch.tensor([5, 1, 3], dtype=torch.long))
+
+    actual = AssembledModel._union_planned_p2p_nids(SimpleNamespace(p2p=[peer]))
+
+    assert actual is peer.data
 
 
 def test_post_mem_update_mode_writes_before_encoder():

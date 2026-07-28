@@ -28,7 +28,7 @@ from frost.models.protocols import PostmanProto
 from frost.runtime.worker.p2p_syncer.utils._interaction_ops import (
     generate_interaction_mails,
 )
-from frost.utils.tensor_set import TensorSet
+from frost.utils.tensor_set import isin_sorted
 
 logger = logging.getLogger(__name__)
 
@@ -112,10 +112,16 @@ class AssembledModel(nn.Module):
         if plan is None or len(plan.p2p) == 0:
             return torch.empty(0, dtype=torch.long)
 
-        union = TensorSet.empty_like(plan.p2p[0].data)
-        for per_dst in plan.p2p:
-            union = union | per_dst
-        return union.data
+        if len(plan.p2p) == 1:
+            return plan.p2p[0].data
+
+        # Every TensorSet is already sorted and unique.  Concatenate all peers
+        # first and deduplicate once instead of rebuilding a sorted TensorSet
+        # after each pairwise union.
+        return torch.unique(
+            torch.cat([per_dst.data for per_dst in plan.p2p]),
+            sorted=True,
+        )
 
     @staticmethod
     def _dedupe_box_entry(entry: BoxEntry) -> BoxEntry:
@@ -159,8 +165,9 @@ class AssembledModel(nn.Module):
         ):
             return None
 
-        valid_mask = (flat_graph.nid != -1) & torch.isin(
-            flat_graph.nid, planned_send_nids
+        valid_mask = (flat_graph.nid != -1) & isin_sorted(
+            flat_graph.nid,
+            planned_send_nids,
         )
         if not torch.any(valid_mask):
             return None
@@ -186,8 +193,9 @@ class AssembledModel(nn.Module):
         ):
             return None
 
-        valid_mask = (flat_graph.nid != -1) & torch.isin(
-            flat_graph.nid, planned_send_nids
+        valid_mask = (flat_graph.nid != -1) & isin_sorted(
+            flat_graph.nid,
+            planned_send_nids,
         )
         if not torch.any(valid_mask):
             return None

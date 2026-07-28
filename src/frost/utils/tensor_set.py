@@ -5,6 +5,20 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+def isin_sorted(
+    query: torch.Tensor,
+    sorted_candidates: torch.Tensor,
+) -> torch.Tensor:
+    """Return membership in an ascending, unique candidate tensor."""
+    if sorted_candidates.numel() == 0:
+        return torch.zeros_like(query, dtype=torch.bool)
+
+    pos = torch.searchsorted(sorted_candidates, query)
+    in_bounds = pos < sorted_candidates.numel()
+    safe_pos = pos.clamp_max(sorted_candidates.numel() - 1)
+    return in_bounds & (sorted_candidates[safe_pos] == query)
+
+
 class TensorSet:
     data: torch.Tensor
     """

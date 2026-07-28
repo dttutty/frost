@@ -2,11 +2,28 @@
 
 import torch
 
-from frost.utils.tensor_set import TensorSet
+from frost.utils.tensor_set import TensorSet, isin_sorted
 
 
 def _ts(vals: list[int]) -> TensorSet:
     return TensorSet(torch.tensor(vals, dtype=torch.long))
+
+
+def test_sorted_membership_matches_torch_isin():
+    query = torch.tensor([9, -1, 3, 5, 3, 12, 1], dtype=torch.long)
+    candidates = torch.tensor([1, 3, 9], dtype=torch.long)
+
+    actual = isin_sorted(query, candidates)
+
+    assert torch.equal(actual, torch.isin(query, candidates))
+
+
+def test_sorted_membership_handles_empty_candidates():
+    query = torch.tensor([1, 2, 3], dtype=torch.long)
+
+    actual = isin_sorted(query, torch.empty(0, dtype=torch.long))
+
+    assert torch.equal(actual, torch.zeros_like(query, dtype=torch.bool))
 
 
 class TestTensorSetBasic:
