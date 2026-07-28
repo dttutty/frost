@@ -82,6 +82,9 @@ Inspect the equivalent `torchrun` command without launching:
 
 Run a declared seed or model/dataset sweep sequentially:
 
+The comparison writes raw logs, `throughput.tsv`, `convergence.tsv`,
+`convergence.png`, and `summary.json` under `artifacts/comparisons/`.
+
 Run a manual experiment:
 
 ```bash
