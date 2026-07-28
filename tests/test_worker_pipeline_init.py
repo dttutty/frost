@@ -51,4 +51,3 @@ def test_direct_state_ablation_initializes_delta_queue(monkeypatch):
 
     assert worker.delta_queue is not None
     assert worker.dy_asm.kwargs["delta_queue"] is worker.delta_queue
-
