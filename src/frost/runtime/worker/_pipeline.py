@@ -97,8 +97,11 @@ class WorkerPipelineMixin:
 
         if has_mem:
             assert self.mem_box_store is not None
-            if use_async_dynamic_state_pipeline:
-                self.delta_queue = Q(maxsize=memory_q_size)
+            # DynamicAssembler keeps a uniform queue-based interface for both the
+            # asynchronous P2P path and the direct shared-memory ablations.  The
+            # latter bypass delta consumption in ``logic()``, but still require
+            # a queue object during construction and orderly shutdown.
+            self.delta_queue = Q(maxsize=memory_q_size)
             self.h2d_out_q = Q(maxsize=memory_q_size)
             if use_async_dynamic_state_pipeline:
                 self._init_mem_box_threads()
