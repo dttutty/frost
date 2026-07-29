@@ -1,6 +1,6 @@
 n_neg: ${n_neg}
 seed: ${seed}
-# last_observed_time is resolved automatically from the train split boundary in the launcher.
+# The training cutoff is resolved automatically from the loaded edge frame.
 train:
   _target_: frost.neg_sampler.RandomNegLinkSampler
   candidate_mode: dst_partition

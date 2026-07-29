@@ -16,9 +16,6 @@ from frost.data.preparation import (
     generate_node_roles,
     write_temporal_csr,
 )
-from frost.neg_sampler import generate_precomputed_negative_file
-
-
 DGB_ZENODO_RECORD = "7213796"
 DGB_ZENODO_URL = f"https://zenodo.org/records/{DGB_ZENODO_RECORD}"
 TIMESTAMP_INDEX_DATASETS = {"canparl", "untrade", "unvote"}
@@ -113,6 +110,10 @@ def import_dgb_snapshot(
     ``ml_*.npy`` products. This function makes every additional FROST
     transformation explicit and records it in ``manifest.json``.
     """
+    # Import lazily so importing frost.data.paths from the negative-sampler
+    # package does not cycle through frost.data.__init__ -> frost.data.dgb.
+    from frost.neg_sampler import generate_precomputed_negative_file
+
     source_dir = source_dir.expanduser()
     output_dir = output_dir.expanduser()
     if graph_direction not in {"directed", "bidirectional"}:

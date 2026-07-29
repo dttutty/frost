@@ -263,8 +263,7 @@ def launch(cfg: DictConfig):
             raise RuntimeError("Host rank must load graph and dataframe before launch.")
 
         neg_sampler_cfg = cfg.neg_sampler
-        # Support both flat configs (e.g. precomputed.yaml: has _target_ at root)
-        # and nested train/eval configs (e.g. random.yaml: has train/eval sub-keys).
+        # Support legacy flat configs and current nested train/eval configs.
         _shared_kwargs = dict(n_nodes=n_nodes, dataset=cfg.dataset)
         if "_target_" in neg_sampler_cfg:
             # Flat format — same sampler for train and eval

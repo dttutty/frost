@@ -3,7 +3,9 @@ defaults:
   - encoder: tgn
   - loss_fn: bce  # no need to change mostly
   - mem_updater: null
-  - neg_sampler: precomputed # precomputed | rnd_then_rnd | rnd_then_hist | rnd_then_ind
+  # rnd_dst_then_fixed | rnd_dst_then_rnd | rnd_dst_then_hist |
+  # rnd_dst_then_post_train | rnd_dst_then_tgb | rnd_dst_then_tgb_wiki
+  - neg_sampler: rnd_dst_then_fixed
   - ngh_sampler: recent
   - precision: base # no need to change mostly
   - predictor: link # don't change this, current version only support link prediction

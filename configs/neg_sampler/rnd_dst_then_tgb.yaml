@@ -2,8 +2,8 @@
 # candidate set per validation/test query. Override eval.n_neg per dataset:
 #   tgbl-review: 100
 #   tgbl-coin, tgbl-comment, tgbl-flight: 20
-# Official tgbl-wiki candidate sets are variable-width and are intentionally
-# rejected by the current fixed-width runtime.
+# Official tgbl-wiki candidate sets are variable-width; use
+# rnd_dst_then_tgb_wiki for its padded fixed-capacity runtime layout.
 seed: ${seed}
 train:
   _target_: frost.neg_sampler.RandomNegLinkSampler
