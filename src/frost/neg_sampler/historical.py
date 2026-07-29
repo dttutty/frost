@@ -1,4 +1,4 @@
-"""DyGLib-style historical negative sampler (eval only, train uses random)."""
+"""Per-source historical destination negatives (eval only)."""
 
 from __future__ import annotations
 
@@ -13,13 +13,14 @@ if TYPE_CHECKING:
 
 
 class HistoricalNegLinkSampler:
-    """DyGLib-style *historical* negative sampler ported to the FROST interface.
+    """Sample previously observed destinations for each current source.
 
-    Negative destinations are sampled preferentially from (src, dst) pairs that
-    appeared historically *before* the current batch but are *not* in the
-    current batch.  If the historical pool is smaller than the requested size,
-    the remainder is filled with collision-checked random negatives drawn from
-    ``unique_dst_node_ids``.
+    FROST's root layout keeps the positive source fixed, so this is a
+    destination-corruption historical protocol: for each current source it
+    prefers destinations connected to that same source strictly before the
+    current batch, excluding current positives. If none exist, it falls back to
+    the observed destination partition. It is intentionally not labelled as an
+    exact port of DyGLib's full-pair protocol, which may replace both endpoints.
 
     Requires ``init_from_df()`` to be called once (done automatically by the
     launcher) and ``set_batch_context()`` before each ``sample()`` call (done
@@ -60,8 +61,6 @@ class HistoricalNegLinkSampler:
         self._dst_np: np.ndarray | None = None
         self._ts_np: np.ndarray | None = None
         self._unique_dst: np.ndarray | None = None
-        self._earliest_time: float | None = None
-        self._possible_edges: set | None = None
 
         # Set per-batch by set_batch_context().
         self._batch_src: np.ndarray | None = None
@@ -87,11 +86,6 @@ class HistoricalNegLinkSampler:
         self._dst_np = df["dst"].to_numpy(dtype=np.int64)
         self._ts_np = df["time"].to_numpy(dtype=np.float64)
         self._unique_dst = np.unique(self._dst_np)
-        self._earliest_time = float(self._ts_np.min())
-        unique_src = np.unique(self._src_np)
-        self._possible_edges = {
-            (s, d) for s in unique_src.tolist() for d in self._unique_dst.tolist()
-        }
 
     def set_batch_context(
         self,
@@ -99,7 +93,9 @@ class HistoricalNegLinkSampler:
         batch_dst: np.ndarray,
         batch_start_time: float,
         batch_end_time: float,
+        batch_ts: np.ndarray | None = None,
     ) -> None:
+        del batch_ts
         self._batch_src = batch_src
         self._batch_dst = batch_dst
         self._batch_start_time = batch_start_time
@@ -109,28 +105,32 @@ class HistoricalNegLinkSampler:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _edges_in_interval(self, t_start: float, t_end: float) -> set[tuple[int, int]]:
-        assert (
-            self._ts_np is not None
-            and self._src_np is not None
-            and self._dst_np is not None
-        )
-        mask = (self._ts_np >= t_start) & (self._ts_np <= t_end)
-        return set(zip(self._src_np[mask].tolist(), self._dst_np[mask].tolist()))
+    def _draw_for_sources(
+        self, src_ids: np.ndarray, historical_edges: set[tuple[int, int]]
+    ) -> np.ndarray:
+        assert self._unique_dst is not None
+        assert self._batch_src is not None and self._batch_dst is not None
+        current_by_src: dict[int, set[int]] = {}
+        for src, dst in zip(self._batch_src.tolist(), self._batch_dst.tolist()):
+            current_by_src.setdefault(src, set()).add(dst)
+        historical_by_src: dict[int, list[int]] = {}
+        for src, dst in sorted(historical_edges):
+            if dst not in current_by_src.get(src, set()):
+                historical_by_src.setdefault(src, []).append(dst)
 
-    def _random_with_collision_check(
-        self, size: int, batch_edges: set[tuple[int, int]]
-    ) -> tuple[np.ndarray, np.ndarray]:
-        assert self._possible_edges is not None
-        candidates = list(self._possible_edges - batch_edges)
-        if not candidates:
-            raise RuntimeError("No valid negative edges remain after collision check.")
-        idx = self._rng.choice(
-            len(candidates), size=size, replace=len(candidates) < size
-        )
-        srcs = np.array([candidates[i][0] for i in idx], dtype=np.int64)
-        dsts = np.array([candidates[i][1] for i in idx], dtype=np.int64)
-        return srcs, dsts
+        result: list[int] = []
+        for src in src_ids.tolist():
+            current = current_by_src.get(src, set())
+            preferred = historical_by_src.get(src, [])
+            fallback = [dst for dst in self._unique_dst.tolist() if dst not in current]
+            candidates = preferred or fallback
+            if not candidates:
+                raise RuntimeError(
+                    f"No valid destination negative remains for source {src}."
+                )
+            for _ in range(self.n_neg):
+                result.append(candidates[self._rng.randint(0, len(candidates))])
+        return np.asarray(result, dtype=np.int64)
 
     # ------------------------------------------------------------------
     # FROST interface
@@ -142,8 +142,6 @@ class HistoricalNegLinkSampler:
         if n_src == 0:
             return torch.empty(0, dtype=torch.long)
 
-        size = n_src * self.n_neg
-
         if self._src_np is None:
             raise RuntimeError(
                 "HistoricalNegLinkSampler.init_from_df() has not been called. "
@@ -153,25 +151,16 @@ class HistoricalNegLinkSampler:
         # Fall back to pure random when no batch context has been set yet.
         if self._batch_src is None or self._batch_dst is None:
             assert self._unique_dst is not None
-            idx = self._rng.randint(0, len(self._unique_dst), size)
+            idx = self._rng.randint(0, len(self._unique_dst), n_src * self.n_neg)
             return torch.from_numpy(self._unique_dst[idx])
 
-        batch_edges = set(zip(self._batch_src.tolist(), self._batch_dst.tolist()))
-        assert self._earliest_time is not None
-        historical = self._edges_in_interval(
-            self._earliest_time, self._batch_start_time
+        assert self._ts_np is not None and self._dst_np is not None
+        historical_mask = self._ts_np < self._batch_start_time
+        historical = set(
+            zip(
+                self._src_np[historical_mask].tolist(),
+                self._dst_np[historical_mask].tolist(),
+            )
         )
-        current = self._edges_in_interval(self._batch_start_time, self._batch_end_time)
-        unique_hist = historical - current
-
-        hist_list = list(unique_hist)
-        if size > len(hist_list):
-            n_random = size - len(hist_list)
-            _, rand_dsts = self._random_with_collision_check(n_random, batch_edges)
-            hist_dst = np.array([e[1] for e in hist_list], dtype=np.int64)
-            neg_dsts = np.concatenate([rand_dsts, hist_dst]).astype(np.int64)
-        else:
-            idx = self._rng.choice(len(hist_list), size=size, replace=False)
-            neg_dsts = np.array([hist_list[i][1] for i in idx], dtype=np.int64)
-
+        neg_dsts = self._draw_for_sources(src_ids.cpu().numpy(), historical)
         return torch.from_numpy(neg_dsts)

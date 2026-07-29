@@ -23,11 +23,14 @@ class PrecomputedNegSampler:
         dataset: str,
         data_root: str | Path = "DATA",
         neg_file: str = PRECOMPUTED_NEGATIVE_FILENAME,
+        seed: int | None = None,
     ) -> None:
         self.n_nodes = n_nodes  # from hydra config
         self.n_neg = n_neg
         self.dataset = dataset
         self.data_root = Path(data_root)
+        self.seed = seed
+        self._validated = False
 
         if self.n_neg != 1:
             raise ValueError(
@@ -45,12 +48,57 @@ class PrecomputedNegSampler:
         self.precomputed_negatives = _load_precomputed_negatives(self.precomputed_path)
 
     def init_from_df(self, df: Any) -> None:
-        """Accept the common sampler lifecycle hook; data is already file-backed."""
+        """Validate row alignment, candidate domain, and positive collisions."""
+        required_columns = {"eid", "dst"}
+        missing = required_columns.difference(df.columns)
+        if missing:
+            raise ValueError(
+                f"Cannot validate {self.precomputed_path}: edges are missing "
+                f"columns {sorted(missing)}."
+            )
+        if len(df) != self.precomputed_negatives.numel():
+            raise ValueError(
+                f"Row mismatch for {self.precomputed_path}: expected {len(df)} "
+                f"negatives, got {self.precomputed_negatives.numel()}."
+            )
+
+        edge_ids = torch.as_tensor(df["eid"].to_numpy(copy=True), dtype=torch.long)
+        expected_ids = torch.arange(1, len(df) + 1, dtype=torch.long)
+        if not torch.equal(edge_ids, expected_ids):
+            raise ValueError("edges.csv must use contiguous eid values 1..N.")
+
+        positive_dst = torch.as_tensor(df["dst"].to_numpy(copy=True), dtype=torch.long)
+        candidates = torch.unique(positive_dst, sorted=True)
+        positions = torch.searchsorted(candidates, self.precomputed_negatives)
+        in_range = positions < candidates.numel()
+        valid_domain = torch.zeros_like(in_range)
+        valid_domain[in_range] = (
+            candidates[positions[in_range]] == self.precomputed_negatives[in_range]
+        )
+        if not bool(valid_domain.all()):
+            invalid = self.precomputed_negatives[~valid_domain][:5].tolist()
+            raise ValueError(
+                f"{self.precomputed_path} contains negative destinations outside "
+                f"the observed dst partition; examples: {invalid}"
+            )
+        collisions = self.precomputed_negatives == positive_dst
+        if bool(collisions.any()):
+            collision_eids = edge_ids[collisions][:5].tolist()
+            raise ValueError(
+                f"{self.precomputed_path} contains positive-edge collisions at "
+                f"eids {collision_eids}."
+            )
+        self._validated = True
 
     def set_batch_context(self, **context: Any) -> None:
         """Accept the common per-batch hook; edge ids select negatives directly."""
 
     def sample(self, src_ids: torch.Tensor, edge_ids: torch.Tensor) -> torch.Tensor:
+        if not self._validated:
+            raise RuntimeError(
+                "PrecomputedNegSampler.init_from_df() must validate the negative "
+                "file before sampling."
+            )
         if src_ids.numel() != edge_ids.numel():
             raise ValueError(
                 f"src_ids and edge_ids must have the same length, got {src_ids.numel()} "

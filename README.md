@@ -76,16 +76,22 @@ uv run frost-data build-graph DATA/GDELT/edges.csv \
 uv run frost-data node-roles DATA/LASTFM/edges.csv \
   --output artifacts/data/LASTFM/node_role.npy
 
-# Convert a plain torch.Tensor feature artifact.
-uv run frost-data convert-features DATA/WIKIPEDIA/edge_features.pt \
-  --output artifacts/data/WIKIPEDIA/edge_features.npy
+# Keep tied timestamps in one train/validation/test split.
+uv run frost-data split DATA/LASTFM/edges.csv \
+  --strategy timestamp --output artifacts/data/LASTFM/edges.csv
 
-# Verify edges.csv, graph direction, CSR contents, and optional row counts.
+# Build fixed evaluation negatives from the observed destination partition.
+uv run frost-data negatives DATA/LASTFM/edges.csv \
+  --output artifacts/data/LASTFM/neg_pre_sampling_1_result.csv
+
+# Verify schema, temporal splits, graph, sidecars, and negative candidates.
 uv run frost-data validate DATA/LASTFM
 ```
 
 Generated outputs are not overwritten unless `--force` is supplied. Run
 `uv run frost-data --help` for explicit output-path and direction options.
+`frost-data import-dgb` performs the complete conversion from an extracted DGB
+Zenodo `ml_*` directory and records every protocol choice in `manifest.json`.
 
 `graph_direction=auto` is the runtime default. It enforces TGL's official graph
 semantics for maintained datasets: GDELT and MAG are directed, while WIKI,

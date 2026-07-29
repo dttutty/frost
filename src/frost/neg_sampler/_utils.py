@@ -1,7 +1,9 @@
 """Shared path-resolution and file-loading utilities for negative samplers."""
+
 from __future__ import annotations
 
 import csv
+import itertools
 import logging
 import random
 from pathlib import Path
@@ -115,11 +117,11 @@ def resolve_precomputed_negative_path(
 
 
 def _load_precomputed_negatives(path: Path) -> torch.Tensor:
-    """Load a precomputed negative-sample file into a 1-D integer tensor.
+    """Load an eid-keyed negative-sample CSV into a 1-D integer tensor.
 
-    The file is expected to contain exactly one non-empty integer per line,
-    where line *i* holds the pre-drawn negative destination node ID for the
-    *i*-th edge (1-indexed).  Empty lines are treated as a format error.
+    The canonical format is ``eid,neg_dst`` with contiguous 1-based edge IDs.
+    Headerless one-integer-per-line files remain readable for migration, but
+    callers should validate their candidate domain against ``edges.csv``.
 
     Args:
         path: Path to the precomputed negative CSV/text file.
@@ -134,12 +136,30 @@ def _load_precomputed_negatives(path: Path) -> torch.Tensor:
     """
     negatives: list[int] = []
     with path.open(newline="") as f:
-        for line_no, line in enumerate(f, start=1):
-            stripped = line.strip()
-            # Blank lines are disallowed – each row must correspond to one edge.
-            if not stripped:
-                raise ValueError(f"Empty line found in {path} at line {line_no}.")
-            negatives.append(int(stripped))
+        first_line = f.readline()
+        if not first_line:
+            raise ValueError(f"Precomputed negative file is empty: {path}")
+        if first_line.strip() == "eid,neg_dst":
+            reader = csv.DictReader(itertools.chain([first_line], f))
+            for row_idx, row in enumerate(reader, start=1):
+                eid = int(row["eid"])
+                if eid != row_idx:
+                    raise ValueError(
+                        f"{path} has non-contiguous eid values: expected "
+                        f"{row_idx}, got {eid}"
+                    )
+                negatives.append(int(row["neg_dst"]))
+        else:
+            logger.warning(
+                "Loading legacy headerless negative file %s; regenerate it to "
+                "the canonical eid,neg_dst format.",
+                path,
+            )
+            for line_no, line in enumerate(itertools.chain([first_line], f), start=1):
+                stripped = line.strip()
+                if not stripped:
+                    raise ValueError(f"Empty line found in {path} at line {line_no}.")
+                negatives.append(int(stripped))
     if not negatives:
         raise ValueError(f"Precomputed negative file is empty: {path}")
     return torch.tensor(negatives, dtype=torch.long)
@@ -188,15 +208,13 @@ def _pick_negative(
     *,
     dst_candidates: tuple[int, ...],
     current_dst: int,
-    observed_neighbors: set[int],
     rng: random.Random,
 ) -> int:
-    """Sample a single **historical-negative** destination node for one edge.
+    """Sample one destination-corruption negative for an observed edge.
 
-    A candidate is considered *valid* if it is **not** the current positive
-    destination and has **not** been seen as a neighbour of the source node in
-    earlier edges of the same streaming sequence.  This mirrors the historical
-    negative-sampling strategy used in DyGLib.
+    A candidate is considered *valid* if it is a real destination node, is
+    **not** the current positive destination.  This is a fixed random-negative
+    protocol, not DyGLib's full-pair historical-negative protocol.
 
     Sampling proceeds in two phases to balance speed and correctness:
 
@@ -208,13 +226,9 @@ def _pick_negative(
 
     Args:
         dst_candidates:      Tuple of all eligible destination node IDs
-                             (typically the universe of observed destinations).
+                             (the observed destination-node partition).
         current_dst:         The true positive destination for this edge;
                              must not be returned as a negative.
-        observed_neighbors:  Set of destination nodes already seen from the
-                             same source node in earlier timesteps; these are
-                             also forbidden (historical negatives must be
-                             genuinely unobserved).
         rng:                 Seeded :class:`random.Random` instance used for
                              all draws, ensuring reproducibility.
 
@@ -222,35 +236,25 @@ def _pick_negative(
         A valid negative destination node ID.
 
     Raises:
-        ValueError:  If the forbidden set is so large that no valid candidate
-                     remains (i.e. every element of *dst_candidates* is
-                     excluded).  Checked upfront to avoid a silent infinite
-                     loop.
-        RuntimeError: If both phases somehow exhaust all candidates without
-                      finding a valid node (should be unreachable given the
-                      upfront check, but retained as a safety net).
+        ValueError: If no destination other than ``current_dst`` exists.
     """
-    # Upfront feasibility check: count distinct forbidden nodes.
-    # current_dst may already be in observed_neighbors, so add it only once.
-    forbidden_count = len(observed_neighbors) + int(current_dst not in observed_neighbors)
-    if forbidden_count >= len(dst_candidates):
+    if len(dst_candidates) <= 1 and current_dst in dst_candidates:
         raise ValueError(
             "No valid negative destination remains after excluding the current "
-            f"positive dst={current_dst} and previously observed neighbors."
+            f"positive dst={current_dst}."
         )
 
     # Phase 1 – fast rejection sampling.
     for _ in range(_REJECTION_TRIES):
         neg_dst = dst_candidates[rng.randrange(len(dst_candidates))]
-        if neg_dst != current_dst and neg_dst not in observed_neighbors:
+        if neg_dst != current_dst:
             return neg_dst
 
     # Phase 2 – linear fallback when the forbidden set is dense.
     for neg_dst in dst_candidates:
-        if neg_dst != current_dst and neg_dst not in observed_neighbors:
+        if neg_dst != current_dst:
             return neg_dst
 
-    # Unreachable in practice (guarded by the feasibility check above).
     raise RuntimeError("Failed to draw a valid negative destination.")
 
 
@@ -259,25 +263,23 @@ def generate_precomputed_negative_file(
     *,
     output_path: str | Path | None = None,
     seed: int = 0,
+    force: bool = False,
 ) -> Path:
-    """Pre-generate one historical-negative destination per edge and write to disk.
+    """Pre-generate one fixed random-negative destination per edge.
 
     This is an **offline preprocessing step**.  The resulting file is consumed
-    at training time by the historical-negative sampler so that negative
-    destinations never need to be re-sampled on the fly.
+    by the evaluation sampler so that negative destinations are stable across
+    models and runs.
 
     Algorithm
     ---------
     Edges are processed in chronological (eid) order.  For each edge
-    ``(src → dst)`` the function draws a negative destination from the full
-    node-ID universe ``[0, max_node_id]`` subject to two constraints:
-
-    * The sampled node must not be *current_dst* (the true positive).
-    * The sampled node must not have been seen as a destination from *src* in
-      any **previous** edge (historical exclusion via :func:`_pick_negative`).
-
-    After sampling, *dst* is added to ``seen_neighbors_by_src[src]`` so that
-    future edges from the same source correctly exclude it.
+    ``(src → dst)`` the function draws a negative destination from the set
+    of node IDs that actually occur in the table's ``dst`` column, subject to
+    one constraint: it must not equal the current positive destination.
+    Historical positives remain eligible, matching a fixed random
+    destination-corruption evaluation rather than an unseen-edge or
+    historical-edge benchmark.
 
     The file is first written to a ``.tmp`` sibling and then atomically renamed
     to *output_path* to avoid leaving corrupt files on disk if the process is
@@ -289,10 +291,8 @@ def generate_precomputed_negative_file(
                      integers starting at 1 (i.e. row 1 → eid=1).
         output_path: Destination path for the generated file.  Defaults to
                      ``<edges_path.parent>/neg_pre_sampling_1_result.csv``.
-        seed:        Integer seed for the RNG.  The actual seed string also
-                     incorporates the dataset directory name so that different
-                     datasets with the same ``seed`` still produce independent
-                     sequences.
+        seed:        Integer seed for the RNG. The artifact depends only on this
+                     seed and the canonical edge table, not its directory name.
 
     Returns:
         The resolved :class:`~pathlib.Path` of the written output file.
@@ -308,9 +308,11 @@ def generate_precomputed_negative_file(
     if output_path is None:
         output_path = edges_path.with_name(PRECOMPUTED_NEGATIVE_FILENAME)
     output_path = Path(output_path)
+    if output_path.exists() and not force:
+        raise FileExistsError(f"refusing to overwrite existing output: {output_path}")
 
-    # --- Pass 1: validate the file and determine the node-ID universe ---
-    max_node_id = -1
+    # --- Pass 1: validate the file and determine the destination partition ---
+    destination_nodes: set[int] = set()
     num_rows = 0
     with edges_path.open(newline="") as f:
         reader = csv.DictReader(f)
@@ -329,25 +331,21 @@ def generate_precomputed_negative_file(
                 raise ValueError(
                     f"{edges_path} has non-contiguous eid values: expected {row_idx}, got {eid}"
                 )
-            src = int(row["src"])
             dst = int(row["dst"])
-            max_node_id = max(max_node_id, src, dst)
+            destination_nodes.add(dst)
             num_rows = row_idx
 
     if num_rows == 0:
         raise ValueError(f"{edges_path} does not contain any rows.")
 
-    # Build the full candidate pool: every integer node ID in [0, max_node_id].
-    candidate_nodes = tuple(range(max_node_id + 1))
-    # Seed incorporates the dataset name so different datasets are independent.
-    rng = random.Random(f"{seed}:{edges_path.parent.name}")
-    # Per-source running history of all observed positive destinations.
-    seen_neighbors_by_src: dict[int, set[int]] = {}
-
+    candidate_nodes = tuple(sorted(destination_nodes))
+    rng = random.Random(seed)
     # --- Pass 2: sample negatives and write to a temporary file atomically ---
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     with edges_path.open(newline="") as src_f, tmp_path.open("w", newline="") as out_f:
         reader = csv.DictReader(src_f)
+        writer = csv.writer(out_f)
+        writer.writerow(["eid", "neg_dst"])
         for row_idx, row in enumerate(reader, start=1):
             eid = int(row["eid"])
             if eid != row_idx:
@@ -355,20 +353,13 @@ def generate_precomputed_negative_file(
                     f"{edges_path} has non-contiguous eid values: expected {row_idx}, got {eid}"
                 )
 
-            src = int(row["src"])
             dst = int(row["dst"])
-            # Lazily initialise the per-source neighbour history.
-            observed_neighbors = seen_neighbors_by_src.setdefault(src, set())
             neg_dst = _pick_negative(
                 dst_candidates=candidate_nodes,
                 current_dst=dst,
-                observed_neighbors=observed_neighbors,
                 rng=rng,
             )
-            out_f.write(f"{neg_dst}\n")
-            # Record dst **after** sampling so the current edge's positive node
-            # is excluded only from *future* edges, not this one.
-            observed_neighbors.add(dst)
+            writer.writerow([eid, neg_dst])
 
     # Atomic rename: minimises the window where a partial file is observable.
     tmp_path.replace(output_path)

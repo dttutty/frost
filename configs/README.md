@@ -52,10 +52,10 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 ## Parameter Flow and Coupling
 
 - `n_neg` flows from root config into `neg_sampler`, access analyzers, neighborhood samplers, the link predictor, and APAN postman components.
-- `neg_sampler=precomputed` reads one precomputed negative destination per edge from `DATA/<dataset>/neg_pre_sampling_1_result.csv` (configurable via `neg_sampler.neg_file`) and currently requires `n_neg=1`.
-- `neg_sampler=rnd_then_rnd` uses `RandomNegLinkSampler` for both train and eval; override `neg_sampler.train.candidate_mode` and `neg_sampler.eval.candidate_mode` independently to switch between `all` and `dst_partition`.
-- `neg_sampler=rnd_then_hist` uses random negatives during training and `HistoricalNegLinkSampler` during eval.
-- `neg_sampler=rnd_then_ind` uses random negatives during training and `InductiveNegLinkSampler` during eval.
+- `neg_sampler=precomputed` uses fresh destination-partition random negatives for training and reads one fixed `eid,neg_dst` evaluation negative per edge from `DATA/<dataset>/neg_pre_sampling_1_result.csv`; it currently requires `n_neg=1`.
+- `neg_sampler=rnd_then_rnd` uses destination-partition random negatives for both train and eval; override `candidate_mode=all` only for an explicitly all-node corruption protocol.
+- `neg_sampler=rnd_then_hist` uses destination-partition random negatives during training and per-source historical destination corruption during eval. It is not DyGLib's full-pair historical protocol, which may replace both endpoints.
+- `neg_sampler=rnd_then_ind` uses destination-partition random negatives during training and per-source post-training destination corruption during eval. It is likewise a destination-only protocol.
 - `neg_sampler=tgb` uses one random training negative and official TGB validation/test pickle files. Run with `eval_metric=mrr`; set `neg_sampler.eval.n_neg=100` for `tgbl-review`, or `20` for `tgbl-coin`, `tgbl-comment`, and `tgbl-flight`.
 - The runtime keeps a fixed negative capacity. Generic `neg_sampler=tgb` requires every query to have exactly that width. `neg_sampler=tgb_wiki` uses capacity 999 and masks the four official wiki-v2 queries that contain 998 negatives; it does not introduce ragged tensors or random replacements.
 - AP mode remains the default and currently requires one evaluation negative per positive edge. MRR is opt-in and uses TGB's optimistic/pessimistic average tie rank for checkpoint selection, logging, and early stopping.

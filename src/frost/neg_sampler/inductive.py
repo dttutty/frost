@@ -1,4 +1,4 @@
-"""DyGLib-style inductive negative sampler (eval only, train uses random)."""
+"""Per-source inductive destination negatives (eval only)."""
 
 from __future__ import annotations
 
@@ -13,12 +13,13 @@ if TYPE_CHECKING:
 
 
 class InductiveNegLinkSampler:
-    """DyGLib-style *inductive* negative sampler ported to the FROST interface.
+    """Sample post-training destinations for each current source.
 
     Negative destinations are sampled from edges that appeared *after*
-    ``last_observed_time`` (the train/val boundary) but have not yet been seen
-    in the current batch.  If this inductive pool is smaller than the requested
-    size, the remainder is filled with collision-checked random negatives.
+    ``last_observed_time`` but strictly before the current batch, while
+    excluding current positives. FROST keeps the current source fixed, so this
+    is a destination-corruption analogue rather than an exact port of DyGLib's
+    full-pair inductive protocol.
 
     Requires ``init_from_df()`` to be called once (done automatically by the
     launcher) and ``set_batch_context()`` before each ``sample()`` call (done
@@ -64,9 +65,6 @@ class InductiveNegLinkSampler:
         self._dst_np: np.ndarray | None = None
         self._ts_np: np.ndarray | None = None
         self._unique_dst: np.ndarray | None = None
-        self._earliest_time: float | None = None
-        self._possible_edges: set | None = None
-        self._observed_edges: set | None = None  # edges up to last_observed_time
 
         self._batch_src: np.ndarray | None = None
         self._batch_dst: np.ndarray | None = None
@@ -91,17 +89,17 @@ class InductiveNegLinkSampler:
         self._dst_np = df["dst"].to_numpy(dtype=np.int64)
         self._ts_np = df["time"].to_numpy(dtype=np.float64)
         self._unique_dst = np.unique(self._dst_np)
-        self._earliest_time = float(self._ts_np.min())
-        unique_src = np.unique(self._src_np)
-        self._possible_edges = {
-            (s, d) for s in unique_src.tolist() for d in self._unique_dst.tolist()
-        }
-        if self.last_observed_time is not None:
-            self._observed_edges = self._edges_in_interval(
-                self._earliest_time, self.last_observed_time
-            )
-        else:
-            self._observed_edges = set()
+        if self.last_observed_time is None:
+            if "default_split" not in df.columns:
+                raise ValueError(
+                    "Resolving last_observed_time requires default_split in edges.csv"
+                )
+            train_times = df.loc[df["default_split"].eq(0), "time"]
+            if train_times.empty:
+                raise ValueError(
+                    "Cannot resolve last_observed_time from an empty train split"
+                )
+            self.last_observed_time = float(train_times.max())
 
     def set_batch_context(
         self,
@@ -109,7 +107,9 @@ class InductiveNegLinkSampler:
         batch_dst: np.ndarray,
         batch_start_time: float,
         batch_end_time: float,
+        batch_ts: np.ndarray | None = None,
     ) -> None:
+        del batch_ts
         self._batch_src = batch_src
         self._batch_dst = batch_dst
         self._batch_start_time = batch_start_time
@@ -119,28 +119,32 @@ class InductiveNegLinkSampler:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _edges_in_interval(self, t_start: float, t_end: float) -> set[tuple[int, int]]:
-        assert (
-            self._ts_np is not None
-            and self._src_np is not None
-            and self._dst_np is not None
-        )
-        mask = (self._ts_np >= t_start) & (self._ts_np <= t_end)
-        return set(zip(self._src_np[mask].tolist(), self._dst_np[mask].tolist()))
+    def _draw_for_sources(
+        self, src_ids: np.ndarray, inductive_edges: set[tuple[int, int]]
+    ) -> np.ndarray:
+        assert self._unique_dst is not None
+        assert self._batch_src is not None and self._batch_dst is not None
+        current_by_src: dict[int, set[int]] = {}
+        for src, dst in zip(self._batch_src.tolist(), self._batch_dst.tolist()):
+            current_by_src.setdefault(src, set()).add(dst)
+        inductive_by_src: dict[int, list[int]] = {}
+        for src, dst in sorted(inductive_edges):
+            if dst not in current_by_src.get(src, set()):
+                inductive_by_src.setdefault(src, []).append(dst)
 
-    def _random_with_collision_check(
-        self, size: int, batch_edges: set[tuple[int, int]]
-    ) -> tuple[np.ndarray, np.ndarray]:
-        assert self._possible_edges is not None
-        candidates = list(self._possible_edges - batch_edges)
-        if not candidates:
-            raise RuntimeError("No valid negative edges remain after collision check.")
-        idx = self._rng.choice(
-            len(candidates), size=size, replace=len(candidates) < size
-        )
-        srcs = np.array([candidates[i][0] for i in idx], dtype=np.int64)
-        dsts = np.array([candidates[i][1] for i in idx], dtype=np.int64)
-        return srcs, dsts
+        result: list[int] = []
+        for src in src_ids.tolist():
+            current = current_by_src.get(src, set())
+            preferred = inductive_by_src.get(src, [])
+            fallback = [dst for dst in self._unique_dst.tolist() if dst not in current]
+            candidates = preferred or fallback
+            if not candidates:
+                raise RuntimeError(
+                    f"No valid destination negative remains for source {src}."
+                )
+            for _ in range(self.n_neg):
+                result.append(candidates[self._rng.randint(0, len(candidates))])
+        return np.asarray(result, dtype=np.int64)
 
     # ------------------------------------------------------------------
     # FROST interface
@@ -152,8 +156,6 @@ class InductiveNegLinkSampler:
         if n_src == 0:
             return torch.empty(0, dtype=torch.long)
 
-        size = n_src * self.n_neg
-
         if self._src_np is None:
             raise RuntimeError(
                 "InductiveNegLinkSampler.init_from_df() has not been called. "
@@ -162,27 +164,19 @@ class InductiveNegLinkSampler:
 
         if self._batch_src is None or self._batch_dst is None:
             assert self._unique_dst is not None
-            idx = self._rng.randint(0, len(self._unique_dst), size)
+            idx = self._rng.randint(0, len(self._unique_dst), n_src * self.n_neg)
             return torch.from_numpy(self._unique_dst[idx])
 
-        assert self._observed_edges is not None
-        batch_edges = set(zip(self._batch_src.tolist(), self._batch_dst.tolist()))
-        assert self._earliest_time is not None
-        historical = self._edges_in_interval(
-            self._earliest_time, self._batch_start_time
+        assert self.last_observed_time is not None
+        assert self._ts_np is not None and self._dst_np is not None
+        inductive_mask = (self._ts_np > self.last_observed_time) & (
+            self._ts_np < self._batch_start_time
         )
-        current = self._edges_in_interval(self._batch_start_time, self._batch_end_time)
-        # Inductive: appeared historically but NOT in train-observed set and NOT in current batch.
-        unique_inductive = historical - self._observed_edges - current
-
-        ind_list = list(unique_inductive)
-        if size > len(ind_list):
-            n_random = size - len(ind_list)
-            _, rand_dsts = self._random_with_collision_check(n_random, batch_edges)
-            ind_dsts = np.array([e[1] for e in ind_list], dtype=np.int64)
-            neg_dsts = np.concatenate([rand_dsts, ind_dsts]).astype(np.int64)
-        else:
-            idx = self._rng.choice(len(ind_list), size=size, replace=False)
-            neg_dsts = np.array([ind_list[i][1] for i in idx], dtype=np.int64)
-
+        inductive_edges = set(
+            zip(
+                self._src_np[inductive_mask].tolist(),
+                self._dst_np[inductive_mask].tolist(),
+            )
+        )
+        neg_dsts = self._draw_for_sources(src_ids.cpu().numpy(), inductive_edges)
         return torch.from_numpy(neg_dsts)

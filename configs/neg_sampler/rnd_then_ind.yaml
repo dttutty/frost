@@ -3,6 +3,6 @@ seed: ${seed}
 # last_observed_time is resolved automatically from the train split boundary in the launcher.
 train:
   _target_: frost.neg_sampler.RandomNegLinkSampler
-  candidate_mode: all
+  candidate_mode: dst_partition
 eval:
   _target_: frost.neg_sampler.InductiveNegLinkSampler

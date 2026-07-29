@@ -1,4 +1,5 @@
 """Public API for the neg_sampler package."""
+
 from frost.neg_sampler.historical import HistoricalNegLinkSampler
 from frost.neg_sampler.inductive import InductiveNegLinkSampler
 from frost.neg_sampler.precomputed import PrecomputedNegSampler

@@ -6,9 +6,12 @@ import csv
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 
 from frost.neg_sampler import (
+    HistoricalNegLinkSampler,
+    InductiveNegLinkSampler,
     PRECOMPUTED_NEGATIVE_FILENAME,
     PrecomputedNegSampler,
     RandomNegLinkSampler,
@@ -25,7 +28,7 @@ def _write_edges_csv(path: Path, rows: list[tuple[int, int, int]]) -> None:
 
 
 class TestPrecomputedNegSampler:
-    def test_generate_precomputed_negative_file_excludes_seen_neighbors(
+    def test_generate_precomputed_negative_file_uses_dst_partition(
         self, tmp_path: Path
     ):
         dataset_dir = tmp_path / "MOCK"
@@ -46,10 +49,11 @@ class TestPrecomputedNegSampler:
         )
 
         output_path = generate_precomputed_negative_file(edges_path, seed=7)
-        negatives = [int(line) for line in output_path.read_text().splitlines()]
+        generated = pd.read_csv(output_path)
+        negatives = generated["neg_dst"].tolist()
         assert len(negatives) == 8
-
-        seen_neighbors: dict[int, set[int]] = {}
+        assert generated["eid"].tolist() == list(range(1, 9))
+        assert set(negatives).issubset({10, 11, 12, 13, 14})
         rows = [
             (0, 10),
             (0, 11),
@@ -61,10 +65,7 @@ class TestPrecomputedNegSampler:
             (3, 14),
         ]
         for neg, (src, dst) in zip(negatives, rows):
-            seen = seen_neighbors.setdefault(src, set())
             assert neg != dst
-            assert neg not in seen
-            seen.add(dst)
 
     def test_sample_reads_precomputed_negatives_by_eid(self, tmp_path: Path):
         dataset_dir = tmp_path / "MOCK"
@@ -88,6 +89,7 @@ class TestPrecomputedNegSampler:
             dataset="MOCK",
             data_root=tmp_path,
         )
+        sampler.init_from_df(pd.read_csv(edges_path))
 
         src = torch.tensor([123, 456])
         eid = torch.tensor([3, 1])
@@ -203,3 +205,52 @@ class TestPrecomputedNegSampler:
         )
 
         assert torch.equal(candidates, torch.tensor([100, 101, 103]))
+
+
+def test_historical_sampler_keeps_source_and_uses_its_past_destinations() -> None:
+    frame = pd.DataFrame(
+        {
+            "eid": [1, 2, 3, 4],
+            "src": [1, 2, 1, 1],
+            "dst": [10, 20, 11, 12],
+            "time": [1, 1, 2, 3],
+            "default_split": [0, 0, 0, 1],
+        }
+    )
+    sampler = HistoricalNegLinkSampler(n_nodes=21, n_neg=4, dataset="MOCK", seed=7)
+    sampler.init_from_df(frame)
+    sampler.set_batch_context(
+        batch_src=np.array([1]),
+        batch_dst=np.array([12]),
+        batch_start_time=3,
+        batch_end_time=3,
+    )
+
+    sampled = sampler.sample(torch.tensor([1]), torch.tensor([4]))
+
+    assert set(sampled.tolist()).issubset({10, 11})
+
+
+def test_inductive_sampler_resolves_train_cutoff_and_uses_post_train_history() -> None:
+    frame = pd.DataFrame(
+        {
+            "eid": [1, 2, 3],
+            "src": [1, 1, 1],
+            "dst": [10, 11, 12],
+            "time": [1, 2, 3],
+            "default_split": [0, 1, 2],
+        }
+    )
+    sampler = InductiveNegLinkSampler(n_nodes=13, n_neg=3, dataset="MOCK", seed=7)
+    sampler.init_from_df(frame)
+    sampler.set_batch_context(
+        batch_src=np.array([1]),
+        batch_dst=np.array([12]),
+        batch_start_time=3,
+        batch_end_time=3,
+    )
+
+    sampled = sampler.sample(torch.tensor([1]), torch.tensor([3]))
+
+    assert sampler.last_observed_time == 1
+    assert sampled.tolist() == [11, 11, 11]

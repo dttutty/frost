@@ -8,12 +8,17 @@ from pathlib import Path
 from typing import Sequence
 
 from frost.data.graph_policy import graph_filename
+from frost.data.dgb import import_dgb_snapshot
 from frost.data.preparation import (
     convert_tensor_to_numpy,
     generate_node_roles,
     validate_dataset,
+    write_dataset_manifest,
+    write_state_labels,
     write_temporal_csr,
+    write_temporal_splits,
 )
+from frost.neg_sampler import generate_precomputed_negative_file
 
 
 def _add_graph_direction_args(
@@ -66,11 +71,75 @@ def _build_parser() -> argparse.ArgumentParser:
     features.add_argument("--output", type=Path)
     features.add_argument("--force", action="store_true")
 
+    split = subparsers.add_parser(
+        "split", help="regenerate default_split with an explicit temporal policy"
+    )
+    split.add_argument("edges", type=Path)
+    split.add_argument("--output", type=Path)
+    split.add_argument(
+        "--strategy", choices=["timestamp", "event_order"], default="timestamp"
+    )
+    split.add_argument("--train-ratio", type=float, default=0.70)
+    split.add_argument("--val-ratio", type=float, default=0.15)
+    split.add_argument("--force", action="store_true")
+
+    negatives = subparsers.add_parser(
+        "negatives",
+        help="generate eid-keyed fixed evaluation negatives from the dst partition",
+    )
+    negatives.add_argument("edges", type=Path)
+    negatives.add_argument("--output", type=Path)
+    negatives.add_argument("--seed", type=int, default=0)
+    negatives.add_argument("--force", action="store_true")
+
+    dgb = subparsers.add_parser(
+        "import-dgb", help="import one extracted DGB Zenodo ml_* directory"
+    )
+    dgb.add_argument("source_dir", type=Path)
+    dgb.add_argument("output_dir", type=Path)
+    dgb.add_argument("--dataset", required=True)
+    _add_graph_direction_args(dgb, required=True)
+    dgb.add_argument(
+        "--split-strategy",
+        choices=["timestamp", "event_order"],
+        default="timestamp",
+    )
+    dgb.add_argument("--train-ratio", type=float, default=0.70)
+    dgb.add_argument("--val-ratio", type=float, default=0.15)
+    dgb.add_argument("--negative-seed", type=int, default=0)
+    dgb.add_argument("--force", action="store_true")
+
+    manifest = subparsers.add_parser(
+        "manifest", help="write provenance and protocol metadata for a dataset"
+    )
+    manifest.add_argument("dataset_dir", type=Path)
+    manifest.add_argument("--upstream-project", required=True)
+    manifest.add_argument("--upstream-dataset", required=True)
+    manifest.add_argument("--source-url", required=True)
+    manifest.add_argument(
+        "--upstream-license", default="not_specified_by_upstream_record"
+    )
+    manifest.add_argument("--event-direction", required=True)
+    manifest.add_argument(
+        "--split-strategy", choices=["timestamp", "event_order"], required=True
+    )
+    manifest.add_argument("--negative-seed", type=int, default=0)
+    manifest.add_argument("--force", action="store_true")
+
+    labels = subparsers.add_parser(
+        "state-labels", help="convert a row-aligned label sidecar to eid,state_label"
+    )
+    labels.add_argument("labels", type=Path)
+    labels.add_argument("edges", type=Path)
+    labels.add_argument("--output", type=Path)
+    labels.add_argument("--force", action="store_true")
+
     validate = subparsers.add_parser(
         "validate", help="validate one published dataset directory"
     )
     validate.add_argument("dataset_dir", type=Path)
     _add_graph_direction_args(validate, required=False)
+    validate.add_argument("--allow-tied-split-timestamps", action="store_true")
     return parser
 
 
@@ -92,9 +161,57 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "convert-features":
         output = args.output or args.source.with_suffix(".npy")
         result = convert_tensor_to_numpy(args.source, output, force=args.force)
+    elif args.command == "split":
+        output = args.output or args.edges
+        result = write_temporal_splits(
+            args.edges,
+            output,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+            strategy=args.strategy,
+            force=args.force,
+        )
+    elif args.command == "negatives":
+        output = args.output or args.edges.with_name("neg_pre_sampling_1_result.csv")
+        path = generate_precomputed_negative_file(
+            args.edges,
+            output_path=output,
+            seed=args.seed,
+            force=args.force,
+        )
+        result = {"output": str(path.resolve()), "seed": args.seed}
+    elif args.command == "import-dgb":
+        result = import_dgb_snapshot(
+            args.source_dir,
+            args.output_dir,
+            dataset=args.dataset,
+            graph_direction=args.graph_direction,
+            split_strategy=args.split_strategy,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+            negative_seed=args.negative_seed,
+            force=args.force,
+        )
+    elif args.command == "manifest":
+        result = write_dataset_manifest(
+            args.dataset_dir,
+            upstream_project=args.upstream_project,
+            upstream_dataset=args.upstream_dataset,
+            source_url=args.source_url,
+            upstream_license=args.upstream_license,
+            event_direction=args.event_direction,
+            split_strategy=args.split_strategy,
+            negative_seed=args.negative_seed,
+            force=args.force,
+        )
+    elif args.command == "state-labels":
+        output = args.output or args.labels.with_name("state_labels.csv")
+        result = write_state_labels(args.labels, args.edges, output, force=args.force)
     else:
         result = validate_dataset(
-            args.dataset_dir, graph_direction=args.graph_direction
+            args.dataset_dir,
+            graph_direction=args.graph_direction,
+            allow_tied_split_timestamps=args.allow_tied_split_timestamps,
         )
 
     print(json.dumps(result, indent=2, sort_keys=True))
