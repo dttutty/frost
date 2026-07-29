@@ -21,6 +21,7 @@ from frost.datatypes.env import Env
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.datatypes.sampled_layout import SampledLayoutView
+from frost.models.contracts import RootExpansion
 from frost.sampling.protocols import NghSamplerProto
 from frost.runtime._thread_base import (
     destroy_process_group,
@@ -59,7 +60,7 @@ def _prepare_sampler_inputs(
     roots: torch.Tensor,
     ts: torch.Tensor,
     n_neg: int,
-    sample_4_neg: bool,
+    root_expansion: RootExpansion,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the explicit sampler inputs from the full root layout.
 
@@ -77,7 +78,7 @@ def _prepare_sampler_inputs(
     if ts.shape[0] != n_src:
         raise ValueError(f"ts length must equal n_src={n_src}, got {ts.shape[0]}")
 
-    if sample_4_neg:
+    if root_expansion is RootExpansion.ALL_ROOTS:
         return roots, torch.cat([ts, ts, ts.repeat_interleave(n_neg)])
 
     return roots[: n_src * 2], ts.repeat(2)
@@ -608,7 +609,7 @@ class Host:
             roots=roots,
             ts=ts,
             n_neg=neg_sampler.n_neg,
-            sample_4_neg=self.ngh_sampler.sample_4_neg,
+            root_expansion=self.ngh_sampler.root_expansion,
         )
         sampled_nid, len = self.ngh_sampler.sample(
             root_nid=roots,
@@ -628,7 +629,7 @@ class Host:
             n_src=src.shape[0],
             n_neg=neg_sampler.n_neg,
             fanout=fanout,
-            sample_4_neg=self.ngh_sampler.sample_4_neg,
+            root_expansion=self.ngh_sampler.root_expansion,
         )
 
         meta = Meta(

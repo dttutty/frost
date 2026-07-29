@@ -60,7 +60,7 @@ class Meta:
     labels: torch.Tensor | None = None
     neg_valid_mask: torch.Tensor | None = None
     fanout: list[int] | None = None
-    flat_nid_cpu: torch.Tensor | None = None  # CPU nids for APAN writeback
+    flat_nid_cpu: torch.Tensor | None = None  # CPU layout for neighborhood mail
     direct_writeback_request: DirectWritebackRequest | None = None
 
     @cached_property

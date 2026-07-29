@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+from frost.models.contracts import RootExpansion
 from frost.sampling.ngh_sampler import NoSampler, dist_safe_tensor
 
 
@@ -64,7 +65,7 @@ class TestNoSampler:
             ring_buf=ring_buf,  # type: ignore[arg-type]
             n_neg=1,
             fanout=[10, 5],
-            sample_4_neg=True,
+            root_expansion=RootExpansion.ALL_ROOTS,
         )
         assert sampler.fanout is None
 
@@ -75,7 +76,7 @@ class TestNoSampler:
             ring_buf=ring_buf,  # type: ignore[arg-type]
             n_neg=1,
             fanout=None,
-            sample_4_neg=False,
+            root_expansion=RootExpansion.ALL_ROOTS,
         )
 
         n_src = 3
@@ -105,7 +106,7 @@ class TestNoSampler:
             ring_buf=ring_buf,  # type: ignore[arg-type]
             n_neg=20,
             fanout=None,
-            sample_4_neg=False,
+            root_expansion=RootExpansion.ALL_ROOTS,
         )
         root_nid = torch.arange(6)  # two positives, one negative each
         root_ts = torch.tensor([10, 20])
@@ -130,7 +131,7 @@ class TestNoSampler:
             ring_buf=ring_buf,  # type: ignore[arg-type]
             n_neg=2,
             fanout=None,
-            sample_4_neg=False,
+            root_expansion=RootExpansion.ALL_ROOTS,
         )
 
         n_src = 2
@@ -161,7 +162,7 @@ class TestNoSampler:
             ring_buf=ring_buf,  # type: ignore[arg-type]
             n_neg=1,
             fanout=None,
-            sample_4_neg=False,
+            root_expansion=RootExpansion.ALL_ROOTS,
         )
 
         n_src = 2
@@ -218,7 +219,7 @@ class TestNghSamplerInit:
                 graph=MagicMock(),
                 fanout=[10, 5],
                 ring_buf=ring_buf,  # type: ignore[arg-type]
-                sample_4_neg=True,
+                root_expansion=RootExpansion.ALL_ROOTS,
                 n_neg=1,
                 strategy="uniform",
                 seed=0,
@@ -240,7 +241,7 @@ class TestNghSamplerInit:
                 graph=mock_graph,
                 fanout=[10],
                 ring_buf=ring_buf,  # type: ignore[arg-type]
-                sample_4_neg=True,
+                root_expansion=RootExpansion.ALL_ROOTS,
                 n_neg=1,
                 strategy="recent",
                 seed=42,
@@ -271,7 +272,7 @@ class TestNghSamplerInit:
                 graph=mock_graph,
                 fanout=[10],
                 ring_buf=ring_buf,  # type: ignore[arg-type]
-                sample_4_neg=True,
+                root_expansion=RootExpansion.ALL_ROOTS,
                 n_neg=1,
                 strategy="recent",
                 seed=42,
@@ -308,12 +309,12 @@ class TestMultiHopNghSamplerInit:
                 n_neg=1,
                 strategy="uniform",
                 seed=0,
-                sample_4_neg=True,
+                root_expansion=RootExpansion.ALL_ROOTS,
             )
 
             assert sampler.fanout == [10, 5]
             assert sampler.n_neg == 1
-            assert sampler.sample_4_neg is True
+            assert sampler.root_expansion is RootExpansion.ALL_ROOTS
             assert sampler.padding_node_id == -1
 
     def test_stores_tgl_sampler_parity(self):
@@ -332,7 +333,7 @@ class TestMultiHopNghSamplerInit:
                 n_neg=1,
                 strategy="recent",
                 seed=0,
-                sample_4_neg=True,
+                root_expansion=RootExpansion.ALL_ROOTS,
                 tgl_sampler_parity=True,
             )
 
@@ -372,7 +373,7 @@ class TestMultiHopNghSamplerInit:
                 n_neg=1,
                 strategy="uniform",
                 seed=0,
-                sample_4_neg=True,
+                root_expansion=RootExpansion.ALL_ROOTS,
             )
             _, length = sampler.sample(
                 root_nid=torch.tensor([1, 2, 3]),

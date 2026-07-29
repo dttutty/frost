@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import torch
 
 from frost.ablation import DynamicStateAblation
+from frost.models.contracts import NodeSet, RootExpansion
 from frost.runtime.worker import _pipeline
 from frost.runtime.worker._pipeline import WorkerPipelineMixin
 
@@ -42,9 +43,12 @@ def test_direct_state_ablation_initializes_delta_queue(monkeypatch):
     worker.box_task_q = None
     worker.mem_wr_q = None
     worker.box_wr_q = None
+    worker.execution_plan = SimpleNamespace(
+        features=SimpleNamespace(node_scope=NodeSet.ALL_SAMPLED)
+    )
 
     worker._init_pipeline(
-        ring_buf=SimpleNamespace(sample_4_neg=True),
+        ring_buf=SimpleNamespace(root_expansion=RootExpansion.ALL_ROOTS),
         nfeat=None,
         efeat=None,
     )

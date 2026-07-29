@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from frost.datatypes.sampled_layout import SampledLayoutView
+from frost.models.contracts import NodeSet, RootExpansion
 
 
 def test_full_sampling_layout_slices_roots_and_hop():
@@ -15,7 +16,7 @@ def test_full_sampling_layout_slices_roots_and_hop():
         n_src=2,
         n_neg=1,
         fanout=[2],
-        sample_4_neg=True,
+        root_expansion=RootExpansion.ALL_ROOTS,
     )
 
     assert layout.n_root == 6
@@ -27,7 +28,7 @@ def test_full_sampling_layout_slices_roots_and_hop():
     assert -1 not in layout.valid_nid.tolist()
 
 
-def test_apan_style_layout_uses_only_positive_roots_for_hop_width():
+def test_positive_root_layout_uses_only_positive_roots_for_hop_width():
     layout = SampledLayoutView(
         nid=torch.tensor(
             [
@@ -55,25 +56,11 @@ def test_apan_style_layout_uses_only_positive_roots_for_hop_width():
         n_src=2,
         n_neg=1,
         fanout=[3],
-        sample_4_neg=False,
+        root_expansion=RootExpansion.POSITIVE_ROOTS,
     )
 
     assert layout.n_root == 6
-    assert layout.apan_pos_ngh.tolist() == [
-        100,
-        101,
-        -1,
-        103,
-        104,
-        105,
-        106,
-        107,
-        108,
-        109,
-        110,
-        111,
-    ]
-    assert layout.filter_valid(layout.apan_pos_ngh).tolist() == [
+    assert layout.valid_hop(0).tolist() == [
         100,
         101,
         103,
@@ -86,17 +73,26 @@ def test_apan_style_layout_uses_only_positive_roots_for_hop_width():
         110,
         111,
     ]
-    with pytest.raises(AssertionError):
-        layout.valid_hop(0)
-
-
+    assert layout.select(NodeSet.POSITIVE_NEIGHBORS).tolist() == [
+        100,
+        101,
+        103,
+        104,
+        105,
+        106,
+        107,
+        108,
+        109,
+        110,
+        111,
+    ]
 def test_zero_hop_layout_has_no_hops():
     layout = SampledLayoutView(
         nid=torch.tensor([0, 1, 2, 3], dtype=torch.long),
         n_src=1,
         n_neg=2,
         fanout=None,
-        sample_4_neg=False,
+        root_expansion=RootExpansion.ALL_ROOTS,
     )
 
     with pytest.raises(IndexError):

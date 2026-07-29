@@ -24,6 +24,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
+from frost.models.contracts import RootExpansion
 from frost.seq_sampler import SeqSampler, TemporalGraphType
 from frost.shm.ring_buf import RingBuf
 
@@ -94,8 +95,7 @@ class NoSampler:
         ring_buf: Shared-memory ring buffer used to pass data to workers.
         n_neg: Number of negative destination nodes per source edge.
         fanout: Ignored; stored as ``None``.
-        sample_4_neg: Stored for layout compatibility; no neighbors are
-            sampled regardless.
+        root_expansion: Stored for layout compatibility; no neighbors are sampled.
     """
 
     def __init__(
@@ -104,12 +104,12 @@ class NoSampler:
         ring_buf: RingBuf,
         n_neg: int = 1,  # from hydra config
         fanout: list[int] | None = None,
-        sample_4_neg: bool = False,
+        root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
     ):
         self.ring_buf = ring_buf
         self.n_neg = n_neg
         self.fanout = None  # NoSampler is always 0-hop; ignore any passed fanout
-        self.sample_4_neg = sample_4_neg
+        self.root_expansion = root_expansion
 
     def sample(
         self,
@@ -198,9 +198,7 @@ class NghSampler:
         graph: Compiled temporal graph used by the C++ sampler.
         fanout: One-element list containing the per-hop neighbor count.
         ring_buf: Shared-memory ring buffer for host-to-worker transfer.
-        sample_4_neg: When ``True`` neighbors are sampled for all root nodes
-            (src, pos_dst, neg_dst).  When ``False`` only src and pos_dst
-            are expanded.
+        root_expansion: Semantic root set expanded into neighborhoods.
         n_neg: Number of negative samples per source edge.
         strategy: Sampling strategy — ``"uniform"``, ``"recent"``, or
             ``"time_interval_aware"``.
@@ -214,7 +212,7 @@ class NghSampler:
         graph: TemporalGraphType,
         fanout: list[int],  # from hydra config
         ring_buf: RingBuf,
-        sample_4_neg: bool,  # from hydra config
+        root_expansion: RootExpansion,
         n_neg: int,  # from hydra config
         strategy: Literal[
             "uniform", "recent", "time_interval_aware"
@@ -238,7 +236,7 @@ class NghSampler:
         )
         self.n_ngh = fanout[0]
         self.ring_buf = ring_buf
-        self.sample_4_neg = sample_4_neg
+        self.root_expansion = root_expansion
         self.n_neg = n_neg
         self.tgl_sampler_parity = tgl_sampler_parity
         # Keep sampler input dtype aligned with temporal-graph indices to avoid
@@ -379,8 +377,7 @@ class MultiHopNghSampler:
         strategy: Sampling strategy — ``"uniform"``, ``"recent"``, or
             ``"time_interval_aware"``.
         seed: Optional RNG seed for reproducibility.
-        sample_4_neg: When ``True`` (default) negative nodes are also expanded
-            at the first hop.
+        root_expansion: Semantic root set expanded into neighborhoods.
     """
 
     padding_node_id: int
@@ -396,7 +393,7 @@ class MultiHopNghSampler:
         ],  # from hydra config
         seed: int | None,  # from hydra config
         time_scaling_factor: float = 0.0,
-        sample_4_neg: bool = True,
+        root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
         tgl_sampler_parity: bool = False,
     ):
         _ensure_seq_sampler_stable_mode()
@@ -411,7 +408,9 @@ class MultiHopNghSampler:
         self.ring_buf = ring_buf
         self.n_neg = n_neg
         self.padding_node_id = -1
-        self.sample_4_neg = sample_4_neg
+        if root_expansion is not RootExpansion.ALL_ROOTS:
+            raise ValueError("Multi-hop sampling requires all-root expansion.")
+        self.root_expansion = root_expansion
         self.tgl_sampler_parity = tgl_sampler_parity
         graph_indices = getattr(graph, "indices", None)
         self._node_np_dtype = (

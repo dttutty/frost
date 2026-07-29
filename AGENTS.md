@@ -48,7 +48,7 @@ Dataset attachment, per-GPU batch layout, ring-buffer sizing, and dynamic-state 
 
 ### Host process (`src/frost/runtime/host/`)
 - `_engine.py` — `Host` class: drives sampling, batching, and scatter to workers
-- `analyzer.py` — `StaticAnalyzer`, `MemoryAnalyzer`, `APANMemoryAnalyzer`: compute `Access` (which nodes need mem/box/nfeat fetched)
+- `analyzer.py` — `AccessPlanAnalyzer`: resolves contract-declared `NodeSet` scopes into mem/box/nfeat planner inputs
 - `_meta_batcher.py` — `MetaBatcher` thread
 - `_planner.py` — `Planner` thread (nfeat/mem/box planning)
 - `_scatter.py` — `Scatter` thread (dist to workers via `scatter_object_list`)
@@ -96,7 +96,7 @@ Host process
                            ├─ [DynamicAssembler if mem_updater]
                            └─ AssembledModel.forward(meta)
                               ├─ mem_updater(flat_graph)
-                              ├─ flat_graph.inflate(fanout, n_neg, sample_4_neg)
+                              ├─ flat_graph.inflate(fanout, n_neg, root_expansion)
                               ├─ encoder(graph=meta.graph)
                               ├─ [postman.deliver() for APAN]
                               └─ header(h) → logits
@@ -105,8 +105,8 @@ Host process
 **FlatGraph layout in RingBuf slot:**
 - `[0 : n_src*(2+n_neg)]` → root nodes: `[src | pos_dst | neg_dst×n_neg]`
 - `[n_src*(2+n_neg) : ...]` → neighbor tiers per fanout hop
-  - `sample_4_neg=True`: tier_k size = `prev_tier * fanout[k]` (all roots sampled)
-  - `sample_4_neg=False`: tier_0 size = `n_src * 2 * fanout[0]` (src+pos_dst only, APAN)
+  - `RootExpansion.ALL_ROOTS`: tier_k size = `prev_tier * fanout[k]`
+  - `RootExpansion.POSITIVE_ROOTS`: tier_0 size = `n_src * 2 * fanout[0]`
 
 ## Key Invariants
 
@@ -125,7 +125,7 @@ Host process
 - `GraphMixer` still uses its explicit concat predictor for DyGLib parity; keep `predictor=graph_mixer`.
 
 ### Analyzer ↔ Runtime consistency (APAN)
-`APANMemoryAnalyzer.count_access()` must exactly match what `Postman.deliver()` + `merge_1_mail()` writes at runtime:
+The `NeighborhoodMailbox` contract must exactly match what `Postman.deliver()` + `merge_1_mail()` writes at runtime:
 1. `ngh_start = n_src * (2 + n_neg)` — not `n_src * (2*n_neg + 2)`
 2. Filter padding: `pos_ngh = pos_ngh_raw[pos_ngh_raw != -1]`
 3. `box_update = TensorSet(pos_ngh)` only — roots are not written by postman

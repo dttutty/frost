@@ -14,6 +14,7 @@ from typing import Literal, cast
 import torch
 
 from frost.datatypes.meta import Meta
+from frost.models.contracts import NodeSet
 from frost.runtime.protocols import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
 from frost.runtime.worker._static_assembler import StaticAssembler
@@ -54,6 +55,7 @@ class H2D(StreamThreadBase):
         device: torch.device,
         history: int = 1,
         n_neg: int = 1,
+        node_feature_scope: NodeSet = NodeSet.ALL_SAMPLED,
     ) -> None:
         super().__init__(name="h2d", stop_ev=stop_ev)
         self.nfeat = nfeat
@@ -65,14 +67,11 @@ class H2D(StreamThreadBase):
         self.ring_buf = ring_buf
         self.history = history
         self.n_neg = n_neg
+        self.node_feature_scope = node_feature_scope
         self.st_asm = StaticAssembler(
             shared_nfeat=nfeat, shared_efeat=efeat, device=self.device
         )
         self.seen_root_nids = torch.tensor([], dtype=torch.long, device="cpu")
-
-    def _uses_root_only_nfeat(self) -> bool:
-        fanout = self.ring_buf.fanout or []
-        return len(fanout) == 1 and not self.ring_buf.sample_4_neg
 
     @torch.no_grad()
     def logic(self) -> None:
@@ -142,7 +141,7 @@ class H2D(StreamThreadBase):
                     flat_graph=meta.flat_graph,
                     nfeat_nid=nfeat,
                     meta=meta,
-                    strict=not self._uses_root_only_nfeat(),
+                    strict=self.node_feature_scope is NodeSet.ALL_SAMPLED,
                 )
 
             ready_event = cast(CudaEvent, torch.cuda.Event())

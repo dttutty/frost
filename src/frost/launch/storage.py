@@ -7,6 +7,7 @@ import torch
 from omegaconf import DictConfig
 
 from frost.datatypes.env import Env
+from frost.models.contracts import RootExpansion
 from frost.seq_sampler import TemporalGraphType
 from frost.shm.dataset_mgr import DatasetManager
 from frost.shm.mem_mgr import MemBoxStore, MemBoxStoreManager
@@ -94,7 +95,7 @@ def prepare_ring_buffer(
     run_id: str,
     precision: PrecisionSpec,
     fanout: list[int],
-    sample_4_neg: bool,
+    root_expansion: RootExpansion,
     train_batch_size: int,
     eval_batch_size: int,
     train_n_neg: int,
@@ -105,7 +106,7 @@ def prepare_ring_buffer(
     slot_capacity = cal_max_buf_size_for_layouts(
         [(train_batch_size, train_n_neg), (eval_batch_size, eval_n_neg)],
         fanout=fanout,
-        sample_4_neg=sample_4_neg,
+        root_expansion=root_expansion,
     )
     return RingBuf(
         run_id=run_id,
@@ -116,7 +117,7 @@ def prepare_ring_buffer(
         fanout=fanout,
         max_batch_size=train_batch_size,
         n_neg=max_n_neg,
-        sample_4_neg=sample_4_neg,
+        root_expansion=root_expansion,
         max_size=ring_buf_size,
         slot_capacity=slot_capacity,
     )

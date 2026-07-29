@@ -1,5 +1,6 @@
 """Tests for RingBuf shared-memory circular buffer."""
 
+from frost.models.contracts import RootExpansion
 from frost.shm.ring_buf import (
     cal_max_buf_size,
     cal_max_buf_size_for_layouts,
@@ -28,11 +29,16 @@ class TestCalMaxBufSize:
         n_2hop = n_1hop * fanout[1]
         assert size == n_root + n_1hop + n_2hop
 
-    def test_sample_4_neg_false(self):
+    def test_positive_root_expansion(self):
         n_src, n_neg, fanout = 100, 1, [10]
-        size = cal_max_buf_size(n_src, fanout=fanout, n_neg=n_neg, sample_4_neg=False)
+        size = cal_max_buf_size(
+            n_src,
+            fanout=fanout,
+            n_neg=n_neg,
+            root_expansion=RootExpansion.POSITIVE_ROOTS,
+        )
         n_root = n_src * (2 + n_neg)
-        expected = n_neg + n_root + n_root * fanout[0]
+        expected = n_root + n_src * 2 * fanout[0]
         assert size == expected
 
     def test_zero_neg(self):

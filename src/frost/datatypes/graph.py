@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
+from frost.models.contracts import RootExpansion
+
 
 @dataclass(kw_only=True)
 class FlatGraph:
@@ -83,7 +85,7 @@ class FlatGraph:
         n_src: int,
         n_neg: int,
         fanout: list[int] | None = None,
-        sample_4_neg: bool = True,
+        root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
     ) -> HierGraph:
         """
         Splits a flattened FlatGraph back into a hierarchical HierGraph
@@ -96,14 +98,11 @@ class FlatGraph:
         n_root = n_src * (2 + n_neg)
         sizes = [n_root]
 
-        if len(fanout) == 1 and not sample_4_neg:
-            # Special case for NghSampler without negative sampling(APAN)
+        if fanout and root_expansion is RootExpansion.POSITIVE_ROOTS:
+            if len(fanout) > 1:
+                raise ValueError("Positive-root expansion only supports one hop.")
             sizes.append(n_src * 2 * fanout[0])
         else:
-            if len(fanout) > 1 and not sample_4_neg:
-                raise ValueError(
-                    "sample_4_neg is False(APAN), fanout layer cannot be multi-hop."
-                )
             # Standard multi-hop or full sampling case
             current_size = n_root
             for k in fanout:

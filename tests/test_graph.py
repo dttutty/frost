@@ -2,6 +2,8 @@
 
 import torch
 
+from frost.models.contracts import RootExpansion
+
 from frost.datatypes.graph import FlatGraph, HierGraph, NeighborOnHop
 
 
@@ -147,7 +149,7 @@ class TestFlatGraphUnflatten:
             eid=torch.arange(total),
             ts=torch.arange(total),
         )
-        hg = fg.unflatten(n_src=n_src, n_neg=n_neg, fanout=fanout, sample_4_neg=True)
+        hg = fg.unflatten(n_src=n_src, n_neg=n_neg, fanout=fanout)
         assert hg.root_nid.tolist() == list(range(n_root))
         assert len(hg.neighbors) == 1
         assert hg.neighbors[0].nid.tolist() == list(range(n_root, total))
@@ -163,7 +165,7 @@ class TestFlatGraphUnflatten:
             eid=torch.arange(total),
             ts=torch.arange(total),
         )
-        hg = fg.unflatten(n_src=n_src, n_neg=n_neg, fanout=fanout, sample_4_neg=True)
+        hg = fg.unflatten(n_src=n_src, n_neg=n_neg, fanout=fanout)
         assert hg.root_nid.tolist() == list(range(n_root))
         assert len(hg.neighbors) == 2
         assert hg.neighbors[0].nid.tolist() == list(range(n_root, n_root + n_1hop))
@@ -171,7 +173,7 @@ class TestFlatGraphUnflatten:
             range(n_root + n_1hop, n_root + n_1hop + n_2hop)
         )
 
-    def test_unflatten_apan_mode_single_hop(self):
+    def test_unflatten_positive_root_mode_single_hop(self):
         n_src, n_neg, fanout = 4, 1, [5]
         n_root = n_src * (2 + n_neg)
         n_nbr = n_src * 2 * fanout[0]
@@ -181,12 +183,17 @@ class TestFlatGraphUnflatten:
             eid=torch.arange(total),
             ts=torch.arange(total),
         )
-        hg = fg.unflatten(n_src=n_src, n_neg=n_neg, fanout=fanout, sample_4_neg=False)
+        hg = fg.unflatten(
+            n_src=n_src,
+            n_neg=n_neg,
+            fanout=fanout,
+            root_expansion=RootExpansion.POSITIVE_ROOTS,
+        )
         assert hg.root_nid.tolist() == list(range(n_root))
         assert len(hg.neighbors) == 1
         assert hg.neighbors[0].nid.tolist() == list(range(n_root, total))
 
-    def test_unflatten_apan_mode_multi_hop_raises(self):
+    def test_unflatten_positive_root_mode_multi_hop_raises(self):
         n_src, n_neg, fanout = 2, 1, [2, 3]
         n_root = n_src * (2 + n_neg)
         total = n_root + 100
@@ -196,12 +203,17 @@ class TestFlatGraphUnflatten:
             ts=torch.arange(total),
         )
         try:
-            fg.unflatten(n_src=n_src, n_neg=n_neg, fanout=fanout, sample_4_neg=False)
+            fg.unflatten(
+                n_src=n_src,
+                n_neg=n_neg,
+                fanout=fanout,
+                root_expansion=RootExpansion.POSITIVE_ROOTS,
+            )
         except ValueError as e:
-            assert "multi-hop" in str(e).lower()
+            assert "one hop" in str(e).lower()
         else:
             raise AssertionError(
-                "Expected ValueError for multi-hop with sample_4_neg=False"
+                "Expected ValueError for multi-hop positive-root expansion"
             )
 
     def test_unflatten_with_features(self):
@@ -216,7 +228,7 @@ class TestFlatGraphUnflatten:
             nfeat=torch.randn(total, 4),
             mem=torch.randn(total, 8),
         )
-        hg = fg.unflatten(n_src=n_src, n_neg=n_neg, fanout=fanout, sample_4_neg=True)
+        hg = fg.unflatten(n_src=n_src, n_neg=n_neg, fanout=fanout)
         assert hg.n_neg == n_neg
         assert hg.root_nfeat.shape == (n_root, 4)
         assert hg.root_mem.shape == (n_root, 8)
@@ -233,7 +245,7 @@ class TestFlatGraphUnflatten:
             eid=torch.arange(total),
             ts=torch.arange(total),
         )
-        hg = fg.unflatten(n_src=n_src, n_neg=n_neg, fanout=fanout, sample_4_neg=True)
+        hg = fg.unflatten(n_src=n_src, n_neg=n_neg, fanout=fanout)
         assert hg.root_nfeat is None
         assert hg.root_mem is None
         assert hg.neighbors[0].nfeat is None

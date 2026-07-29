@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
+from frost.models.contracts import RootExpansion
+
 from frost.datatypes.graph import FlatGraph
 from frost.datatypes.meta import Meta
 from frost.datatypes.plan import DynamicPlan, PlanSet
@@ -105,7 +107,7 @@ def _make_assembler(
     *,
     use_shm_instead: bool,
     n_neg: int = 1,
-    sample_4_neg: bool = True,
+    root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
 ) -> DynamicAssembler:
     assembler = DynamicAssembler.__new__(DynamicAssembler)
     assembler.device = torch.device("cpu")
@@ -113,19 +115,23 @@ def _make_assembler(
     assembler.boxsize = store.box.shape[1]
     assembler.d_mail = store.box.shape[2]
     assembler.n_neg = n_neg
-    assembler.sample_4_neg = sample_4_neg
+    assembler.root_expansion = root_expansion
     assembler.use_shm_instead = use_shm_instead
     return assembler
 
 
 def _make_logic_assembler(
-    store: MemBoxStore, *, use_shm_instead: bool, n_neg: int = 1, sample_4_neg: bool = True
+    store: MemBoxStore,
+    *,
+    use_shm_instead: bool,
+    n_neg: int = 1,
+    root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
 ) -> DynamicAssembler:
     assembler = _make_assembler(
         store,
         use_shm_instead=use_shm_instead,
         n_neg=n_neg,
-        sample_4_neg=sample_4_neg,
+        root_expansion=root_expansion,
     )
     assembler.in_q = Queue()
     assembler.delta_queue = Queue()
@@ -248,13 +254,13 @@ class TestDynamicAssemblerShmMode:
         assert torch.equal(graph.box[1], store.box[4])
         assert torch.equal(graph.box_ts[1], store.box_ts[4])
 
-    def test_apan_root_only_assembly_skips_neighbor_mem_and_box(self):
+    def test_positive_root_assembly_skips_neighbor_mem_and_box(self):
         store = _make_store(boxsize=2, n_nodes=6)
         assembler = _make_assembler(
             store,
             use_shm_instead=True,
             n_neg=1,
-            sample_4_neg=False,
+            root_expansion=RootExpansion.POSITIVE_ROOTS,
         )
         graph = _make_graph([1, 4, 2, 5])
         mem_plan = _make_plan([1])

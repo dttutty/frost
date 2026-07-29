@@ -6,7 +6,6 @@ worker has its own independent head/tail pair so the host can push data to
 multiple workers without coordination between workers.
 """
 
-import logging
 import time
 
 import torch
@@ -14,14 +13,15 @@ import torch.distributed as dist
 
 # Assuming you have this env datatype defined
 from frost.datatypes.env import Env
+from frost.models.contracts import RootExpansion
 
 from ._core import create_shared_mem_array, get_shared_mem_array
 
-logger = logging.getLogger(__name__)
-
-
 def cal_max_buf_size(
-    n_src: int, fanout: list[int] | None, n_neg: int, sample_4_neg: bool = True
+    n_src: int,
+    fanout: list[int] | None,
+    n_neg: int,
+    root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
 ) -> int:
     """Compute the maximum number of node entries per ring-buffer slot.
 
@@ -32,24 +32,19 @@ def cal_max_buf_size(
         n_src: Number of source edges in a batch.
         fanout: Per-hop sampling widths.  ``None`` means 0-hop (no neighbors).
         n_neg: Number of negative destination nodes per source edge.
-        sample_4_neg: When ``True`` (default) neighbor tiers are expanded for
-            all root nodes including negatives.  When ``False`` only the
-            ``src`` + ``pos_dst`` roots are expanded (APAN-style).
+        root_expansion: Semantic root set expanded by the sampler.
 
     Returns:
         Total number of node slots required for one batch entry.
     """
-    total = 0
-    if not sample_4_neg:  # save space by not sampling neighbors for negative nodes
+    n_root = n_src * (2 + n_neg)
+    total = n_root
+    if root_expansion is RootExpansion.POSITIVE_ROOTS:
         if fanout and len(fanout) > 1:
-            logger.warning("sample_4_neg is False, fanout layer cannot be multi-hop.")
-
-        # Initial seed nodes
-        total += n_neg
+            raise ValueError("Positive-root expansion only supports one hop.")
         current_layer_nodes = n_src * 2
-
-    current_layer_nodes = n_src * (2 + n_neg)
-    total += current_layer_nodes
+    else:
+        current_layer_nodes = n_root
 
     # Multiply progressively for multi-hop
     if fanout is not None:
@@ -63,13 +58,14 @@ def cal_max_buf_size(
 def cal_max_buf_size_for_layouts(
     layouts: list[tuple[int, int]],
     fanout: list[int] | None,
-    sample_4_neg: bool = True,
+    root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
 ) -> int:
     """Return one slot capacity covering multiple ``(n_src, n_neg)`` layouts."""
     if not layouts:
         raise ValueError("At least one batch layout is required.")
     return max(
-        cal_max_buf_size(n_src, fanout, n_neg, sample_4_neg) for n_src, n_neg in layouts
+        cal_max_buf_size(n_src, fanout, n_neg, root_expansion)
+        for n_src, n_neg in layouts
     )
 
 
@@ -88,7 +84,7 @@ class RingBuf:
         fanout: Per-hop sampling widths used to size each slot.  ``None``
             means 0-hop (seeds only).
         n_neg: Number of negative samples per source edge.
-        sample_4_neg: Whether neighbors are also sampled for negative nodes.
+        root_expansion: Semantic root set expanded by the sampler.
         max_size: Number of slots in the ring (pipeline depth per worker).
         ndtype: PyTorch dtype for node-ID arrays.
         edtype: PyTorch dtype for edge-ID arrays.
@@ -101,7 +97,7 @@ class RingBuf:
         max_batch_size: int,  # from hydra config
         fanout: list[int] | None,  # from hydra config
         n_neg: int,  # from hydra config
-        sample_4_neg: bool,  # from hydra config
+        root_expansion: RootExpansion,
         max_size: int,  # from hydra config
         ndtype: torch.dtype,
         edtype: torch.dtype,
@@ -117,11 +113,11 @@ class RingBuf:
         self.ndtype = ndtype
         self.edtype = edtype
         self.tsdtype = tsdtype
-        self.sample_4_neg = sample_4_neg
-        self.fanout = fanout  # store for downstream use (e.g. APAN writeback)
+        self.root_expansion = root_expansion
+        self.fanout = fanout
 
         total = (
-            cal_max_buf_size(max_batch_size, fanout, n_neg, sample_4_neg)
+            cal_max_buf_size(max_batch_size, fanout, n_neg, root_expansion)
             if slot_capacity is None
             else int(slot_capacity)
         )

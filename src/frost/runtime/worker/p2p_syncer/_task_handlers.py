@@ -201,18 +201,18 @@ class MessageHandler(StreamThreadBase):
     ) -> tuple[P2PTask, BoxEntry, MailEntry | None]:
         """Aggregate and route messages, producing a boxsize=1 BoxEntry for P2P.
 
-        For models with a postman (e.g. APAN), routes mail to neighbors first.
+        For neighborhood-mail contracts, routes seed mail to neighbors first.
         The CPU writeback uses MemBoxStore.write_mail() (ring buffer).
 
         Returns:
             (p2p_task, box_entry, seed_mail_cpu)
-            seed_mail_cpu is set only when postman is active (APAN mode);
+            seed_mail_cpu is set only when neighborhood routing is active;
             it carries the raw seed mails on CPU for the CPU-side writeback.
         """
         box_plan = box_task.box_plan
         seed_mail_cpu: MailEntry | None = None
 
-        # For APAN: route mail to 1-hop neighbors via postman (P2P path)
+        # Route seed mail to one-hop neighbors on the P2P path.
         # but also capture the raw seed mail for CPU-side writeback
         if self.postman is not None:
             # Snapshot seed mail to CPU *before* postman expands it
@@ -283,7 +283,7 @@ class MessageHandler(StreamThreadBase):
                 writeback_event = cast(CudaEvent, torch.cuda.Event())
                 writeback_event.record(torch.cuda.current_stream())
                 if box_task.box_plan.writeback is not None:
-                    # APAN fast path: send seed mail + CPU nids for CPU-side scatter
+                    # Send seed mail + CPU layout for CPU-side neighbor scatter.
                     if seed_mail_cpu is not None and box_task.flat_nid_cpu is not None:
                         self.box_wr_q.put(
                             (

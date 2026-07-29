@@ -117,7 +117,7 @@ class StaticAssembler:
             nfeat_nid: Sorted lookup table mapping NID → feature vector.
             meta: Batch metadata (used for debugging context).
             strict: Whether every valid node in ``flat_graph`` must exist in the
-                lookup table. APAN uses ``False`` so only root-node features are
+                lookup table. Root-scoped feature plans use ``False`` so only roots are
                 filled while neighbor rows remain zeroed.
 
         Returns:

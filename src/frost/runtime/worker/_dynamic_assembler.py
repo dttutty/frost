@@ -15,6 +15,7 @@ import torch
 from frost.ablation import DynamicStateAblation
 from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
+from frost.models.contracts import RootExpansion
 from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
 from frost.runtime.protocols import CudaEvent
 from frost.runtime.worker._dynamic_state import DynamicStateAssemblerMixin, MemAndBox
@@ -47,7 +48,7 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
         h2d_sem: CreditGate,
         mem_box_store: MemBoxStore,  # Pass shared memory instance here
         n_neg: int = 1,
-        sample_4_neg: bool = True,
+        root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
         use_shm_instead: bool = False,
         mem_task_q: Queue | None = None,
         box_task_q: Queue | None = None,
@@ -66,7 +67,7 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
         self.boxsize = mem_box_store.box.shape[1]
         self.d_mail = mem_box_store.box.shape[2]
         self.n_neg = n_neg
-        self.sample_4_neg = sample_4_neg
+        self.root_expansion = root_expansion
         self.use_shm_instead = use_shm_instead
         self.mem_task_q = mem_task_q
         self.box_task_q = box_task_q

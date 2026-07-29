@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
 import torch
+
+from frost.models.contracts import RootExpansion
 import torch.nn as nn
 
 from frost.ablation import (
@@ -101,7 +103,7 @@ def test_post_mem_update_mode_writes_before_encoder():
         header=_IdentityHeader(),
         postman=None,
         n_neg=1,
-        sample_4_neg=True,
+        root_expansion=RootExpansion.ALL_ROOTS,
         dynamic_state_ablation=resolve_dynamic_state_ablation(
             DYNAMIC_STATE_ABLATION_NO_PLAN_NO_DELTA_POST_MEM_UPDATE_RAW
         ),
@@ -129,7 +131,7 @@ def test_post_step_mode_defers_writeback_until_worker_step():
         header=_IdentityHeader(),
         postman=None,
         n_neg=1,
-        sample_4_neg=True,
+        root_expansion=RootExpansion.ALL_ROOTS,
         dynamic_state_ablation=resolve_dynamic_state_ablation(
             DYNAMIC_STATE_ABLATION_NO_PLAN_NO_DELTA_POST_STEP_RAW
         ),

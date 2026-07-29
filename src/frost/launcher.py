@@ -39,8 +39,6 @@ from frost.sampling.ngh_sampler import MultiHopNghSampler, NghSampler, NoSampler
 from frost.models.contracts import (
     InteractionMailbox,
     MemoryState,
-    NeighborhoodMailbox,
-    RootExpansion,
 )
 from frost.models.recipes import instantiate_model_recipe
 from frost.utils._logger import init_logging
@@ -181,9 +179,7 @@ def launch(cfg: DictConfig):
     if has_mem and mail_combine is None:
         raise ValueError("Memory models require model.state.mail_combine.")
     fanout = list(execution_plan.sampling.fanout)
-    sample_4_neg = bool(fanout) and (
-        execution_plan.layout.root_expansion is RootExpansion.ALL_ROOTS
-    )
+    root_expansion = execution_plan.layout.root_expansion
     ngh_sampler_strategy = cfg.ngh_sampler.strategy
     time_scaling_factor = resolve_time_scaling_factor(
         cfg.ngh_sampler.get("time_scaling_factor", 0.0)
@@ -233,7 +229,7 @@ def launch(cfg: DictConfig):
         run_id=run_id,
         precision=precision,
         fanout=fanout,
-        sample_4_neg=sample_4_neg,
+        root_expansion=root_expansion,
         train_batch_size=per_gpu_batch_size,
         eval_batch_size=eval_per_gpu_batch_size,
         train_n_neg=train_n_neg,
@@ -255,7 +251,7 @@ def launch(cfg: DictConfig):
     if env.is_host:
         # Launch host process
         from frost.runtime.host._engine import Host
-        from frost.runtime.host.analyzer import StaticAnalyzer
+        from frost.runtime.host.analyzer import AccessPlanAnalyzer
         from frost.shm._core import set_as_host
 
         set_as_host()
@@ -325,14 +321,14 @@ def launch(cfg: DictConfig):
                 graph=graph,
                 ring_buf=ring_buf,
                 n_neg=max_n_neg,
-                sample_4_neg=False,
+                root_expansion=root_expansion,
             )
         elif len(fanout) == 1:
             ngh_sampler = NghSampler(
                 graph=graph,
                 fanout=fanout,
                 ring_buf=ring_buf,
-                sample_4_neg=sample_4_neg,
+                root_expansion=root_expansion,
                 n_neg=max_n_neg,
                 strategy=ngh_sampler_strategy,
                 seed=cfg.seed,
@@ -348,21 +344,10 @@ def launch(cfg: DictConfig):
                 strategy=ngh_sampler_strategy,
                 seed=cfg.seed,
                 time_scaling_factor=time_scaling_factor,
-                sample_4_neg=True,
+                root_expansion=root_expansion,
                 tgl_sampler_parity=tgl_sampler_parity,
             )
-        if not has_mem:
-            planner = StaticAnalyzer()
-        else:
-            from frost.runtime.host.analyzer import APANMemoryAnalyzer, MemoryAnalyzer
-
-            state_contract = execution_plan.dynamic_state
-            assert isinstance(state_contract, MemoryState)
-            planner = (
-                APANMemoryAnalyzer()
-                if isinstance(state_contract.mailbox, NeighborhoodMailbox)
-                else MemoryAnalyzer()
-            )
+        planner = AccessPlanAnalyzer(execution_plan)
         has_nfeat = ndim > 0
         has_efeat = edim > 0
 
@@ -445,6 +430,7 @@ def launch(cfg: DictConfig):
                 optimizer=cfg.optimizer,
                 lr=cfg.lr,
                 mail_combine=mail_combine,
+                execution_plan=execution_plan,
                 use_shm_instead=use_shm_instead,
                 dynamic_state_ablation=dynamic_state_ablation,
                 compile_model=cfg.get("compile", True),

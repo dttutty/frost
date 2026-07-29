@@ -7,6 +7,8 @@ from functools import cached_property
 
 from torch import Tensor
 
+from frost.models.contracts import NodeSet, RootExpansion
+
 
 @dataclass(frozen=True, kw_only=True)
 class SampledLayoutView:
@@ -22,8 +24,7 @@ class SampledLayoutView:
         n_src: Number of positive source edges in the batch.
         n_neg: Number of negative destinations per source edge.
         fanout: Sampling fanout per hop, or ``None`` for 0-hop layouts.
-        sample_4_neg: Whether first-hop neighborhoods are also expanded for
-            negative roots.
+        root_expansion: Semantic root set expanded into neighborhoods.
         padding_nid: Sentinel used for missing / padded node slots.
     """
 
@@ -31,7 +32,7 @@ class SampledLayoutView:
     n_src: int
     n_neg: int
     fanout: list[int] | None
-    sample_4_neg: bool = True
+    root_expansion: RootExpansion = RootExpansion.ALL_ROOTS
     padding_nid: int = -1
 
     def __post_init__(self) -> None:
@@ -76,25 +77,43 @@ class SampledLayoutView:
     def valid_nid(self) -> Tensor:
         return self.filter_valid(self.nid)
 
+    def select(self, node_set: NodeSet) -> Tensor:
+        """Resolve a semantic node set without exposing flat-layout offsets."""
+        if node_set is NodeSet.NONE:
+            return self.nid[:0]
+        if node_set is NodeSet.ROOTS:
+            return self.filter_valid(self.roots)
+        if node_set is NodeSet.POSITIVE_ROOTS:
+            return self.filter_valid(self.pos_roots)
+        if node_set is NodeSet.ALL_SAMPLED:
+            return self.valid_nid
+        if node_set is NodeSet.POSITIVE_NEIGHBORS:
+            if self.root_expansion is not RootExpansion.POSITIVE_ROOTS:
+                raise ValueError(
+                    "positive_neighbors requires positive-root neighborhood expansion."
+                )
+            return self.valid_hop(0)
+        raise ValueError(f"Unsupported node set: {node_set!r}")
+
     def valid_hop(self, hop_idx: int) -> Tensor:
-        """Return one non-APAN hop with all padding entries removed."""
+        """Return one sampled hop with all padding entries removed."""
         if hop_idx < 0:
             raise ValueError(f"hop_idx must be non-negative, got {hop_idx}")
 
         fanout = self.fanout or []
         if not fanout:
             raise IndexError("valid_hop is unavailable for 0-hop layouts.")
-        assert self.sample_4_neg, (
-            "valid_hop only supports layouts where sample_4_neg=True. "
-            "APAN-specific layouts should use apan_pos_hop_0 instead."
-        )
         if hop_idx >= len(fanout):
             raise IndexError(
                 f"hop_idx={hop_idx} is out of range for {len(fanout)} hops"
             )
 
         start = self.n_root
-        current_size = self.n_root
+        current_size = (
+            self.n_root
+            if self.root_expansion is RootExpansion.ALL_ROOTS
+            else 2 * self.n_src
+        )
         for i, per_hop_fanout in enumerate(fanout):
             current_size *= per_hop_fanout
             end = start + current_size
@@ -103,18 +122,3 @@ class SampledLayoutView:
             start = end
 
         raise IndexError(f"hop_idx={hop_idx} is out of range for {len(fanout)} hops")
-
-    @cached_property
-    def apan_pos_ngh(self) -> Tensor:
-        """Return APAN's 1-hop neighbors for ``src`` + ``pos_dst`` roots.
-
-        This is the raw 1-hop slice, so padding entries (``-1``) are preserved.
-        Call ``filter_valid(...)`` if the consumer needs only valid node IDs.
-        """
-        if self.sample_4_neg:
-            raise ValueError("apan_pos_hop_0 is only valid when sample_4_neg=False.")
-        if self.fanout is None or len(self.fanout) != 1:
-            raise ValueError("apan_pos_hop_0 requires a single-hop APAN layout.")
-        start = self.n_root
-        end = start + self.n_src * 2 * self.fanout[0]
-        return self.nid[start:end]

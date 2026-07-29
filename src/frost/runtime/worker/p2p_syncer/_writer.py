@@ -115,7 +115,7 @@ class BoxMailWriter(ThreadBase):
     into the circular buffer at ``box_pos``, then advances the pointer.
 
     Expects entries as ``BoxEntry`` with ``boxsize=1`` (i.e. the new mail
-    wrapped via ``mail_to_box``), or for APAN mode, a tuple of
+    wrapped via ``mail_to_box``), or for neighborhood-mail mode, a tuple of
     ``(MailEntry, flat_nid_cpu)`` for CPU-side neighbor scatter.
     """
 
@@ -191,7 +191,7 @@ class BoxMailWriter(ThreadBase):
         )
         self.mem_box_store.write_mail(mail)
 
-    def write_back_apan(
+    def write_back_neighbor_mail(
         self,
         writeback: torch.Tensor | None,
         seed_mail: MailEntry,
@@ -200,7 +200,7 @@ class BoxMailWriter(ThreadBase):
     ) -> None:
         """CPU-side scatter of seed mails to neighbor ring buffers.
 
-        Instead of transferring the postman-expanded mails back from GPU,
+        Instead of transferring router-expanded mails back from GPU,
         this method takes the raw 2N seed mails (already on CPU) and
         scatters them to each seed node's 1-hop neighbors using the
         CPU-resident neighbor nids from ``flat_nid_cpu``.
@@ -309,10 +309,12 @@ class BoxMailWriter(ThreadBase):
                         self.write_back(data, entry)
                     self.writer_stream.synchronize()
                 else:
-                    # APAN fast path: entry is (MailEntry, Tensor, n_neg) tuple
+                    # Neighborhood-mail path: seed mail plus sampled layout.
                     if isinstance(entry, tuple):
                         seed_mail, flat_nid_cpu, n_neg = entry
-                        self.write_back_apan(data, seed_mail, flat_nid_cpu, n_neg)
+                        self.write_back_neighbor_mail(
+                            data, seed_mail, flat_nid_cpu, n_neg
+                        )
                     else:
                         self.write_back(data, entry)
                 _release_h2d_credit(self.h2d_sem, batch_idx=batch_idx, kind="box")

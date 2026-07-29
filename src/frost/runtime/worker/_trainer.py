@@ -110,7 +110,7 @@ class WorkerTrainerMixin:
             header=predictor,
             n_neg=self.n_neg,
             postman=postman,
-            sample_4_neg=ring_buf.sample_4_neg,
+            root_expansion=ring_buf.root_expansion,
             dynamic_state_ablation=self.dynamic_state_ablation,
         )
 

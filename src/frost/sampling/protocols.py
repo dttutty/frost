@@ -5,6 +5,8 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
+from frost.models.contracts import RootExpansion
+
 
 @runtime_checkable
 class NghSamplerProto(Protocol):
@@ -12,7 +14,7 @@ class NghSamplerProto(Protocol):
     def fanout(self) -> Sequence[int] | None: ...
 
     @property
-    def sample_4_neg(self) -> bool: ...
+    def root_expansion(self) -> RootExpansion: ...
 
     def sample(
         self,

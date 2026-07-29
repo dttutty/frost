@@ -13,6 +13,7 @@ from frost.datatypes.graph import FlatGraph
 from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.plan import DynamicPlan
+from frost.models.contracts import RootExpansion
 from frost.shm.mem_mgr import MemBoxStore
 
 
@@ -61,7 +62,7 @@ class DynamicStateAssemblerMixin:
     boxsize: int
     d_mail: int
     n_neg: int
-    sample_4_neg: bool
+    root_expansion: RootExpansion
     use_shm_instead: bool
     mem_task_q: Queue | None
     box_task_q: Queue | None
@@ -73,13 +74,13 @@ class DynamicStateAssemblerMixin:
     ) -> torch.Tensor:
         """Return the positions whose mem/box state must be assembled this step.
 
-        APAN layouts sample 1-hop neighbors only for ``src`` and ``pos_dst`` but
-        the current forward pass only needs dynamic state for the root slice
+        Positive-root layouts sample neighbors only for ``src`` and ``pos_dst``;
+        the current forward pass needs dynamic state only for the root slice
         ``[src | pos_dst | neg_dst]``.  Neighbor rows are intentionally left
         zero-filled on GPU.
         """
         valid_mask = graph.nid != -1
-        if self.sample_4_neg:
+        if self.root_expansion is RootExpansion.ALL_ROOTS:
             return valid_mask
 
         n_root = min(graph.nid.numel(), n_src * (2 + n_neg))
@@ -300,7 +301,7 @@ class DynamicStateAssemblerMixin:
                 valid_mask,
             )
 
-            # ----- APAN optimization: pre-fill box for delta nodes -----
+            # Neighborhood-mail optimization: pre-fill box for delta nodes.
             # For boxsize > 1, delta nodes will need old ring-buffer contents
             # on GPU so that _apply_box_mail_delta can do a pure GPU scatter.
             # Pre-load them here (async H2D) instead of synchronous CPU→GPU
@@ -501,7 +502,7 @@ class DynamicStateAssemblerMixin:
         )
 
         # P2P delta box now always has boxsize=1 (single mail).
-        # For boxsize > 1 (APAN), merge P2P mail into the full box from CPU.
+        # For boxsize > 1, merge P2P mail into the full box from CPU.
         delta_box_slots = delta.box.data.shape[1] if delta.box.data.dim() == 3 else 1
         if self.boxsize > 1 and delta_box_slots == 1:
             self._apply_box_mail_delta(delta.box, graph, box_delta_mask)

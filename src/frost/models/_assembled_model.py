@@ -24,6 +24,7 @@ from frost.datatypes.meta import Meta
 from frost.datatypes.tasks import BoxTask, DirectWritebackRequest, MemTask
 from frost.runtime.protocols import CudaEvent
 from frost.models.protocols import MemoryUpdaterProto
+from frost.models.contracts import RootExpansion
 from frost.models.protocols import PostmanProto
 from frost.runtime.worker.p2p_syncer.utils._interaction_ops import (
     generate_interaction_mails,
@@ -55,9 +56,7 @@ class AssembledModel(nn.Module):
         postman: Optional APAN postman for mailbox delivery.  Pass ``None`` for
             non-APAN models.
         n_neg: Number of negative samples per positive edge.
-        sample_4_neg: Whether negative destinations are sampled together with
-            source and positive destination (True) or only for src+pos_dst
-            (False, APAN mode).
+        root_expansion: Semantic root set expanded into neighborhoods.
     """
 
     def __init__(
@@ -67,7 +66,7 @@ class AssembledModel(nn.Module):
         header: nn.Module,
         postman: PostmanProto | None,
         n_neg: int,
-        sample_4_neg: bool = True,
+        root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
         dynamic_state_ablation: DynamicStateAblation | None = None,
     ) -> None:
         super().__init__()
@@ -83,7 +82,7 @@ class AssembledModel(nn.Module):
         )
 
         self.n_neg = n_neg  # from hydra config
-        self.sample_4_neg = sample_4_neg  # from hydra config
+        self.root_expansion = root_expansion
         self._delay_box_task_for_structural_mail = self._encoder_uses_structural_mail(
             encoder
         )
@@ -288,7 +287,7 @@ class AssembledModel(nn.Module):
                 n_src=n_src,
                 fanout=fanout,
                 n_neg=meta.n_neg,
-                sample_4_neg=self.sample_4_neg,
+                root_expansion=self.root_expansion,
             )
             # Retrieve detached states for p2p sync
 
@@ -393,7 +392,7 @@ class AssembledModel(nn.Module):
                 n_src=n_src,
                 fanout=fanout,
                 n_neg=meta.n_neg,
-                sample_4_neg=self.sample_4_neg,
+                root_expansion=self.root_expansion,
             )
 
         # 3. Pass the hierarchical HierGraph to the GNN

@@ -411,7 +411,7 @@ class DynamicPlanner(ThreadBase):
         return plans
 
 
-class APANDynamicPlanner(DynamicPlanner):
+class NeighborhoodDynamicPlanner(DynamicPlanner):
     def _plan(
         self,
         box_fetch_list: list[TensorSet],
@@ -426,11 +426,11 @@ class APANDynamicPlanner(DynamicPlanner):
             raw_need_counts = [len(ts) for ts in box_fetch_list]
 
         # 1. Deduplicate: each updated node is owned by exactly one GPU.
-        # box_update_list = nodes that postman delivers mail to (src+dst + their neighbors)
+        # box_update_list = neighborhood-mail recipients for the current batch
         deduplicate_update_list, all_update = deduplicate_updates(box_update_list)
 
         # 2. Fresh P2P: send this batch's updates to GPUs that need them next batch.
-        # next_box_fetch_list = next batch's pos_root_need (src+dst that need box read)
+        # next_box_fetch_list = nodes that need mailbox reads in the next batch
         _, p2p = compute_p2p_transfer_plan(next_box_fetch_list, deduplicate_update_list)
 
         # 3. Writeback all updated nodes to keep ring buffer state consistent on CPU.

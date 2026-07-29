@@ -135,7 +135,8 @@ class Receiver(ThreadBase):
                     eid=buf["EID"][:buf_len].clone(),
                     ts=buf["TS"][:buf_len].clone(),
                 )
-                meta.flat_nid_cpu = cpu_nid.clone()  # APAN: keep CPU copy for writeback
+                # Neighborhood-mail routing needs the sampled CPU layout.
+                meta.flat_nid_cpu = cpu_nid.clone()
                 buf = None
                 self.ring_buf.release()
 

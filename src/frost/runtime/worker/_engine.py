@@ -33,6 +33,7 @@ from frost.runtime.worker.types import AssembledQ, DeltaQueue, H2DOutQ, Received
 from frost.datatypes.env import Env
 from frost.datatypes.result import Result
 from frost.models._assembled_model import AssembledModel
+from frost.launch.plan import ExecutionPlan
 from frost.models.protocols import MemoryUpdaterProto
 from frost.models.protocols import PostmanProto
 from frost.runtime._thread_base import (
@@ -146,6 +147,7 @@ class Worker(
         optimizer: Literal["adam", "sgd"],
         lr: float,
         mail_combine: Literal["last", "mean"] | None,
+        execution_plan: ExecutionPlan,
         use_shm_instead: bool = False,
         dynamic_state_ablation: DynamicStateAblation | None = None,
         compile_model: bool = True,
@@ -156,6 +158,7 @@ class Worker(
     ) -> None:
         # --- Basic config ---
         self.ring_buf = ring_buf
+        self.execution_plan = execution_plan
         self.n_neg = n_neg
         self.save_to = save_to
         self.env = env
