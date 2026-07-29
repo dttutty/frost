@@ -1,14 +1,11 @@
 defaults:
-  - optional access_analyzer: null
-  - encoder: tgn
+  - model: tgn
   - loss_fn: bce  # no need to change mostly
-  - mem_updater: null
   # rnd_dst_then_fixed | rnd_dst_then_hist | rnd_dst_then_post_train |
   # rnd_dst_then_tgb | rnd_dst_then_tgb_wiki
   - neg_sampler: rnd_dst_then_fixed
   - ngh_sampler: recent
   - precision: base # no need to change mostly
-  - predictor: link # don't change this, current version only support link prediction
   - _self_
 
 epoch: 100

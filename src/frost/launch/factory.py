@@ -4,22 +4,16 @@ import logging
 
 import torch.nn as nn
 from hydra.utils import instantiate
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 from frost.launch.config import (
-    DYGFORMER_ENCODER_TARGET,
     DYGLIB_ALIGNED_FEATURE_DIM,
-    GRAPH_MIXER_ENCODER_TARGET,
-    TGAT_ENCODER_TARGET,
-    resolve_dygformer_dummy_edge_dim,
-    resolve_dygformer_dummy_node_dim,
-    resolve_predictor_cfg,
-    resolve_tgat_dummy_edge_dim,
-    resolve_tgat_dummy_node_dim,
-    string_keyed_dict,
 )
+from frost.launch.plan import ExecutionPlan
+from frost.models.contracts import MemoryState, NeighborhoodMailbox
 from frost.models.protocols import MemoryUpdaterProto
 from frost.models.protocols import PostmanProto
+from frost.models.recipes import ModelRecipe
 from frost.runtime.worker.postman import Postman
 
 
@@ -29,11 +23,10 @@ logger = logging.getLogger(__name__)
 def build_worker_modules(
     cfg: DictConfig,
     *,
-    encoder_target: str,
-    fanout: list[int],
+    recipe: ModelRecipe,
+    plan: ExecutionPlan,
     d_mail: int,
     max_n_neg: int,
-    postman_enabled: bool,
 ) -> tuple[
     MemoryUpdaterProto | None,
     nn.Module,
@@ -41,86 +34,47 @@ def build_worker_modules(
     PostmanProto | None,
     nn.Module,
 ]:
-    mem_updater_cfg = cfg.get("mem_updater")
-    if mem_updater_cfg is not None:
-        mem_updater_cfg = OmegaConf.to_container(mem_updater_cfg, resolve=True)
-        if not isinstance(mem_updater_cfg, dict):
-            raise TypeError("mem_updater must resolve to a mapping")
-        mem_updater_cfg.pop("mail_recipients", None)
-        mem_updater_cfg.pop("mail_combine", None)
-        mem_updater_cfg.pop("postman_delivery_strategy", None)
-    mem_updater: MemoryUpdaterProto | None = instantiate(mem_updater_cfg, d_mail=d_mail)
+    mem_updater: MemoryUpdaterProto | None = None
+    if recipe.state is not None:
+        updater_cfg = recipe.state.get("updater")
+        if not isinstance(updater_cfg, dict):
+            raise TypeError("model.state.updater must resolve to a mapping")
+        mem_updater = instantiate(
+            updater_cfg,
+            d_mail=d_mail,
+            boxsize=int(recipe.state["boxsize"]),
+        )
 
-    encoder_cfg = string_keyed_dict(
-        OmegaConf.to_container(cfg.encoder, resolve=True), name="encoder"
-    )
-    encoder_cfg.pop("out_dim", None)
-    encoder_cfg.pop("fanout", None)
-    encoder_cfg.pop("ngh_sampler_strategy", None)
+    encoder_cfg = dict(recipe.encoder)
     if (
-        encoder_target == DYGFORMER_ENCODER_TARGET
-        and cfg.ndim == 0
+        cfg.ndim == 0
         and bool(encoder_cfg.get("enable_dummy_node_features", False))
+        and encoder_cfg.get("dummy_node_dim") is None
     ):
-        encoder_cfg["dummy_node_dim"] = resolve_dygformer_dummy_node_dim(
-            dataset=cfg.dataset,
-            requested_dim=encoder_cfg.get("dummy_node_dim"),
-        )
+        encoder_cfg["dummy_node_dim"] = DYGLIB_ALIGNED_FEATURE_DIM
     if (
-        encoder_target == DYGFORMER_ENCODER_TARGET
-        and cfg.edim == 0
-        and bool(encoder_cfg.get("enable_dummy_edge_features", True))
+        cfg.edim == 0
+        and bool(encoder_cfg.get("enable_dummy_edge_features", False))
+        and encoder_cfg.get("dummy_edge_dim") is None
     ):
-        encoder_cfg["dummy_edge_dim"] = resolve_dygformer_dummy_edge_dim(
-            dataset=cfg.dataset,
-            requested_dim=encoder_cfg.get("dummy_edge_dim"),
-        )
+        encoder_cfg["dummy_edge_dim"] = DYGLIB_ALIGNED_FEATURE_DIM
     if (
-        encoder_target == TGAT_ENCODER_TARGET
-        and cfg.ndim == 0
-        and bool(encoder_cfg.get("enable_dummy_node_features", True))
-    ):
-        encoder_cfg["dummy_node_dim"] = resolve_tgat_dummy_node_dim(
-            dataset=cfg.dataset,
-            requested_dim=encoder_cfg.get("dummy_node_dim"),
-        )
-    if (
-        encoder_target == TGAT_ENCODER_TARGET
-        and cfg.edim == 0
-        and bool(encoder_cfg.get("enable_dummy_edge_features", True))
-    ):
-        encoder_cfg["dummy_edge_dim"] = resolve_tgat_dummy_edge_dim(
-            dataset=cfg.dataset,
-            requested_dim=encoder_cfg.get("dummy_edge_dim"),
-        )
-    if (
-        encoder_target == GRAPH_MIXER_ENCODER_TARGET
-        and bool(encoder_cfg.get("align_dyglib_zero_features", False))
+        bool(encoder_cfg.get("align_dyglib_zero_features", False))
         and encoder_cfg.get("dyglib_feature_dim") is None
     ):
         encoder_cfg["dyglib_feature_dim"] = DYGLIB_ALIGNED_FEATURE_DIM
         logger.info(
-            "Resolved GraphMixer dyglib_feature_dim=%d for encoder=%s.",
+            "Resolved model encoder dyglib_feature_dim=%d.",
             DYGLIB_ALIGNED_FEATURE_DIM,
-            GRAPH_MIXER_ENCODER_TARGET,
         )
-    encoder: nn.Module = (
-        instantiate(encoder_cfg, fanout=fanout)
-        if encoder_target == TGAT_ENCODER_TARGET
-        else instantiate(encoder_cfg)
+    encoder: nn.Module = instantiate(encoder_cfg)
+    predictor: nn.Module = instantiate(recipe.head)
+    state_contract = plan.dynamic_state
+    postman: PostmanProto | None = (
+        Postman(n_neg=max_n_neg)
+        if isinstance(state_contract, MemoryState)
+        and isinstance(state_contract.mailbox, NeighborhoodMailbox)
+        else None
     )
-
-    predictor_cfg = string_keyed_dict(
-        OmegaConf.to_container(cfg.predictor, resolve=True), name="predictor"
-    )
-    predictor_cfg, predictor_switched = resolve_predictor_cfg(
-        encoder_target, predictor_cfg
-    )
-    if predictor_switched:
-        logger.info(
-            "Auto-switched predictor for pair-aware encoder=%s.", encoder_target
-        )
-    predictor: nn.Module = instantiate(predictor_cfg)
-    postman: PostmanProto | None = Postman(n_neg=max_n_neg) if postman_enabled else None
     loss_fn: nn.Module = instantiate(cfg.loss_fn)
     return mem_updater, encoder, predictor, postman, loss_fn

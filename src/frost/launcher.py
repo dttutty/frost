@@ -11,9 +11,6 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from frost.ablation import resolve_dynamic_state_ablation
 from frost.datatypes.env import Env
 from frost.launch.config import (
-    APAN_ENCODER_TARGET,
-    TGN_ENCODER_TARGET,
-    normalize_fanout,
     resolve_dynamic_state_fetch_mode,
     resolve_eval_metric,
     resolve_no_memory_queue_size,
@@ -28,6 +25,7 @@ from frost.launch.distributed import (
 )
 from frost.launch.dispatch import dispatch_host, dispatch_worker
 from frost.launch.factory import build_worker_modules
+from frost.launch.plan import DatasetSchema, compile_execution_plan
 from frost.launch.storage import (
     prepare_dynamic_store,
     prepare_launch_dataset,
@@ -38,6 +36,13 @@ from frost.sampling.protocols import NghSamplerProto
 from frost.runtime.host._plan_router import detect_gpu_topology
 from frost.neg_sampler import PrecomputedNegSampler, RandomNegLinkSampler
 from frost.sampling.ngh_sampler import MultiHopNghSampler, NghSampler, NoSampler
+from frost.models.contracts import (
+    InteractionMailbox,
+    MemoryState,
+    NeighborhoodMailbox,
+    RootExpansion,
+)
+from frost.models.recipes import instantiate_model_recipe
 from frost.utils._logger import init_logging
 from frost.utils.precision import resolve_precision
 from frost.utils.utils import broadcast_data, set_seed
@@ -140,59 +145,51 @@ def launch(cfg: DictConfig):
     if env.is_host:
         logger.info("Detected GPU topology from CUDA_VISIBLE_DEVICES: %s", gpu_topo)
 
-    has_mem = cfg.get("mem_updater") is not None
-    encoder_target = str(cfg.encoder._target_)
+    recipe = instantiate_model_recipe(cfg.model)
+    execution_plan = compile_execution_plan(
+        recipe,
+        DatasetSchema(
+            name=str(cfg.dataset),
+            n_nodes=n_nodes,
+            node_feature_dim=ndim,
+            edge_feature_dim=edim,
+        ),
+    )
+    has_mem = execution_plan.has_dynamic_state
+    state_cfg = recipe.state
     if dynamic_state_ablation.requires_tgn_boxsize_one_only:
         if not has_mem:
             raise ValueError(
-                "dynamic_state_ablation requires mem_updater to be configured."
+                "dynamic_state_ablation requires model.state to be configured."
             )
-        if encoder_target != TGN_ENCODER_TARGET:
+        state_contract = execution_plan.dynamic_state
+        if not (
+            isinstance(state_contract, MemoryState)
+            and isinstance(state_contract.mailbox, InteractionMailbox)
+            and len(execution_plan.sampling.fanout) == 1
+        ):
             raise ValueError(
-                "dynamic_state_ablation is only supported for encoder=tgn."
+                "dynamic_state_ablation requires a one-hop interaction-mail "
+                "memory model."
             )
-        if int(cfg.mem_updater.boxsize) != 1:
+        assert state_cfg is not None
+        if int(state_cfg["boxsize"]) != 1:
             raise ValueError(
-                "dynamic_state_ablation currently only supports mem_updater.boxsize=1."
+                "dynamic_state_ablation currently only supports model.state.boxsize=1."
             )
-    mail_recipients = int(cfg.mem_updater.get("mail_recipients", 0)) if has_mem else 0
-    mail_combine = cfg.mem_updater.get("mail_combine") if has_mem else None
-    if mail_recipients < 0:
-        raise ValueError("mem_updater.mail_recipients must be >= 0.")
+    mail_combine = state_cfg.get("mail_combine") if state_cfg is not None else None
     if has_mem and mail_combine is None:
-        raise ValueError("Memory models require mem_updater.mail_combine.")
-    is_apan = encoder_target == APAN_ENCODER_TARGET
-
-    if is_apan:
-        if not has_mem:
-            raise ValueError("APAN requires mem_updater to be configured.")
-        if mail_recipients <= 0:
-            raise ValueError("APAN requires mem_updater.mail_recipients > 0.")
-        fanout = [mail_recipients]
-        sample_4_neg = False
-        ngh_sampler_strategy = cfg.mem_updater.get(
-            "postman_delivery_strategy", cfg.ngh_sampler.strategy
-        )
-    else:
-        if has_mem and mail_recipients != 0:
-            raise ValueError(
-                "Non-APAN memory updaters must set mem_updater.mail_recipients=0."
-            )
-        encoder_fanout_cfg = cfg.encoder.get("fanout")
-        raw_fanout = (
-            OmegaConf.to_container(encoder_fanout_cfg, resolve=True)
-            if OmegaConf.is_config(encoder_fanout_cfg)
-            else encoder_fanout_cfg
-        )
-        fanout = normalize_fanout(raw_fanout)
-        sample_4_neg = bool(fanout)
-        ngh_sampler_strategy = cfg.ngh_sampler.strategy
+        raise ValueError("Memory models require model.state.mail_combine.")
+    fanout = list(execution_plan.sampling.fanout)
+    sample_4_neg = bool(fanout) and (
+        execution_plan.layout.root_expansion is RootExpansion.ALL_ROOTS
+    )
+    ngh_sampler_strategy = cfg.ngh_sampler.strategy
     time_scaling_factor = resolve_time_scaling_factor(
-        None if is_apan else cfg.ngh_sampler.get("time_scaling_factor", 0.0)
+        cfg.ngh_sampler.get("time_scaling_factor", 0.0)
     )
     tgl_sampler_parity = bool(cfg.ngh_sampler.get("tgl_sampler_parity", False))
 
-    postman_enabled = mail_recipients > 0
     no_memory_queue_size = resolve_no_memory_queue_size(cfg.get("no_memory_queue_size"))
     use_shm_instead = resolve_dynamic_state_fetch_mode(
         cfg,
@@ -205,7 +202,11 @@ def launch(cfg: DictConfig):
 
     d_mail = 0
     if has_mem:
-        d_mail = 2 * cfg.mem_updater.d_mem + cfg.edim
+        assert state_cfg is not None
+        updater_cfg = state_cfg.get("updater")
+        if not isinstance(updater_cfg, dict):
+            raise TypeError("model.state.updater must resolve to a mapping")
+        d_mail = 2 * int(updater_cfg["d_mem"]) + cfg.edim
 
     nccl_ddp, nccl_p2p = create_worker_process_groups(env)
 
@@ -246,8 +247,8 @@ def launch(cfg: DictConfig):
         run_id=run_id,
         precision=precision,
         n_nodes=n_nodes,
-        boxsize=int(cfg.mem_updater.boxsize) if has_mem else 0,
-        d_mem=int(cfg.mem_updater.d_mem) if has_mem else 0,
+        boxsize=int(state_cfg["boxsize"]) if state_cfg is not None else 0,
+        d_mem=int(state_cfg["updater"]["d_mem"]) if state_cfg is not None else 0,
         edim=int(cfg.edim),
     )
 
@@ -350,15 +351,18 @@ def launch(cfg: DictConfig):
                 sample_4_neg=True,
                 tgl_sampler_parity=tgl_sampler_parity,
             )
-        planner_cfg = cfg.get("access_analyzer")
-        if planner_cfg is None:
-            if has_mem:
-                raise ValueError(
-                    "Memory models must configure access_analyzer explicitly."
-                )
+        if not has_mem:
             planner = StaticAnalyzer()
         else:
-            planner = instantiate(planner_cfg)
+            from frost.runtime.host.analyzer import APANMemoryAnalyzer, MemoryAnalyzer
+
+            state_contract = execution_plan.dynamic_state
+            assert isinstance(state_contract, MemoryState)
+            planner = (
+                APANMemoryAnalyzer()
+                if isinstance(state_contract.mailbox, NeighborhoodMailbox)
+                else MemoryAnalyzer()
+            )
         has_nfeat = ndim > 0
         has_efeat = edim > 0
 
@@ -411,17 +415,16 @@ def launch(cfg: DictConfig):
 
         mem_updater, encoder, predictor, postman, loss_fn = build_worker_modules(
             cfg,
-            encoder_target=encoder_target,
-            fanout=fanout,
+            recipe=recipe,
+            plan=execution_plan,
             d_mail=d_mail,
             max_n_neg=max_n_neg,
-            postman_enabled=postman_enabled,
         )
         if use_shm_instead and not bool(cfg.get("__debug_use_shm_instead", False)):
             logger.info(
                 "Auto-enabled shared-memory dynamic-state fetch path for root-only memory model "
-                "encoder=%s.",
-                encoder_target,
+                "model=%s.",
+                execution_plan.model_name,
             )
         dispatch_worker(
             lambda: Worker(

@@ -1,0 +1,21 @@
+_target_: frost.models.recipes.JODIERecipe
+embedding_dim: 128
+neighborhood:
+  fanout: []
+encoder:
+  _target_: frost.models.encoder.jodie.JODIE
+  ndim: ${ndim}
+  d_mem: ${model.embedding_dim}
+  d_time: ${d_time}
+state:
+  boxsize: 1
+  mail_combine: last
+  updater:
+    _target_: frost.models.mem_updater.MemoryUpdater
+    d_time: ${d_time}
+    cell: gru
+    d_mem: ${model.embedding_dim}
+head:
+  _target_: frost.models.header.LinkPredictor
+  d_in: ${model.embedding_dim}
+  n_neg: ${n_neg}

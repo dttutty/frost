@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
+
+from hydra.utils import get_class
+from omegaconf import DictConfig, OmegaConf
 
 from frost.models.contracts import (
     FeatureContract,
@@ -202,3 +205,20 @@ RECIPE_TYPES = {
     )
 }
 
+
+def instantiate_model_recipe(config: DictConfig) -> ModelRecipe:
+    """Instantiate a cheap recipe while leaving nested torch configs untouched."""
+
+    payload = OmegaConf.to_container(config, resolve=True)
+    if not isinstance(payload, dict):
+        raise TypeError("model config must resolve to a mapping")
+    if not all(isinstance(key, str) for key in payload):
+        raise TypeError("model config keys must be strings")
+    typed_payload = cast(dict[str, Any], payload)
+    raw_target = typed_payload.pop("_target_", None)
+    if not isinstance(raw_target, str):
+        raise TypeError("model config must define a string _target_")
+    recipe_type = get_class(raw_target)
+    if not isinstance(recipe_type, type) or not issubclass(recipe_type, ModelRecipe):
+        raise TypeError(f"{raw_target} is not a ModelRecipe type")
+    return recipe_type(**typed_payload)

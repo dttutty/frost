@@ -200,4 +200,4 @@ uv run torchrun --nproc_per_node=3 run.py <hydra overrides...>
 - If `CUDA_VISIBLE_DEVICES=0,1`, then `--nproc_per_node` should be `3`, not `2`.
 - If distributed training fails very early, check whether external NCCL environment variables are conflicting with the intended runtime setup.
 - If throughput drops unexpectedly, confirm that `CUDA_LAUNCH_BLOCKING` or verbose debug flags are not still enabled.
-- If CAWN is much slower than TGN, TGAT, or GraphMixer, reduce `macro_batch_size` first, then `encoder.fanout`.
+- If CAWN is much slower than TGN, TGAT, or GraphMixer, reduce `macro_batch_size` first, then `model.neighborhood.fanout`.

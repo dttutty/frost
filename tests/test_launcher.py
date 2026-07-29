@@ -4,7 +4,6 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from frost.launch.config import (
-    APAN_ENCODER_TARGET,
     CAWN_ENCODER_TARGET,
     DEFAULT_NO_MEMORY_QUEUE_SIZE,
     DYGLIB_ALIGNED_FEATURE_DIM,
@@ -21,46 +20,53 @@ from frost.launch.config import (
     resolve_time_scaling_factor,
 )
 from frost.launch.factory import build_worker_modules
+from frost.launch.plan import DatasetSchema, compile_execution_plan
 from frost.models.mem_updater import TransformerMemoryUpdater
+from frost.models.recipes import APANRecipe
 from frost.launch.storage import resolve_batch_layout
 
 
 def test_apan_runtime_only_config_builds_worker_modules():
     cfg = OmegaConf.create(
         {
-            "mem_updater": {
-                "_target_": "frost.models.mem_updater.TransformerMemoryUpdater",
-                "d_time": 4,
-                "d_mem": 8,
-                "boxsize": 2,
-                "heads": 2,
-                "dropout": 0.0,
-                "mail_recipients": 2,
-                "mail_combine": "last",
-                "postman_delivery_strategy": "uniform",
-            },
-            "encoder": {
-                "_target_": APAN_ENCODER_TARGET,
-                "out_dim": 8,
-                "d_mem": 8,
-                "n_neg": 1,
-            },
-            "predictor": {
-                "_target_": "frost.models.header.LinkPredictor",
-                "d_in": 8,
-                "n_neg": 1,
-            },
+            "ndim": 0,
+            "edim": 0,
             "loss_fn": {"_target_": "torch.nn.BCEWithLogitsLoss"},
         }
     )
+    recipe = APANRecipe(
+        embedding_dim=8,
+        neighborhood={"fanout": [2]},
+        encoder={
+            "_target_": "frost.models.encoder.apan.APAN",
+            "d_mem": 8,
+            "n_neg": 1,
+        },
+        state={
+            "boxsize": 2,
+            "mail_combine": "last",
+            "updater": {
+                "_target_": "frost.models.mem_updater.TransformerMemoryUpdater",
+                "d_time": 4,
+                "d_mem": 8,
+                "heads": 2,
+                "dropout": 0.0,
+            },
+        },
+        head={
+            "_target_": "frost.models.header.LinkPredictor",
+            "d_in": 8,
+            "n_neg": 1,
+        },
+    )
+    plan = compile_execution_plan(recipe, DatasetSchema("EXAMPLE", 10, 0, 0))
 
     mem_updater, _, _, postman, _ = build_worker_modules(
         cfg,
-        encoder_target=APAN_ENCODER_TARGET,
-        fanout=[2],
+        recipe=recipe,
+        plan=plan,
         d_mail=16,
         max_n_neg=1,
-        postman_enabled=True,
     )
 
     assert isinstance(mem_updater, TransformerMemoryUpdater)

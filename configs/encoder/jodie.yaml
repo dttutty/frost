@@ -1,7 +1,0 @@
-_target_: frost.models.encoder.jodie.JODIE
-out_dim: 128
-fanout: null
-ngh_sampler_strategy: recent
-d_time: ${d_time}
-d_mem: ${mem_updater.d_mem}
-ndim: ${ndim}

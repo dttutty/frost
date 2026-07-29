@@ -13,8 +13,7 @@ uv pip install -e .
 
 # Run training — nproc_per_node = n_gpu_workers + 1 (host process)
 uv run torchrun --nproc_per_node=3 run.py \
-  access_analyzer=memory_analyzer dataset=LASTFM encoder=tgn \
-  mem_updater=gru
+  model=tgn dataset=LASTFM
 
 # Run tests
 uv run pytest tests/ -v
@@ -24,19 +23,20 @@ uv run pytest tests/ -v
 
 | Model | Command |
 |-------|---------|
-| TGN | `uv run torchrun --nproc_per_node=3 run.py access_analyzer=memory_analyzer dataset=LASTFM encoder=tgn mem_updater=gru` |
-| JODIE | `uv run torchrun --nproc_per_node=3 run.py access_analyzer=memory_analyzer dataset=LASTFM encoder=jodie mem_updater=rnn` |
-| APAN | `uv run torchrun --nproc_per_node=3 run.py access_analyzer=apan_memory_analyzer dataset=LASTFM encoder=apan mem_updater=apan` |
-| TGAT | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=tgat` |
-| DyGFormer | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=dygformer` |
-| GraphMixer | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=graph_mixer predictor=graph_mixer` |
-| TCL | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=tcl predictor=tcl` |
-| CAWN | `uv run torchrun --nproc_per_node=3 run.py dataset=LASTFM encoder=cawn predictor=dygformer` |
+| TGN | `uv run torchrun --nproc_per_node=3 run.py model=tgn dataset=LASTFM` |
+| JODIE | `uv run torchrun --nproc_per_node=3 run.py model=jodie dataset=LASTFM` |
+| DyRep | `uv run torchrun --nproc_per_node=3 run.py model=dyrep dataset=LASTFM` |
+| APAN | `uv run torchrun --nproc_per_node=3 run.py model=apan dataset=LASTFM` |
+| TGAT | `uv run torchrun --nproc_per_node=3 run.py model=tgat dataset=LASTFM` |
+| DyGFormer | `uv run torchrun --nproc_per_node=3 run.py model=dygformer dataset=LASTFM` |
+| GraphMixer | `uv run torchrun --nproc_per_node=3 run.py model=graph_mixer dataset=LASTFM` |
+| TCL | `uv run torchrun --nproc_per_node=3 run.py model=tcl dataset=LASTFM` |
+| CAWN | `uv run torchrun --nproc_per_node=3 run.py model=cawn dataset=LASTFM` |
 | EdgeBank | `uv run python eval_edgebank.py --dataset LASTFM` |
 
-**Config defaults** (`configs/config.yaml`): `access_analyzer` omitted on non-memory runs, `mem_updater=null`, `n_neg=1`, `ring_buf_size=64`, `macro_batch_size=4000`, `d_time=128`, `no_memory_queue_size=4`.
+**Config defaults** (`configs/config.yaml`): `model=tgn`, `n_neg=1`, `ring_buf_size=64`, `macro_batch_size=4000`, `d_time=128`, `no_memory_queue_size=4`.
 
-**Pair-aware predictor auto-switches** (`src/frost/launch/config.py`): if the user leaves the default `predictor=link`, `DyGFormer` and `CAWN` are auto-switched to `DyGFormerLinkPredictor`, and `TCL` is auto-switched to `PairAwareMergeLayerPredictor`.
+Model recipes own their encoder, optional state updater, semantic contract, and compatible link head. Runtime code must consume the compiled `ExecutionPlan` rather than branch on model target strings.
 
 ## Architecture Overview
 
