@@ -19,6 +19,16 @@ from frost.data.graph_policy import (
     check_graph_direction,
     resolve_graph_artifact,
 )
+from frost.data.paths import (
+    is_raw_tgb_dataset,
+    resolve_artifact_dataset_dir,
+    resolve_tgb_raw_dataset_dir,
+)
+from frost.data.tgb import (
+    build_tgbl_wiki_node_features,
+    load_tgbl_wiki_edge_features,
+    load_tgbl_wiki_runtime_graph,
+)
 from frost.datatypes.env import Env
 from frost.seq_sampler import TemporalGraph, TemporalGraphType
 from frost.shm._core import create_shared_mem_array as csm
@@ -26,7 +36,6 @@ from frost.shm._core import get_shared_mem_array as gsm
 from frost.utils.utils import broadcast_data
 
 logger = logging.getLogger(__name__)
-DATA_DIR = Path("DATA")
 _NP_TO_TORCH = {
     np.dtype(np.bool_): torch.bool,
     np.dtype(np.uint8): torch.uint8,
@@ -41,26 +50,7 @@ _NP_TO_TORCH = {
 
 
 def _resolve_dataset_dir(dataset: str) -> Path:
-    direct = DATA_DIR / dataset
-    if direct.is_dir():
-        return direct
-
-    lower = DATA_DIR / dataset.lower()
-    if lower.is_dir():
-        return lower
-
-    if DATA_DIR.is_dir():
-        for child in DATA_DIR.iterdir():
-            if child.is_dir() and child.name.lower() == dataset.lower():
-                return child
-
-    available = []
-    if DATA_DIR.is_dir():
-        available = sorted(child.name for child in DATA_DIR.iterdir() if child.is_dir())
-    raise FileNotFoundError(
-        f"Could not resolve dataset directory for {dataset} under {DATA_DIR}. "
-        f"Available datasets: {available}"
-    )
+    return resolve_artifact_dataset_dir(dataset)
 
 
 def _resolve_required_dataset_path(dataset: str, relative_paths: list[str]) -> Path:
@@ -154,9 +144,15 @@ def _validate_feature_rows(
     )
 
 
-def _rows_per_chunk(feature_dim: int, target_dtype: torch.dtype) -> int:
+def _rows_per_chunk(
+    feature_dim: int,
+    target_dtype: torch.dtype,
+    *,
+    source_itemsize: int | None = None,
+) -> int:
     target_itemsize = torch.tensor([], dtype=target_dtype).element_size()
-    bytes_per_row = max(feature_dim * target_itemsize, 1)
+    itemsize = max(target_itemsize, source_itemsize or 0)
+    bytes_per_row = max(feature_dim * itemsize, 1)
     return max(1, (128 * 1024 * 1024) // bytes_per_row)
 
 
@@ -172,7 +168,7 @@ def load_graph(
     direction is checked against an explicit setting or TGL's official policy.
 
     Args:
-        d: Dataset name; used as a directory name under ``DATA/``.
+        d: Runtime dataset name resolved through its registered source.
 
     Returns:
         A four-tuple of:
@@ -181,16 +177,27 @@ def load_graph(
         - ``n_nodes``: Total number of nodes.
         - ``n_edges``: Total number of edges.
     """
-    dataset_dir = _resolve_dataset_dir(d)
-    npz_path = resolve_graph_artifact(dataset_dir)
-    csv_path = _resolve_required_dataset_path(d, ["edges.csv"])
-    with np.load(npz_path, allow_pickle=False) as npz:
-        indptr_arr = np.ascontiguousarray(npz["indptr"], dtype=index_dtype)
-        indices_arr = np.ascontiguousarray(npz["indices"], dtype=index_dtype)
-        eid_arr = np.ascontiguousarray(npz["eid"], dtype=index_dtype)
-        ts_arr = np.ascontiguousarray(npz["ts"], dtype=time_dtype)
-
-    df = pd.read_csv(csv_path)
+    if is_raw_tgb_dataset(d):
+        raw_dir = resolve_tgb_raw_dataset_dir(d)
+        runtime_graph = load_tgbl_wiki_runtime_graph(raw_dir)
+        arrays = runtime_graph.arrays
+        indptr_arr = np.ascontiguousarray(arrays["indptr"], dtype=index_dtype)
+        indices_arr = np.ascontiguousarray(arrays["indices"], dtype=index_dtype)
+        eid_arr = np.ascontiguousarray(arrays["eid"], dtype=index_dtype)
+        ts_arr = np.ascontiguousarray(arrays["ts"], dtype=time_dtype)
+        df = runtime_graph.frame
+        source_description = raw_dir / "ml_tgbl-wiki.pkl"
+    else:
+        dataset_dir = _resolve_dataset_dir(d)
+        npz_path = resolve_graph_artifact(dataset_dir)
+        csv_path = _resolve_required_dataset_path(d, ["edges.csv"])
+        with np.load(npz_path, allow_pickle=False) as npz:
+            indptr_arr = np.ascontiguousarray(npz["indptr"], dtype=index_dtype)
+            indices_arr = np.ascontiguousarray(npz["indices"], dtype=index_dtype)
+            eid_arr = np.ascontiguousarray(npz["eid"], dtype=index_dtype)
+            ts_arr = np.ascontiguousarray(npz["ts"], dtype=time_dtype)
+        df = pd.read_csv(csv_path)
+        source_description = npz_path
     required_columns = {"eid", "src", "dst", "time", "default_split"}
     missing_columns = required_columns.difference(df.columns)
     if missing_columns:
@@ -216,7 +223,7 @@ def load_graph(
         "Loaded %s temporal graph for %s from %s",
         actual_direction,
         d,
-        npz_path,
+        source_description,
     )
 
     g = TemporalGraph(indptr=indptr_arr, indices=indices_arr, eid=eid_arr, ts=ts_arr)
@@ -244,7 +251,7 @@ class DatasetManager:
     Args:
         env: Distributed environment descriptor.
         run_id: Prefix string used to name shared-memory segments.
-        dataset: Name of the dataset directory under ``DATA/``.
+        dataset: Runtime dataset name resolved through its registered source.
     """
 
     def __init__(
@@ -315,12 +322,14 @@ class DatasetManager:
                 feat_type="node",
                 shm_name="nfeat",
                 expected_rows=n_nodes,
+                frame=df,
             )
             efeat, edim, edtype = self._load_feature_to_shm(
                 dataset=self.dataset,
                 feat_type="edge",
                 shm_name="efeat",
                 expected_rows=n_edges,
+                frame=df,
             )
             nfeat_rows = 0 if nfeat is None else int(nfeat.shape[0])
             efeat_rows = 0 if efeat is None else int(efeat.shape[0])
@@ -400,6 +409,7 @@ class DatasetManager:
         feat_type: str,
         shm_name: str,
         expected_rows: int,
+        frame: pd.DataFrame | None = None,
     ) -> tuple[torch.Tensor | None, int, torch.dtype | None]:
         """Load a feature matrix and materialize it directly into shared memory."""
         if feat_type == "node" and self.ignore_nfeat_on_disk:
@@ -414,6 +424,15 @@ class DatasetManager:
                 dataset,
             )
             return None, 0, None
+
+        if is_raw_tgb_dataset(dataset):
+            return self._load_tgbl_wiki_feature_to_shm(
+                dataset=dataset,
+                feat_type=feat_type,
+                shm_name=shm_name,
+                expected_rows=expected_rows,
+                frame=frame,
+            )
 
         source = self._resolve_feature_source(dataset, feat_type)
         if source is None:
@@ -447,6 +466,59 @@ class DatasetManager:
 
         raise ValueError(f"Unsupported feature source kind: {source_kind}")
 
+    def _load_tgbl_wiki_feature_to_shm(
+        self,
+        *,
+        dataset: str,
+        feat_type: str,
+        shm_name: str,
+        expected_rows: int,
+        frame: pd.DataFrame | None,
+    ) -> tuple[torch.Tensor, int, torch.dtype]:
+        raw_dir = resolve_tgb_raw_dataset_dir(dataset)
+        if feat_type == "edge":
+            raw_features = load_tgbl_wiki_edge_features(raw_dir)
+            if raw_features.shape[0] != expected_rows:
+                raise ValueError(
+                    "Official tgbl-wiki edge-feature rows do not match the edge "
+                    f"table: {raw_features.shape[0]} != {expected_rows}"
+                )
+            output_shape = (expected_rows + 1, raw_features.shape[1])
+            output_offset = 1
+        elif feat_type == "node":
+            if frame is None:
+                raise RuntimeError(
+                    "The in-memory TGB node feature adapter requires the edge frame."
+                )
+            raw_features = build_tgbl_wiki_node_features(frame, expected_rows)
+            output_shape = raw_features.shape
+            output_offset = 0
+        else:
+            raise ValueError(f"Unsupported TGB feature type: {feat_type!r}")
+
+        final_dtype = self.feature_dtype
+        feat_shm = csm(f"{self.run_id}_{shm_name}", output_shape, dtype=final_dtype)
+        if output_offset:
+            feat_shm[:output_offset].zero_()
+        rows_per_chunk = _rows_per_chunk(
+            raw_features.shape[1],
+            final_dtype,
+            source_itemsize=raw_features.dtype.itemsize,
+        )
+        for start in range(0, raw_features.shape[0], rows_per_chunk):
+            end = min(start + rows_per_chunk, raw_features.shape[0])
+            chunk = torch.from_numpy(np.array(raw_features[start:end], copy=True)).to(
+                dtype=final_dtype
+            )
+            feat_shm[start + output_offset : end + output_offset].copy_(chunk)
+        logger.info(
+            "Built %s features for %s in shared memory from %s",
+            feat_type,
+            dataset,
+            raw_dir,
+        )
+        return feat_shm, raw_features.shape[1], final_dtype
+
     def _load_npy_feature_to_shm(
         self,
         path: Path,
@@ -474,7 +546,9 @@ class DatasetManager:
         if src_dtype == torch.bool:
             final_dtype = self.feature_dtype
         feat_shm = csm(f"{self.run_id}_{shm_name}", arr.shape, dtype=final_dtype)
-        rows_per_chunk = _rows_per_chunk(arr.shape[1], final_dtype)
+        rows_per_chunk = _rows_per_chunk(
+            arr.shape[1], final_dtype, source_itemsize=arr.dtype.itemsize
+        )
         for start in range(0, arr.shape[0], rows_per_chunk):
             end = min(start + rows_per_chunk, arr.shape[0])
             chunk_np = np.array(arr[start:end], copy=True)

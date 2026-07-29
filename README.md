@@ -23,14 +23,36 @@ uv sync --python 3.12
 
 ### Datasets
 
-Mirror the prepared dataset bundle into the locally ignored `DATA/` path so runtime paths match `DATA/<dataset>/...`. `DATA/` may be a directory or a symbolic link to shared storage. If you host the datasets on Hugging Face, set the repository id via an environment variable before downloading.
+Copy [`.env.example`](.env.example) to the locally ignored `.env.local` and
+configure the two machine-local dataset roots:
+
+```bash
+cp .env.example .env.local
+# FROST_DATA_ROOT=/absolute/path/to/frost_dataset
+# TGB_DATA_ROOT=/absolute/path/to/tgb
+```
+
+FROST loads `.env.local` automatically. `FROST_DATA_ROOT` contains materialized
+artifact datasets such as `LASTFM/` and `WIKIPEDIA/`. `TGB_DATA_ROOT` contains
+official TGB downloads beneath `raw/`; these remain separate from the published
+artifact bundle. A repository-local `DATA` directory or symlink is not required.
+Source `.env.local` explicitly before using its variables in shell-only commands:
+
+```bash
+set -a
+source .env.local
+set +a
+```
+
+If you host the materialized datasets on Hugging Face, download them directly
+to the configured artifact root:
 
 ```bash
 export HF_DATASET_REPO=<your-dataset-repo>
 uvx --from huggingface_hub hf download \
   "$HF_DATASET_REPO" \
   --repo-type dataset \
-  --local-dir DATA
+  --local-dir /absolute/path/to/frost_dataset
 ```
 
 To fetch a single dataset:
@@ -41,51 +63,50 @@ uvx --from huggingface_hub hf download \
   "$HF_DATASET_REPO" \
   --repo-type dataset \
   --include "LASTFM/*" \
-  --local-dir DATA
+  --local-dir /absolute/path/to/frost_dataset
 ```
 
-For `tgbl-wiki-v2`, keep the official TGB download outside the repository and
-convert only the FROST runtime files into `DATA/`:
+For `tgbl-wiki-v2`, keep the official files at the following configured path:
 
 ```bash
-# Expected official files: ~/datasets/tgb/raw/tgbl_wiki/{ml_tgbl-wiki.pkl,...}
-uv run python scripts/prepare_tgbl_wiki.py \
-  --raw-dir ~/datasets/tgb/raw/tgbl_wiki \
-  --output-dir DATA/TGBL_WIKI
+# $TGB_DATA_ROOT/raw/tgbl_wiki/{ml_tgbl-wiki.pkl,...}
+ls /absolute/path/to/tgb/raw/tgbl_wiki
 ```
 
-`DATA/` can itself be a symlink such as `DATA -> ~/datasets/frost_dataset`.
-The converter links the large official negative-sample files instead of copying
-them. See the TGB command under [configuration](configs/README.md#tgb-link-prediction).
+The host rank constructs FROST's edge frame, temporal CSR, padded edge features,
+and node-role features in memory at launch. No materialized `TGBL_WIKI/`
+directory is needed. `scripts/prepare_tgbl_wiki.py` remains available only for
+explicit exports and requires an `--output-dir`. See the TGB command under
+[configuration](configs/README.md#tgb-link-prediction).
 
 Dataset transformation code is maintained in FROST rather than in the published
 artifact bundle. Use `frost-data` to build or validate the common on-disk format:
 
 ```bash
 # Build the temporal CSR consumed by DatasetManager into a scratch artifact path.
-uv run frost-data build-graph DATA/LASTFM/edges.csv \
+uv run frost-data build-graph "$FROST_DATA_ROOT/LASTFM/edges.csv" \
   --bidirectional \
   --output artifacts/data/LASTFM/full_graph_with_reverse_edges.npz
 
 # TGL's GDELT and MAG protocols keep only the published edge direction.
-uv run frost-data build-graph DATA/GDELT/edges.csv \
+uv run frost-data build-graph "$FROST_DATA_ROOT/GDELT/edges.csv" \
   --directed \
   --output artifacts/data/GDELT/full_graph_no_reverse_edges.npz
 
 # Generate node_role.npy after verifying that src/dst are disjoint partitions.
-uv run frost-data node-roles DATA/LASTFM/edges.csv \
+uv run frost-data node-roles "$FROST_DATA_ROOT/LASTFM/edges.csv" \
   --output artifacts/data/LASTFM/node_role.npy
 
 # Keep tied timestamps in one train/validation/test split.
-uv run frost-data split DATA/LASTFM/edges.csv \
+uv run frost-data split "$FROST_DATA_ROOT/LASTFM/edges.csv" \
   --strategy timestamp --output artifacts/data/LASTFM/edges.csv
 
 # Build fixed evaluation negatives from the observed destination partition.
-uv run frost-data negatives DATA/LASTFM/edges.csv \
+uv run frost-data negatives "$FROST_DATA_ROOT/LASTFM/edges.csv" \
   --output artifacts/data/LASTFM/neg_pre_sampling_1_result.csv
 
 # Verify schema, temporal splits, graph, sidecars, and negative candidates.
-uv run frost-data validate DATA/LASTFM
+uv run frost-data validate "$FROST_DATA_ROOT/LASTFM"
 ```
 
 Generated outputs are not overwritten unless `--force` is supplied. Run
@@ -144,7 +165,7 @@ uv run torchrun --nproc_per_node=3 run.py <hydra overrides...>
 | [`scripts/`](scripts/) | Specialized experiment and measurement frontends |
 | [`tests/`](tests/) | Test suite |
 | `artifacts/` | Ignored benchmark outputs; override with `FROST_ARTIFACT_ROOT` |
-| `DATA/` | Locally ignored dataset bundle or link to shared storage |
+| `.env.local` | Ignored machine-local dataset root configuration |
 | [`eval_edgebank.py`](eval_edgebank.py) | Standalone EdgeBank baseline evaluator |
 
 ## Notes

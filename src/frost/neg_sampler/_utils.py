@@ -10,6 +10,8 @@ from pathlib import Path
 
 import torch
 
+from frost.data.paths import resolve_artifact_dataset_dir
+
 logger = logging.getLogger(__name__)
 
 PRECOMPUTED_NEGATIVE_FILENAME = "neg_pre_sampling_1_result.csv"
@@ -19,7 +21,7 @@ _REJECTION_TRIES = 64
 
 def resolve_dataset_dir(
     dataset: str,
-    data_root: str | Path = "DATA",
+    data_root: str | Path | None = None,
 ) -> Path:
     """Locate the directory for a given dataset under *data_root*.
 
@@ -33,8 +35,7 @@ def resolve_dataset_dir(
     Args:
         dataset:   Dataset name as referenced in the configuration
                    (e.g. ``"LASTFM"`` or ``"Wikipedia"``).
-        data_root: Root directory that contains one sub-folder per dataset.
-                   Defaults to ``"DATA"`` relative to the working directory.
+        data_root: Optional explicit root. When omitted, use ``FROST_DATA_ROOT``.
 
     Returns:
         Resolved :class:`~pathlib.Path` pointing to the dataset directory.
@@ -44,38 +45,12 @@ def resolve_dataset_dir(
                            The error message lists all available dataset folders
                            to help diagnose typos.
     """
-    root = Path(data_root)
-
-    # Pass 1 – try the name verbatim.
-    direct = root / dataset
-    if direct.is_dir():
-        return direct
-
-    # Pass 2 – try the lower-cased name (common when datasets are stored with
-    # all-lower directory names but referred to in upper-case in configs).
-    lower = root / dataset.lower()
-    if lower.is_dir():
-        return lower
-
-    # Pass 3 – full case-insensitive scan over all immediate children.
-    if root.is_dir():
-        for child in root.iterdir():
-            if child.is_dir() and child.name.lower() == dataset.lower():
-                return child
-
-    # None of the passes succeeded; collect available names for a helpful error.
-    available = []
-    if root.is_dir():
-        available = sorted(child.name for child in root.iterdir() if child.is_dir())
-    raise FileNotFoundError(
-        f"Could not resolve dataset directory for {dataset} under {root}. "
-        f"Available datasets: {available}"
-    )
+    return resolve_artifact_dataset_dir(dataset, data_root=data_root)
 
 
 def resolve_precomputed_negative_path(
     dataset: str,
-    data_root: str | Path = "DATA",
+    data_root: str | Path | None = None,
 ) -> Path:
     """Return the path to the precomputed negative-sample CSV for *dataset*.
 

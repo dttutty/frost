@@ -39,7 +39,7 @@ class HistoricalNegLinkSampler:
         n_nodes: int,
         n_neg: int,
         dataset: str,
-        data_root: str | Path = "DATA",
+        data_root: str | Path | None = None,
         seed: int = 0,
     ) -> None:
         if n_nodes <= 0:
@@ -52,7 +52,7 @@ class HistoricalNegLinkSampler:
         self.n_nodes = n_nodes
         self.n_neg = n_neg
         self.dataset = dataset
-        self.data_root = Path(data_root)
+        self.data_root = None if data_root is None else Path(data_root)
         self.seed = seed
         self._rng = np.random.RandomState(seed)
 

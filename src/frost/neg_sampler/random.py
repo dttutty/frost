@@ -17,7 +17,7 @@ class RandomNegLinkSampler:
         n_nodes: int,
         n_neg: int,
         dataset: str,
-        data_root: str | Path = "DATA",
+        data_root: str | Path | None = None,
         candidate_mode: Literal["all", "dst_partition"] = "all",
         seed: int | None = None,
         collision_check: bool = False,
@@ -32,7 +32,7 @@ class RandomNegLinkSampler:
         self.n_nodes = n_nodes
         self.n_neg = n_neg
         self.dataset = dataset
-        self.data_root = Path(data_root)
+        self.data_root = None if data_root is None else Path(data_root)
         self.candidate_mode = candidate_mode
         self.seed = seed
         self.collision_check = collision_check

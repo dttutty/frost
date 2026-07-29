@@ -27,7 +27,7 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | `dropout` | `0.2` | Shared dropout hyperparameter forwarded into several encoders and memory modules. |
 | `seed` | `42` | Shared random seed for sampling and reproducibility. |
 | `d_time` | `128` | Time encoding dimension. |
-| `dataset` | `LASTFM` | Dataset name under `DATA/`. |
+| `dataset` | `LASTFM` | Runtime dataset name. Artifact datasets resolve under `FROST_DATA_ROOT`; registered TGB datasets resolve from official files under `TGB_DATA_ROOT/raw`. |
 | `access_analyzer` | omitted | Non-memory runs fall back to `StaticAnalyzer` in `launcher.py`. Memory runs must select `memory_analyzer` (TGN/JODIE/DyRep) or `apan_memory_analyzer` (APAN). |
 | `optimizer` | `adam` | Worker optimizer. Supported values: `adam` and `sgd`. |
 | `lr` | `0.0001` | Learning rate. |
@@ -52,7 +52,7 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 ## Parameter Flow and Coupling
 
 - `n_neg` flows from root config into `neg_sampler`, access analyzers, neighborhood samplers, the link predictor, and APAN postman components.
-- `neg_sampler=precomputed` uses fresh destination-partition random negatives for training and reads one fixed `eid,neg_dst` evaluation negative per edge from `DATA/<dataset>/neg_pre_sampling_1_result.csv`; it currently requires `n_neg=1`.
+- `neg_sampler=precomputed` uses fresh destination-partition random negatives for training and reads one fixed `eid,neg_dst` evaluation negative per edge from `$FROST_DATA_ROOT/<dataset>/neg_pre_sampling_1_result.csv`; it currently requires `n_neg=1`.
 - `neg_sampler=rnd_then_rnd` uses destination-partition random negatives for both train and eval; override `candidate_mode=all` only for an explicitly all-node corruption protocol.
 - `neg_sampler=rnd_then_hist` uses destination-partition random negatives during training and per-source historical destination corruption during eval. It is not DyGLib's full-pair historical protocol, which may replace both endpoints.
 - `neg_sampler=rnd_then_ind` uses destination-partition random negatives during training and per-source post-training destination corruption during eval. It is likewise a destination-only protocol.
@@ -66,16 +66,15 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 - `macro_batch_size`, `n_neg`, the derived `fanout`, `mem_updater.mail_recipients`, and `ring_buf_size` together determine the ring-buffer slot layout and pipeline depth.
 - The runtime neighborhood sampler is configured under `ngh_sampler`. In particular, `ngh_sampler.strategy` selects `uniform`, `recent`, or `time_interval_aware`, and `ngh_sampler.time_scaling_factor` is consumed by the `time_interval_aware` sampler.
 - GPU placement is auto-detected from `CUDA_VISIBLE_DEVICES` plus `nvidia-smi topo -m`. The planner distinguishes three levels when available: NVLink peers, same-NUMA peers, and cross-NUMA peers.
-- `edim` is inferred from the edge-feature file under `DATA/<dataset>/` (typically `edge_features.npy`) and combines with `d_mem` / `boxsize` to determine mailbox dimensionality: `d_mail = 2 * d_mem + edim`.
+- `edim` is inferred from the materialized edge-feature file or the registered raw dataset source and combines with `d_mem` / `boxsize` to determine mailbox dimensionality: `d_mail = 2 * d_mem + edim`.
 - Setting `mem_updater` also enables the shared memory/mailbox store. Non-memory models should leave `mem_updater=null`.
 - `mem_updater.mail_recipients>0` enables APAN-style neighbor-directed mail routing. The shipped `apan` updater sets `10`; the other memory updaters must keep it at `0`.
 - `mem_updater.mail_combine` controls mailbox aggregation for memory models. Supported values are `last` and `mean`; the shipped updaters default to `last`.
 
 ## TGB Link Prediction
 
-After preparing `DATA/TGBL_WIKI` with
-[`scripts/prepare_tgbl_wiki.py`](../scripts/prepare_tgbl_wiki.py), a two-GPU
-TGN run is:
+With the official tgbl-wiki-v2 files under
+`$TGB_DATA_ROOT/raw/tgbl_wiki`, a two-GPU TGN run is:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --nproc_per_node=3 run.py \

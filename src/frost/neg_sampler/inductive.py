@@ -42,7 +42,7 @@ class InductiveNegLinkSampler:
         n_nodes: int,
         n_neg: int,
         dataset: str,
-        data_root: str | Path = "DATA",
+        data_root: str | Path | None = None,
         last_observed_time: float | None = None,
         seed: int = 0,
     ) -> None:
@@ -56,7 +56,7 @@ class InductiveNegLinkSampler:
         self.n_nodes = n_nodes
         self.n_neg = n_neg
         self.dataset = dataset
-        self.data_root = Path(data_root)
+        self.data_root = None if data_root is None else Path(data_root)
         self.seed = seed
         self.last_observed_time = last_observed_time
         self._rng = np.random.RandomState(seed)

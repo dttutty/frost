@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from frost.data.paths import frost_data_root
 from frost.neg_sampler import (
     PRECOMPUTED_NEGATIVE_FILENAME,
     generate_precomputed_negative_file,
@@ -16,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-root",
         type=Path,
-        default=Path("DATA"),
+        default=None,
         help="Root directory containing dataset subdirectories.",
     )
     parser.add_argument(
@@ -30,9 +31,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    edges_paths = sorted(args.data_root.glob("*/edges.csv"))
+    data_root = args.data_root or frost_data_root()
+    edges_paths = sorted(data_root.glob("*/edges.csv"))
     if not edges_paths:
-        raise SystemExit(f"No edges.csv files found under {args.data_root}")
+        raise SystemExit(f"No edges.csv files found under {data_root}")
 
     for edges_path in edges_paths:
         output_path = edges_path.with_name(PRECOMPUTED_NEGATIVE_FILENAME)

@@ -22,6 +22,7 @@ GRAPH_FILENAMES = (
 TGL_OFFICIAL_GRAPH_DIRECTIONS: dict[str, GraphDirection] = {
     "WIKI": "bidirectional",
     "WIKIPEDIA": "bidirectional",
+    "TGBL_WIKI": "bidirectional",
     "REDDIT": "bidirectional",
     "MOOC": "bidirectional",
     "LASTFM": "bidirectional",

@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from frost.data.paths import is_raw_tgb_dataset, resolve_tgb_raw_dataset_dir
 from frost.neg_sampler._utils import resolve_dataset_dir
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ class TGBEvalNegSampler:
         n_nodes: int,
         n_neg: int,
         dataset: str,
-        data_root: str | Path = "DATA",
+        data_root: str | Path | None = None,
         seed: int | None = None,
         allow_variable_width: bool = False,
     ) -> None:
@@ -37,7 +38,11 @@ class TGBEvalNegSampler:
         self.dataset = dataset
         self.allow_variable_width = allow_variable_width
 
-        dataset_dir = resolve_dataset_dir(self.dataset, data_root=data_root)
+        dataset_dir = (
+            resolve_tgb_raw_dataset_dir(self.dataset)
+            if data_root is None and is_raw_tgb_dataset(self.dataset)
+            else resolve_dataset_dir(self.dataset, data_root=data_root)
+        )
 
         # Load val and test dictionaries into a unified evaluation set
         # Schema: (src, dst, ts) -> numpy.ndarray of neg_dsts

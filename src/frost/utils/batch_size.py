@@ -4,9 +4,11 @@ from collections.abc import Sequence
 from numbers import Real
 from pathlib import Path
 
+from frost.data.paths import is_raw_tgb_dataset, resolve_artifact_dataset_dir
+from frost.data.sources import load_runtime_edge_frame
+
 
 DEFAULT_SPLIT: tuple[float, ...] = (7.0, 1.5, 1.5)
-DEFAULT_DATA_DIR = Path(__file__).resolve().parents[3] / "DATA"
 
 
 def _normalize_split(split: Sequence[int | float]) -> tuple[float, ...]:
@@ -50,7 +52,7 @@ def _count_csv_rows(csv_path: Path) -> int:
         return max(sum(1 for _ in fh) - 1, 0)
 
 
-def _resolve_num_edges(dataset_or_num_edges: str | int, data_dir: Path) -> int:
+def _resolve_num_edges(dataset_or_num_edges: str | int, data_dir: Path | None) -> int:
     if isinstance(dataset_or_num_edges, bool):
         raise TypeError("dataset_or_num_edges must be a dataset name or an integer.")
 
@@ -60,7 +62,13 @@ def _resolve_num_edges(dataset_or_num_edges: str | int, data_dir: Path) -> int:
         return dataset_or_num_edges
 
     if isinstance(dataset_or_num_edges, str):
-        dataset_dir = _resolve_dataset_dir(dataset_or_num_edges, data_dir)
+        if data_dir is None and is_raw_tgb_dataset(dataset_or_num_edges):
+            return len(load_runtime_edge_frame(dataset_or_num_edges))
+        dataset_dir = (
+            _resolve_dataset_dir(dataset_or_num_edges, data_dir)
+            if data_dir is not None
+            else resolve_artifact_dataset_dir(dataset_or_num_edges)
+        )
         csv_path = dataset_dir / "edges.csv"
         if not csv_path.is_file():
             raise FileNotFoundError(f"Could not find edges.csv under {dataset_dir}.")
@@ -75,7 +83,7 @@ def _resolve_num_edges(dataset_or_num_edges: str | int, data_dir: Path) -> int:
 def get_max_macro_batch_size(
     dataset_or_num_edges: str | int,
     split: Sequence[int | float] = DEFAULT_SPLIT,
-    data_dir: str | Path = DEFAULT_DATA_DIR,
+    data_dir: str | Path | None = None,
 ) -> int:
     """Return a conservative upper bound for ``macro_batch_size``.
 
@@ -85,7 +93,7 @@ def get_max_macro_batch_size(
     contain at least one full macro-batch.
 
     Args:
-        dataset_or_num_edges: Dataset name under ``DATA/`` or a known ``num_edges``.
+        dataset_or_num_edges: Runtime dataset name or a known ``num_edges``.
         split: Relative train/eval split weights. Default is ``(7, 1.5, 1.5)``.
         data_dir: Dataset root used when ``dataset_or_num_edges`` is a name.
 
@@ -95,6 +103,7 @@ def get_max_macro_batch_size(
     normalized_split = _normalize_split(split)
     total_weight = sum(normalized_split)
     min_eval_weight = min(normalized_split[1:])
-    num_edges = _resolve_num_edges(dataset_or_num_edges, Path(data_dir))
+    resolved_data_dir = None if data_dir is None else Path(data_dir)
+    num_edges = _resolve_num_edges(dataset_or_num_edges, resolved_data_dir)
     min_eval_edges = (num_edges * min_eval_weight) // total_weight
     return int(min_eval_edges)

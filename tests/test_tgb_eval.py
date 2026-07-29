@@ -92,6 +92,35 @@ def test_tgb_sampler_honors_explicit_dataset_version(tmp_path: Path) -> None:
     assert torch.equal(sampled, torch.tensor([11, 12]))
 
 
+def test_tgbl_wiki_sampler_uses_configured_official_raw_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset_dir = tmp_path / "raw" / "tgbl_wiki"
+    dataset_dir.mkdir(parents=True)
+    values = {(1, 10, 100): np.array([20, 21])}
+    for split in ("val", "test"):
+        _write_negative_file(dataset_dir / f"tgbl-wiki_{split}_ns_v2.pkl", values)
+    monkeypatch.setenv("TGB_DATA_ROOT", str(tmp_path))
+
+    sampler = TGBEvalNegSampler(
+        n_nodes=100,
+        n_neg=2,
+        dataset="TGBL_WIKI",
+    )
+    sampler.set_batch_context(
+        batch_src=np.array([1]),
+        batch_dst=np.array([10]),
+        batch_start_time=100,
+        batch_end_time=100,
+        batch_ts=np.array([100]),
+    )
+
+    assert torch.equal(
+        sampler.sample(torch.tensor([1]), torch.tensor([1])),
+        torch.tensor([20, 21]),
+    )
+
+
 def test_tgb_sampler_rejects_variable_width_candidates(tmp_path: Path) -> None:
     sampler = _make_sampler(
         tmp_path,

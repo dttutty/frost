@@ -1,4 +1,5 @@
 from pathlib import Path
+import pickle
 
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ class TestDatasetManager:
         dataset_dir.mkdir()
         np.save(dataset_dir / "node_features.npy", np.ones((4, 3), dtype=np.float32))
 
-        monkeypatch.setattr(dm, "DATA_DIR", tmp_path)
+        monkeypatch.setenv("FROST_DATA_ROOT", str(tmp_path))
 
         mgr = dm.DatasetManager(
             env=None,  # type: ignore[arg-type]
@@ -71,7 +72,7 @@ def test_load_graph_accepts_directed_gdelt(tmp_path: Path, monkeypatch) -> None:
     dataset_dir.mkdir()
     _write_graph_fixture(dataset_dir, add_reverse=False)
     sentinel = object()
-    monkeypatch.setattr(dm, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("FROST_DATA_ROOT", str(tmp_path))
     monkeypatch.setattr(dm, "TemporalGraph", lambda **_: sentinel)
 
     graph, _, n_nodes, n_edges = dm.load_graph("GDELT", np.int64, np.int64)
@@ -85,7 +86,86 @@ def test_load_graph_rejects_bidirectional_mag(tmp_path: Path, monkeypatch) -> No
     dataset_dir = tmp_path / "MAG"
     dataset_dir.mkdir()
     _write_graph_fixture(dataset_dir, add_reverse=True)
-    monkeypatch.setattr(dm, "DATA_DIR", tmp_path)
+    monkeypatch.setenv("FROST_DATA_ROOT", str(tmp_path))
 
     with pytest.raises(ValueError, match="requires a directed temporal graph"):
         dm.load_graph("MAG", np.int64, np.int64)
+
+
+def _write_tgbl_wiki_raw_fixture(tgb_root: Path) -> Path:
+    raw_dir = tgb_root / "raw" / "tgbl_wiki"
+    raw_dir.mkdir(parents=True)
+    frame = pd.DataFrame(
+        {
+            "u": [0, 1, 0, 2],
+            "i": [3, 4, 4, 3],
+            "ts": [10, 20, 30, 40],
+            "idx": [0, 1, 2, 3],
+            "w": [1.0, 1.0, 1.0, 1.0],
+        }
+    )
+    frame.to_pickle(raw_dir / "ml_tgbl-wiki.pkl")
+    with (raw_dir / "ml_tgbl-wiki_edge.pkl").open("wb") as handle:
+        pickle.dump(np.arange(8, dtype=np.float64).reshape(4, 2), handle)
+    return raw_dir
+
+
+def test_load_graph_builds_tgbl_wiki_from_official_raw_files(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _write_tgbl_wiki_raw_fixture(tmp_path)
+    captured: dict[str, np.ndarray] = {}
+
+    def fake_temporal_graph(**arrays):
+        captured.update(arrays)
+        return object()
+
+    monkeypatch.setenv("TGB_DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(dm, "TemporalGraph", fake_temporal_graph)
+
+    _, frame, n_nodes, n_edges = dm.load_graph("TGBL_WIKI", np.int32, np.int64)
+
+    assert n_nodes == 5
+    assert n_edges == 4
+    assert frame["src"].tolist() == [0, 1, 0, 2]
+    assert frame["default_split"].tolist() == [0, 0, 0, 2]
+    assert captured["indices"].dtype == np.int32
+    assert len(captured["indices"]) == 2 * n_edges
+
+
+def test_tgbl_wiki_features_are_built_directly_in_shared_memory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _write_tgbl_wiki_raw_fixture(tmp_path)
+    monkeypatch.setenv("TGB_DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        dm,
+        "csm",
+        lambda _name, shape, dtype: torch.empty(shape, dtype=dtype),
+    )
+    frame = pd.DataFrame({"dst": [3, 4, 4, 3]})
+    manager = dm.DatasetManager(
+        env=None,  # type: ignore[arg-type]
+        run_id="test",
+        dataset="TGBL_WIKI",
+        index_dtype=np.int64,
+        time_dtype=np.int64,
+        feature_dtype=torch.float32,
+    )
+
+    edge_features, edge_dim, _ = manager._load_feature_to_shm(
+        "TGBL_WIKI", "edge", "efeat", expected_rows=4, frame=frame
+    )
+    node_features, node_dim, _ = manager._load_feature_to_shm(
+        "TGBL_WIKI", "node", "nfeat", expected_rows=5, frame=frame
+    )
+
+    assert edge_dim == 2
+    assert edge_features is not None
+    assert torch.equal(edge_features[0], torch.zeros(2))
+    assert torch.equal(
+        edge_features[1:], torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    )
+    assert node_dim == 1
+    assert node_features is not None
+    assert node_features[:, 0].tolist() == [0.0, 0.0, 0.0, 1.0, 1.0]

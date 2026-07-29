@@ -21,6 +21,7 @@ dependencies = [
     "numpy>=2.0",
     "pandas>=2.0",
     # Utilities
+    "python-dotenv>=1.0",
     "tqdm>=4.60",
     "PyYAML>=6.0",
     "scikit-learn>=1.0",
