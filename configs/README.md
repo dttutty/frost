@@ -51,6 +51,9 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 
 ## Parameter Flow and Coupling
 
+The canonical definitions and cross-framework comparison rules live in
+[`docs/negative_sampling.md`](../docs/negative_sampling.md).
+
 - `n_neg` flows from root config into `neg_sampler`, access analyzers, neighborhood samplers, the link predictor, and APAN postman components.
 - `neg_sampler=precomputed` uses fresh destination-partition random negatives for training and reads one fixed `eid,neg_dst` evaluation negative per edge from `$FROST_DATA_ROOT/<dataset>/neg_pre_sampling_1_result.csv`; it currently requires `n_neg=1`.
 - `neg_sampler=rnd_then_rnd` uses destination-partition random negatives for both train and eval; override `candidate_mode=all` only for an explicitly all-node corruption protocol.

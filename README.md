@@ -114,6 +114,11 @@ Generated outputs are not overwritten unless `--force` is supplied. Run
 `frost-data import-dgb` performs the complete conversion from an extracted DGB
 Zenodo `ml_*` directory and records every protocol choice in `manifest.json`.
 
+Negative-sampling names are not interchangeable across frameworks. See
+[Negative-sampling protocols](docs/negative_sampling.md) for FROST's exact
+random, fixed, historical, inductive, and TGB semantics and their differences
+from DyGLib.
+
 `graph_direction=auto` is the runtime default. It enforces TGL's official graph
 semantics for maintained datasets: GDELT and MAG are directed, while WIKI,
 WIKIPEDIA, REDDIT, MOOC, and LASTFM include reverse adjacencies. For a custom
