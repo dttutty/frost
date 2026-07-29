@@ -163,43 +163,6 @@ def write_temporal_splits(
     }
 
 
-def write_state_labels(
-    labels_path: Path,
-    edges_path: Path,
-    output_path: Path,
-    *,
-    force: bool = False,
-) -> dict[str, Any]:
-    """Attach explicit edge IDs to a row-aligned legacy state-label table."""
-    edges = load_edges(edges_path)
-    labels = pd.read_csv(labels_path)
-    if len(labels) != len(edges):
-        raise ValueError(
-            f"row mismatch for {labels_path}: expected {len(edges)}, got {len(labels)}"
-        )
-    if "state_label" in labels.columns:
-        values = labels["state_label"]
-    elif "label" in labels.columns:
-        values = labels["label"]
-    elif labels.shape[1] == 1:
-        values = labels.iloc[:, 0]
-    else:
-        raise ValueError(
-            f"{labels_path} must contain one label column or a state_label column"
-        )
-    canonical = pd.DataFrame(
-        {
-            "eid": edges["eid"].to_numpy(copy=True),
-            "state_label": values.to_numpy(copy=True),
-        }
-    )
-    output_path = _require_writable_target(output_path, force=force)
-    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-    canonical.to_csv(tmp_path, index=False)
-    tmp_path.replace(output_path)
-    return {"output": str(output_path.resolve()), "rows": len(canonical)}
-
-
 def _edge_arrays(
     frame: pd.DataFrame,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -479,12 +442,6 @@ def write_dataset_manifest(
                 "shape": list(array.shape),
                 "dtype": str(array.dtype),
             }
-    state_labels_path = dataset_dir / "state_labels.csv"
-    if state_labels_path.is_file():
-        artifacts[state_labels_path.name] = {
-            "rows": len(pd.read_csv(state_labels_path, usecols=["eid"]))
-        }
-
     manifest = {
         "schema_version": 1,
         "dataset": dataset_dir.name,
@@ -609,40 +566,6 @@ def validate_dataset(
                 "node_role.npy must remain opt-in metadata, not an alias used as "
                 "default node_features.npy"
             )
-
-    label_paths = [
-        path
-        for path in (
-            dataset_dir / "state_labels.csv",
-            dataset_dir / "ban_labels.csv",
-        )
-        if path.is_file()
-    ]
-    if len(label_paths) > 1:
-        raise ValueError("keep only state_labels.csv; remove the legacy ban_labels.csv")
-    if label_paths:
-        labels_path = label_paths[0]
-        labels = pd.read_csv(labels_path)
-        if len(labels) != num_edges:
-            raise ValueError(
-                f"row mismatch for {labels_path}: expected {num_edges}, got {len(labels)}"
-            )
-        if labels_path.name == "state_labels.csv":
-            if list(labels.columns) != ["eid", "state_label"]:
-                raise ValueError(
-                    "state_labels.csv must use canonical columns eid,state_label"
-                )
-            if not np.array_equal(
-                labels["eid"].to_numpy(dtype=np.int64),
-                np.arange(1, num_edges + 1, dtype=np.int64),
-            ):
-                raise ValueError("state_labels.csv must use contiguous eid values 1..N")
-            label_values = pd.to_numeric(
-                labels["state_label"], errors="raise"
-            ).to_numpy()
-            if not np.isfinite(label_values).all():
-                raise ValueError("state_labels.csv contains non-finite values")
-        optional_shapes[labels_path.name] = list(labels.shape)
 
     negative_shape = _validate_precomputed_negatives(dataset_dir, frame)
     if negative_shape is not None:

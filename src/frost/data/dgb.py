@@ -21,7 +21,6 @@ from frost.neg_sampler import generate_precomputed_negative_file
 
 DGB_ZENODO_RECORD = "7213796"
 DGB_ZENODO_URL = f"https://zenodo.org/records/{DGB_ZENODO_RECORD}"
-DYNAMIC_STATE_DATASETS = {"mooc", "reddit", "wikipedia"}
 TIMESTAMP_INDEX_DATASETS = {"canparl", "untrade", "unvote"}
 EDGE_FEATURE_DTYPES: dict[str, np.dtype[Any]] = {
     "canparl": np.dtype(np.int16),
@@ -161,20 +160,6 @@ def import_dgb_snapshot(
     edges_tmp.replace(edges_path)
 
     artifacts: dict[str, Any] = {}
-    if dataset.lower() in DYNAMIC_STATE_DATASETS:
-        if "label" not in raw.columns:
-            raise ValueError(f"{edge_source} is missing the state label column")
-        labels = pd.DataFrame(
-            {"eid": eids, "state_label": pd.to_numeric(raw["label"], errors="raise")}
-        )
-        labels_path = output_dir / "state_labels.csv"
-        if labels_path.exists() and not force:
-            raise FileExistsError(
-                f"refusing to overwrite existing output: {labels_path}"
-            )
-        labels.to_csv(labels_path, index=False)
-        artifacts[labels_path.name] = {"rows": len(labels)}
-
     if feature_source is not None:
         features = np.load(feature_source, mmap_mode="r", allow_pickle=False)
         feature_meta: dict[str, Any] = {

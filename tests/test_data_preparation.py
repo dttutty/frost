@@ -131,10 +131,6 @@ def test_validate_dataset_checks_graph_and_optional_row_contracts(
         dataset_dir / "node_role.npy",
         np.array([[False], [False], [True], [True]], dtype=np.bool_),
     )
-    pd.DataFrame({"eid": edges["eid"], "state_label": [False, True] * 3}).to_csv(
-        dataset_dir / "state_labels.csv", index=False
-    )
-
     summary = validate_dataset(dataset_dir)
 
     assert summary["dataset"] == "EXAMPLE"
@@ -232,8 +228,7 @@ def test_import_dgb_snapshot_materializes_reproducible_release(tmp_path: Path) -
     assert manifest["split"]["strategy"] == "timestamp"
     assert manifest["negative_sampling"]["candidate_set"] == "observed_dst_nodes"
     assert not (output_dir / "node_features.npy").exists()
-    labels = pd.read_csv(output_dir / "state_labels.csv")
-    assert list(labels.columns) == ["eid", "state_label"]
+    assert not (output_dir / "state_labels.csv").exists()
     negatives = pd.read_csv(output_dir / "neg_pre_sampling_1_result.csv")
     assert set(negatives["neg_dst"]).issubset({10, 11})
     validate_dataset(output_dir)

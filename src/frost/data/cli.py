@@ -14,7 +14,6 @@ from frost.data.preparation import (
     generate_node_roles,
     validate_dataset,
     write_dataset_manifest,
-    write_state_labels,
     write_temporal_csr,
     write_temporal_splits,
 )
@@ -126,14 +125,6 @@ def _build_parser() -> argparse.ArgumentParser:
     manifest.add_argument("--negative-seed", type=int, default=0)
     manifest.add_argument("--force", action="store_true")
 
-    labels = subparsers.add_parser(
-        "state-labels", help="convert a row-aligned label sidecar to eid,state_label"
-    )
-    labels.add_argument("labels", type=Path)
-    labels.add_argument("edges", type=Path)
-    labels.add_argument("--output", type=Path)
-    labels.add_argument("--force", action="store_true")
-
     validate = subparsers.add_parser(
         "validate", help="validate one published dataset directory"
     )
@@ -204,9 +195,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             negative_seed=args.negative_seed,
             force=args.force,
         )
-    elif args.command == "state-labels":
-        output = args.output or args.labels.with_name("state_labels.csv")
-        result = write_state_labels(args.labels, args.edges, output, force=args.force)
     else:
         result = validate_dataset(
             args.dataset_dir,

@@ -9,7 +9,6 @@ from frost.data.preparation import (
     load_edges,
     validate_dataset,
     write_dataset_manifest,
-    write_state_labels,
     write_temporal_csr,
     write_temporal_splits,
 )
@@ -23,7 +22,6 @@ __all__ = [
     "load_edges",
     "validate_dataset",
     "write_dataset_manifest",
-    "write_state_labels",
     "write_temporal_csr",
     "write_temporal_splits",
 ]
