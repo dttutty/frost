@@ -80,6 +80,10 @@ With the official tgbl-wiki-v2 files under
 `$TGB_DATA_ROOT/raw/tgbl_wiki`, a two-GPU TGN run is:
 
 ```bash
+uv run frost-data fetch-tgb tgbl-wiki
+```
+
+```bash
 CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --nproc_per_node=3 run.py \
   access_analyzer=memory_analyzer dataset=TGBL_WIKI encoder=tgn \
   mem_updater=gru neg_sampler=tgb_wiki eval_metric=mrr \

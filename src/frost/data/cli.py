@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -16,6 +17,11 @@ from frost.data.preparation import (
     write_dataset_manifest,
     write_temporal_csr,
     write_temporal_splits,
+)
+from frost.data.tgb_download import (
+    fetch_tgb_link_datasets,
+    select_tgb_link_datasets,
+    tgb_link_dataset_catalog,
 )
 from frost.neg_sampler import generate_precomputed_negative_file
 
@@ -108,6 +114,32 @@ def _build_parser() -> argparse.ArgumentParser:
     dgb.add_argument("--negative-seed", type=int, default=0)
     dgb.add_argument("--force", action="store_true")
 
+    tgb = subparsers.add_parser(
+        "fetch-tgb",
+        help="download official TGB dynamic link prediction datasets",
+    )
+    tgb.add_argument(
+        "datasets",
+        nargs="*",
+        help="dataset names such as tgbl-wiki; use --all for the full catalog",
+    )
+    tgb.add_argument("--all", action="store_true", dest="all_datasets")
+    tgb.add_argument(
+        "--list",
+        action="store_true",
+        help="print the pinned catalog without downloading",
+    )
+    tgb.add_argument(
+        "--root",
+        type=Path,
+        help="override TGB_DATA_ROOT for this command",
+    )
+    tgb.add_argument(
+        "--download-only",
+        action="store_true",
+        help="verify and retain archives without extracting them",
+    )
+
     manifest = subparsers.add_parser(
         "manifest", help="write provenance and protocol metadata for a dataset"
     )
@@ -135,7 +167,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    result: object
     if args.command == "build-graph":
         add_reverse = args.graph_direction == "bidirectional"
         default_name = graph_filename(args.graph_direction)
@@ -183,6 +217,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             negative_seed=args.negative_seed,
             force=args.force,
         )
+    elif args.command == "fetch-tgb":
+        if args.list:
+            if args.datasets or args.all_datasets:
+                parser.error(
+                    "fetch-tgb --list cannot be combined with dataset selectors"
+                )
+            result = {"datasets": tgb_link_dataset_catalog()}
+        else:
+            try:
+                specs = select_tgb_link_datasets(
+                    args.datasets, all_datasets=args.all_datasets
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+            print(
+                "Selected TGB datasets: " + ", ".join(spec.name for spec in specs),
+                file=sys.stderr,
+            )
+            result = {
+                "datasets": fetch_tgb_link_datasets(
+                    specs,
+                    root=args.root,
+                    download_only=args.download_only,
+                )
+            }
     elif args.command == "manifest":
         result = write_dataset_manifest(
             args.dataset_dir,

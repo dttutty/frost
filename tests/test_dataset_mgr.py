@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 import torch
 
+from frost.data.tgb import load_tgbl_wiki_edge_features, load_tgbl_wiki_frame
 from frost.shm import dataset_mgr as dm
 
 
@@ -169,3 +170,24 @@ def test_tgbl_wiki_features_are_built_directly_in_shared_memory(
     assert node_dim == 1
     assert node_features is not None
     assert node_features[:, 0].tolist() == [0.0, 0.0, 0.0, 1.0, 1.0]
+
+
+def test_tgbl_wiki_runtime_can_read_freshly_extracted_official_csv(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw" / "tgbl_wiki"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "tgbl-wiki_edgelist_v2.csv").write_text(
+        "user_id,item_id,timestamp,state_label,features\n"
+        "0,0,10.0,0,1.5,2.5\n"
+        "2,1,20.0,0,3.5,4.5\n",
+        encoding="utf-8",
+    )
+
+    frame = load_tgbl_wiki_frame(raw_dir)
+    features = load_tgbl_wiki_edge_features(raw_dir)
+
+    assert frame["src"].tolist() == [0, 2]
+    assert frame["dst"].tolist() == [3, 4]
+    assert frame["time"].tolist() == [10, 20]
+    assert np.array_equal(features, np.array([[1.5, 2.5], [3.5, 4.5]]))

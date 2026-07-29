@@ -66,18 +66,31 @@ uvx --from huggingface_hub hf download \
   --local-dir /absolute/path/to/frost_dataset
 ```
 
-For `tgbl-wiki-v2`, keep the official files at the following configured path:
+Download the complete
+[official dynamic link property prediction catalog](https://tgb.complexdatalab.com/docs/linkprop/)
+into `TGB_DATA_ROOT` with:
 
 ```bash
-# $TGB_DATA_ROOT/raw/tgbl_wiki/{ml_tgbl-wiki.pkl,...}
-ls /absolute/path/to/tgb/raw/tgbl_wiki
+# Debian/Ubuntu: sudo apt install aria2
+uv run frost-data fetch-tgb --list
+uv run frost-data fetch-tgb --all
 ```
 
-The host rank constructs FROST's edge frame, temporal CSR, padded edge features,
-and node-role features in memory at launch. No materialized `TGBL_WIKI/`
-directory is needed. `scripts/prepare_tgbl_wiki.py` remains available only for
-explicit exports and requires an `--output-dir`. See the TGB command under
-[configuration](configs/README.md#tgb-link-prediction).
+The pinned catalog contains `tgbl-wiki-v2`, `tgbl-review-v2`, `tgbl-coin`,
+`tgbl-comment`, and `tgbl-flight`. The five official archives total about
+4.52 GiB compressed and require substantially more space after extraction.
+FROST delegates retries, segmented transfers, resume support, progress, and MD5
+verification to `aria2c`, then extracts beneath `$TGB_DATA_ROOT/raw/`.
+Re-running the command skips complete datasets. Use `--download-only` to retain
+verified archives without extracting.
+
+The current FROST runtime adapter supports `TGBL_WIKI`; it can consume a freshly
+extracted official v2 CSV directly. The host rank constructs FROST's edge frame,
+temporal CSR, padded edge features, and node-role features in memory at launch.
+No materialized FROST `TGBL_WIKI/` directory is needed. The other four datasets
+are downloaded for reproducible local availability but still require runtime
+adapters before training in FROST. `scripts/prepare_tgbl_wiki.py` remains
+available only for explicit exports and requires an `--output-dir`.
 
 Dataset transformation code is maintained in FROST rather than in the published
 artifact bundle. Use `frost-data` to build or validate the common on-disk format:
