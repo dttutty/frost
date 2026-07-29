@@ -15,6 +15,10 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 
+from frost.data.graph_policy import (
+    check_graph_direction,
+    resolve_graph_artifact,
+)
 from frost.datatypes.env import Env
 from frost.seq_sampler import TemporalGraph, TemporalGraphType
 from frost.shm._core import create_shared_mem_array as csm
@@ -52,9 +56,7 @@ def _resolve_dataset_dir(dataset: str) -> Path:
 
     available = []
     if DATA_DIR.is_dir():
-        available = sorted(
-            child.name for child in DATA_DIR.iterdir() if child.is_dir()
-        )
+        available = sorted(child.name for child in DATA_DIR.iterdir() if child.is_dir())
     raise FileNotFoundError(
         f"Could not resolve dataset directory for {dataset} under {DATA_DIR}. "
         f"Available datasets: {available}"
@@ -162,12 +164,12 @@ def load_graph(
     d: str,
     index_dtype: np.dtype,
     time_dtype: np.dtype,
+    graph_direction: str = "auto",
 ) -> tuple[TemporalGraphType, pd.DataFrame, int, int]:
     """Load a temporal graph from pre-processed NPZ and CSV files.
 
-    Reads ``DATA/<d>/full_graph_with_reverse_edges.npz`` (CSR topology) and
-    ``DATA/<d>/edges.csv`` (edge list with metadata). Node and edge counts are
-    inferred from both sources and asserted to be consistent.
+    Reads the single supported temporal-graph artifact and ``edges.csv``. Graph
+    direction is checked against an explicit setting or TGL's official policy.
 
     Args:
         d: Dataset name; used as a directory name under ``DATA/``.
@@ -179,17 +181,14 @@ def load_graph(
         - ``n_nodes``: Total number of nodes.
         - ``n_edges``: Total number of edges.
     """
-    npz_path = _resolve_required_dataset_path(d, ["full_graph_with_reverse_edges.npz"])
+    dataset_dir = _resolve_dataset_dir(d)
+    npz_path = resolve_graph_artifact(dataset_dir)
     csv_path = _resolve_required_dataset_path(d, ["edges.csv"])
-    npz = np.load(npz_path)
-
-    indptr_arr = np.ascontiguousarray(npz["indptr"], dtype=index_dtype)
-    indices_arr = np.ascontiguousarray(npz["indices"], dtype=index_dtype)
-    eid_arr = np.ascontiguousarray(npz["eid"], dtype=index_dtype)
-    ts_arr = np.ascontiguousarray(npz["ts"], dtype=time_dtype)
-
-    # Initialize TemporalGraph directly
-    g = TemporalGraph(indptr=indptr_arr, indices=indices_arr, eid=eid_arr, ts=ts_arr)
+    with np.load(npz_path, allow_pickle=False) as npz:
+        indptr_arr = np.ascontiguousarray(npz["indptr"], dtype=index_dtype)
+        indices_arr = np.ascontiguousarray(npz["indices"], dtype=index_dtype)
+        eid_arr = np.ascontiguousarray(npz["eid"], dtype=index_dtype)
+        ts_arr = np.ascontiguousarray(npz["ts"], dtype=time_dtype)
 
     df = pd.read_csv(csv_path)
     required_columns = {"eid", "src", "dst", "time", "default_split"}
@@ -207,6 +206,20 @@ def load_graph(
     assert n_nodes_infer_from_g == n_nodes_infer_from_df
 
     n_edges = df.shape[0]
+    actual_direction = check_graph_direction(
+        dataset=d,
+        requested=graph_direction,
+        n_edges=n_edges,
+        n_adjacencies=len(indices_arr),
+    )
+    logger.info(
+        "Loaded %s temporal graph for %s from %s",
+        actual_direction,
+        d,
+        npz_path,
+    )
+
+    g = TemporalGraph(indptr=indptr_arr, indices=indices_arr, eid=eid_arr, ts=ts_arr)
 
     return g, df, n_nodes_infer_from_g, n_edges
 
@@ -242,6 +255,7 @@ class DatasetManager:
         index_dtype: np.dtype,
         time_dtype: np.dtype,
         feature_dtype: torch.dtype,
+        graph_direction: str = "auto",
         ignore_nfeat_on_disk: bool = False,
         ignore_efeat_on_disk: bool = False,
     ):
@@ -251,6 +265,7 @@ class DatasetManager:
         self.index_dtype = np.dtype(index_dtype)
         self.time_dtype = np.dtype(time_dtype)
         self.feature_dtype = feature_dtype
+        self.graph_direction = graph_direction
         self.ignore_nfeat_on_disk = ignore_nfeat_on_disk
         self.ignore_efeat_on_disk = ignore_efeat_on_disk
 
@@ -291,6 +306,7 @@ class DatasetManager:
                 self.dataset,
                 index_dtype=self.index_dtype,
                 time_dtype=self.time_dtype,
+                graph_direction=self.graph_direction,
             )
 
             # Process features on host

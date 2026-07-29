@@ -27,7 +27,7 @@ def _canonical_edges() -> pd.DataFrame:
 
 
 def test_build_temporal_csr_adds_reverse_edges_and_sorts_adjacencies() -> None:
-    graph = build_temporal_csr(_canonical_edges())
+    graph = build_temporal_csr(_canonical_edges(), add_reverse=True)
 
     np.testing.assert_array_equal(graph["indptr"], [0, 0, 2, 3, 4])
     np.testing.assert_array_equal(graph["indices"], [2, 3, 1, 1])
@@ -92,6 +92,7 @@ def test_validate_dataset_checks_graph_and_optional_row_contracts(
     write_temporal_csr(
         edges_path,
         dataset_dir / "full_graph_with_reverse_edges.npz",
+        add_reverse=True,
     )
     np.save(dataset_dir / "edge_features.npy", np.zeros((3, 2), dtype=np.float32))
     np.save(dataset_dir / "node_role.npy", np.zeros((4, 1), dtype=np.bool_))
@@ -105,7 +106,43 @@ def test_validate_dataset_checks_graph_and_optional_row_contracts(
     assert summary["num_nodes"] == 4
     assert summary["num_edges"] == 2
     assert summary["stored_adjacencies"] == 4
+    assert summary["graph_direction"] == "bidirectional"
+    assert summary["graph_artifact"] == "full_graph_with_reverse_edges.npz"
     assert summary["optional_artifacts"]["edge_features.npy"] == [3, 2]
+
+
+def test_validate_dataset_accepts_tgl_directed_policy_for_gdelt(
+    tmp_path: Path,
+) -> None:
+    dataset_dir = tmp_path / "GDELT"
+    dataset_dir.mkdir()
+    edges_path = dataset_dir / "edges.csv"
+    _canonical_edges().to_csv(edges_path, index=False)
+    write_temporal_csr(
+        edges_path,
+        dataset_dir / "full_graph_no_reverse_edges.npz",
+        add_reverse=False,
+    )
+
+    summary = validate_dataset(dataset_dir)
+
+    assert summary["graph_direction"] == "directed"
+    assert summary["stored_adjacencies"] == 2
+
+
+def test_validate_dataset_rejects_reverse_edges_for_gdelt(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "GDELT"
+    dataset_dir.mkdir()
+    edges_path = dataset_dir / "edges.csv"
+    _canonical_edges().to_csv(edges_path, index=False)
+    write_temporal_csr(
+        edges_path,
+        dataset_dir / "full_graph_with_reverse_edges.npz",
+        add_reverse=True,
+    )
+
+    with pytest.raises(ValueError, match="requires a directed temporal graph"):
+        validate_dataset(dataset_dir)
 
 
 def test_validate_dataset_detects_graph_drift(tmp_path: Path) -> None:
@@ -114,7 +151,7 @@ def test_validate_dataset_detects_graph_drift(tmp_path: Path) -> None:
     edges_path = dataset_dir / "edges.csv"
     edges = _canonical_edges()
     edges.to_csv(edges_path, index=False)
-    graph = build_temporal_csr(edges)
+    graph = build_temporal_csr(edges, add_reverse=True)
     graph["indices"][0] = 3
     np.savez(dataset_dir / "full_graph_with_reverse_edges.npz", **graph)
 
@@ -126,7 +163,7 @@ def test_write_temporal_csr_refuses_to_overwrite(tmp_path: Path) -> None:
     edges_path = tmp_path / "edges.csv"
     output_path = tmp_path / "graph.npz"
     _canonical_edges().to_csv(edges_path, index=False)
-    write_temporal_csr(edges_path, output_path)
+    write_temporal_csr(edges_path, output_path, add_reverse=True)
 
     with pytest.raises(FileExistsError, match="overwrite"):
-        write_temporal_csr(edges_path, output_path)
+        write_temporal_csr(edges_path, output_path, add_reverse=True)

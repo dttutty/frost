@@ -72,6 +72,7 @@ def prepare_launch_dataset(
         index_dtype=precision.index_np,
         time_dtype=precision.time_preprocessing_np,
         feature_dtype=precision.feature_torch,
+        graph_direction=str(cfg.get("graph_direction", "auto")),
         ignore_nfeat_on_disk=bool(cfg.get("ignore_nfeat_on_disk", False)),
         ignore_efeat_on_disk=bool(cfg.get("ignore_efeat_on_disk", False)),
     ).prepare()

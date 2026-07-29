@@ -64,7 +64,13 @@ artifact bundle. Use `frost-data` to build or validate the common on-disk format
 ```bash
 # Build the temporal CSR consumed by DatasetManager into a scratch artifact path.
 uv run frost-data build-graph DATA/LASTFM/edges.csv \
+  --bidirectional \
   --output artifacts/data/LASTFM/full_graph_with_reverse_edges.npz
+
+# TGL's GDELT and MAG protocols keep only the published edge direction.
+uv run frost-data build-graph DATA/GDELT/edges.csv \
+  --directed \
+  --output artifacts/data/GDELT/full_graph_no_reverse_edges.npz
 
 # Generate node_role.npy after verifying that src/dst are disjoint partitions.
 uv run frost-data node-roles DATA/LASTFM/edges.csv \
@@ -74,12 +80,18 @@ uv run frost-data node-roles DATA/LASTFM/edges.csv \
 uv run frost-data convert-features DATA/WIKIPEDIA/edge_features.pt \
   --output artifacts/data/WIKIPEDIA/edge_features.npy
 
-# Verify edges.csv, the reverse CSR, and optional feature/label row counts.
+# Verify edges.csv, graph direction, CSR contents, and optional row counts.
 uv run frost-data validate DATA/LASTFM
 ```
 
 Generated outputs are not overwritten unless `--force` is supplied. Run
-`uv run frost-data --help` for explicit output-path and no-reverse options.
+`uv run frost-data --help` for explicit output-path and direction options.
+
+`graph_direction=auto` is the runtime default. It enforces TGL's official graph
+semantics for maintained datasets: GDELT and MAG are directed, while WIKI,
+WIKIPEDIA, REDDIT, MOOC, and LASTFM include reverse adjacencies. For a custom
+dataset, `auto` accepts either representation after inferring it from the graph;
+set `graph_direction=directed` or `bidirectional` to enforce one explicitly.
 
 ### Runtime Shape
 

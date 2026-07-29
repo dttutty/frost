@@ -7,12 +7,34 @@ import json
 from pathlib import Path
 from typing import Sequence
 
+from frost.data.graph_policy import graph_filename
 from frost.data.preparation import (
     convert_tensor_to_numpy,
     generate_node_roles,
     validate_dataset,
     write_temporal_csr,
 )
+
+
+def _add_graph_direction_args(
+    parser: argparse.ArgumentParser, *, required: bool
+) -> None:
+    direction = parser.add_mutually_exclusive_group(required=required)
+    direction.add_argument(
+        "--directed",
+        dest="graph_direction",
+        action="store_const",
+        const="directed",
+        help="keep each input edge in its original direction",
+    )
+    direction.add_argument(
+        "--bidirectional",
+        dest="graph_direction",
+        action="store_const",
+        const="bidirectional",
+        help="add a reverse adjacency for every input edge",
+    )
+    parser.set_defaults(graph_direction="auto")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -27,7 +49,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     graph.add_argument("edges", type=Path)
     graph.add_argument("--output", type=Path)
-    graph.add_argument("--no-reverse", action="store_true")
+    _add_graph_direction_args(graph, required=True)
     graph.add_argument("--force", action="store_true")
 
     roles = subparsers.add_parser(
@@ -48,18 +70,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "validate", help="validate one published dataset directory"
     )
     validate.add_argument("dataset_dir", type=Path)
+    _add_graph_direction_args(validate, required=False)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "build-graph":
-        add_reverse = not args.no_reverse
-        default_name = (
-            "full_graph_with_reverse_edges.npz"
-            if add_reverse
-            else "full_graph_no_reverse_edges.npz"
-        )
+        add_reverse = args.graph_direction == "bidirectional"
+        default_name = graph_filename(args.graph_direction)
         output = args.output or args.edges.parent / default_name
         result = write_temporal_csr(
             args.edges,
@@ -74,7 +93,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         output = args.output or args.source.with_suffix(".npy")
         result = convert_tensor_to_numpy(args.source, output, force=args.force)
     else:
-        result = validate_dataset(args.dataset_dir)
+        result = validate_dataset(
+            args.dataset_dir, graph_direction=args.graph_direction
+        )
 
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

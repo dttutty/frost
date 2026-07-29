@@ -9,6 +9,11 @@ import numpy as np
 import pandas as pd
 import torch
 
+from frost.data.graph_policy import (
+    check_graph_direction,
+    resolve_graph_artifact,
+)
+
 
 CANONICAL_EDGE_COLUMNS = ("src", "dst", "time", "eid")
 LEGACY_EDGE_COLUMNS = ("u", "i", "ts", "idx")
@@ -72,7 +77,7 @@ def _edge_arrays(
 def build_temporal_csr(
     frame: pd.DataFrame,
     *,
-    add_reverse: bool = True,
+    add_reverse: bool,
     num_nodes: int | None = None,
 ) -> dict[str, np.ndarray]:
     """Build FROST's deterministically sorted temporal CSR representation."""
@@ -125,7 +130,7 @@ def write_temporal_csr(
     edges_path: Path,
     output_path: Path,
     *,
-    add_reverse: bool = True,
+    add_reverse: bool,
     force: bool = False,
 ) -> dict[str, int | str | bool]:
     frame = load_edges(edges_path)
@@ -220,7 +225,9 @@ def _validate_array_rows(path: Path, expected_rows: int) -> None:
         )
 
 
-def validate_dataset(dataset_dir: Path) -> dict[str, Any]:
+def validate_dataset(
+    dataset_dir: Path, *, graph_direction: str = "auto"
+) -> dict[str, Any]:
     """Validate a canonical dataset directory against FROST's runtime contract."""
     dataset_dir = dataset_dir.expanduser()
     frame = load_edges(dataset_dir / "edges.csv")
@@ -232,16 +239,22 @@ def validate_dataset(dataset_dir: Path) -> dict[str, Any]:
     if missing_columns:
         raise ValueError(f"edges.csv is missing columns: {sorted(missing_columns)}")
 
-    expected = build_temporal_csr(frame, add_reverse=True)
-    graph_path = dataset_dir / "full_graph_with_reverse_edges.npz"
-    if not graph_path.is_file():
-        raise FileNotFoundError(f"missing graph artifact: {graph_path}")
+    graph_path = resolve_graph_artifact(dataset_dir)
     with np.load(graph_path, allow_pickle=False) as archive:
         missing_keys = set(GRAPH_KEYS).difference(archive.files)
         if missing_keys:
             raise ValueError(
                 f"graph artifact is missing arrays: {sorted(missing_keys)}"
             )
+        actual_direction = check_graph_direction(
+            dataset=dataset_dir.name,
+            requested=graph_direction,
+            n_edges=len(frame),
+            n_adjacencies=len(archive["indices"]),
+        )
+        expected = build_temporal_csr(
+            frame, add_reverse=actual_direction == "bidirectional"
+        )
         for key in GRAPH_KEYS:
             actual = archive[key]
             if not np.array_equal(actual, expected[key]):
@@ -279,5 +292,7 @@ def validate_dataset(dataset_dir: Path) -> dict[str, Any]:
         "num_nodes": num_nodes,
         "num_edges": num_edges,
         "stored_adjacencies": len(expected["indices"]),
+        "graph_direction": actual_direction,
+        "graph_artifact": graph_path.name,
         "optional_artifacts": optional_shapes,
     }

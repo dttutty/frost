@@ -200,7 +200,16 @@ Config: `configs/access_analyzer/my_analyzer.yaml` with `_target_` and `n_neg: $
 
 ## Datasets
 
-Stored in `DATA/<DATASET>/`. Loaded directly by `DatasetManager`. Expected files: `edges.csv` (columns: `src`, `dst`, `time`, `default_split`, `Unnamed: 0`), optional `node_features.pt`, `edge_features.pt`.
+Stored in `DATA/<DATASET>/`. Loaded directly by `DatasetManager`. Expected files:
+`edges.csv` (columns: `eid`, `src`, `dst`, `time`, `default_split`), exactly one
+temporal CSR (`full_graph_no_reverse_edges.npz`,
+`full_graph_with_reverse_edges.npz`, or legacy TGL `ext_full.npz`), and optional
+`node_features.pt` / `edge_features.pt` artifacts.
+
+`graph_direction=auto` follows TGL's official graph semantics: GDELT/MAG are
+directed; WIKI/WIKIPEDIA/REDDIT/MOOC/LASTFM include reverse adjacencies. The
+runtime validates adjacency counts against that policy. `frost-data build-graph`
+requires an explicit `--directed` or `--bidirectional` choice.
 
 ## Environment Variables (Performance)
 
