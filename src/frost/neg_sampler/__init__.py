@@ -9,7 +9,6 @@ from frost.neg_sampler._utils import (
     PRECOMPUTED_NEGATIVE_FILENAME,
     LEGACY_PRECOMPUTED_NEGATIVE_FILENAME,
     generate_precomputed_negative_file,
-    resolve_dataset_dir,
     resolve_precomputed_negative_path,
 )
 
@@ -22,6 +21,5 @@ __all__ = [
     "PRECOMPUTED_NEGATIVE_FILENAME",
     "LEGACY_PRECOMPUTED_NEGATIVE_FILENAME",
     "generate_precomputed_negative_file",
-    "resolve_dataset_dir",
     "resolve_precomputed_negative_path",
 ]

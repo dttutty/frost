@@ -4,7 +4,11 @@ from collections.abc import Sequence
 from numbers import Real
 from pathlib import Path
 
-from frost.data.paths import is_raw_tgb_dataset, resolve_artifact_dataset_dir
+from frost.data.paths import (
+    is_raw_tgb_dataset,
+    resolve_artifact_dataset_dir,
+    resolve_child_directory,
+)
 from frost.data.sources import load_runtime_edge_frame
 
 
@@ -23,27 +27,6 @@ def _normalize_split(split: Sequence[int | float]) -> tuple[float, ...]:
             raise ValueError("split weights must be positive.")
         normalized.append(float(weight))
     return tuple(normalized)
-
-
-def _resolve_dataset_dir(dataset: str, data_dir: Path) -> Path:
-    direct = data_dir / dataset
-    if direct.is_dir():
-        return direct
-
-    lower = data_dir / dataset.lower()
-    if lower.is_dir():
-        return lower
-
-    if data_dir.is_dir():
-        for child in data_dir.iterdir():
-            if child.is_dir() and child.name.lower() == dataset.lower():
-                return child
-
-    available = sorted(child.name for child in data_dir.iterdir() if child.is_dir())
-    raise FileNotFoundError(
-        f"Could not resolve dataset directory for {dataset} under {data_dir}. "
-        f"Available datasets: {available}"
-    )
 
 
 def _count_csv_rows(csv_path: Path) -> int:
@@ -65,7 +48,7 @@ def _resolve_num_edges(dataset_or_num_edges: str | int, data_dir: Path | None) -
         if data_dir is None and is_raw_tgb_dataset(dataset_or_num_edges):
             return len(load_runtime_edge_frame(dataset_or_num_edges))
         dataset_dir = (
-            _resolve_dataset_dir(dataset_or_num_edges, data_dir)
+            resolve_child_directory(data_dir, dataset_or_num_edges)
             if data_dir is not None
             else resolve_artifact_dataset_dir(dataset_or_num_edges)
         )

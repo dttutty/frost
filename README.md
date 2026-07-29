@@ -87,10 +87,9 @@ verified archives without extracting.
 The current FROST runtime adapter supports `TGBL_WIKI`; it can consume a freshly
 extracted official v2 CSV directly. The host rank constructs FROST's edge frame,
 temporal CSR, padded edge features, and node-role features in memory at launch.
-No materialized FROST `TGBL_WIKI/` directory is needed. The other four datasets
-are downloaded for reproducible local availability but still require runtime
-adapters before training in FROST. `scripts/prepare_tgbl_wiki.py` remains
-available only for explicit exports and requires an `--output-dir`.
+No materialized FROST `TGBL_WIKI/` directory or export step is needed. The other
+four datasets are downloaded for reproducible local availability but still
+require runtime adapters before training in FROST.
 
 Dataset transformation code is maintained in FROST rather than in the published
 artifact bundle. Use `frost-data` to build or validate the common on-disk format:
@@ -126,6 +125,9 @@ Generated outputs are not overwritten unless `--force` is supplied. Run
 `uv run frost-data --help` for explicit output-path and direction options.
 `frost-data import-dgb` performs the complete conversion from an extracted DGB
 Zenodo `ml_*` directory and records every protocol choice in `manifest.json`.
+`frost-data catalog "$FROST_DATA_ROOT"` derives release statistics and the exact
+evaluation batch-size ceiling from those manifests, so those figures do not
+need to be maintained in multiple READMEs.
 
 Negative-sampling names are not interchangeable across frameworks. See
 [Negative-sampling protocols](docs/negative_sampling.md) for FROST's exact

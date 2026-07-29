@@ -7,10 +7,10 @@ from typing import Any
 
 import torch
 
+from frost.data.paths import resolve_artifact_dataset_dir
 from frost.neg_sampler._utils import (
     PRECOMPUTED_NEGATIVE_FILENAME,
     _load_precomputed_negatives,
-    resolve_dataset_dir,
     resolve_precomputed_negative_path,
 )
 
@@ -38,7 +38,9 @@ class PrecomputedNegSampler:
                 "a precomputed file with one negative per edge."
             )
 
-        dataset_dir = resolve_dataset_dir(self.dataset, data_root=self.data_root)
+        dataset_dir = resolve_artifact_dataset_dir(
+            self.dataset, data_root=self.data_root
+        )
         self.precomputed_path = dataset_dir / neg_file
         if not self.precomputed_path.is_file():
             self.precomputed_path = resolve_precomputed_negative_path(

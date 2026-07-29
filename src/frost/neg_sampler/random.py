@@ -8,7 +8,8 @@ from typing import Literal
 import numpy as np
 import torch
 
-from frost.neg_sampler._utils import _load_unique_dst_nodes, resolve_dataset_dir
+from frost.data.paths import resolve_artifact_dataset_dir
+from frost.neg_sampler._utils import _load_unique_dst_nodes
 
 
 class RandomNegLinkSampler:
@@ -49,7 +50,9 @@ class RandomNegLinkSampler:
             self.candidates = torch.arange(n_nodes, dtype=torch.long)
         elif candidate_mode == "dst_partition":
             if candidate_nodes is None:
-                dataset_dir = resolve_dataset_dir(dataset, data_root=self.data_root)
+                dataset_dir = resolve_artifact_dataset_dir(
+                    dataset, data_root=self.data_root
+                )
                 self.candidates = _load_unique_dst_nodes(dataset_dir / "edges.csv")
             else:
                 self.candidates = torch.as_tensor(

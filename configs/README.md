@@ -46,7 +46,7 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | `encoder` | TGNN encoder architecture | `tgn`, `jodie`, `apan`, `dyrep`, `tgat`, `dygformer`, `graph_mixer`, `tcl` | Yes |
 | `loss_fn` | Training loss | `bce` | Fixed |
 | `mem_updater` | Memory update module | `gru`, `rnn`, `apan` or `null` | Memory models only |
-| `neg_sampler` | Negative destination sampling | `rnd_dst_then_fixed`, `rnd_dst_then_rnd`, `rnd_dst_then_hist`, `rnd_dst_then_post_train`, `rnd_dst_then_tgb`, `rnd_dst_then_tgb_wiki` | Yes |
+| `neg_sampler` | Negative destination sampling | `rnd_dst_then_fixed`, `rnd_dst_then_hist`, `rnd_dst_then_post_train`, `rnd_dst_then_tgb`, `rnd_dst_then_tgb_wiki` | Yes |
 | `predictor` | Downstream prediction head | `link` | Fixed |
 
 ## Parameter Flow and Coupling
@@ -56,7 +56,6 @@ The canonical definitions and cross-framework comparison rules live in
 
 - `n_neg` flows from root config into `neg_sampler`, access analyzers, neighborhood samplers, the link predictor, and APAN postman components.
 - `neg_sampler=rnd_dst_then_fixed` uses fresh destination-partition random negatives for training and reads one fixed `eid,neg_dst` evaluation negative per edge from `$FROST_DATA_ROOT/<dataset>/neg_pre_sampling_1_result.csv`; it currently requires `n_neg=1`.
-- `neg_sampler=rnd_dst_then_rnd` uses destination-partition random negatives for both train and eval; override `candidate_mode=all` only for an explicitly all-node corruption protocol.
 - `neg_sampler=rnd_dst_then_hist` uses destination-partition random negatives during training and per-source historical destination corruption during eval. It is not DyGLib's full-pair historical protocol, which may replace both endpoints.
 - `neg_sampler=rnd_dst_then_post_train` uses destination-partition random negatives during training and per-source post-training destination corruption during eval. It is likewise a destination-only protocol.
 - `neg_sampler=rnd_dst_then_tgb` uses one random training negative and official TGB validation/test pickle files. Run with `eval_metric=mrr`; set `neg_sampler.eval.n_neg=100` for `tgbl-review`, or `20` for `tgbl-coin`, `tgbl-comment`, and `tgbl-flight`.

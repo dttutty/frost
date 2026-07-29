@@ -19,45 +19,16 @@ LEGACY_PRECOMPUTED_NEGATIVE_FILENAME = "pre_neg_sampler_result.csv"
 _REJECTION_TRIES = 64
 
 
-def resolve_dataset_dir(
-    dataset: str,
-    data_root: str | Path | None = None,
-) -> Path:
-    """Locate the directory for a given dataset under *data_root*.
-
-    Resolution is attempted in three passes to tolerate case differences
-    between the caller-supplied name and the actual directory name on disk:
-
-    1. Exact match  –  ``<data_root>/<dataset>``
-    2. Lower-case match  –  ``<data_root>/<dataset.lower()>``
-    3. Case-insensitive scan of every direct child of *data_root*
-
-    Args:
-        dataset:   Dataset name as referenced in the configuration
-                   (e.g. ``"LASTFM"`` or ``"Wikipedia"``).
-        data_root: Optional explicit root. When omitted, use ``FROST_DATA_ROOT``.
-
-    Returns:
-        Resolved :class:`~pathlib.Path` pointing to the dataset directory.
-
-    Raises:
-        FileNotFoundError: If no matching directory is found under *data_root*.
-                           The error message lists all available dataset folders
-                           to help diagnose typos.
-    """
-    return resolve_artifact_dataset_dir(dataset, data_root=data_root)
-
-
 def resolve_precomputed_negative_path(
     dataset: str,
     data_root: str | Path | None = None,
 ) -> Path:
     """Return the path to the precomputed negative-sample CSV for *dataset*.
 
-    The function first locates the dataset directory via
-    :func:`resolve_dataset_dir`, then looks for the pre-generated negative
-    sample file.  Two filenames are supported so that older cached files remain
-    usable without renaming:
+    The function first locates the dataset directory via the shared artifact
+    resolver, then looks for the pre-generated negative sample file. Two
+    filenames are supported so that older cached files remain usable without
+    renaming:
 
     1. Canonical name – ``neg_pre_sampling_1_result.csv``
     2. Legacy name    – ``pre_neg_sampler_result.csv``
@@ -73,7 +44,7 @@ def resolve_precomputed_negative_path(
         FileNotFoundError: If neither the canonical nor the legacy file exists
                            inside the resolved dataset directory.
     """
-    dataset_dir = resolve_dataset_dir(dataset, data_root=data_root)
+    dataset_dir = resolve_artifact_dataset_dir(dataset, data_root=data_root)
 
     # Prefer the canonical (current) filename.
     canonical = dataset_dir / PRECOMPUTED_NEGATIVE_FILENAME

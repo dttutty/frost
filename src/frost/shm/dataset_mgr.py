@@ -49,12 +49,8 @@ _NP_TO_TORCH = {
 }
 
 
-def _resolve_dataset_dir(dataset: str) -> Path:
-    return resolve_artifact_dataset_dir(dataset)
-
-
 def _resolve_required_dataset_path(dataset: str, relative_paths: list[str]) -> Path:
-    base = _resolve_dataset_dir(dataset)
+    base = resolve_artifact_dataset_dir(dataset)
     for relative_path in relative_paths:
         path = base / relative_path
         if path.exists():
@@ -188,7 +184,7 @@ def load_graph(
         df = runtime_graph.frame
         source_description = raw_dir / "ml_tgbl-wiki.pkl"
     else:
-        dataset_dir = _resolve_dataset_dir(d)
+        dataset_dir = resolve_artifact_dataset_dir(d)
         npz_path = resolve_graph_artifact(dataset_dir)
         csv_path = _resolve_required_dataset_path(d, ["edges.csv"])
         with np.load(npz_path, allow_pickle=False) as npz:
@@ -396,7 +392,7 @@ class DatasetManager:
             (f"{stem}.npy", "npy"),
             (f"{stem}.pt", "pt"),
         ]
-        base = _resolve_dataset_dir(dataset)
+        base = resolve_artifact_dataset_dir(dataset)
         for relative_path, source_kind in candidates:
             path = base / relative_path
             if path.exists():

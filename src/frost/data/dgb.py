@@ -12,10 +12,12 @@ import pandas as pd
 
 from frost.data.graph_policy import graph_filename
 from frost.data.preparation import (
+    SplitStrategy,
     assign_temporal_splits,
     generate_node_roles,
     write_temporal_csr,
 )
+
 DGB_ZENODO_RECORD = "7213796"
 DGB_ZENODO_URL = f"https://zenodo.org/records/{DGB_ZENODO_RECORD}"
 TIMESTAMP_INDEX_DATASETS = {"canparl", "untrade", "unvote"}
@@ -98,7 +100,7 @@ def import_dgb_snapshot(
     *,
     dataset: str,
     graph_direction: str,
-    split_strategy: str = "timestamp",
+    split_strategy: SplitStrategy = "timestamp",
     train_ratio: float = 0.70,
     val_ratio: float = 0.15,
     negative_seed: int = 0,

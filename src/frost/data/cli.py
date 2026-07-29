@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from frost.data.catalog import load_dataset_catalog, write_dataset_catalog
 from frost.data.graph_policy import graph_filename
 from frost.data.dgb import import_dgb_snapshot
 from frost.data.preparation import (
@@ -157,6 +158,17 @@ def _build_parser() -> argparse.ArgumentParser:
     manifest.add_argument("--negative-seed", type=int, default=0)
     manifest.add_argument("--force", action="store_true")
 
+    catalog = subparsers.add_parser(
+        "catalog", help="summarize a dataset bundle from its manifests"
+    )
+    catalog.add_argument("root", type=Path)
+    catalog.add_argument(
+        "--markdown-output",
+        type=Path,
+        help="write a generated Markdown table instead of returning JSON only",
+    )
+    catalog.add_argument("--force", action="store_true")
+
     validate = subparsers.add_parser(
         "validate", help="validate one published dataset directory"
     )
@@ -254,6 +266,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             negative_seed=args.negative_seed,
             force=args.force,
         )
+    elif args.command == "catalog":
+        if args.markdown_output is None:
+            result = {"datasets": load_dataset_catalog(args.root)}
+        else:
+            result = write_dataset_catalog(
+                args.root, args.markdown_output, force=args.force
+            )
     else:
         result = validate_dataset(
             args.dataset_dir,
