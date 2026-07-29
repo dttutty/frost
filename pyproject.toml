@@ -27,6 +27,7 @@ dependencies = [
 ]
 
 [project.scripts]
+frost-data = "frost.data.cli:main"
 
 [dependency-groups]
 dev = [

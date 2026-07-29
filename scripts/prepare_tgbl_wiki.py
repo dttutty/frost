@@ -11,32 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-
-def _build_reverse_csr(
-    src: np.ndarray,
-    dst: np.ndarray,
-    ts: np.ndarray,
-    eid: np.ndarray,
-    n_nodes: int,
-) -> dict[str, np.ndarray]:
-    all_src = np.concatenate([src, dst])
-    all_dst = np.concatenate([dst, src])
-    all_ts = np.concatenate([ts, ts])
-    all_eid = np.concatenate([eid, eid])
-
-    # Group by source and keep every temporal adjacency list deterministic.
-    order = np.lexsort((all_dst, all_eid, all_ts, all_src))
-    all_src = all_src[order]
-    counts = np.bincount(all_src, minlength=n_nodes)
-    indptr = np.empty(n_nodes + 1, dtype=np.int64)
-    indptr[0] = 0
-    np.cumsum(counts, out=indptr[1:])
-    return {
-        "indptr": indptr,
-        "indices": np.ascontiguousarray(all_dst[order], dtype=np.int64),
-        "ts": np.ascontiguousarray(all_ts[order], dtype=np.int64),
-        "eid": np.ascontiguousarray(all_eid[order], dtype=np.int64),
-    }
+from frost.data import build_temporal_csr
 
 
 def prepare(raw_dir: Path, output_dir: Path) -> None:
@@ -93,7 +68,7 @@ def prepare(raw_dir: Path, output_dir: Path) -> None:
     )
 
     n_nodes = int(max(src.max(), dst.max())) + 1
-    graph = _build_reverse_csr(src, dst, ts, eid, n_nodes)
+    graph = build_temporal_csr(edges, add_reverse=True, num_nodes=n_nodes)
 
     with source_edge_feat.open("rb") as f:
         raw_edge_features = np.asarray(pickle.load(f))

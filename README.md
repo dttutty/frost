@@ -58,6 +58,29 @@ uv run python scripts/prepare_tgbl_wiki.py \
 The converter links the large official negative-sample files instead of copying
 them. See the TGB command under [configuration](configs/README.md#tgb-link-prediction).
 
+Dataset transformation code is maintained in FROST rather than in the published
+artifact bundle. Use `frost-data` to build or validate the common on-disk format:
+
+```bash
+# Build the temporal CSR consumed by DatasetManager into a scratch artifact path.
+uv run frost-data build-graph DATA/LASTFM/edges.csv \
+  --output artifacts/data/LASTFM/full_graph_with_reverse_edges.npz
+
+# Generate node_role.npy after verifying that src/dst are disjoint partitions.
+uv run frost-data node-roles DATA/LASTFM/edges.csv \
+  --output artifacts/data/LASTFM/node_role.npy
+
+# Convert a plain torch.Tensor feature artifact.
+uv run frost-data convert-features DATA/WIKIPEDIA/edge_features.pt \
+  --output artifacts/data/WIKIPEDIA/edge_features.npy
+
+# Verify edges.csv, the reverse CSR, and optional feature/label row counts.
+uv run frost-data validate DATA/LASTFM
+```
+
+Generated outputs are not overwritten unless `--force` is supplied. Run
+`uv run frost-data --help` for explicit output-path and no-reverse options.
+
 ### Runtime Shape
 
 FROST uses `torchrun` with one extra rank reserved for the host/planner process:
