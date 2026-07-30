@@ -95,6 +95,13 @@ class PrecomputedNegSampler:
     def set_batch_context(self, **context: Any) -> None:
         """Accept the common per-batch hook; edge ids select negatives directly."""
 
+    def reset(self) -> None:
+        """Precomputed samples have no mutable iteration state."""
+
+    def get_last_negative_mask(self) -> None:
+        """Precomputed samples never pad their output."""
+        return None
+
     def sample(self, src_ids: torch.Tensor, edge_ids: torch.Tensor) -> torch.Tensor:
         if not self._validated:
             raise RuntimeError(

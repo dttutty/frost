@@ -76,6 +76,17 @@ class TGBEvalNegSampler:
         self._batch_ts: np.ndarray | None = None
         self._last_negative_mask: torch.Tensor | None = None
 
+    def init_from_df(self, df: object) -> None:
+        """Official negative dictionaries are initialized from pickle files."""
+        del df
+
+    def reset(self) -> None:
+        """Clear per-batch lookup state between evaluation splits."""
+        self._batch_src = None
+        self._batch_dst = None
+        self._batch_ts = None
+        self._last_negative_mask = None
+
     @staticmethod
     def _candidate_base_names(dataset: str) -> list[str]:
         normalized = dataset.strip().lower().replace("_", "-")
@@ -218,7 +229,7 @@ class TGBEvalNegSampler:
         self._last_negative_mask = valid_mask.reshape(-1)
         return result.reshape(-1)
 
-    def get_last_negative_mask(self) -> torch.Tensor:
+    def get_last_negative_mask(self) -> torch.Tensor | None:
         """Return the validity mask produced by the immediately preceding sample."""
         if self._last_negative_mask is None:
             raise RuntimeError(

@@ -1,41 +1,26 @@
-"""Temporal neighborhood samplers for the FROST host process.
-
-Three sampler implementations are provided:
-
-- :class:`NoSampler` — 0-hop; only seeds (src, dst, neg) are written.
-- :class:`NghSampler` — single-hop historical neighbor sampling backed by the
-  nanobind ``SeqSampler`` C++ extension.
-- :class:`MultiHopNghSampler` — multi-hop variant that iteratively expands
-  each neighbor tier.
-
-All samplers share the same :meth:`sample` interface and write sampled data
-into a :class:`~frost.shm.ring_buf.RingBuf` slot before committing it.
-"""
+"""Temporal neighborhood sampling into the host-to-worker ring buffer."""
 
 from __future__ import annotations
 
 import logging
 import os
 import sys
-from collections.abc import Sequence
-from typing import Any, Literal, cast
+from typing import Literal
 
 import numpy as np
-import numpy.typing as npt
 import torch
 
 from frost.models.contracts import RootExpansion
 from frost.seq_sampler import SeqSampler, TemporalGraphType
 from frost.shm.ring_buf import RingBuf
 
-Int64Array = npt.NDArray[np.int64]
 logger = logging.getLogger(__name__)
 
 
 def _resolve_root_layout(
     root_nid: torch.Tensor, root_ts: torch.Tensor
 ) -> tuple[int, int, int]:
-    """Return ``(n_src, n_neg, n_root)`` for the current batch layout."""
+    """Return ``(n_src, n_neg, n_root)`` for a root layout."""
     n_src = int(root_ts.numel())
     if n_src <= 0:
         raise ValueError("root_ts must contain at least one positive edge timestamp")
@@ -44,71 +29,85 @@ def _resolve_root_layout(
             f"root_nid length ({root_nid.numel()}) must be divisible by "
             f"root_ts length ({n_src})."
         )
-    root_width = root_nid.numel() // n_src
-    n_neg = root_width - 2
+    n_neg = root_nid.numel() // n_src - 2
     if n_neg <= 0:
         raise ValueError(
-            f"Root layout must contain src, positive dst, and at least one negative; "
-            f"got width {root_width}."
+            "Root layout must contain src, positive dst, and at least one negative; "
+            f"got width {root_nid.numel() // n_src}."
         )
     return n_src, n_neg, int(root_nid.numel())
 
 
+def _acquire_and_write_roots(
+    ring_buf: RingBuf,
+    gpu_id: int,
+    root_nid: torch.Tensor,
+    root_ts: torch.Tensor,
+    pos_eid: torch.Tensor,
+) -> tuple[dict[str, torch.Tensor], int]:
+    """Acquire a slot and write the shared root prefix once for every sampler."""
+    n_src, n_neg, n_root = _resolve_root_layout(root_nid, root_ts)
+    slot = ring_buf.acquire_slot(gpu_id)
+    if slot is None:
+        raise RuntimeError("Failed to acquire slot from ring buffer")
+
+    slot["NID"][:n_root] = root_nid.cpu()
+    ts_cpu = root_ts.cpu().to(dtype=slot["TS"].dtype)
+    slot["TS"][:n_src] = ts_cpu
+    slot["TS"][n_src : 2 * n_src] = ts_cpu
+    slot["TS"][2 * n_src : n_root] = ts_cpu.repeat_interleave(n_neg)
+    slot["EID"][:n_src] = pos_eid.cpu()
+    slot["EID"][n_src:n_root] = -1
+    return slot, n_root
+
+
+def _commit(
+    ring_buf: RingBuf,
+    gpu_id: int,
+    slot: dict[str, torch.Tensor],
+    length: int,
+) -> tuple[torch.Tensor, int]:
+    sampled_nid = slot["NID"][:length].clone()
+    ring_buf.commit_slot(gpu_id)
+    return sampled_nid, length
+
+
 def _ensure_seq_sampler_stable_mode() -> None:
-    """Prefer the single-threaded sampler path in debugger sessions.
-
-    We've observed sporadic native crashes when the OpenMP path is used under
-    debug adapters (debugpy / pydevd). Falling back to the single-threaded C++
-    implementation avoids that class of failures while preserving correctness.
-    Users can still opt back in explicitly by setting
-    ``FROST_SEQSAMPLER_NO_OMP=0``.
-    """
-    no_omp = os.getenv("FROST_SEQSAMPLER_NO_OMP")
-    if no_omp is not None:
-        return
-
-    debugger_attached = sys.gettrace() is not None
-    if debugger_attached:
+    """Prefer the single-threaded native sampler while a debugger is attached."""
+    if os.getenv("FROST_SEQSAMPLER_NO_OMP") is None and sys.gettrace() is not None:
         os.environ["FROST_SEQSAMPLER_NO_OMP"] = "1"
         logger.warning(
-            "Detected active Python debugger; defaulting SeqSampler to "
-            "single-thread mode (FROST_SEQSAMPLER_NO_OMP=1) for stability."
+            "Detected active Python debugger; using the single-thread SeqSampler."
         )
 
 
-def _enable_tgl_sampler_parity_if_requested(tgl_sampler_parity: bool) -> None:
-    if tgl_sampler_parity:
+def _enable_tgl_sampler_parity_if_requested(enabled: bool) -> None:
+    if enabled:
         os.environ["FROST_DEBUG_TGL_BATCH_SHARED_RECENT"] = "1"
         os.environ["FROST_DEBUG_TGL_UNIFORM_LOW_DEGREE_RECENT"] = "1"
 
 
+def dist_safe_tensor(value, dtype: torch.dtype) -> torch.Tensor:
+    """Detach a nanobind-owned array into ordinary torch storage."""
+    if value is None:
+        return torch.empty(0, dtype=dtype)
+    array = np.asarray(value)
+    if array.size == 0:
+        return torch.empty(0, dtype=dtype)
+    return torch.from_numpy(np.array(array, copy=True)).to(dtype)
+
+
 class NoSampler:
-    """Zero-hop sampler that writes only seed nodes into the ring buffer.
+    """Write roots only for a zero-hop model."""
 
-    Implements the :class:`~frost.sampling.protocols.NghSamplerProto`
-    interface.  ``fanout`` is always ``None`` regardless of any configuration
-    value passed at construction time; downstream code treats ``None`` as an
-    empty neighbor list.
-
-    Args:
-        graph: Temporal graph (not used; kept for interface compatibility).
-        ring_buf: Shared-memory ring buffer used to pass data to workers.
-        n_neg: Number of negative destination nodes per source edge.
-        fanout: Ignored; stored as ``None``.
-        root_expansion: Stored for layout compatibility; no neighbors are sampled.
-    """
+    fanout: tuple[()] = ()
 
     def __init__(
         self,
-        graph: TemporalGraphType,
         ring_buf: RingBuf,
-        n_neg: int = 1,  # from hydra config
-        fanout: list[int] | None = None,
         root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
-    ):
+    ) -> None:
         self.ring_buf = ring_buf
-        self.n_neg = n_neg
-        self.fanout = None  # NoSampler is always 0-hop; ignore any passed fanout
         self.root_expansion = root_expansion
 
     def sample(
@@ -120,127 +119,45 @@ class NoSampler:
         pos_eid: torch.Tensor,
         gpu_id: int,
     ) -> tuple[torch.Tensor, int]:
-        """Write seed nodes to a ring-buffer slot and return the raw sampled layout.
-
-        Args:
-            root_nid: Concatenated root node IDs ``[src | pos_dst | neg_dst×n_neg]``
-                of shape ``[n_src * (2 + n_neg)]``.
-            root_ts: Source-edge timestamps of shape ``[n_src]``.
-            sample_nid: Nodes whose neighborhoods should be sampled; ignored by
-                ``NoSampler`` because 0-hop models do not expand any roots.
-            sample_ts: Expanded timestamps aligned with ``sample_nid``; ignored
-                by ``NoSampler``.
-            pos_eid: Positive edge IDs of shape ``[n_src]``.
-            gpu_id: Target worker GPU index.
-
-        Returns:
-            A two-tuple of:
-            - ``valid_nid_raw``: Raw node-ID slice before deduplication.
-            - ``length``: Total number of entries written into the slot.
-        """
-        n_src, batch_n_neg, num_seeds = _resolve_root_layout(root_nid, root_ts)
-
-        # Wait for an empty slot
-        slot = self.ring_buf.acquire_slot(gpu_id)
-        if slot is None:
-            raise RuntimeError("Failed to acquire slot from ring buffer")
-
-        # Write seed nodes safely
-        slot["NID"][:num_seeds] = root_nid.cpu()
-        ts_cpu = root_ts.cpu().to(dtype=slot["TS"].dtype)
-        slot["TS"][:n_src] = ts_cpu
-        slot["TS"][n_src : 2 * n_src] = ts_cpu
-        slot["TS"][2 * n_src : num_seeds] = ts_cpu.repeat_interleave(batch_n_neg)
-        slot["EID"][:n_src] = pos_eid.cpu()
-        slot["EID"][n_src:num_seeds] = -1
-
-        length = num_seeds
-
-        # Slice and filter before committing to avoid race conditions
-        valid_nid_raw = slot["NID"][:length].clone()
-
-        # Commit slot only after host is done
-        self.ring_buf.commit_slot(gpu_id)
-
-        return valid_nid_raw, length
+        del sample_nid, sample_ts
+        slot, n_root = _acquire_and_write_roots(
+            self.ring_buf, gpu_id, root_nid, root_ts, pos_eid
+        )
+        return _commit(self.ring_buf, gpu_id, slot, n_root)
 
 
-def dist_safe_tensor(arr, dtype):
-    """
-    Force a deep copy to fully detach any nanobind PyCapsule backing from the array.
-    """
-    if arr is None:
-        return torch.empty(0, dtype=dtype)
+class NeighborhoodSampler:
+    """Sample any positive number of historical-neighborhood hops."""
 
-    # nanobind may return an empty ndarray proxy for zero-sized outputs.
-    # Materialize to numpy first and short-circuit to avoid touching invalid
-    # capsule-backed memory in edge cases.
-    np_arr = np.asarray(arr)
-    if np_arr.size == 0:
-        return torch.empty(0, dtype=dtype)
-
-    # np.array(..., copy=True) allocates fresh memory on the Python heap,
-    # breaking any reference to nanobind-managed capsule memory
-    np_safe = np.array(np_arr, copy=True)
-
-    # Clone and contiguous after converting back to torch ensures the simplest storage layout
-    return torch.from_numpy(np_safe).to(dtype)
-
-
-class NghSampler:
-    """Single-hop historical neighbor sampler backed by the C++ ``SeqSampler``.
-
-    For each root node the sampler queries up to ``fanout[0]`` temporally
-    valid neighbors from the CSR temporal graph using the configured strategy.
-    Results are written into the ring buffer alongside the seed nodes.
-
-    Args:
-        graph: Compiled temporal graph used by the C++ sampler.
-        fanout: One-element list containing the per-hop neighbor count.
-        ring_buf: Shared-memory ring buffer for host-to-worker transfer.
-        root_expansion: Semantic root set expanded into neighborhoods.
-        n_neg: Number of negative samples per source edge.
-        strategy: Sampling strategy — ``"uniform"``, ``"recent"``, or
-            ``"time_interval_aware"``.
-        seed: Optional RNG seed for reproducible sampling.
-        time_scaling_factor: DyGLib-style scaling factor used by
-            ``"time_interval_aware"`` sampling.
-    """
+    padding_node_id = -1
 
     def __init__(
         self,
         graph: TemporalGraphType,
-        fanout: list[int],  # from hydra config
+        fanout: list[int],
         ring_buf: RingBuf,
         root_expansion: RootExpansion,
-        n_neg: int,  # from hydra config
-        strategy: Literal[
-            "uniform", "recent", "time_interval_aware"
-        ],  # from hydra config
-        seed: int | None,  # from hydra config
+        strategy: Literal["uniform", "recent", "time_interval_aware"],
+        seed: int | None,
         time_scaling_factor: float = 0.0,
         tgl_sampler_parity: bool = False,
-    ):
+    ) -> None:
+        if not fanout or any(value <= 0 for value in fanout):
+            raise ValueError(f"fanout must contain positive hop sizes, got {fanout}.")
+        if root_expansion is not RootExpansion.ALL_ROOTS and len(fanout) > 1:
+            raise ValueError("Positive-root-only expansion currently supports one hop.")
+
         _ensure_seq_sampler_stable_mode()
         _enable_tgl_sampler_parity_if_requested(tgl_sampler_parity)
-        assert len(fanout) == 1, (
-            "Only single-hop sampling is supported in NghSampler. Use MultiHopNghSampler for multi-hop sampling."
-        )
-        self.graph = graph
-        self.fanout = fanout
         self.seq_sampler = SeqSampler(
             graph=graph,
             strategy=strategy,
             seed=seed,
             time_scaling_factor=time_scaling_factor,
         )
-        self.n_ngh = fanout[0]
+        self.fanout = tuple(fanout)
         self.ring_buf = ring_buf
         self.root_expansion = root_expansion
-        self.n_neg = n_neg
-        self.tgl_sampler_parity = tgl_sampler_parity
-        # Keep sampler input dtype aligned with temporal-graph indices to avoid
-        # unsafe casts in the nanobind/C++ boundary.
         graph_indices = getattr(graph, "indices", None)
         self._node_np_dtype = (
             graph_indices.dtype if graph_indices is not None else np.int64
@@ -250,6 +167,7 @@ class NghSampler:
         self._time_torch_dtype = torch.from_numpy(
             np.empty(0, dtype=self._time_np_dtype)
         ).dtype
+
         omp_disabled = os.getenv("FROST_SEQSAMPLER_NO_OMP", "").strip().lower() in {
             "1",
             "true",
@@ -257,10 +175,10 @@ class NghSampler:
             "on",
         }
         logger.info(
-            "NghSampler initialized with SeqSampler backend path: %s "
-            "(FROST_SEQSAMPLER_NO_OMP=%r, tgl_sampler_parity=%r)",
+            "NeighborhoodSampler initialized with %d hop(s), backend=%s, "
+            "tgl_sampler_parity=%r",
+            len(self.fanout),
             "single-thread" if omp_disabled else "OpenMP",
-            os.getenv("FROST_SEQSAMPLER_NO_OMP"),
             tgl_sampler_parity,
         )
 
@@ -273,261 +191,53 @@ class NghSampler:
         pos_eid: torch.Tensor,
         gpu_id: int,
     ) -> tuple[torch.Tensor, int]:
-        """Sample one-hop neighbors and write the full subgraph into a ring-buffer slot.
-
-        Args:
-            root_nid: Root node IDs ``[src | pos_dst | neg_dst×n_neg]``,
-                shape ``[n_src * (2 + n_neg)]``.
-            root_ts: Source-edge timestamps, shape ``[n_src]``.
-            sample_nid: Root nodes whose historical neighbors should be queried.
-            sample_ts: Timestamps aligned with ``sample_nid``; must already be
-                repeated by the caller to match ``sample_nid`` length.
-            pos_eid: Positive edge IDs, shape ``[n_src]``.
-            gpu_id: Target worker GPU index.
-
-        Returns:
-            A two-tuple of:
-            - ``valid_nid_raw``: Raw node-ID slice before deduplication.
-            - ``length``: Total entries written into the slot.
-        """
-        n_src, batch_n_neg, num_seeds = _resolve_root_layout(root_nid, root_ts)
-
         if sample_nid.shape[0] != sample_ts.shape[0]:
             raise ValueError(
-                "NghSampler requires nid/ts to have equal length before calling C++ sampler, "
-                f"got nid={sample_nid.shape[0]}, ts={sample_ts.shape[0]}"
+                "NeighborhoodSampler requires nid/ts to have equal length, "
+                f"got nid={sample_nid.shape[0]}, ts={sample_ts.shape[0]}."
             )
 
-        # Materialize contiguous numpy buffers before crossing into nanobind.
-        # This avoids passing non-contiguous views / unexpected dtypes that can
-        # trigger undefined behavior in C++ sampler code.
-        nid_np_safe = np.ascontiguousarray(
+        current_nid = np.ascontiguousarray(
             sample_nid.detach().cpu().numpy(), dtype=self._node_np_dtype
         )
-        ts_np_safe = np.ascontiguousarray(
+        current_ts = np.ascontiguousarray(
             sample_ts.detach().cpu().numpy(), dtype=self._time_np_dtype
         )
-
-        # Wait for an empty slot
-        slot = self.ring_buf.acquire_slot(gpu_id)
-        if slot is None:
-            raise RuntimeError("Failed to acquire slot from ring buffer")
-
-        # Write seed nodes safely
-        slot["NID"][:num_seeds] = root_nid.cpu()
-        ts_cpu = root_ts.cpu().to(dtype=slot["TS"].dtype)
-        slot["TS"][:n_src] = ts_cpu
-        slot["TS"][n_src : 2 * n_src] = ts_cpu
-        slot["TS"][2 * n_src : num_seeds] = ts_cpu.repeat_interleave(batch_n_neg)
-        slot["EID"][:n_src] = pos_eid.cpu()
-        slot["EID"][n_src:num_seeds] = -1
-
-        if nid_np_safe.size == 0 or self.n_ngh <= 0:
-            n_tensor = torch.empty(0, dtype=root_nid.dtype)
-            e_tensor = torch.empty(0, dtype=pos_eid.dtype)
-            t_tensor = torch.empty(0, dtype=self._time_torch_dtype)
-        else:
-            # Get neighbors from C++ nanobind backend
-            ngh_nid, ngh_eid, ngh_ts = self.seq_sampler.get_historical_neighbors(
-                cast(Sequence[int], nid_np_safe),
-                cast(Any, ts_np_safe),
-                self.n_ngh,
-            )
-
-            # Safely convert nanobind outputs to plain tensors
-            n_tensor = dist_safe_tensor(ngh_nid, root_nid.dtype).reshape(-1)
-            e_tensor = dist_safe_tensor(ngh_eid, pos_eid.dtype).reshape(-1)
-            t_tensor = dist_safe_tensor(ngh_ts, self._time_torch_dtype).reshape(-1)
-
-        num_out = n_tensor.numel()
-
-        # Write sampled features to shared memory
-        slot["NID"][num_seeds : num_seeds + num_out] = n_tensor
-        slot["TS"][num_seeds : num_seeds + num_out] = t_tensor
-        slot["EID"][num_seeds : num_seeds + num_out] = e_tensor
-
-        length = num_seeds + num_out
-
-        # Slice and filter before committing
-        valid_nid_raw = slot["NID"][:length].clone()
-
-        # Commit slot only after host is done
-        self.ring_buf.commit_slot(gpu_id)
-
-        return valid_nid_raw, length
-
-
-class MultiHopNghSampler:
-    """Multi-hop historical neighbor sampler for non-memory-based models.
-
-    Iteratively expands each tier of neighbors by calling the ``SeqSampler``
-    C++ backend for each hop in ``fanout``.  Padding nodes (``-1``) are
-    skipped during sampling but retained in the output layout for positional
-    consistency.
-
-    Note:
-        Memory-based encoders (TGN, JODIE, APAN) are not supported because the
-        multi-hop layout conflicts with their ``box_update`` accounting.
-
-    Args:
-        graph: Compiled temporal graph used by the C++ sampler.
-        fanout: Per-hop neighbor counts, e.g. ``[10, 5]`` for 2-hop sampling.
-        ring_buf: Shared-memory ring buffer for host-to-worker transfer.
-        n_neg: Number of negative samples per source edge.
-        strategy: Sampling strategy — ``"uniform"``, ``"recent"``, or
-            ``"time_interval_aware"``.
-        seed: Optional RNG seed for reproducibility.
-        root_expansion: Semantic root set expanded into neighborhoods.
-    """
-
-    padding_node_id: int
-
-    def __init__(
-        self,
-        graph: TemporalGraphType,
-        fanout: list[int],  # from hydra config
-        ring_buf: RingBuf,
-        n_neg: int,  # from hydra config
-        strategy: Literal[
-            "uniform", "recent", "time_interval_aware"
-        ],  # from hydra config
-        seed: int | None,  # from hydra config
-        time_scaling_factor: float = 0.0,
-        root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
-        tgl_sampler_parity: bool = False,
-    ):
-        _ensure_seq_sampler_stable_mode()
-        _enable_tgl_sampler_parity_if_requested(tgl_sampler_parity)
-        self.sampler = SeqSampler(
-            graph=graph,
-            strategy=strategy,
-            seed=seed,
-            time_scaling_factor=time_scaling_factor,
+        slot, n_root = _acquire_and_write_roots(
+            self.ring_buf, gpu_id, root_nid, root_ts, pos_eid
         )
-        self.fanout = fanout
-        self.ring_buf = ring_buf
-        self.n_neg = n_neg
-        self.padding_node_id = -1
-        if root_expansion is not RootExpansion.ALL_ROOTS:
-            raise ValueError("Multi-hop sampling requires all-root expansion.")
-        self.root_expansion = root_expansion
-        self.tgl_sampler_parity = tgl_sampler_parity
-        graph_indices = getattr(graph, "indices", None)
-        self._node_np_dtype = (
-            graph_indices.dtype if graph_indices is not None else np.int64
-        )
-        graph_ts = getattr(graph, "ts", None)
-        self._time_np_dtype = graph_ts.dtype if graph_ts is not None else np.int64
-        self._time_torch_dtype = torch.from_numpy(
-            np.empty(0, dtype=self._time_np_dtype)
-        ).dtype
 
-    def sample(
-        self,
-        root_nid: torch.Tensor,
-        root_ts: torch.Tensor,
-        sample_nid: torch.Tensor,
-        sample_ts: torch.Tensor,
-        pos_eid: torch.Tensor,
-        gpu_id: int,
-    ) -> tuple[torch.Tensor, int]:
-        """Sample multi-hop historical neighbors by repeatedly calling ``SeqSampler``."""
-        padding_node_id = self.padding_node_id
-        fanout = self.fanout
-        n_src, batch_n_neg, num_seeds = _resolve_root_layout(root_nid, root_ts)
-
-        nid_np = np.ascontiguousarray(
-            cast(np.ndarray, sample_nid.cpu().numpy()), dtype=self._node_np_dtype
-        )
-        ts_np = np.ascontiguousarray(
-            cast(np.ndarray, sample_ts.cpu().numpy()), dtype=self._time_np_dtype
-        )
-        assert nid_np.shape[0] == ts_np.shape[0], "nid and ts must have the same length"
-
-        if len(fanout) == 0:
-            raise ValueError("n_ngh_per_hop must contain at least one hop")
-
-        for hop_idx, n_ngh in enumerate(fanout):
-            if n_ngh <= 0:
-                raise ValueError(
-                    f"n_ngh_per_hop[{hop_idx}] must be positive, got {n_ngh}"
-                )
-
-        # Wait for an empty slot
-        slot = self.ring_buf.acquire_slot(gpu_id)
-        if slot is None:
-            raise RuntimeError("Failed to acquire slot from ring buffer")
-
-        # Write seed nodes safely
-        slot["NID"][:num_seeds] = root_nid.cpu()
-        ts_cpu = root_ts.cpu().to(dtype=slot["TS"].dtype)
-        slot["TS"][:n_src] = ts_cpu
-        slot["TS"][n_src : 2 * n_src] = ts_cpu
-        slot["TS"][2 * n_src : num_seeds] = ts_cpu.repeat_interleave(batch_n_neg)
-        slot["EID"][:n_src] = pos_eid.cpu()
-        slot["EID"][n_src:num_seeds] = -1
-
-        cur_nid = nid_np
-        cur_ts = ts_np
-
-        start = num_seeds
+        start = n_root
         end = start
-        for n_ngh in fanout:
-            hop_size = len(cur_nid)
-            valid_mask = cur_nid != padding_node_id
-            end += len(cur_nid) * n_ngh
+        for n_neighbors in self.fanout:
+            parent_count = len(current_nid)
+            valid_parent = current_nid != self.padding_node_id
+            end += parent_count * n_neighbors
+            sampled_nid = slot["NID"][start:end].reshape(parent_count, n_neighbors)
+            sampled_eid = slot["EID"][start:end].reshape(parent_count, n_neighbors)
+            sampled_ts = slot["TS"][start:end].reshape(parent_count, n_neighbors)
 
-            sampled_nodes = slot["NID"][start:end].reshape(hop_size, n_ngh)
-            sampled_edges = slot["EID"][start:end].reshape(hop_size, n_ngh)
-            sampled_times = slot["TS"][start:end].reshape(hop_size, n_ngh)
-
-            # Slots are reused by the ring buffer.  Rows whose parent is padding
-            # are deliberately skipped below, so clear the entire tier before
-            # writing valid rows; otherwise those skipped rows can retain nodes
-            # from an older batch and be expanded as real parents on the next
-            # hop.
-            sampled_nodes.fill_(padding_node_id)
-            sampled_edges.fill_(-1)
-            sampled_times.zero_()
-
-            if np.any(valid_mask):
-                valid_nodes = cur_nid[valid_mask]
-                valid_times = cur_ts[valid_mask]
-                valid_nodes_safe = valid_nodes.copy()
-                valid_times_safe = valid_times.copy()
-
-                out_nodes, out_edges, out_times = self.sampler.get_historical_neighbors(
-                    valid_nodes_safe,
-                    valid_times_safe,
-                    n_ngh,
+            sampled_nid.fill_(self.padding_node_id)
+            sampled_eid.fill_(-1)
+            sampled_ts.zero_()
+            if np.any(valid_parent):
+                out_nid, out_eid, out_ts = self.seq_sampler.get_historical_neighbors(
+                    current_nid[valid_parent].copy(),
+                    current_ts[valid_parent].copy(),
+                    n_neighbors,
                 )
+                sampled_nid[valid_parent] = dist_safe_tensor(
+                    out_nid, root_nid.dtype
+                ).reshape(-1, n_neighbors)
+                sampled_eid[valid_parent] = dist_safe_tensor(
+                    out_eid, pos_eid.dtype
+                ).reshape(-1, n_neighbors)
+                sampled_ts[valid_parent] = dist_safe_tensor(
+                    out_ts, self._time_torch_dtype
+                ).reshape(-1, n_neighbors)
 
-                # Use defensive conversion to avoid DLPack / capsule lifetime issues
-                # from nanobind-managed arrays.
-                out_nodes_tensor = dist_safe_tensor(out_nodes, root_nid.dtype).reshape(
-                    -1, n_ngh
-                )
-                out_edges_tensor = dist_safe_tensor(out_edges, pos_eid.dtype).reshape(
-                    -1, n_ngh
-                )
-                out_times_tensor = dist_safe_tensor(
-                    out_times, self._time_torch_dtype
-                ).reshape(-1, n_ngh)
-
-                sampled_nodes[valid_mask] = out_nodes_tensor
-                sampled_edges[valid_mask] = out_edges_tensor
-                sampled_times[valid_mask] = out_times_tensor
-
-            cur_nid = slot["NID"][start:end].numpy().reshape(-1)
-            cur_ts = slot["TS"][start:end].numpy().reshape(-1)
+            current_nid = slot["NID"][start:end].numpy().reshape(-1)
+            current_ts = slot["TS"][start:end].numpy().reshape(-1)
             start = end
 
-        length = end
-
-        # Slice and filter before committing
-        valid_nid_raw = slot["NID"][:length].clone()
-
-        # Commit slot only after host is done
-        self.ring_buf.commit_slot(gpu_id)
-
-        return valid_nid_raw, length
+        return _commit(self.ring_buf, gpu_id, slot, end)

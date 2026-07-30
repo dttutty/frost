@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 import torch
@@ -9,9 +8,9 @@ from frost.models.contracts import RootExpansion
 
 
 @runtime_checkable
-class NghSamplerProto(Protocol):
+class NeighborhoodSamplerProto(Protocol):
     @property
-    def fanout(self) -> Sequence[int] | None: ...
+    def fanout(self) -> tuple[int, ...]: ...
 
     @property
     def root_expansion(self) -> RootExpansion: ...

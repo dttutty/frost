@@ -31,10 +31,11 @@ from frost.launch.storage import (
     prepare_ring_buffer,
     resolve_batch_layout,
 )
-from frost.sampling.protocols import NghSamplerProto
+from frost.sampling.protocols import NeighborhoodSamplerProto
 from frost.runtime.host._plan_router import detect_gpu_topology
-from frost.neg_sampler import PrecomputedNegSampler, RandomNegLinkSampler
-from frost.sampling.ngh_sampler import MultiHopNghSampler, NghSampler, NoSampler
+from frost.neg_sampler import RandomNegLinkSampler
+from frost.neg_sampler.protocols import NegSamplerProto
+from frost.sampling.ngh_sampler import NeighborhoodSampler, NoSampler
 from frost.models.contracts import (
     InteractionMailbox,
     MemoryState,
@@ -193,16 +194,9 @@ def launch(cfg: DictConfig):
     nccl_ddp, nccl_p2p = create_worker_process_groups(env)
 
     # Determine maximum n_neg between train and eval for shared memory sizing
-    neg_sampler_cfg = cfg.get("neg_sampler", {})
-    if "_target_" in neg_sampler_cfg:
-        train_n_neg = neg_sampler_cfg.get("n_neg", cfg.n_neg)
-        eval_n_neg = train_n_neg
-    elif "train" in neg_sampler_cfg and "eval" in neg_sampler_cfg:
-        train_n_neg = neg_sampler_cfg.train.get("n_neg", cfg.n_neg)
-        eval_n_neg = neg_sampler_cfg.eval.get("n_neg", cfg.n_neg)
-    else:
-        train_n_neg = cfg.n_neg
-        eval_n_neg = cfg.n_neg
+    neg_sampler_cfg = cfg.neg_sampler
+    train_n_neg = neg_sampler_cfg.train.get("n_neg", cfg.n_neg)
+    eval_n_neg = neg_sampler_cfg.eval.get("n_neg", cfg.n_neg)
     eval_metric = resolve_eval_metric(cfg.get("eval_metric", "ap"))
     if eval_metric == "ap" and eval_n_neg != 1:
         raise ValueError(
@@ -246,87 +240,58 @@ def launch(cfg: DictConfig):
             raise RuntimeError("Host rank must load graph and dataframe before launch.")
 
         neg_sampler_cfg = cfg.neg_sampler
-        # Support legacy flat configs and current nested train/eval configs.
         _shared_kwargs = dict(n_nodes=n_nodes, dataset=cfg.dataset)
-        if "_target_" in neg_sampler_cfg:
-            # Flat format — same sampler for train and eval
-            _sampler = instantiate(neg_sampler_cfg, **_shared_kwargs)
-            neg_sampler_train: PrecomputedNegSampler = _sampler
-            neg_sampler_eval: PrecomputedNegSampler = _sampler
-        else:
-            # Nested format — separate train / eval samplers
-            _common = dict(
-                seed=neg_sampler_cfg.get("seed"),
+        _common = dict(seed=neg_sampler_cfg.get("seed"))
+        train_uses_dst_partition = _uses_dst_partition_random_sampler(
+            neg_sampler_cfg.train
+        )
+        eval_uses_dst_partition = _uses_dst_partition_random_sampler(
+            neg_sampler_cfg.eval
+        )
+        candidate_nodes = None
+        if train_uses_dst_partition or eval_uses_dst_partition:
+            candidate_nodes = RandomNegLinkSampler.candidates_from_dst_nodes(
+                df["dst"].to_numpy(copy=False), n_nodes=n_nodes
             )
-            train_uses_dst_partition = _uses_dst_partition_random_sampler(
-                neg_sampler_cfg.train
+            logger.info(
+                "Built %d destination-partition negative candidates from the "
+                "already loaded edge frame.",
+                candidate_nodes.numel(),
             )
-            eval_uses_dst_partition = _uses_dst_partition_random_sampler(
-                neg_sampler_cfg.eval
-            )
-            candidate_nodes = None
-            if train_uses_dst_partition or eval_uses_dst_partition:
-                candidate_nodes = RandomNegLinkSampler.candidates_from_dst_nodes(
-                    df["dst"].to_numpy(copy=False), n_nodes=n_nodes
-                )
-                logger.info(
-                    "Built %d destination-partition negative candidates from the "
-                    "already loaded edge frame.",
-                    candidate_nodes.numel(),
-                )
-            train_candidate_kwargs = (
-                {"candidate_nodes": candidate_nodes} if train_uses_dst_partition else {}
-            )
-            eval_candidate_kwargs = (
-                {"candidate_nodes": candidate_nodes} if eval_uses_dst_partition else {}
-            )
-            # Make sure n_neg uses the specific sub-config or falls back to global
-            neg_sampler_train = instantiate(
-                neg_sampler_cfg.train,
-                **_shared_kwargs,
-                **_common,
-                **train_candidate_kwargs,
-                n_neg=train_n_neg,
-            )
-            neg_sampler_eval = instantiate(
-                neg_sampler_cfg.eval,
-                **_shared_kwargs,
-                **_common,
-                **eval_candidate_kwargs,
-                n_neg=eval_n_neg,
-            )
-        # Historical / inductive samplers need the full edge DataFrame to build
-        # their candidate edge sets.  Call init_from_df() if the sampler supports it.
+        train_candidate_kwargs = (
+            {"candidate_nodes": candidate_nodes} if train_uses_dst_partition else {}
+        )
+        eval_candidate_kwargs = (
+            {"candidate_nodes": candidate_nodes} if eval_uses_dst_partition else {}
+        )
+        neg_sampler_train: NegSamplerProto = instantiate(
+            neg_sampler_cfg.train,
+            **_shared_kwargs,
+            **_common,
+            **train_candidate_kwargs,
+            n_neg=train_n_neg,
+        )
+        neg_sampler_eval: NegSamplerProto = instantiate(
+            neg_sampler_cfg.eval,
+            **_shared_kwargs,
+            **_common,
+            **eval_candidate_kwargs,
+            n_neg=eval_n_neg,
+        )
         assert df is not None
         for _ns in (neg_sampler_train, neg_sampler_eval):
-            if callable(getattr(_ns, "init_from_df", None)):
-                _ns.init_from_df(df)
-        ngh_sampler: NghSamplerProto
+            _ns.init_from_df(df)
+        ngh_sampler: NeighborhoodSamplerProto
         if not fanout:
             ngh_sampler = NoSampler(
-                graph=graph,
-                ring_buf=ring_buf,
-                n_neg=max_n_neg,
-                root_expansion=root_expansion,
-            )
-        elif len(fanout) == 1:
-            ngh_sampler = NghSampler(
-                graph=graph,
-                fanout=fanout,
                 ring_buf=ring_buf,
                 root_expansion=root_expansion,
-                n_neg=max_n_neg,
-                strategy=ngh_sampler_strategy,
-                seed=cfg.seed,
-                time_scaling_factor=time_scaling_factor,
-                tgl_sampler_parity=tgl_sampler_parity,
             )
         else:
-            ngh_sampler = MultiHopNghSampler(
+            ngh_sampler = NeighborhoodSampler(
                 graph=graph,
                 fanout=fanout,
                 ring_buf=ring_buf,
-                n_neg=max_n_neg,
                 strategy=ngh_sampler_strategy,
                 seed=cfg.seed,
                 time_scaling_factor=time_scaling_factor,

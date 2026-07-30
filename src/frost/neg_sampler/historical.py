@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+from frost.neg_sampler._contextual import draw_negative_destinations
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -102,37 +104,6 @@ class HistoricalNegLinkSampler:
         self._batch_end_time = batch_end_time
 
     # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _draw_for_sources(
-        self, src_ids: np.ndarray, historical_edges: set[tuple[int, int]]
-    ) -> np.ndarray:
-        assert self._unique_dst is not None
-        assert self._batch_src is not None and self._batch_dst is not None
-        current_by_src: dict[int, set[int]] = {}
-        for src, dst in zip(self._batch_src.tolist(), self._batch_dst.tolist()):
-            current_by_src.setdefault(src, set()).add(dst)
-        historical_by_src: dict[int, list[int]] = {}
-        for src, dst in sorted(historical_edges):
-            if dst not in current_by_src.get(src, set()):
-                historical_by_src.setdefault(src, []).append(dst)
-
-        result: list[int] = []
-        for src in src_ids.tolist():
-            current = current_by_src.get(src, set())
-            preferred = historical_by_src.get(src, [])
-            fallback = [dst for dst in self._unique_dst.tolist() if dst not in current]
-            candidates = preferred or fallback
-            if not candidates:
-                raise RuntimeError(
-                    f"No valid destination negative remains for source {src}."
-                )
-            for _ in range(self.n_neg):
-                result.append(candidates[self._rng.randint(0, len(candidates))])
-        return np.asarray(result, dtype=np.int64)
-
-    # ------------------------------------------------------------------
     # FROST interface
     # ------------------------------------------------------------------
 
@@ -162,5 +133,19 @@ class HistoricalNegLinkSampler:
                 self._dst_np[historical_mask].tolist(),
             )
         )
-        neg_dsts = self._draw_for_sources(src_ids.cpu().numpy(), historical)
+        assert self._unique_dst is not None
+        assert self._batch_src is not None and self._batch_dst is not None
+        neg_dsts = draw_negative_destinations(
+            src_ids=src_ids.cpu().numpy(),
+            observed_edges=historical,
+            batch_src=self._batch_src,
+            batch_dst=self._batch_dst,
+            all_destinations=self._unique_dst,
+            n_neg=self.n_neg,
+            rng=self._rng,
+        )
         return torch.from_numpy(neg_dsts)
+
+    def get_last_negative_mask(self) -> None:
+        """Historical sampling never pads its output."""
+        return None

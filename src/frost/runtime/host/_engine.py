@@ -22,7 +22,7 @@ from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.datatypes.sampled_layout import SampledLayoutView
 from frost.models.contracts import RootExpansion
-from frost.sampling.protocols import NghSamplerProto
+from frost.sampling.protocols import NeighborhoodSamplerProto
 from frost.runtime._thread_base import (
     destroy_process_group,
     join_thread,
@@ -31,7 +31,7 @@ from frost.runtime._thread_base import (
 from frost.runtime.host import PlanRouter, Scatter
 from frost.runtime.host._batch_balance import make_balance_plan
 from frost.runtime.host.protocols import AnalyzerProto
-from frost.neg_sampler import PrecomputedNegSampler
+from frost.neg_sampler.protocols import NegSamplerProto
 
 logger = logging.getLogger(__name__)
 
@@ -113,9 +113,9 @@ class Host:
         has_nfeat: bool,
         has_mem: bool,
         df: pd.DataFrame,
-        neg_sampler_train: PrecomputedNegSampler,
-        neg_sampler_eval: PrecomputedNegSampler,
-        ngh_sampler: NghSamplerProto,
+        neg_sampler_train: NegSamplerProto,
+        neg_sampler_eval: NegSamplerProto,
+        ngh_sampler: NeighborhoodSamplerProto,
         env: Env,
         start_time: float,
         planner: AnalyzerProto,
@@ -431,11 +431,8 @@ class Host:
         if split != "train" and not getattr(
             self, "share_neg_sampler_across_splits", False
         ):
-            reset = getattr(self.neg_sampler_eval, "reset", None)
-            if getattr(self, "reset_eval_neg_sampler_each_epoch", True) and callable(
-                reset
-            ):
-                reset()
+            if getattr(self, "reset_eval_neg_sampler_each_epoch", True):
+                self.neg_sampler_eval.reset()
 
         # Use make_balance_plan for balanced GPU distribution
         per_gpu_batch_size = (
@@ -568,23 +565,16 @@ class Host:
             if split == "train" or self.share_neg_sampler_across_splits
             else self.neg_sampler_eval
         )
-        # Historical / inductive samplers need per-batch context to determine
-        # which edges are "current" vs "historical".  Feed it if supported.
-        if callable(getattr(neg_sampler, "set_batch_context", None)):
-            import numpy as np
-
-            neg_sampler.set_batch_context(
-                batch_src=edges["src"].to_numpy(dtype=np.int64),
-                batch_dst=edges["dst"].to_numpy(dtype=np.int64),
-                batch_start_time=float(edges["time"].min()),
-                batch_end_time=float(edges["time"].max()),
-                batch_ts=edges["time"].to_numpy(dtype=np.float64),
-            )
+        neg_sampler.set_batch_context(
+            batch_src=edges["src"].to_numpy(dtype=np.int64),
+            batch_dst=edges["dst"].to_numpy(dtype=np.int64),
+            batch_start_time=float(edges["time"].min()),
+            batch_end_time=float(edges["time"].max()),
+            batch_ts=edges["time"].to_numpy(dtype=np.float64),
+        )
         neg_dst = neg_sampler.sample(src, eid)
-        neg_valid_mask = None
-        get_negative_mask = getattr(neg_sampler, "get_last_negative_mask", None)
-        if callable(get_negative_mask):
-            neg_valid_mask = get_negative_mask()
+        neg_valid_mask = neg_sampler.get_last_negative_mask()
+        if neg_valid_mask is not None:
             if neg_valid_mask.shape != neg_dst.shape:
                 raise ValueError(
                     "Negative validity mask must match sampled negatives: "

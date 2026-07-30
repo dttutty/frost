@@ -124,6 +124,14 @@ class RandomNegLinkSampler:
         self._generator = torch.Generator(device="cpu")
         self._generator.manual_seed(self.seed)
 
+    def init_from_df(self, df: object) -> None:
+        """Random candidates are fully initialized by the constructor."""
+        del df
+
+    def get_last_negative_mask(self) -> None:
+        """Random sampling never pads its output."""
+        return None
+
     def set_batch_context(
         self,
         *,
