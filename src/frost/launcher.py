@@ -231,6 +231,7 @@ def launch(cfg: DictConfig):
     if env.is_host:
         # Launch host process
         from frost.runtime.host._engine import Host
+        from frost.runtime.host._config import HostOptions, HostResources
         from frost.runtime.host.analyzer import AccessPlanAnalyzer
         from frost.shm._core import set_as_host
 
@@ -304,43 +305,50 @@ def launch(cfg: DictConfig):
         if_carry_over_route: bool = bool(cfg.get("if_carry_over_route", False))
         dispatch_host(
             lambda: Host(
-                has_nfeat=has_nfeat,
-                has_mem=has_mem,
-                df=df,
-                env=env,
-                start_time=start,
-                planner=planner,
-                batch_size=per_gpu_batch_size,
-                neg_sampler_train=neg_sampler_train,
-                neg_sampler_eval=neg_sampler_eval,
-                ngh_sampler=ngh_sampler,
-                time_dtype=RUNTIME_DTYPES.timestamp_torch,
-                n_epoch=cfg.epoch,
-                patience=cfg.patience,
-                gpu_topo=gpu_topo,
-                if_carry_over_route=if_carry_over_route,
-                show_tqdm=bool(cfg.get("tqdm", False)),
-                no_memory_queue_size=no_memory_queue_size,
-                output_dir=output_dir,
-                reset_eval_neg_sampler_each_epoch=bool(
-                    cfg.get("reset_eval_neg_sampler_each_epoch", False)
+                resources=HostResources(
+                    dataframe=df,
+                    train_negative_sampler=neg_sampler_train,
+                    eval_negative_sampler=neg_sampler_eval,
+                    neighborhood_sampler=ngh_sampler,
+                    env=env,
+                    analyzer=planner,
+                    gpu_topology=gpu_topo,
                 ),
-                share_neg_sampler_across_splits=bool(
-                    cfg.get("share_neg_sampler_across_splits", False)
+                options=HostOptions(
+                    has_node_features=has_nfeat,
+                    has_dynamic_state=has_mem,
+                    start_time=start,
+                    batch_size=per_gpu_batch_size,
+                    eval_batch_size=eval_per_gpu_batch_size,
+                    timestamp_dtype=RUNTIME_DTYPES.timestamp_torch,
+                    epochs=cfg.epoch,
+                    patience=cfg.patience,
+                    carry_over_route=if_carry_over_route,
+                    show_progress=bool(cfg.get("tqdm", False)),
+                    no_memory_queue_size=no_memory_queue_size,
+                    output_dir=output_dir,
+                    reset_eval_sampler_each_epoch=bool(
+                        cfg.get("reset_eval_neg_sampler_each_epoch", False)
+                    ),
+                    share_negative_sampler_across_splits=bool(
+                        cfg.get("share_neg_sampler_across_splits", False)
+                    ),
+                    normalize_event_time=bool(
+                        cfg.get("normalize_event_time", False)
+                    ),
+                    persist_all_updates_to_cpu=(
+                        bool(cfg.get("persist_all_updates_to_cpu", False))
+                        or use_shm_instead
+                    ),
+                    dynamic_state_ablation=dynamic_state_ablation,
+                    eval_metric=eval_metric,
                 ),
-                normalize_event_time=bool(cfg.get("normalize_event_time", False)),
-                persist_all_updates_to_cpu=bool(
-                    cfg.get("persist_all_updates_to_cpu", False)
-                )
-                or use_shm_instead,
-                dynamic_state_ablation=dynamic_state_ablation,
-                eval_metric=eval_metric,
-                eval_batch_size=eval_per_gpu_batch_size,
             )
         )
 
     else:
         # Launch worker process
+        from frost.runtime.worker._config import WorkerOptions, WorkerResources
         from frost.runtime.worker._engine import Worker
 
         assert nccl_ddp is not None, "Worker rank must be in nccl group"
@@ -354,29 +362,33 @@ def launch(cfg: DictConfig):
         )
         dispatch_worker(
             lambda: Worker(
-                n_neg=max_n_neg,
-                mem_box_store=shared,
-                ring_buf=ring_buf,
-                save_to=output_dir,
-                nfeat=nfeat,
-                efeat=efeat,
-                env=env,
-                nccl_ddp=nccl_ddp,
-                nccl_p2p=nccl_p2p,
-                mem_updater=mem_updater,
-                encoder=encoder,
-                predictor=predictor,
-                mailbox_router=mailbox_router,
-                optimizer=cfg.optimizer,
-                lr=cfg.lr,
-                mail_combine=mail_combine,
-                execution_plan=execution_plan,
-                use_shm_instead=use_shm_instead,
-                dynamic_state_ablation=dynamic_state_ablation,
-                compile_model=cfg.get("compile", True),
-                amp=bool(cfg.compute.amp),
-                no_memory_queue_size=no_memory_queue_size,
-                cpu_benchmark_pid_list=cpu_benchmark_pid_list,
-                eval_metric=eval_metric,
+                resources=WorkerResources(
+                    dynamic_store=shared,
+                    node_features=nfeat,
+                    edge_features=efeat,
+                    env=env,
+                    ddp_group=nccl_ddp,
+                    p2p_group=nccl_p2p,
+                    memory_updater=mem_updater,
+                    encoder=encoder,
+                    predictor=predictor,
+                    ring_buffer=ring_buf,
+                    mailbox_router=mailbox_router,
+                ),
+                options=WorkerOptions(
+                    max_negative_samples=max_n_neg,
+                    checkpoint_dir=output_dir,
+                    optimizer=cfg.optimizer,
+                    learning_rate=cfg.lr,
+                    mail_combine=mail_combine,
+                    execution_plan=execution_plan,
+                    use_shared_memory_fetch=use_shm_instead,
+                    dynamic_state_ablation=dynamic_state_ablation,
+                    compile_model=cfg.get("compile", True),
+                    amp=bool(cfg.compute.amp),
+                    no_memory_queue_size=no_memory_queue_size,
+                    cpu_benchmark_pid_list=cpu_benchmark_pid_list,
+                    eval_metric=eval_metric,
+                ),
             )
         )

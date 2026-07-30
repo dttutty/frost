@@ -22,7 +22,6 @@ from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.datatypes.sampled_layout import SampledLayoutView
 from frost.models.contracts import RootExpansion
-from frost.sampling.protocols import NeighborhoodSamplerProto
 from frost.runtime._thread_base import (
     destroy_process_group,
     join_thread,
@@ -30,8 +29,7 @@ from frost.runtime._thread_base import (
 )
 from frost.runtime.host import PlanRouter, Scatter
 from frost.runtime.host._batch_balance import make_balance_plan
-from frost.runtime.host.protocols import AnalyzerProto
-from frost.neg_sampler.protocols import NegSamplerProto
+from frost.runtime.host._config import HostOptions, HostResources
 
 logger = logging.getLogger(__name__)
 
@@ -110,64 +108,41 @@ class Host:
 
     def __init__(
         self,
-        has_nfeat: bool,
-        has_mem: bool,
-        df: pd.DataFrame,
-        neg_sampler_train: NegSamplerProto,
-        neg_sampler_eval: NegSamplerProto,
-        ngh_sampler: NeighborhoodSamplerProto,
-        env: Env,
-        start_time: float,
-        planner: AnalyzerProto,
-        gpu_topo: list,
-        batch_size: int,
-        time_dtype: torch.dtype,
-        n_epoch: int,
-        patience: int,
-        if_carry_over_route: bool = False,
-        show_tqdm: bool = False,
-        no_memory_queue_size: int = 4,
-        output_dir: str | None = None,
-        reset_eval_neg_sampler_each_epoch: bool = False,
-        share_neg_sampler_across_splits: bool = False,
-        normalize_event_time: bool = False,
-        persist_all_updates_to_cpu: bool = False,
-        dynamic_state_ablation: DynamicStateAblation | None = None,
-        eval_metric: Literal["ap", "mrr"] = "ap",
-        eval_batch_size: int | None = None,
+        resources: HostResources,
+        options: HostOptions,
     ) -> None:
-        self.neg_sampler_train = neg_sampler_train
-        self.neg_sampler_eval = neg_sampler_eval
-        self.ngh_sampler = ngh_sampler
-        self.start_time = start_time
-        self.has_nfeat = has_nfeat
-        self.has_mem = has_mem
-        self.n_gpu = env.n_gpu
-        self.batch_size = batch_size
-        self.eval_batch_size = (
-            batch_size if eval_batch_size is None else eval_batch_size
-        )
+        self.neg_sampler_train = resources.train_negative_sampler
+        self.neg_sampler_eval = resources.eval_negative_sampler
+        self.ngh_sampler = resources.neighborhood_sampler
+        self.start_time = options.start_time
+        self.has_nfeat = options.has_node_features
+        self.has_mem = options.has_dynamic_state
+        self.n_gpu = resources.env.n_gpu
+        self.batch_size = options.batch_size
+        self.eval_batch_size = options.eval_batch_size
         if self.eval_batch_size < 1:
             raise ValueError("eval_batch_size must be >= 1.")
-        self.analyzer = planner
-        self.show_tqdm = show_tqdm
-        self.time_dtype = time_dtype
-        self.reset_eval_neg_sampler_each_epoch = reset_eval_neg_sampler_each_epoch
-        self.share_neg_sampler_across_splits = share_neg_sampler_across_splits
-        self.normalize_event_time = normalize_event_time
-        if eval_metric not in {"ap", "mrr"}:
+        self.analyzer = resources.analyzer
+        self.show_tqdm = options.show_progress
+        self.time_dtype = options.timestamp_dtype
+        self.reset_eval_neg_sampler_each_epoch = options.reset_eval_sampler_each_epoch
+        self.share_neg_sampler_across_splits = (
+            options.share_negative_sampler_across_splits
+        )
+        self.normalize_event_time = options.normalize_event_time
+        if options.eval_metric not in {"ap", "mrr"}:
             raise ValueError(
-                f"Unsupported eval_metric={eval_metric!r}; expected 'ap' or 'mrr'."
+                f"Unsupported eval_metric={options.eval_metric!r}; expected 'ap' or 'mrr'."
             )
-        self.eval_metric = eval_metric
+        self.eval_metric = options.eval_metric
         self.dynamic_state_ablation = (
-            dynamic_state_ablation
-            if dynamic_state_ablation is not None
+            options.dynamic_state_ablation
+            if options.dynamic_state_ablation is not None
             else DynamicStateAblation(name="baseline")
         )
-        if no_memory_queue_size < 1:
+        if options.no_memory_queue_size < 1:
             raise ValueError("no_memory_queue_size must be >= 1.")
-        self.no_memory_queue_size = no_memory_queue_size
+        self.no_memory_queue_size = options.no_memory_queue_size
 
         self.stop_ev = threading.Event()
         self.mini_batch_idx = 0
@@ -181,8 +156,8 @@ class Host:
             test_auc=0.0,
             test_ap=0.0,
         )
-        self.total_epoch = n_epoch
-        self.patience = patience
+        self.total_epoch = options.epochs
+        self.patience = options.patience
         self.patience_counter = 0
         self.last_epoch_result: Result | None = None
         self._shutdown_done = False
@@ -191,13 +166,13 @@ class Host:
         self._scatter_q_put_s_curve: list[float] = []
 
         self._init_pipeline(
-            env,
-            gpu_topo,
-            if_carry_over_route,
-            output_dir,
-            persist_all_updates_to_cpu,
+            resources.env,
+            resources.gpu_topology,
+            options.carry_over_route,
+            options.output_dir,
+            options.persist_all_updates_to_cpu,
         )
-        self._init_dataset(df)
+        self._init_dataset(resources.dataframe)
 
     def _init_pipeline(
         self,
