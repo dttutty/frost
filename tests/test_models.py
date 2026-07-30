@@ -1,38 +1,75 @@
-"""Tests for model components: LinkPredictor, TimeEncoder, MemoryUpdater."""
+"""Tests for model components, structured heads, and time encoding."""
 
 import torch
+import pytest
 
 from frost.datatypes.graph import HierGraph, NeighborOnHop
 from frost.models.encoder.dygformer import DyGFormer
 from frost.models.header import (
-    DyGFormerLinkPredictor,
-    LinkPredictor,
-    MergeLayerPredictor,
+    AdditiveLinkHead,
+    ConcatLinkHead,
     NodeClassificationHeader,
 )
+from frost.models.contracts import RepresentationKind
+from frost.models.outputs import EncoderResult, RepresentationAdapter
 from frost.models.modules.time_encoder import TimeEncoder
 
 
-class TestLinkPredictor:
+def _adapt(h: torch.Tensor, *, n_src: int, n_neg: int, kind: RepresentationKind):
+    return RepresentationAdapter(kind)(EncoderResult(h), n_src=n_src, n_neg=n_neg)
+
+
+@pytest.mark.parametrize("n_neg", [1, 20, 100])
+@pytest.mark.parametrize(
+    ("kind", "head_type"),
+    [
+        (RepresentationKind.NODE_ALIGNED, AdditiveLinkHead),
+        (RepresentationKind.NODE_ALIGNED, ConcatLinkHead),
+        (RepresentationKind.PAIR_ALIGNED, AdditiveLinkHead),
+        (RepresentationKind.PAIR_ALIGNED, ConcatLinkHead),
+    ],
+)
+def test_structured_link_pipeline_shapes(n_neg, kind, head_type):
+    n_src, d_in = 3, 8
+    row_count = (
+        n_src * (2 + n_neg)
+        if kind is RepresentationKind.NODE_ALIGNED
+        else 2 * n_src * (1 + n_neg)
+    )
+    result = EncoderResult(torch.randn(row_count, d_in))
+    edges = RepresentationAdapter(kind)(result, n_src=n_src, n_neg=n_neg)
+
+    assert edges.positive_source.shape == (n_src, d_in)
+    assert edges.negative_source.shape == (n_src * n_neg, d_in)
+    assert head_type(d_in=d_in)(edges).shape == (n_src * (1 + n_neg), 1)
+
+
+class TestAdditiveLinkHead:
     def test_output_shape(self):
         d_in, n_src, n_neg = 64, 8, 1
-        pred = LinkPredictor(d_in=d_in, n_neg=n_neg)
+        pred = AdditiveLinkHead(d_in=d_in)
         h = torch.randn(n_src * (2 + n_neg), d_in)
-        out = pred(h)
+        out = pred(
+            _adapt(h, n_src=n_src, n_neg=n_neg, kind=RepresentationKind.NODE_ALIGNED)
+        )
         assert out.shape == (n_src * (1 + n_neg), 1)
 
     def test_output_shape_multi_neg(self):
         d_in, n_src, n_neg = 32, 5, 3
-        pred = LinkPredictor(d_in=d_in, n_neg=n_neg)
+        pred = AdditiveLinkHead(d_in=d_in)
         h = torch.randn(n_src * (2 + n_neg), d_in)
-        out = pred(h)
+        out = pred(
+            _adapt(h, n_src=n_src, n_neg=n_neg, kind=RepresentationKind.NODE_ALIGNED)
+        )
         assert out.shape == (n_src * (1 + n_neg), 1)
 
     def test_gradient_flow(self):
         d_in, n_src, n_neg = 16, 4, 1
-        pred = LinkPredictor(d_in=d_in, n_neg=n_neg)
+        pred = AdditiveLinkHead(d_in=d_in)
         h = torch.randn(n_src * (2 + n_neg), d_in, requires_grad=True)
-        out = pred(h)
+        out = pred(
+            _adapt(h, n_src=n_src, n_neg=n_neg, kind=RepresentationKind.NODE_ALIGNED)
+        )
         out.sum().backward()
         assert h.grad is not None
         assert h.grad.shape == h.shape
@@ -40,16 +77,18 @@ class TestLinkPredictor:
     def test_pos_neg_split(self):
         """First n_src scores are positive, rest are negative."""
         d_in, n_src, n_neg = 16, 3, 2
-        pred = LinkPredictor(d_in=d_in, n_neg=n_neg)
+        pred = AdditiveLinkHead(d_in=d_in)
         h = torch.randn(n_src * (2 + n_neg), d_in)
-        out = pred(h)
+        out = pred(
+            _adapt(h, n_src=n_src, n_neg=n_neg, kind=RepresentationKind.NODE_ALIGNED)
+        )
         pos_scores = out[:n_src]
         neg_scores = out[n_src:]
         assert pos_scores.shape == (n_src, 1)
         assert neg_scores.shape == (n_src * n_neg, 1)
 
     def test_multi_neg_pairs_each_source_with_its_own_row(self):
-        pred = LinkPredictor(d_in=1, n_neg=2)
+        pred = AdditiveLinkHead(d_in=1)
         with torch.no_grad():
             for layer in (pred.src_fc, pred.dst_fc, pred.out_fc):
                 layer.weight.fill_(1.0)
@@ -59,19 +98,22 @@ class TestLinkPredictor:
         h = torch.tensor(
             [[1.0], [10.0], [0.0], [0.0], [100.0], [200.0], [300.0], [400.0]]
         )
-        logits = pred(h).squeeze(1)
+        logits = pred(
+            _adapt(h, n_src=2, n_neg=2, kind=RepresentationKind.NODE_ALIGNED)
+        ).squeeze(1)
 
         assert torch.equal(logits[2:], torch.tensor([101.0, 201.0, 310.0, 410.0]))
 
-    def test_runtime_n_neg_can_differ_from_constructor_default(self):
-        pred = LinkPredictor(d_in=4, n_neg=1)
+    def test_adapter_uses_runtime_n_neg(self):
+        pred = AdditiveLinkHead(d_in=4)
         h = torch.randn(2 * (2 + 3), 4)
-        assert pred(h, n_neg=3).shape == (2 * (1 + 3), 1)
+        edges = _adapt(h, n_src=2, n_neg=3, kind=RepresentationKind.NODE_ALIGNED)
+        assert pred(edges).shape == (2 * (1 + 3), 1)
 
 
-class TestMergeLayerPredictor:
+class TestConcatLinkHead:
     def test_multi_neg_pairs_each_source_with_its_own_row(self):
-        pred = MergeLayerPredictor(d_in=1, n_neg=2)
+        pred = ConcatLinkHead(d_in=1)
         with torch.no_grad():
             pred.fc1.weight.fill_(1.0)
             pred.fc1.bias.zero_()
@@ -81,7 +123,9 @@ class TestMergeLayerPredictor:
         h = torch.tensor(
             [[1.0], [10.0], [0.0], [0.0], [100.0], [200.0], [300.0], [400.0]]
         )
-        logits = pred(h).squeeze(1)
+        logits = pred(
+            _adapt(h, n_src=2, n_neg=2, kind=RepresentationKind.NODE_ALIGNED)
+        ).squeeze(1)
 
         assert torch.equal(logits[2:], torch.tensor([101.0, 201.0, 310.0, 410.0]))
 
@@ -101,19 +145,23 @@ class TestNodeClassificationHeader:
         assert x.grad is not None
 
 
-class TestDyGFormerLinkPredictor:
+class TestPairAlignedRepresentations:
     def test_output_shape(self):
         d_in, n_src, n_neg = 32, 5, 2
-        pred = DyGFormerLinkPredictor(d_in=d_in, n_neg=n_neg)
+        pred = AdditiveLinkHead(d_in=d_in)
         h = torch.randn(2 * n_src * (1 + n_neg), d_in)
-        out = pred(h)
+        out = pred(
+            _adapt(h, n_src=n_src, n_neg=n_neg, kind=RepresentationKind.PAIR_ALIGNED)
+        )
         assert out.shape == (n_src * (1 + n_neg), 1)
 
     def test_negative_src_segment_affects_logits(self):
         d_in, n_src, n_neg = 16, 3, 2
-        pred = DyGFormerLinkPredictor(d_in=d_in, n_neg=n_neg)
+        pred = AdditiveLinkHead(d_in=d_in)
         h = torch.randn(2 * n_src * (1 + n_neg), d_in, requires_grad=True)
-        out = pred(h)
+        out = pred(
+            _adapt(h, n_src=n_src, n_neg=n_neg, kind=RepresentationKind.PAIR_ALIGNED)
+        )
         out.sum().backward()
 
         neg_src_lo = 2 * n_src
@@ -121,10 +169,11 @@ class TestDyGFormerLinkPredictor:
         assert h.grad is not None
         assert torch.count_nonzero(h.grad[neg_src_lo:neg_src_hi]).item() > 0
 
-    def test_runtime_n_neg_can_differ_from_constructor_default(self):
-        pred = DyGFormerLinkPredictor(d_in=8, n_neg=1)
+    def test_adapter_uses_runtime_n_neg(self):
+        pred = AdditiveLinkHead(d_in=8)
         h = torch.randn(2 * 2 * (1 + 3), 8)
-        assert pred(h, n_neg=3).shape == (2 * (1 + 3), 1)
+        edges = _adapt(h, n_src=2, n_neg=3, kind=RepresentationKind.PAIR_ALIGNED)
+        assert pred(edges).shape == (2 * (1 + 3), 1)
 
 
 class TestTimeEncoder:
@@ -258,7 +307,7 @@ class TestDyGFormer:
             n_neg=1,
             enable_dummy_edge_features=False,
         )
-        predictor = DyGFormerLinkPredictor(d_in=8, n_neg=1)
+        predictor = AdditiveLinkHead(d_in=8)
 
         graph = HierGraph(
             root_nid=torch.tensor([100, 200, 300], dtype=torch.int64),
@@ -284,8 +333,11 @@ class TestDyGFormer:
             fanout=[2],
         )
 
-        h = model(graph)
-        logits = predictor(h)
+        result = model(graph)
+        edges = RepresentationAdapter(RepresentationKind.PAIR_ALIGNED)(
+            result, n_src=1, n_neg=1
+        )
+        logits = predictor(edges)
 
-        assert h.shape == (4, 8)
+        assert result.embeddings.shape == (4, 8)
         assert logits.shape == (2, 1)

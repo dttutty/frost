@@ -49,8 +49,7 @@ class BoxTask:
         stale_box: Optional pre-update mailbox snapshot for stale carry-over
             nodes already assembled on this worker for the current batch.
         mail_peer_mem: Optional peer embedding used for the "other node" half
-            of the mail message.  DyRep uses this to send structural
-            graph-attention embeddings while preserving the self-memory half.
+            of the mail message while preserving the self-memory half.
         batch_idx: Global batch counter for ordering writes.
         box_plan: DynamicPlan carrying node IDs and P2P routing for the
             mailbox update.

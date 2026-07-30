@@ -22,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from frost.datatypes.graph import HierGraph
+from frost.models.outputs import EncoderResult
 from frost.models.modules.time_encoder import TimeEncoder
 
 
@@ -88,7 +89,7 @@ class TCL(nn.Module):
 
         h = [pos_src_emb | pos_dst_emb | neg_src_emb | neg_dst_emb]
 
-    This is consumed by ``PairAwareMergeLayerPredictor``.
+    This is normalized by ``RepresentationAdapter`` before scoring.
     """
 
     def __init__(
@@ -142,7 +143,7 @@ class TCL(nn.Module):
     # Main entry point (FROST interface)
     # ------------------------------------------------------------------
 
-    def forward(self, graph: HierGraph) -> torch.Tensor:
+    def forward(self, graph: HierGraph) -> EncoderResult:
         """Return embeddings in pair-aware layout.
 
         Output shape: ``[n_src * 2 * (1 + n_neg), d_out]`` laid out as
@@ -186,7 +187,9 @@ class TCL(nn.Module):
             )
 
         # Pair-aware layout: [pos_src | pos_dst | neg_src | neg_dst]
-        return torch.cat([pos_src_emb, pos_dst_emb, neg_src_emb, neg_dst_emb], dim=0)
+        return EncoderResult(
+            torch.cat([pos_src_emb, pos_dst_emb, neg_src_emb, neg_dst_emb], dim=0)
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers

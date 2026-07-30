@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from frost.datatypes.graph import HierGraph
+from frost.models.outputs import EncoderResult
 from frost.models.modules.temporal_graph_attention_layer import (
     TemporalGraphAttentionLayer,
 )
@@ -172,7 +173,7 @@ class TGAT(nn.Module):
             )
         return None
 
-    def forward(self, graph: HierGraph) -> torch.Tensor:
+    def forward(self, graph: HierGraph) -> EncoderResult:
         """
         Forward pass using the pure PyTorch HierGraph structure.
         """
@@ -238,7 +239,7 @@ class TGAT(nn.Module):
                 dt=dt,
                 mask=mask,
             )
-            return cast(torch.Tensor, out)
+            return EncoderResult(cast(torch.Tensor, out))
 
         # Multi-layer path (bottom-up aggregation)
         # We need to maintain a list of hidden states for each hop level
@@ -276,9 +277,7 @@ class TGAT(nn.Module):
                 num_targets = target_feat.shape[0]
                 fanout = graph.fanout[hop_idx]
                 nbr_level = graph.neighbors[hop_idx]
-                neighbor_feat = hidden_states[hop_idx + 1].view(
-                    num_targets, fanout, -1
-                )
+                neighbor_feat = hidden_states[hop_idx + 1].view(num_targets, fanout, -1)
                 e_feat = self._edge_features_for_hop(
                     edge_features=nbr_level.efeat,
                     num_targets=num_targets,
@@ -287,13 +286,9 @@ class TGAT(nn.Module):
                     dtype=neighbor_feat.dtype,
                 )
                 target_ts = (
-                    graph.root_ts
-                    if hop_idx == 0
-                    else graph.neighbors[hop_idx - 1].ts
+                    graph.root_ts if hop_idx == 0 else graph.neighbors[hop_idx - 1].ts
                 )
-                dt = target_ts.unsqueeze(1) - nbr_level.ts.view(
-                    num_targets, fanout
-                )
+                dt = target_ts.unsqueeze(1) - nbr_level.ts.view(num_targets, fanout)
                 mask = nbr_level.nid.view(num_targets, fanout) != -1
                 next_hidden_states.append(
                     self.layers[layer_idx](
@@ -307,4 +302,4 @@ class TGAT(nn.Module):
             hidden_states = next_hidden_states
 
         # The final representation of the root nodes is at index 0
-        return cast(torch.Tensor, hidden_states[0])
+        return EncoderResult(cast(torch.Tensor, hidden_states[0]))

@@ -4,17 +4,10 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from frost.launch.config import (
-    CAWN_ENCODER_TARGET,
     DEFAULT_NO_MEMORY_QUEUE_SIZE,
     DYGLIB_ALIGNED_FEATURE_DIM,
-    DYGFORMER_ENCODER_TARGET,
-    LINK_PREDICTOR_TARGET,
-    PAIR_AWARE_PREDICTOR_TARGET,
-    TCL_ENCODER_TARGET,
-    TCL_PAIR_AWARE_PREDICTOR_TARGET,
     resolve_dygformer_dummy_edge_dim,
     resolve_no_memory_queue_size,
-    resolve_predictor_cfg,
     resolve_tgat_dummy_node_dim,
     resolve_tgat_dummy_edge_dim,
     resolve_time_scaling_factor,
@@ -54,9 +47,8 @@ def test_apan_runtime_only_config_builds_worker_modules():
             },
         },
         head={
-            "_target_": "frost.models.header.LinkPredictor",
+            "_target_": "frost.models.header.AdditiveLinkHead",
             "d_in": 8,
-            "n_neg": 1,
         },
     )
     plan = compile_execution_plan(recipe, DatasetSchema("EXAMPLE", 10, 0, 0))
@@ -162,49 +154,6 @@ class TestResolveTGATDummyNodeDim:
         )
 
         assert resolved == 48
-
-
-class TestResolvePredictorCfg:
-    def test_switches_default_link_predictor_for_pair_aware_encoders(self):
-        for encoder_target in (DYGFORMER_ENCODER_TARGET, CAWN_ENCODER_TARGET):
-            resolved, switched = resolve_predictor_cfg(
-                encoder_target,
-                {"_target_": LINK_PREDICTOR_TARGET, "d_in": 172, "n_neg": 1},
-            )
-
-            assert switched is True
-            assert resolved["_target_"] == PAIR_AWARE_PREDICTOR_TARGET
-
-    def test_keeps_custom_predictor_for_pair_aware_encoders(self):
-        resolved, switched = resolve_predictor_cfg(
-            CAWN_ENCODER_TARGET,
-            {
-                "_target_": PAIR_AWARE_PREDICTOR_TARGET,
-                "d_in": 172,
-                "n_neg": 1,
-            },
-        )
-
-        assert switched is False
-        assert resolved["_target_"] == PAIR_AWARE_PREDICTOR_TARGET
-
-    def test_switches_tcl_to_merge_layer_predictor(self):
-        resolved, switched = resolve_predictor_cfg(
-            TCL_ENCODER_TARGET,
-            {"_target_": LINK_PREDICTOR_TARGET, "d_in": 172, "n_neg": 1},
-        )
-
-        assert switched is True
-        assert resolved["_target_"] == TCL_PAIR_AWARE_PREDICTOR_TARGET
-
-    def test_keeps_default_link_predictor_for_non_pair_aware_encoders(self):
-        resolved, switched = resolve_predictor_cfg(
-            "frost.models.encoder.tgat.TGAT",
-            {"_target_": LINK_PREDICTOR_TARGET, "d_in": 172, "n_neg": 1},
-        )
-
-        assert switched is False
-        assert resolved["_target_"] == LINK_PREDICTOR_TARGET
 
 
 class TestResolveNoMemoryQueueSize:

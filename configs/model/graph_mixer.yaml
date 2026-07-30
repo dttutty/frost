@@ -19,6 +19,5 @@ encoder:
   dyglib_feature_dim: null
 state: null
 head:
-  _target_: frost.models.header.MergeLayerPredictor
+  _target_: frost.models.header.ConcatLinkHead
   d_in: ${model.embedding_dim}
-  n_neg: ${n_neg}

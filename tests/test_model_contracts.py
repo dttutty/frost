@@ -10,7 +10,6 @@ from frost.models.contracts import (
     RootExpansion,
     ScoringKind,
     Stateless,
-    StructuralMailbox,
 )
 from frost.models.recipes import RECIPE_TYPES, ModelRecipe
 
@@ -18,7 +17,6 @@ from frost.models.recipes import RECIPE_TYPES, ModelRecipe
 DEFAULT_FANOUT = {
     "tgn": [10],
     "jodie": [],
-    "dyrep": [10],
     "apan": [10],
     "tgat": [20, 20],
     "graph_mixer": [2000],
@@ -33,7 +31,7 @@ def _recipe(name: str) -> ModelRecipe:
         embedding_dim=128,
         neighborhood={"fanout": DEFAULT_FANOUT[name]},
         encoder={},
-        state={} if name in {"tgn", "jodie", "dyrep", "apan"} else None,
+        state={} if name in {"tgn", "jodie", "apan"} else None,
         head={},
     )
 
@@ -52,9 +50,6 @@ def test_state_and_representation_contracts_are_semantic() -> None:
     apan = compile_execution_plan(
         _recipe("apan"), DatasetSchema("EXAMPLE", 10, 4, 3)
     )
-    dyrep = compile_execution_plan(
-        _recipe("dyrep"), DatasetSchema("EXAMPLE", 10, 4, 3)
-    )
     dygformer = compile_execution_plan(
         _recipe("dygformer"), DatasetSchema("EXAMPLE", 10, 4, 3)
     )
@@ -65,8 +60,6 @@ def test_state_and_representation_contracts_are_semantic() -> None:
     assert apan.layout.root_expansion is RootExpansion.POSITIVE_ROOTS
     assert isinstance(apan.dynamic_state, MemoryState)
     assert isinstance(apan.dynamic_state.mailbox, NeighborhoodMailbox)
-    assert isinstance(dyrep.dynamic_state, MemoryState)
-    assert isinstance(dyrep.dynamic_state.mailbox, StructuralMailbox)
     assert dygformer.representation is RepresentationKind.PAIR_ALIGNED
     assert dygformer.scoring is ScoringKind.ADDITIVE
     assert isinstance(tgat.dynamic_state, Stateless)
@@ -83,4 +76,3 @@ def test_contract_rejects_wrong_hop_count() -> None:
     )
     with pytest.raises(ValueError, match="requires 1..1 hops"):
         compile_execution_plan(recipe, DatasetSchema("EXAMPLE", 10, 4, 3))
-

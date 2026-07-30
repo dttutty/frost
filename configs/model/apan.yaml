@@ -16,6 +16,5 @@ state:
     heads: 2
     dropout: ${dropout}
 head:
-  _target_: frost.models.header.LinkPredictor
+  _target_: frost.models.header.AdditiveLinkHead
   d_in: ${model.embedding_dim}
-  n_neg: ${n_neg}

@@ -2,7 +2,8 @@ from types import SimpleNamespace
 
 import torch
 
-from frost.models.contracts import RootExpansion
+from frost.models.contracts import RepresentationKind, RootExpansion
+from frost.models.outputs import EdgeRepresentations, EncoderResult
 import torch.nn as nn
 
 from frost.ablation import (
@@ -50,12 +51,12 @@ class _FakeEncoder(nn.Module):
     def forward(self, graph):
         del graph
         self.events.append("encoder")
-        return torch.ones((1, 1), dtype=torch.float32)
+        return EncoderResult(torch.ones((3, 1), dtype=torch.float32))
 
 
 class _IdentityHeader(nn.Module):
-    def forward(self, h):
-        return h
+    def forward(self, edges: EdgeRepresentations):
+        return torch.cat([edges.positive_source, edges.negative_source])
 
 
 def _make_meta() -> Meta:
@@ -103,6 +104,7 @@ def test_post_mem_update_mode_writes_before_encoder():
         header=_IdentityHeader(),
         postman=None,
         n_neg=1,
+        representation=RepresentationKind.NODE_ALIGNED,
         root_expansion=RootExpansion.ALL_ROOTS,
         dynamic_state_ablation=resolve_dynamic_state_ablation(
             DYNAMIC_STATE_ABLATION_NO_PLAN_NO_DELTA_POST_MEM_UPDATE_RAW
@@ -131,6 +133,7 @@ def test_post_step_mode_defers_writeback_until_worker_step():
         header=_IdentityHeader(),
         postman=None,
         n_neg=1,
+        representation=RepresentationKind.NODE_ALIGNED,
         root_expansion=RootExpansion.ALL_ROOTS,
         dynamic_state_ablation=resolve_dynamic_state_ablation(
             DYNAMIC_STATE_ABLATION_NO_PLAN_NO_DELTA_POST_STEP_RAW

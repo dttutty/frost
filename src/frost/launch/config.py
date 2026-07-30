@@ -12,19 +12,6 @@ from omegaconf import DictConfig
 
 logger = logging.getLogger(__name__)
 
-APAN_ENCODER_TARGET = "frost.models.encoder.apan.APAN"
-TGAT_ENCODER_TARGET = "frost.models.encoder.tgat.TGAT"
-DYGFORMER_ENCODER_TARGET = "frost.models.encoder.dygformer.DyGFormer"
-CAWN_ENCODER_TARGET = "frost.models.encoder.cawn.CAWN"
-TGN_ENCODER_TARGET = "frost.models.encoder.tgn.TGN"
-GRAPH_MIXER_ENCODER_TARGET = "frost.models.encoder.graph_mixer.GraphMixer"
-TCL_ENCODER_TARGET = "frost.models.encoder.tcl.TCL"
-LINK_PREDICTOR_TARGET = "frost.models.header.LinkPredictor"
-PAIR_AWARE_PREDICTOR_TARGET = "frost.models.header.DyGFormerLinkPredictor"
-TCL_PAIR_AWARE_PREDICTOR_TARGET = "frost.models.header.PairAwareMergeLayerPredictor"
-PAIR_AWARE_ENCODER_TARGETS = frozenset(
-    {DYGFORMER_ENCODER_TARGET, CAWN_ENCODER_TARGET, TCL_ENCODER_TARGET}
-)
 DYGLIB_ALIGNED_FEATURE_DIM = 172
 DEFAULT_NO_MEMORY_QUEUE_SIZE = 4
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -177,23 +164,6 @@ def resolve_tgat_dummy_node_dim(
         feature_file_name="ml_{dataset_key}_node.npy",
         processed_data_root=processed_data_root,
     )
-
-
-def resolve_predictor_cfg(
-    encoder_target: str, predictor_cfg: Mapping[str, Any]
-) -> tuple[dict[str, Any], bool]:
-    resolved = dict(predictor_cfg)
-    switched = (
-        encoder_target in PAIR_AWARE_ENCODER_TARGETS
-        and resolved.get("_target_") == LINK_PREDICTOR_TARGET
-    )
-    if switched:
-        resolved["_target_"] = (
-            TCL_PAIR_AWARE_PREDICTOR_TARGET
-            if encoder_target == TCL_ENCODER_TARGET
-            else PAIR_AWARE_PREDICTOR_TARGET
-        )
-    return resolved, switched
 
 
 def resolve_no_memory_queue_size(configured_size: object | None) -> int:

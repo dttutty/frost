@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from torch.nn import MultiheadAttention
 
 from frost.datatypes.graph import HierGraph
+from frost.models.outputs import EncoderResult
 from frost.models.modules.time_encoder import TimeEncoder
 
 logger = logging.getLogger(__name__)
@@ -311,7 +312,7 @@ class DyGFormer(nn.Module):
     # Main entry point (FROST interface)
     # ------------------------------------------------------------------
 
-    def forward(self, graph: HierGraph) -> torch.Tensor:
+    def forward(self, graph: HierGraph) -> EncoderResult:
         """
         Returns pair-aware embeddings laid out as:
           h[0 : n_src]                      = pos-pair src embeddings
@@ -357,7 +358,9 @@ class DyGFormer(nn.Module):
             neg_src_emb, neg_dst_emb = self._forward_pair(src_tiled, neg_s)
 
         # Assemble pair-aware output for DyGFormer-specific prediction ----
-        return torch.cat([pos_src_emb, pos_dst_emb, neg_src_emb, neg_dst_emb], dim=0)
+        return EncoderResult(
+            torch.cat([pos_src_emb, pos_dst_emb, neg_src_emb, neg_dst_emb], dim=0)
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers

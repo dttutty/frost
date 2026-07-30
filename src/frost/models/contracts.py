@@ -45,11 +45,6 @@ class ScoringKind(StrEnum):
     CONCAT = "concat"
 
 
-class MailboxPublishTiming(StrEnum):
-    AFTER_STATE_UPDATE = "after_state_update"
-    AFTER_ENCODER = "after_encoder"
-
-
 @dataclass(frozen=True)
 class NeighborhoodContract:
     min_hops: int
@@ -83,24 +78,15 @@ class FeatureContract:
 
 @dataclass(frozen=True)
 class InteractionMailbox:
-    publish_timing: MailboxPublishTiming = MailboxPublishTiming.AFTER_STATE_UPDATE
+    pass
 
 
 @dataclass(frozen=True)
 class NeighborhoodMailbox:
     recipients: NodeSet = NodeSet.POSITIVE_NEIGHBORS
-    publish_timing: MailboxPublishTiming = MailboxPublishTiming.AFTER_STATE_UPDATE
 
 
-@dataclass(frozen=True)
-class StructuralMailbox:
-    recipients: NodeSet = NodeSet.POSITIVE_ROOTS
-    publish_timing: MailboxPublishTiming = MailboxPublishTiming.AFTER_ENCODER
-
-
-MailboxContract: TypeAlias = (
-    InteractionMailbox | NeighborhoodMailbox | StructuralMailbox
-)
+MailboxContract: TypeAlias = InteractionMailbox | NeighborhoodMailbox
 
 
 @dataclass(frozen=True)
@@ -126,4 +112,3 @@ class ModelContract:
     dynamic_state: DynamicStateContract
     representation: RepresentationKind
     scoring: ScoringKind
-

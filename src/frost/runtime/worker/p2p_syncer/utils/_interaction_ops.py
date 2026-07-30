@@ -25,8 +25,7 @@ def generate_interaction_mails(
         peer_mem:          Optional peer embeddings in the same root layout.  When
                            provided, mail still uses ``root_new_mem_orig.data`` for
                            the self half but uses ``peer_mem`` for the other-node
-                           half.  This lets DyRep write graph-attention peer
-                           embeddings without changing mailbox width.
+                           half without changing mailbox width.
     Returns:
         MailEntry of shape [2N, 2 * mem_dim + edge_dim],
         where entry i is the mail for node root_new_mem_orig.nid[i].

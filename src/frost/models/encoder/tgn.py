@@ -6,6 +6,7 @@ import logging
 import torch
 
 from frost.datatypes.graph import HierGraph
+from frost.models.outputs import EncoderResult
 from frost.models.modules.temporal_graph_attention_layer import (
     TemporalGraphAttentionLayer,
 )
@@ -64,7 +65,7 @@ class TGN(torch.nn.Module):
     def forward(
         self,
         graph: HierGraph,
-    ) -> torch.Tensor:
+    ) -> EncoderResult:
         """Compute root-node embeddings via 1-hop temporal graph attention.
 
         Args:
@@ -130,4 +131,4 @@ class TGN(torch.nn.Module):
             mask=mask,
         )
 
-        return out
+        return EncoderResult(out)

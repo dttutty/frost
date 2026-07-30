@@ -16,6 +16,5 @@ encoder:
   n_neg: ${n_neg}
 state: null
 head:
-  _target_: frost.models.header.PairAwareMergeLayerPredictor
+  _target_: frost.models.header.ConcatLinkHead
   d_in: ${model.embedding_dim}
-  n_neg: ${n_neg}

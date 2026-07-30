@@ -17,6 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from frost.datatypes.graph import HierGraph
+from frost.models.outputs import EncoderResult
 from frost.models.modules.time_encoder import TimeEncoder
 
 logger = logging.getLogger(__name__)
@@ -192,7 +193,7 @@ class GraphMixer(nn.Module):
         # Final projection: concat link output and node output → d_out
         self.output_layer = nn.Linear(num_channels + self.ndim, d_out)
 
-    def forward(self, graph: HierGraph) -> torch.Tensor:
+    def forward(self, graph: HierGraph) -> EncoderResult:
         """
         Returns h of shape [n_root, d_out].
         n_root = n_src * (2 + n_neg); all root nodes are processed independently.
@@ -283,7 +284,9 @@ class GraphMixer(nn.Module):
 
             # Build mask over full neighbor set
             pad_mask_all = nbr.nid.reshape(n_root, K) == -1  # [n_root, K]
-            logits_all = torch.zeros((n_root, K), device=ngh_nfeat_all.device, dtype=torch.float32)
+            logits_all = torch.zeros(
+                (n_root, K), device=ngh_nfeat_all.device, dtype=torch.float32
+            )
             logits_all = logits_all.masked_fill(pad_mask_all, -1e10)
             scores_all = torch.softmax(logits_all, dim=1)  # [n_root, K]
 
@@ -298,8 +301,8 @@ class GraphMixer(nn.Module):
         # ------------------------------------------------------------------ #
         # Output                                                              #
         # ------------------------------------------------------------------ #
-        return self.output_layer(
-            torch.cat([link_out, node_out], dim=-1)
+        return EncoderResult(
+            self.output_layer(torch.cat([link_out, node_out], dim=-1))
         )  # [n_root, d_out]
 
     def _left_align_valid_positions(
@@ -316,10 +319,10 @@ class GraphMixer(nn.Module):
             dim=1,
             index=order.unsqueeze(-1).expand_as(x) if x.ndim == 3 else order,
         )
-        
+
         sorted_valid_mask = torch.gather(valid_mask, dim=1, index=order)
         if x.ndim == 3:
             sorted_valid_mask = sorted_valid_mask.unsqueeze(-1)
-            
+
         sorted_x.masked_fill_(~sorted_valid_mask, pad_value)
         return sorted_x

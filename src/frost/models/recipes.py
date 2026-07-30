@@ -21,7 +21,6 @@ from frost.models.contracts import (
     RootExpansion,
     ScoringKind,
     Stateless,
-    StructuralMailbox,
 )
 
 
@@ -90,22 +89,6 @@ class JODIERecipe(ModelRecipe):
         neighborhood=NeighborhoodContract(0, 0),
         features=_OPTIONAL_FEATURES,
         dynamic_state=_STANDARD_MEMORY,
-        representation=RepresentationKind.NODE_ALIGNED,
-        scoring=ScoringKind.ADDITIVE,
-    )
-
-
-class DyRepRecipe(ModelRecipe):
-    NAME = "dyrep"
-    CONTRACT = ModelContract(
-        neighborhood=NeighborhoodContract(1, 1),
-        features=_OPTIONAL_FEATURES,
-        dynamic_state=MemoryState(
-            memory_read=NodeSet.ALL_SAMPLED,
-            memory_write=NodeSet.POSITIVE_ROOTS,
-            mailbox_read=NodeSet.ALL_SAMPLED,
-            mailbox=StructuralMailbox(),
-        ),
         representation=RepresentationKind.NODE_ALIGNED,
         scoring=ScoringKind.ADDITIVE,
     )
@@ -195,7 +178,6 @@ RECIPE_TYPES = {
     for recipe in (
         TGNRecipe,
         JODIERecipe,
-        DyRepRecipe,
         APANRecipe,
         TGATRecipe,
         GraphMixerRecipe,

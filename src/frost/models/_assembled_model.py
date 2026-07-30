@@ -6,7 +6,6 @@ used by the worker during training and evaluation.
 """
 
 from collections.abc import Callable
-import inspect
 import logging
 from queue import Queue
 from typing import cast
@@ -24,7 +23,8 @@ from frost.datatypes.meta import Meta
 from frost.datatypes.tasks import BoxTask, DirectWritebackRequest, MemTask
 from frost.runtime.protocols import CudaEvent
 from frost.models.protocols import MemoryUpdaterProto
-from frost.models.contracts import RootExpansion
+from frost.models.contracts import RepresentationKind, RootExpansion
+from frost.models.outputs import EncoderResult, RepresentationAdapter
 from frost.models.protocols import PostmanProto
 from frost.runtime.worker.p2p_syncer.utils._interaction_ops import (
     generate_interaction_mails,
@@ -52,7 +52,7 @@ class AssembledModel(nn.Module):
         encoder: GNN encoder module (e.g., TGN, TGAT, DyGFormer).
         mem_updater: Optional memory updater (MemoryUpdater or
             TransformerMemoryUpdater).  Pass ``None`` for memory-free models.
-        header: Prediction head module (e.g., LinkPredictor).
+        header: Prediction head over structured edge representations.
         postman: Optional APAN postman for mailbox delivery.  Pass ``None`` for
             non-APAN models.
         n_neg: Number of negative samples per positive edge.
@@ -66,6 +66,7 @@ class AssembledModel(nn.Module):
         header: nn.Module,
         postman: PostmanProto | None,
         n_neg: int,
+        representation: RepresentationKind,
         root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
         dynamic_state_ablation: DynamicStateAblation | None = None,
     ) -> None:
@@ -73,7 +74,7 @@ class AssembledModel(nn.Module):
         self.encoder = encoder
         self.mem_updater = mem_updater
         self.header = header
-        self._header_accepts_runtime_n_neg = self._accepts_runtime_n_neg(header)
+        self.representation_adapter = RepresentationAdapter(representation)
         self.postman = postman
         self.dynamic_state_ablation = (
             dynamic_state_ablation
@@ -83,28 +84,6 @@ class AssembledModel(nn.Module):
 
         self.n_neg = n_neg  # from hydra config
         self.root_expansion = root_expansion
-        self._delay_box_task_for_structural_mail = self._encoder_uses_structural_mail(
-            encoder
-        )
-
-    @staticmethod
-    def _encoder_uses_structural_mail(encoder: nn.Module) -> bool:
-        encoder = getattr(encoder, "_orig_mod", encoder)
-        return encoder.__class__.__name__ == "DyRep" and bool(
-            getattr(encoder, "use_structural_attention", False)
-        )
-
-    @staticmethod
-    def _accepts_runtime_n_neg(header: nn.Module) -> bool:
-        """Keep compatibility with custom headers that only accept ``h``."""
-        try:
-            parameters = inspect.signature(header.forward).parameters.values()
-        except (TypeError, ValueError):
-            return False
-        return any(
-            parameter.name == "n_neg" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters
-        )
 
     @staticmethod
     def _union_planned_p2p_nids(plan) -> torch.Tensor:
@@ -243,13 +222,6 @@ class AssembledModel(nn.Module):
         n_src = meta.n_src
         fanout = meta.fanout if meta.fanout is not None else []
         assert meta.flat_graph is not None
-        delay_box_task = self._delay_box_task_for_structural_mail
-        pending_box_root_new_mem: MemEntry | None = None
-        pending_box_pos_efeat: torch.Tensor | None = None
-        pending_box_plan = None
-        pending_box_graph = None
-        pending_box_flat_nid_cpu = None
-        pending_box_stale_box: BoxEntry | None = None
         meta.direct_writeback_request = None
 
         if self.mem_updater is not None:
@@ -325,35 +297,22 @@ class AssembledModel(nn.Module):
                     # Avoid in-place modification issues
                     mem_task_q.put((mem_task, ready_event))
 
-                    if delay_box_task:
-                        assert plan_set.box_plan is not None
-                        pending_box_root_new_mem = root_new_mem_clone
-                        pending_box_pos_efeat = box_pos_efeat
-                        pending_box_plan = plan_set.box_plan
-                        pending_box_graph = box_graph
-                        pending_box_flat_nid_cpu = box_flat_nid_cpu
-                        pending_box_stale_box = stale_box_source
-                    else:
-                        assert box_task_q is not None
-                        assert plan_set is not None
-                        assert plan_set.box_plan is not None
-                        box_task = BoxTask(
-                            pos_efeat=box_pos_efeat,
-                            root_new_mem=root_new_mem_clone,
-                            stale_box=stale_box_source,
-                            mail_peer_mem=None,
-                            mini_batch_idx=meta.mini_batch_idx,
-                            box_plan=plan_set.box_plan,
-                            is_last=meta.is_last_macro_of_epoch,
-                            graph=box_graph,
-                            flat_nid_cpu=box_flat_nid_cpu,
-                        )
-                        box_task_q.put((box_task, ready_event))
+                    assert box_task_q is not None
+                    assert plan_set is not None
+                    assert plan_set.box_plan is not None
+                    box_task = BoxTask(
+                        pos_efeat=box_pos_efeat,
+                        root_new_mem=root_new_mem_clone,
+                        stale_box=stale_box_source,
+                        mail_peer_mem=None,
+                        mini_batch_idx=meta.mini_batch_idx,
+                        box_plan=plan_set.box_plan,
+                        is_last=meta.is_last_macro_of_epoch,
+                        graph=box_graph,
+                        flat_nid_cpu=box_flat_nid_cpu,
+                    )
+                    box_task_q.put((box_task, ready_event))
                 elif self.dynamic_state_ablation.uses_direct_cpu_writeback:
-                    if delay_box_task:
-                        raise ValueError(
-                            "dynamic_state_ablation does not support delayed structural mailbox writes."
-                        )
                     direct_mem_filter = None
                     direct_box_filter = None
                     if self.dynamic_state_ablation.filter_writeback_by_plan:
@@ -396,48 +355,13 @@ class AssembledModel(nn.Module):
             )
 
         # 3. Pass the hierarchical HierGraph to the GNN
-        encoder_out = self.encoder(graph=meta.graph)
-        mail_peer_mem: torch.Tensor | None = None
-        if isinstance(encoder_out, tuple):
-            h = encoder_out[0]
-            if len(encoder_out) > 1:
-                mail_peer_mem = encoder_out[1]
-        else:
-            h = encoder_out
-        h = cast(torch.Tensor, h)
-
-        if (
-            self.mem_updater is not None
-            and delay_box_task
-            and not self.dynamic_state_ablation.uses_direct_cpu_writeback
-        ):
-            assert box_task_q is not None
-            assert pending_box_root_new_mem is not None
-            assert pending_box_plan is not None
-            with torch.no_grad():
-                mail_peer_mem_for_box = (
-                    mail_peer_mem.detach().clone()
-                    if mail_peer_mem is not None
-                    else None
-                )
-                box_task = BoxTask(
-                    pos_efeat=pending_box_pos_efeat,
-                    root_new_mem=pending_box_root_new_mem,
-                    stale_box=pending_box_stale_box,
-                    mail_peer_mem=mail_peer_mem_for_box,
-                    mini_batch_idx=meta.mini_batch_idx,
-                    box_plan=pending_box_plan,
-                    is_last=meta.is_last_macro_of_epoch,
-                    graph=pending_box_graph,
-                    flat_nid_cpu=pending_box_flat_nid_cpu,
-                )
-                box_ready_event = cast(CudaEvent, torch.cuda.Event())
-                box_ready_event.record(stream=torch.cuda.current_stream())
-                box_task_q.put((box_task, box_ready_event))
+        encoder_result = cast(EncoderResult, self.encoder(graph=meta.graph))
 
         # 4. Predict edges
-        if self._header_accepts_runtime_n_neg:
-            ret = self.header(h, n_neg=meta.n_neg)
-        else:
-            ret = self.header(h)
+        edge_representations = self.representation_adapter(
+            encoder_result,
+            n_src=meta.n_src,
+            n_neg=meta.n_neg,
+        )
+        ret = self.header(edge_representations)
         return cast(torch.Tensor, ret)

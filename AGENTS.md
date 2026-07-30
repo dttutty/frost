@@ -25,7 +25,6 @@ uv run pytest tests/ -v
 |-------|---------|
 | TGN | `uv run torchrun --nproc_per_node=3 run.py model=tgn dataset=LASTFM` |
 | JODIE | `uv run torchrun --nproc_per_node=3 run.py model=jodie dataset=LASTFM` |
-| DyRep | `uv run torchrun --nproc_per_node=3 run.py model=dyrep dataset=LASTFM` |
 | APAN | `uv run torchrun --nproc_per_node=3 run.py model=apan dataset=LASTFM` |
 | TGAT | `uv run torchrun --nproc_per_node=3 run.py model=tgat dataset=LASTFM` |
 | DyGFormer | `uv run torchrun --nproc_per_node=3 run.py model=dygformer dataset=LASTFM` |
@@ -69,7 +68,7 @@ Dataset attachment, per-GPU batch layout, ring-buffer sizing, and dynamic-state 
 ### Models (`src/frost/models/`)
 - `_assembled_model.py` — `AssembledModel`: unified forward pass (mem_updater → inflate → encoder → postman → header)
 - `mem_updater.py` — `MemoryUpdater` (GRU), `TransformerMemoryUpdater`
-- `header.py` — `LinkPredictor`
+- `header.py` — `AdditiveLinkHead`, `ConcatLinkHead`
 - `encoder/` — `tgn.py`, `tgat.py`, `apan.py`, `jodie.py`, `dygformer.py`, `graph_mixer.py`, `tcl.py`, `cawn.py`
 
 ### Shared memory / sampling (`src/frost/shm/`, `src/frost/sampling/`)
@@ -119,10 +118,10 @@ Host process
 - `TCL`: `num_tokens` should equal `fanout[0]`; `num_depths = fanout[0] + 1`.
 - `CAWN`: default encoder config now uses `ngh_sampler_strategy=time_interval_aware` with `time_scaling_factor=1e-6`; the sampler weight lives in the sampler wrapper, not the encoder module.
 
-### Predictor layout compatibility
-- `DyGFormer` and `CAWN` emit pair-aware root layouts `[pos_src | pos_dst | neg_src | neg_dst]`; plain `LinkPredictor` is incompatible, so `launcher.py` auto-switches the default predictor to `DyGFormerLinkPredictor`.
-- `TCL` also consumes pair-aware positive/negative pairs, but expects merge-layer scoring; `launcher.py` auto-switches the default predictor to `PairAwareMergeLayerPredictor`.
-- `GraphMixer` still uses its explicit concat predictor for DyGLib parity; keep `predictor=graph_mixer`.
+### Representation and scoring compatibility
+- Encoders return `EncoderResult`; `RepresentationAdapter` converts either node-aligned or pair-aligned layouts into `EdgeRepresentations`.
+- `DyGFormer`, `CAWN`, and `TCL` declare pair-aligned representations; the adapter preserves their negative-pair source embeddings.
+- Heads consume structured edge representations and never infer `n_neg` or layout from tensor length.
 
 ### Analyzer ↔ Runtime consistency (APAN)
 The `NeighborhoodMailbox` contract must exactly match what `Postman.deliver()` + `merge_1_mail()` writes at runtime:

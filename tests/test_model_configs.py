@@ -42,10 +42,15 @@ def test_model_configs_compose_and_build(name: str) -> None:
 
 @pytest.mark.parametrize(
     "legacy_override",
-    ["encoder=tgn", "mem_updater=gru", "predictor=link", "access_analyzer=memory_analyzer"],
+    [
+        "encoder=tgn",
+        "mem_updater=gru",
+        "predictor=link",
+        "access_analyzer=memory_analyzer",
+        "model=dyrep",
+    ],
 )
 def test_removed_component_config_groups_fail(legacy_override: str) -> None:
     with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
         with pytest.raises(ConfigCompositionException):
             compose(config_name="config", overrides=[legacy_override])
-

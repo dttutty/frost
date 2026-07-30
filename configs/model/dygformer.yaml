@@ -21,6 +21,5 @@ encoder:
   n_neg: ${n_neg}
 state: null
 head:
-  _target_: frost.models.header.DyGFormerLinkPredictor
+  _target_: frost.models.header.AdditiveLinkHead
   d_in: ${model.embedding_dim}
-  n_neg: ${n_neg}

@@ -41,7 +41,7 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 
 | Group | Role | Common Choices | User-Facing? |
 | --- | --- | --- | --- |
-| `model` | Complete model recipe and semantic contract | `tgn`, `jodie`, `apan`, `dyrep`, `tgat`, `dygformer`, `graph_mixer`, `tcl`, `cawn` | Yes |
+| `model` | Complete model recipe and semantic contract | `tgn`, `jodie`, `apan`, `tgat`, `dygformer`, `graph_mixer`, `tcl`, `cawn` | Yes |
 | `loss_fn` | Training loss | `bce` | Fixed |
 | `neg_sampler` | Negative destination sampling | `rnd_dst_then_fixed`, `rnd_dst_then_hist`, `rnd_dst_then_post_train`, `rnd_dst_then_tgb`, `rnd_dst_then_tgb_wiki` | Yes |
 | `ngh_sampler` | Runtime neighborhood-sampling implementation | `recent`, `uniform`, `time_interval_aware` | Yes |

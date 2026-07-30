@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 
 from frost.datatypes.graph import HierGraph
+from frost.models.outputs import EncoderResult
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +132,7 @@ class JODIE(nn.Module):
         self.layer_norm = nn.LayerNorm(d_mem)
         self.jodie_time_proj = JODIETimeEmbedding(dim_out=d_mem)
 
-    def forward(self, graph: HierGraph) -> torch.Tensor:
+    def forward(self, graph: HierGraph) -> EncoderResult:
         """
         graph: Graph with root_mem, root_mem_ts, root_ts, root_nfeat populated.
         root_* tensors cover all root nodes: [src, pos_dst, neg_dst].
@@ -152,4 +153,4 @@ class JODIE(nn.Module):
         h = self.layer_norm(h)
         h = self.jodie_time_proj(h, graph.root_mem_ts, graph.root_ts)
 
-        return cast(torch.Tensor, h)
+        return EncoderResult(cast(torch.Tensor, h))

@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from frost.datatypes.graph import HierGraph
+from frost.models.outputs import EncoderResult
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ class APAN(nn.Module):
     def forward(
         self,
         graph: HierGraph,
-    ) -> torch.Tensor:
+    ) -> EncoderResult:
         """
         Forward pass using HierGraph.
         """
@@ -48,4 +49,4 @@ class APAN(nn.Module):
         # Apply LayerNorm to target node memory
         embedding = self.gnn_norm(graph.root_mem)
 
-        return cast(torch.Tensor, embedding)
+        return EncoderResult(cast(torch.Tensor, embedding))

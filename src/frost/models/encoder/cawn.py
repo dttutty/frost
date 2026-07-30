@@ -18,6 +18,7 @@ from torch.nn import MultiheadAttention
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from frost.datatypes.graph import HierGraph
+from frost.models.outputs import EncoderResult
 from frost.models.modules.time_encoder import TimeEncoder
 
 logger = logging.getLogger(__name__)
@@ -315,7 +316,7 @@ class CAWN(nn.Module):
             dropout=dropout,
         )
 
-    def forward(self, graph: HierGraph) -> torch.Tensor:
+    def forward(self, graph: HierGraph) -> EncoderResult:
         """
         Returns pair-aware embeddings laid out as:
           h[0 : n_src]                      = pos-pair src embeddings
@@ -357,7 +358,9 @@ class CAWN(nn.Module):
                 src_tiled, neg_tree, graph.fanout
             )
 
-        return torch.cat([pos_src_emb, pos_dst_emb, neg_src_emb, neg_dst_emb], dim=0)
+        return EncoderResult(
+            torch.cat([pos_src_emb, pos_dst_emb, neg_src_emb, neg_dst_emb], dim=0)
+        )
 
     def _slice_tree(
         self, graph: HierGraph, lo: int, hi: int, n_root: int, fanout: List[int]
