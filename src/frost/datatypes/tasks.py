@@ -48,20 +48,17 @@ class BoxTask:
             the mail content.
         stale_box: Optional pre-update mailbox snapshot for stale carry-over
             nodes already assembled on this worker for the current batch.
-        mail_peer_mem: Optional peer embedding used for the "other node" half
-            of the mail message while preserving the self-memory half.
         batch_idx: Global batch counter for ordering writes.
         box_plan: DynamicPlan carrying node IDs and P2P routing for the
             mailbox update.
         is_last: ``True`` iff this is the final batch of the current epoch.
-        graph: Hierarchical ``HierGraph`` for this batch; used by the postman to
+        graph: Hierarchical ``HierGraph`` used by neighborhood mailbox routing to
             determine which neighbor mailboxes to update.
     """
 
     pos_efeat: Tensor | None
     root_new_mem: MemEntry
     stale_box: BoxEntry | None
-    mail_peer_mem: Tensor | None
     mini_batch_idx: int
     box_plan: DynamicPlan
     is_last: bool

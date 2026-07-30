@@ -398,12 +398,11 @@ def launch(cfg: DictConfig):
         assert nccl_ddp is not None, "Worker rank must be in nccl group"
         assert nccl_p2p is not None, "Worker rank must be in nccl_p2p group"
 
-        mem_updater, encoder, predictor, postman, loss_fn = build_worker_modules(
+        mem_updater, encoder, predictor, mailbox_router, loss_fn = build_worker_modules(
             cfg,
             recipe=recipe,
             plan=execution_plan,
             d_mail=d_mail,
-            max_n_neg=max_n_neg,
         )
         if use_shm_instead and not bool(cfg.get("__debug_use_shm_instead", False)):
             logger.info(
@@ -425,7 +424,7 @@ def launch(cfg: DictConfig):
                 mem_updater=mem_updater,
                 encoder=encoder,
                 predictor=predictor,
-                postman=postman,
+                mailbox_router=mailbox_router,
                 criterion=loss_fn,
                 optimizer=cfg.optimizer,
                 lr=cfg.lr,

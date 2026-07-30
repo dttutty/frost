@@ -31,7 +31,6 @@ def test_model_configs_compose_and_build(name: str) -> None:
         recipe=recipe,
         plan=plan,
         d_mail=2 * d_mem,
-        max_n_neg=1,
     )
 
     assert encoder.__class__.__name__.lower().replace("_", "") in name.replace(

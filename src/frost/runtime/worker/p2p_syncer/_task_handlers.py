@@ -23,7 +23,7 @@ from frost.datatypes.mem_mail_box.mail import MailEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.tasks import BoxTask, P2PTask
 from frost.runtime.protocols import CudaEvent
-from frost.models.protocols import PostmanProto
+from frost.models.protocols import MailboxRouterProto
 from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
 from frost.runtime.worker._h2d_credit import CreditGate
 
@@ -176,7 +176,7 @@ class MessageHandler(StreamThreadBase):
         device: torch.device,
         box_wr_q: BoxWrQ,
         h2d_sem: CreditGate,
-        postman: PostmanProto | None,
+        mailbox_router: MailboxRouterProto | None,
         n_neg: int = 1,
         fanout: list[int] | None = None,
     ) -> None:
@@ -187,7 +187,7 @@ class MessageHandler(StreamThreadBase):
         self.box_p2p_q = box_p2p_q
         self.stop_ev = stop_ev
         self.mail_combine: Literal["last", "mean"] = mail_combine
-        self.postman = postman
+        self.mailbox_router = mailbox_router
         self.box_wr_q = box_wr_q
         self.h2d_sem = h2d_sem
         self.n_neg = n_neg
@@ -214,8 +214,8 @@ class MessageHandler(StreamThreadBase):
 
         # Route seed mail to one-hop neighbors on the P2P path.
         # but also capture the raw seed mail for CPU-side writeback
-        if self.postman is not None:
-            # Snapshot seed mail to CPU *before* postman expands it
+        if self.mailbox_router is not None:
+            # Snapshot seed mail before routing expands it.
             seed_mail_cpu = MailEntry(
                 nid=new_mail.nid.cpu(),
                 data=new_mail.data.cpu(),
@@ -225,9 +225,9 @@ class MessageHandler(StreamThreadBase):
             )
             graph = box_task.graph
             assert graph is not None, (
-                "BoxTask.graph must not be None when postman is set"
+                "BoxTask.graph must not be None when mailbox routing is active"
             )
-            new_mail = self.postman.deliver(graph, mail_data=new_mail.data)
+            new_mail = self.mailbox_router.deliver(graph, mail_data=new_mail.data)
 
         if mail_combine == "last":
             new_mail = keep_last(new_mail)
@@ -266,7 +266,6 @@ class MessageHandler(StreamThreadBase):
                 new_mail = generate_interaction_mails(
                     box_task.root_new_mem,
                     box_task.pos_efeat,
-                    box_task.mail_peer_mem,
                 )
 
                 p2p_task, box_entry, seed_mail_cpu = self._process_messages(

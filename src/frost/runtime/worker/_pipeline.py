@@ -181,7 +181,7 @@ class WorkerPipelineMixin:
             mail_combine=self.mail_combine,
             device=self.device,
             box_wr_q=self.box_wr_q,
-            postman=self.postman,
+            mailbox_router=self.mailbox_router,
             n_neg=self.n_neg,
             fanout=self.ring_buf.fanout,
         )

@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from frost.models._assembled_model import AssembledModel
+from frost.models.temporal_link_model import TemporalLinkModel
 
 
 class WorkerCheckpointMixin:
@@ -14,8 +14,8 @@ class WorkerCheckpointMixin:
     nccl: dist.ProcessGroup
     model: Any
 
-    def _unwrap_model(self) -> AssembledModel:
-        """Return the bare AssembledModel, stripping torch.compile and DDP wrappers."""
+    def _unwrap_model(self) -> TemporalLinkModel:
+        """Return the bare model, stripping torch.compile and DDP wrappers."""
         model: object = self.model
         # torch.compile wraps the model in an OptimizedModule
         if hasattr(model, "_orig_mod"):
@@ -23,7 +23,7 @@ class WorkerCheckpointMixin:
         # DDP wraps the model in a DistributedDataParallel
         if isinstance(model, DDP):
             model = model.module
-        return cast(AssembledModel, model)
+        return cast(TemporalLinkModel, model)
 
     def save_model(self, path: str) -> None:
         """Save a consistent CPU snapshot of the unwrapped model (rank 0 only).

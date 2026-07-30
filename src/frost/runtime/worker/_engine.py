@@ -32,10 +32,10 @@ from frost.runtime.worker.types import (
 from frost.runtime.worker.types import AssembledQ, DeltaQueue, H2DOutQ, ReceivedQ
 from frost.datatypes.env import Env
 from frost.datatypes.result import Result
-from frost.models._assembled_model import AssembledModel
+from frost.models.temporal_link_model import TemporalLinkModel
 from frost.launch.plan import ExecutionPlan
 from frost.models.protocols import MemoryUpdaterProto
-from frost.models.protocols import PostmanProto
+from frost.models.protocols import MailboxRouterProto
 from frost.runtime._thread_base import (
     destroy_process_group,
 )
@@ -86,8 +86,8 @@ class Worker(
         delta_queue: Queue carrying P2P delta tuples; only used when mem_box_store is present.
         h2d_out_q: Intermediate queue between H2D and DynamicAssembler.
         full_q: Queue of fully-assembled ``(Meta, CudaEvent)`` tuples ready for the model.
-        mem_task_q: Queue of memory update tasks posted by AssembledModel.
-        box_task_q: Queue of mailbox update tasks posted by AssembledModel.
+        mem_task_q: Queue of memory update tasks posted by DynamicStateCoordinator.
+        box_task_q: Queue of mailbox update tasks posted by DynamicStateCoordinator.
         mem_p2p_q: Queue of P2P memory descriptors produced by MemTaskHandler.
         box_p2p_q: Queue of P2P mailbox descriptors produced by MessageHandler.
         mem_wr_q: Queue of write-back requests for the node memory store.
@@ -98,7 +98,7 @@ class Worker(
         box_handler: MessageHandler thread (memory-model path only).
         box_wr: SharedMemWriter thread for mailbox (memory-model path only).
         p2p_q_handler: P2PQHandler thread (memory-model path only).
-        model: AssembledModel wrapped in DDP.
+        model: TemporalLinkModel wrapped in DDP.
         result_q: Single-element queue used to pass epoch results back to the Receiver.
     """
 
@@ -124,7 +124,7 @@ class Worker(
     p2p_q_handler: P2PQHandler | None = None
     direct_state_writer: DirectDynamicStateWriter | None = None
 
-    model: AssembledModel | DDP
+    model: TemporalLinkModel | DDP
     optimizer: torch.optim.Optimizer
     result_q: Q[Result]
 
@@ -142,7 +142,7 @@ class Worker(
         encoder: nn.Module,
         predictor: nn.Module,
         ring_buf: RingBuf,
-        postman: PostmanProto | None,
+        mailbox_router: MailboxRouterProto | None,
         criterion: torch.nn.Module,
         optimizer: Literal["adam", "sgd"],
         lr: float,
@@ -162,7 +162,7 @@ class Worker(
         self.n_neg = n_neg
         self.save_to = save_to
         self.env = env
-        self.postman = postman
+        self.mailbox_router = mailbox_router
         self.mem_updater = mem_updater
         self.mem_box_store = mem_box_store
         self.nccl = nccl_ddp
@@ -261,7 +261,6 @@ class Worker(
             encoder,
             mem_updater,
             predictor,
-            postman,
             criterion,
             optimizer,
             ring_buf,

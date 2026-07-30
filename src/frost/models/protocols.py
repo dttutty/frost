@@ -21,5 +21,5 @@ class MemoryUpdaterProto(Protocol):
 
 
 @runtime_checkable
-class PostmanProto(Protocol):
+class MailboxRouterProto(Protocol):
     def deliver(self, graph: HierGraph, mail_data: torch.Tensor) -> MailEntry: ...

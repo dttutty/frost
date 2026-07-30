@@ -12,9 +12,9 @@ from frost.launch.config import (
 from frost.launch.plan import ExecutionPlan
 from frost.models.contracts import MemoryState, NeighborhoodMailbox
 from frost.models.protocols import MemoryUpdaterProto
-from frost.models.protocols import PostmanProto
+from frost.models.protocols import MailboxRouterProto
 from frost.models.recipes import ModelRecipe
-from frost.runtime.worker.postman import Postman
+from frost.runtime.worker.mailbox_router import NeighborhoodMailboxRouter
 
 
 logger = logging.getLogger(__name__)
@@ -26,12 +26,11 @@ def build_worker_modules(
     recipe: ModelRecipe,
     plan: ExecutionPlan,
     d_mail: int,
-    max_n_neg: int,
 ) -> tuple[
     MemoryUpdaterProto | None,
     nn.Module,
     nn.Module,
-    PostmanProto | None,
+    MailboxRouterProto | None,
     nn.Module,
 ]:
     mem_updater: MemoryUpdaterProto | None = None
@@ -70,11 +69,11 @@ def build_worker_modules(
     encoder: nn.Module = instantiate(encoder_cfg)
     predictor: nn.Module = instantiate(recipe.head)
     state_contract = plan.dynamic_state
-    postman: PostmanProto | None = (
-        Postman(n_neg=max_n_neg)
+    mailbox_router: MailboxRouterProto | None = (
+        NeighborhoodMailboxRouter()
         if isinstance(state_contract, MemoryState)
         and isinstance(state_contract.mailbox, NeighborhoodMailbox)
         else None
     )
     loss_fn: nn.Module = instantiate(cfg.loss_fn)
-    return mem_updater, encoder, predictor, postman, loss_fn
+    return mem_updater, encoder, predictor, mailbox_router, loss_fn

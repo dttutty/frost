@@ -53,16 +53,15 @@ def test_apan_runtime_only_config_builds_worker_modules():
     )
     plan = compile_execution_plan(recipe, DatasetSchema("EXAMPLE", 10, 0, 0))
 
-    mem_updater, _, _, postman, _ = build_worker_modules(
+    mem_updater, _, _, mailbox_router, _ = build_worker_modules(
         cfg,
         recipe=recipe,
         plan=plan,
         d_mail=16,
-        max_n_neg=1,
     )
 
     assert isinstance(mem_updater, TransformerMemoryUpdater)
-    assert postman is not None
+    assert mailbox_router is not None
 
 
 class TestResolveDyGFormerDummyEdgeDim:

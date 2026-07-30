@@ -13,7 +13,7 @@ class MailEntry:
     """A batch of mail messages aggregated over source nodes for a single step.
 
     Unlike ``BoxEntry``, ``MailEntry`` holds a single message per row (no
-    slot dimension).  It is typically produced by the postman and then
+    slot dimension).  It is typically produced by a mailbox router and then
     inserted into the mailbox via ``BoxEntry.merge_1_mail``.
 
     Attributes:

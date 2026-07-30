@@ -14,7 +14,6 @@ class EncoderResult(NamedTuple):
     """Standard output of every temporal encoder."""
 
     embeddings: torch.Tensor
-    mail_peer_memory: torch.Tensor | None = None
 
 
 class EdgeRepresentations(NamedTuple):

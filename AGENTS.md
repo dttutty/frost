@@ -66,7 +66,8 @@ Dataset attachment, per-GPU batch layout, ring-buffer sizing, and dynamic-state 
 - `p2p_syncer/` — `MemHandler`, `BoxHandler`, `P2PQHandler`, writers
 
 ### Models (`src/frost/models/`)
-- `_assembled_model.py` — `AssembledModel`: unified forward pass (mem_updater → inflate → encoder → postman → header)
+- `temporal_link_model.py` — `TemporalLinkModel`: pure computation (mem_updater → unflatten → encoder → representation adapter → head)
+- Runtime state publication is owned by `runtime/worker/_state_coordinator.py`, not by model modules.
 - `mem_updater.py` — `MemoryUpdater` (GRU), `TransformerMemoryUpdater`
 - `header.py` — `AdditiveLinkHead`, `ConcatLinkHead`
 - `encoder/` — `tgn.py`, `tgat.py`, `apan.py`, `jodie.py`, `dygformer.py`, `graph_mixer.py`, `tcl.py`, `cawn.py`
@@ -93,12 +94,14 @@ Host process
                            ├─ Receiver (scatter_object_list)
                            ├─ H2D (load nfeat/efeat/mem/box → GPU)
                            ├─ [DynamicAssembler if mem_updater]
-                           └─ AssembledModel.forward(meta)
-                              ├─ mem_updater(flat_graph)
-                              ├─ flat_graph.inflate(fanout, n_neg, root_expansion)
-                              ├─ encoder(graph=meta.graph)
-                              ├─ [postman.deliver() for APAN]
-                              └─ header(h) → logits
+                           └─ DynamicStateCoordinator.batch(meta)
+                              └─ TemporalLinkModel.forward(meta)
+                                 ├─ mem_updater(flat_graph)
+                                 ├─ coordinator hook publishes state tasks
+                                 ├─ flat_graph.unflatten(...)
+                                 ├─ encoder(graph=meta.graph)
+                                 ├─ RepresentationAdapter(...)
+                                 └─ head(edge_representations) → logits
 ```
 
 **FlatGraph layout in RingBuf slot:**
@@ -112,7 +115,7 @@ Host process
 ### Dimension alignment
 - `d_mem` in `mem_updater/*.yaml` **must equal** `${encoder.out_dim}` for identity-GNN models (JODIE, APAN).
 - APAN's effective 1-hop fanout is `mem_updater.mail_recipients`; all other models derive fanout from `encoder.fanout`.
-- APAN's neighborhood sampling strategy is `mem_updater.postman_delivery_strategy`; all other models derive it from `encoder.ngh_sampler_strategy`.
+- APAN uses positive-root one-hop sampling declared by its model contract.
 - `d_mail = 2*d_mem + edim` — computed in `launcher.py`; mailbox slot size and `TransformerMemoryUpdater` key/value dim must agree.
 - `GraphMixer`: `fanout[0]` is the total neighbors sampled (node encoder uses all, link encoder uses `num_tokens`). `num_tokens` controls the link encoder neighbor count (default 20). `predictor=graph_mixer` required for DyGLib-compatible concat predictor.
 - `TCL`: `num_tokens` should equal `fanout[0]`; `num_depths = fanout[0] + 1`.
@@ -124,19 +127,19 @@ Host process
 - Heads consume structured edge representations and never infer `n_neg` or layout from tensor length.
 
 ### Analyzer ↔ Runtime consistency (APAN)
-The `NeighborhoodMailbox` contract must exactly match what `Postman.deliver()` + `merge_1_mail()` writes at runtime:
+The `NeighborhoodMailbox` contract must exactly match what `NeighborhoodMailboxRouter.deliver()` writes at runtime:
 1. `ngh_start = n_src * (2 + n_neg)` — not `n_src * (2*n_neg + 2)`
 2. Filter padding: `pos_ngh = pos_ngh_raw[pos_ngh_raw != -1]`
-3. `box_update = TensorSet(pos_ngh)` only — roots are not written by postman
+3. `box_update = TensorSet(pos_ngh)` only — roots are not written by the router
 
 ### Sampler invariants
-- `NoSampler.fanout` is always `None` regardless of `encoder.fanout`; `_assembled_model.py` treats `None` as `[]`.
+- `NoSampler.fanout` is always `None`; `TemporalLinkModel` treats it as `[]`.
 - The C++ `SeqSampler` supports `uniform`, `recent`, and `time_interval_aware`; `time_interval_aware` consumes `time_scaling_factor` from config.
 - `time_scaling_factor` is sampler-only config. `launcher.py` must strip it from `encoder_cfg` before instantiating the Python encoder.
 - `MultiHopNghSampler.sample()` receives `ts` of shape `[n_src]`; must expand to `ts.repeat(2 + n_neg)` before calling C++ `get_historical_neighbors()` (positional-only args).
 
 ### Memory model detached states
-`TransformerMemoryUpdater.forward()` must write cached states to `flat_graph.detached_*`, not `self.detached_*`. Downstream `_assembled_model.py` reads from `flat_graph.detached_nid/ts/mem`.
+`TransformerMemoryUpdater.forward()` must write cached states to `flat_graph.detached_*`, not `self.detached_*`. `DynamicStateCoordinator` reads `flat_graph.detached_nid/ts/mem` in the updater hook.
 
 ## Queue Sizes
 

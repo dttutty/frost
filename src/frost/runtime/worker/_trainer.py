@@ -18,10 +18,10 @@ from torchmetrics.functional.classification import (
 
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
-from frost.models._assembled_model import AssembledModel
+from frost.models.temporal_link_model import TemporalLinkModel
 from frost.models.protocols import MemoryUpdaterProto
-from frost.models.protocols import PostmanProto
 from frost.shm.ring_buf import RingBuf
+from frost.runtime.worker._state_coordinator import DynamicStateCoordinator
 
 
 def _tgb_reciprocal_ranks(
@@ -86,8 +86,9 @@ class P2PGuardCommHook:
 
 
 class WorkerTrainerMixin:
-    model: AssembledModel | DDP
+    model: TemporalLinkModel | DDP
     optimizer: torch.optim.Optimizer
+    state_coordinator: DynamicStateCoordinator
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
@@ -97,22 +98,18 @@ class WorkerTrainerMixin:
         encoder: nn.Module,
         mem_updater: MemoryUpdaterProto | None,
         predictor: nn.Module,
-        postman: PostmanProto | None,
         criterion: torch.nn.Module,
         optimizer: Literal["adam", "sgd"],
         ring_buf: RingBuf,
         compile_model: bool = True,
     ) -> None:
         """Create model, optimizer, and wrap with DDP."""
-        model = AssembledModel(
+        model = TemporalLinkModel(
             encoder=encoder,
             mem_updater=mem_updater,
-            header=predictor,
-            n_neg=self.n_neg,
-            postman=postman,
+            head=predictor,
             representation=self.execution_plan.representation,
             root_expansion=ring_buf.root_expansion,
-            dynamic_state_ablation=self.dynamic_state_ablation,
         )
 
         if optimizer == "adam":
@@ -133,16 +130,25 @@ class WorkerTrainerMixin:
 
         ddp_model.register_comm_hook(state=self.nccl, hook=p2p_guard_comm_hook)
         if compile_model:
-            # Compile only the pure-compute submodules (encoder, mem_updater, header).
-            # AssembledModel.forward has too many non-tensor operations (Queue puts,
-            # CUDA events, dataclass access) that cause graph breaks and recompilation.
+            # Compile only tensor-heavy submodules; Meta graph assembly remains eager.
             bare = model
             bare.encoder = cast(nn.Module, torch.compile(bare.encoder))
             if bare.mem_updater is not None:
                 bare.mem_updater = cast(
                     MemoryUpdaterProto, torch.compile(bare.mem_updater)
                 )
-            bare.header = cast(nn.Module, torch.compile(bare.header))
+            bare.head = cast(nn.Module, torch.compile(bare.head))
+        self.state_coordinator = DynamicStateCoordinator(
+            plan=self.execution_plan,
+            dynamic_state_ablation=self.dynamic_state_ablation,
+            mem_task_q=self.mem_task_q,
+            box_task_q=self.box_task_q,
+            direct_writeback=self._write_direct_dynamic_state_request,
+        )
+        updater_module = (
+            cast(nn.Module, model.mem_updater) if model.mem_updater is not None else None
+        )
+        self.state_coordinator.attach(updater_module)
         self.criterion = criterion
         self.grad_scaler = torch.amp.GradScaler("cuda", enabled=self.amp)
 
@@ -342,12 +348,8 @@ class WorkerTrainerMixin:
             raise RuntimeError("Training metadata is missing labels")
         labels = meta.labels
         with torch.amp.autocast("cuda", enabled=self.amp):
-            logits = self.model(
-                meta,
-                mem_task_q=self.mem_task_q,
-                box_task_q=self.box_task_q,
-                direct_writeback=self._write_direct_dynamic_state_request,
-            )
+            with self.state_coordinator.batch(meta):
+                logits = self.model(meta)
 
             logits_flat = logits.squeeze(-1)
             n_pos = meta.n_src
@@ -388,12 +390,8 @@ class WorkerTrainerMixin:
         self.model.eval()
 
         with torch.amp.autocast("cuda", enabled=self.amp):
-            logits = self.model(
-                meta,
-                mem_task_q=self.mem_task_q,
-                box_task_q=self.box_task_q,
-                direct_writeback=self._write_direct_dynamic_state_request,
-            )
+            with self.state_coordinator.batch(meta):
+                logits = self.model(meta)
         if self.dynamic_state_ablation.direct_cpu_writeback_after_optimizer_step:
             self._flush_deferred_direct_dynamic_state(meta, release_h2d_credits=True)
         if (
