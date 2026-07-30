@@ -37,14 +37,6 @@ class StaticPlanner(ThreadBase):
         self.stop_ev = stop_ev
         self.pending: list[TensorSet] | None = None
 
-        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        device = torch.device("cpu")
-
-        self.fetch: list[TensorSet] = [
-            TensorSet(torch.tensor([], dtype=torch.long, device=device))
-            for _ in range(self.n_gpus)
-        ]
-
     def logic(self) -> None:
         """Main planning loop for static node features.
 

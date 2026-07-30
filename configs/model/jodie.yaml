@@ -6,7 +6,6 @@ encoder:
   _target_: frost.models.encoder.jodie.JODIE
   ndim: ${ndim}
   d_mem: ${model.embedding_dim}
-  d_time: ${d_time}
 state:
   boxsize: 1
   mail_combine: last

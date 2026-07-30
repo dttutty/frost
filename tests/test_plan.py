@@ -19,14 +19,6 @@ class TestStaticPlan:
         assert plan.to_cache.data.tolist() == [1, 2, 3]
         assert plan.fetch.data.tolist() == [1, 2, 3, 4, 5]
 
-    def test_clone(self):
-        to_cache = _ts([1, 2])
-        fetch = _ts([1, 2, 3])
-        plan = StaticPlan(to_cache=to_cache, fetch=fetch)
-        cloned = plan.clone()
-        assert cloned.to_cache.data.tolist() == plan.to_cache.data.tolist()
-        assert cloned.fetch.data.tolist() == plan.fetch.data.tolist()
-
     def test_to_device(self):
         to_cache = _ts([1, 2, 3])
         fetch = _ts([1, 2, 3, 4])
@@ -34,12 +26,6 @@ class TestStaticPlan:
         plan_cpu = plan.to(torch.device("cpu"))
         assert plan_cpu.to_cache.data.device.type == "cpu"
         assert plan_cpu.fetch.data.device.type == "cpu"
-
-    def test_device_property(self):
-        to_cache = _ts([1, 2, 3])
-        fetch = _ts([1, 2, 3])
-        plan = StaticPlan(to_cache=to_cache, fetch=fetch)
-        assert plan.device.type == "cpu"
 
     def test_repr(self):
         to_cache = _ts([1, 2])
@@ -83,23 +69,6 @@ class TestDynamicPlan:
         assert plan.writeback is not None
         assert plan.writeback.data.tolist() == [4, 5]
 
-    def test_clone(self):
-        p2p = [_ts([1, 2])]
-        fetch = _ts([3, 4])
-        recv_counts = np.array([2])
-        send_counts = np.array([2])
-        plan = DynamicPlan(
-            p2p=p2p,
-            fetch=fetch,
-            recv_counts=recv_counts,
-            send_counts=send_counts,
-        )
-        cloned = plan.clone()
-        assert cloned.fetch.data.tolist() == plan.fetch.data.tolist()
-        assert cloned.recv_counts.tolist() == plan.recv_counts.tolist()
-        cloned.recv_counts[0] = 999
-        assert plan.recv_counts[0] != 999
-
     def test_to_device(self):
         p2p = [_ts([1, 2]), _ts([3, 4])]
         fetch = _ts([5, 6])
@@ -132,33 +101,6 @@ class TestDynamicPlan:
         plan_cpu = plan.to(torch.device("cpu"))
         assert plan_cpu.writeback is not None
         assert plan_cpu.writeback.data.device.type == "cpu"
-
-    def test_device_property(self):
-        p2p = [_ts([1])]
-        fetch = _ts([2, 3])
-        recv_counts = np.array([1])
-        send_counts = np.array([1])
-        plan = DynamicPlan(
-            p2p=p2p,
-            fetch=fetch,
-            recv_counts=recv_counts,
-            send_counts=send_counts,
-        )
-        assert plan.device.type == "cpu"
-
-    def test_sort_returns_self(self):
-        p2p = [_ts([1])]
-        fetch = _ts([2])
-        recv_counts = np.array([1])
-        send_counts = np.array([1])
-        plan = DynamicPlan(
-            p2p=p2p,
-            fetch=fetch,
-            recv_counts=recv_counts,
-            send_counts=send_counts,
-        )
-        sorted_plan = plan.sort()
-        assert sorted_plan is plan
 
     def test_repr(self):
         p2p = [_ts([1, 2])]
@@ -214,9 +156,9 @@ class TestPlanSet:
         ps = PlanSet(mem_plan=mem_plan, nfeat_plan=nfeat_plan)
         ps_cpu = ps.to(torch.device("cpu"))
         assert ps_cpu.mem_plan is not None
-        assert ps_cpu.mem_plan.device.type == "cpu"
+        assert ps_cpu.mem_plan.fetch.data.device.type == "cpu"
         assert ps_cpu.nfeat_plan is not None
-        assert ps_cpu.nfeat_plan.device.type == "cpu"
+        assert ps_cpu.nfeat_plan.to_cache.data.device.type == "cpu"
 
     def test_to_device_with_none_plans(self):
         ps = PlanSet(mem_plan=None, box_plan=None, nfeat_plan=None)

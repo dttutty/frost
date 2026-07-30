@@ -14,7 +14,7 @@ class MailEntry:
 
     Unlike ``BoxEntry``, ``MailEntry`` holds a single message per row (no
     slot dimension).  It is typically produced by a mailbox router and then
-    inserted into the mailbox via ``BoxEntry.merge_1_mail``.
+    converted to a single-slot ``BoxEntry`` for mailbox writeback.
 
     Attributes:
         nid: Destination node IDs, shape ``[N]``.
@@ -35,34 +35,6 @@ class MailEntry:
             f"MailEntry(nid={self.nid.shape}, data={self.data.shape}, "
             f"ts={self.ts.shape}, is_sorted={self.is_sorted}, is_unique={self.is_unique})"
         )
-
-    def clone(self) -> MailEntry:
-        return MailEntry(
-            nid=self.nid.clone(),
-            data=self.data.clone(),
-            ts=self.ts.clone(),
-            is_sorted=self.is_sorted,
-            is_unique=self.is_unique,
-        )
-
-    def _ensure_sorted_unique_nid(self) -> MailEntry:
-        from ._data_ops import _ensure_sorted_unique_nid
-
-        return _ensure_sorted_unique_nid(self)
-
-    def cuda(self) -> MailEntry:
-        return MailEntry(
-            nid=self.nid.cuda(),
-            data=self.data.cuda(),
-            ts=self.ts.cuda(),
-            is_sorted=self.is_sorted,
-            is_unique=self.is_unique,
-        )
-
-    def merge_with_priority(self, other: MailEntry) -> MailEntry:
-        from ._data_ops import merge_with_priority
-
-        return merge_with_priority(self, other)
 
     def sort_by_nid(self) -> MailEntry:
         if self.is_sorted:

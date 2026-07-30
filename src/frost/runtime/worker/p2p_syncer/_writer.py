@@ -127,7 +127,6 @@ class BoxMailWriter(ThreadBase):
         wr_q: Queue,
         device: torch.device,
         name: str,
-        n_neg: int = 1,
         fanout: list[int] | None = None,
     ) -> None:
         super().__init__(name=name, stop_ev=stop_ev)
@@ -136,7 +135,6 @@ class BoxMailWriter(ThreadBase):
         self.h2d_sem = h2d_sem
         self.wr_q = wr_q
         self.stop_ev = stop_ev
-        self.n_neg = n_neg
         self.fanout = fanout[0] if fanout and len(fanout) > 0 else 0
         self.writer_stream = cast(
             torch.cuda.Stream, torch.cuda.Stream(device=self.device)

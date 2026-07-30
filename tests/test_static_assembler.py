@@ -2,25 +2,8 @@ import pytest
 import torch
 
 from frost.datatypes.graph import FlatGraph
-from frost.datatypes.meta import Meta
 from frost.datatypes.n_feat_nid import NodeFeatNid
 from frost.runtime.worker._static_assembler import StaticAssembler
-
-
-def _make_meta(flat_graph: FlatGraph) -> Meta:
-    return Meta(
-        cur_epoch=0,
-        cur_macro_of_split=0,
-        n_macro_of_split=1,
-        cur_macro_of_epoch=0,
-        split="train",
-        n_src=2,
-        mini_batch_idx=0,
-        flat_graph=flat_graph,
-        buf_len=flat_graph.nid.numel(),
-        n_neg=1,
-        fanout=[1],
-    )
 
 
 def _make_flat_graph() -> FlatGraph:
@@ -51,7 +34,6 @@ def test_fill_nfeat_strict_mode_rejects_missing_nodes():
         assembler.fill_nfeat(
             flat_graph=flat_graph,
             nfeat_nid=nfeat_nid,
-            meta=_make_meta(flat_graph),
             strict=True,
         )
 
@@ -75,7 +57,6 @@ def test_fill_nfeat_non_strict_keeps_unplanned_rows_zero():
     out = assembler.fill_nfeat(
         flat_graph=flat_graph,
         nfeat_nid=nfeat_nid,
-        meta=_make_meta(flat_graph),
         strict=False,
     )
 

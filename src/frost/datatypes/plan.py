@@ -65,20 +65,6 @@ class DynamicPlan:
         None  # GPU-side copy of fetch.data for fast access during assembly
     )
 
-    def clone(self) -> DynamicPlan:
-        """
-        Shallow-clone DynamicPlan. TensorSets are immutable so they can be shared.
-        numpy arrays are copied to avoid aliasing.
-        """
-        return DynamicPlan(
-            p2p=self.p2p.copy(),  # shallow list copy is sufficient; TensorSets are immutable
-            fetch=self.fetch,  # reuse the same TensorSet object
-            recv_counts=self.recv_counts.copy(),  # numpy arrays must be copied
-            send_counts=self.send_counts.copy(),  # numpy arrays must be copied
-            writeback=self.writeback,  # reuse the same TensorSet object (if present)
-            fetch_on_gpu=self.fetch_on_gpu,  # reuse the same tensor object (if present)
-        )
-
     def __repr__(self) -> str:
         return (
             f"DynamicPlan(p2p={[ts.data.shape for ts in self.p2p]}, "
@@ -108,19 +94,6 @@ class DynamicPlan:
             fetch_on_gpu=self.fetch.data.to(device) if self.fetch is not None else None,
         )
 
-    @property
-    def device(self) -> torch.device:
-        """Device on which the ``fetch`` TensorSet resides."""
-        return self.fetch.data.device
-
-    def sort(self) -> DynamicPlan:
-        """
-        TensorSet maintains a sorted invariant internally,
-        so no action is needed here.
-        """
-        return self
-
-
 @dataclass(kw_only=True)
 class StaticPlan:
     """Fetch and cache schedule for static node features.
@@ -134,15 +107,6 @@ class StaticPlan:
 
     to_cache: TensorSet
     fetch: TensorSet
-
-    def clone(self) -> StaticPlan:
-        """
-        Shallow-clone StaticPlan. TensorSets are immutable so they can be shared.
-        """
-        return StaticPlan(
-            to_cache=self.to_cache,  # reuse the same TensorSet object
-            fetch=self.fetch,  # reuse the same TensorSet object
-        )
 
     def __repr__(self) -> str:
         return (
@@ -163,17 +127,3 @@ class StaticPlan:
             to_cache=_move(self.to_cache),
             fetch=self.fetch,  # fetch stays on CPU
         )
-
-    def sort(self) -> StaticPlan:
-        """No-op: TensorSet maintains sorted order internally.
-
-        Returns:
-            ``self`` unchanged.
-        """
-        return self
-
-    @property
-    def device(self) -> torch.device:
-        """Device on which the ``to_cache`` TensorSet resides."""
-        # Access .data to get the underlying tensor's device
-        return self.to_cache.data.device

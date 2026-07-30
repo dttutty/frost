@@ -70,7 +70,6 @@ class Scatter(ThreadBase):
         self.world_size: int = env.world_size
         self.local_rank: int = env.local_rank
         self.host_rank: int = env.host_rank
-        self.ngpus: int = env.n_gpu
         self._gather_seq = 0
         self._timing_enabled = _timing_enabled()
         self._mem_plan_wait_s_curve: list[float] = []

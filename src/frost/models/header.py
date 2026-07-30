@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -44,18 +42,3 @@ class ConcatLinkHead(nn.Module):
         positive_score = self.fc2(F.relu(self.fc1(positive)))
         negative_score = self.fc2(F.relu(self.fc1(negative)))
         return torch.cat([positive_score, negative_score])
-
-
-class NodeClassificationHeader(nn.Module):
-    """Two-layer MLP head for node classification tasks."""
-
-    def __init__(self, dim_in: int, d_hid: int, num_class: int) -> None:
-        super().__init__()
-        self.fc1 = nn.Linear(dim_in, d_hid)
-        self.fc2 = nn.Linear(d_hid, num_class)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.fc1(x)
-        x = F.relu(x)
-        x = self.fc2(x)
-        return cast(torch.Tensor, x)

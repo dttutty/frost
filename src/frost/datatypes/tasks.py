@@ -135,17 +135,3 @@ class P2PTask:
             f"send_counts={self.send_counts}, "
             f"batch_idx={self.mini_batch_idx})"
         )
-
-    def clone(self) -> P2PTask:
-        """Return a deep copy of this task with all tensors and arrays cloned."""
-        return P2PTask(
-            send_nid=self.send_nid.clone(),
-            recv_nid=self.recv_nid.clone(),
-            data2send=self.data2send.clone(),
-            data2recv=self.data2recv.clone(),
-            ts2send=self.ts2send.clone(),
-            ts2recv=self.ts2recv.clone(),
-            recv_counts=self.recv_counts.copy(),
-            send_counts=self.send_counts.copy(),
-            mini_batch_idx=self.mini_batch_idx,
-        )

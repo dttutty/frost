@@ -18,7 +18,6 @@ from frost.models.contracts import NodeSet
 from frost.runtime.protocols import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
 from frost.runtime.worker._static_assembler import StaticAssembler
-from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
 
@@ -33,28 +32,22 @@ class H2D(StreamThreadBase):
     ``out_q``.
 
     Args:
-        ring_buf: Shared ring buffer (not used for data here, kept for context).
         nfeat: CPU tensor of node features, or ``None`` if the dataset has none.
         efeat: CPU tensor of edge features, or ``None`` if the dataset has none.
         in_q: Input queue producing ``Meta | "end_of_epoch" | None``.
         out_q: Output queue consuming ``(Meta, CudaEvent) | "end_of_epoch" | None``.
         stop_ev: Shared stop event.
         device: Target CUDA device.
-        history: Number of historical hops (unused; reserved for future use).
-        n_neg: Number of negative samples per positive edge.
     """
 
     def __init__(
         self,
-        ring_buf: RingBuf,
         nfeat: torch.Tensor | None,
         efeat: torch.Tensor | None,
         in_q: Q[Meta | None | Literal["end_of_epoch"]],
         out_q: Q[tuple[Meta, CudaEvent] | None | Literal["end_of_epoch"]],
         stop_ev: threading.Event,
         device: torch.device,
-        history: int = 1,
-        n_neg: int = 1,
         node_feature_scope: NodeSet = NodeSet.ALL_SAMPLED,
     ) -> None:
         super().__init__(name="h2d", stop_ev=stop_ev)
@@ -64,14 +57,10 @@ class H2D(StreamThreadBase):
         self.in_q = in_q
         self.out_q = out_q
         self.stop_ev = stop_ev
-        self.ring_buf = ring_buf
-        self.history = history
-        self.n_neg = n_neg
         self.node_feature_scope = node_feature_scope
         self.st_asm = StaticAssembler(
             shared_nfeat=nfeat, shared_efeat=efeat, device=self.device
         )
-        self.seen_root_nids = torch.tensor([], dtype=torch.long, device="cpu")
 
     @torch.no_grad()
     def logic(self) -> None:
@@ -106,7 +95,7 @@ class H2D(StreamThreadBase):
             # can run no matter has nfeat or not
             if self.efeat is not None:
                 meta.flat_graph = self.st_asm.fill_efeat(
-                    meta.flat_graph, n_src=meta.n_src, meta=meta
+                    meta.flat_graph, n_src=meta.n_src
                 )
 
             # Root edge features have already been gathered above. Clear every
@@ -134,13 +123,12 @@ class H2D(StreamThreadBase):
                     meta.plan_set is not None and meta.plan_set.nfeat_plan is not None
                 )
                 nfeat = self.st_asm.prepare_nfeat_cache(
-                    nfeat_plan=meta.plan_set.nfeat_plan, meta=meta
+                    nfeat_plan=meta.plan_set.nfeat_plan
                 )
 
                 meta.flat_graph = self.st_asm.fill_nfeat(
                     flat_graph=meta.flat_graph,
                     nfeat_nid=nfeat,
-                    meta=meta,
                     strict=self.node_feature_scope is NodeSet.ALL_SAMPLED,
                 )
 

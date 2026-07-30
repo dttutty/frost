@@ -40,7 +40,6 @@ def build_worker_modules(
         mem_updater = instantiate(
             updater_cfg,
             d_mail=d_mail,
-            boxsize=int(recipe.state["boxsize"]),
         )
 
     encoder_cfg = dict(recipe.encoder)

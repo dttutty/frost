@@ -1,15 +1,8 @@
-from pathlib import Path
-
-import numpy as np
 from omegaconf import OmegaConf
 
 from frost.launch.config import (
     DEFAULT_NO_MEMORY_QUEUE_SIZE,
-    DYGLIB_ALIGNED_FEATURE_DIM,
-    resolve_dygformer_dummy_edge_dim,
     resolve_no_memory_queue_size,
-    resolve_tgat_dummy_node_dim,
-    resolve_tgat_dummy_edge_dim,
     resolve_time_scaling_factor,
 )
 from frost.launch.factory import build_worker_modules
@@ -27,7 +20,6 @@ def test_apan_runtime_only_config_builds_worker_modules():
         encoder={
             "_target_": "frost.models.encoder.apan.APAN",
             "d_mem": 8,
-            "n_neg": 1,
         },
         state={
             "boxsize": 2,
@@ -35,8 +27,9 @@ def test_apan_runtime_only_config_builds_worker_modules():
             "updater": {
                 "_target_": "frost.models.mem_updater.TransformerMemoryUpdater",
                 "d_time": 4,
-                "d_mem": 8,
-                "heads": 2,
+                    "d_mem": 8,
+                    "boxsize": 2,
+                    "heads": 2,
                 "dropout": 0.0,
             },
         },
@@ -56,97 +49,6 @@ def test_apan_runtime_only_config_builds_worker_modules():
 
     assert isinstance(mem_updater, TransformerMemoryUpdater)
     assert mailbox_router is not None
-
-
-class TestResolveDyGFormerDummyEdgeDim:
-    def test_uses_dyglib_alignment_floor_for_zero_feature_datasets(
-        self, tmp_path: Path
-    ):
-        dataset_dir = tmp_path / "lastfm"
-        dataset_dir.mkdir()
-        np.save(dataset_dir / "ml_lastfm.npy", np.zeros((8, 1), dtype=np.float32))
-
-        resolved = resolve_dygformer_dummy_edge_dim(
-            dataset="LASTFM",
-            requested_dim=None,
-            processed_data_root=tmp_path,
-        )
-
-        assert resolved == DYGLIB_ALIGNED_FEATURE_DIM
-
-    def test_prefers_larger_processed_edge_feature_width(self, tmp_path: Path):
-        dataset_dir = tmp_path / "mock"
-        dataset_dir.mkdir()
-        np.save(dataset_dir / "ml_mock.npy", np.zeros((8, 256), dtype=np.float32))
-
-        resolved = resolve_dygformer_dummy_edge_dim(
-            dataset="MOCK",
-            requested_dim=None,
-            processed_data_root=tmp_path,
-        )
-
-        assert resolved == 256
-
-    def test_explicit_config_override_wins(self, tmp_path: Path):
-        resolved = resolve_dygformer_dummy_edge_dim(
-            dataset="LASTFM",
-            requested_dim=64,
-            processed_data_root=tmp_path,
-        )
-
-        assert resolved == 64
-
-
-class TestResolveTGATDummyEdgeDim:
-    def test_uses_dyglib_alignment_floor_for_zero_feature_datasets(
-        self, tmp_path: Path
-    ):
-        dataset_dir = tmp_path / "lastfm"
-        dataset_dir.mkdir()
-        np.save(dataset_dir / "ml_lastfm.npy", np.zeros((8, 1), dtype=np.float32))
-
-        resolved = resolve_tgat_dummy_edge_dim(
-            dataset="LASTFM",
-            requested_dim=None,
-            processed_data_root=tmp_path,
-        )
-
-        assert resolved == DYGLIB_ALIGNED_FEATURE_DIM
-
-    def test_explicit_config_override_wins(self, tmp_path: Path):
-        resolved = resolve_tgat_dummy_edge_dim(
-            dataset="LASTFM",
-            requested_dim=32,
-            processed_data_root=tmp_path,
-        )
-
-        assert resolved == 32
-
-
-class TestResolveTGATDummyNodeDim:
-    def test_uses_dyglib_alignment_floor_for_zero_feature_datasets(
-        self, tmp_path: Path
-    ):
-        dataset_dir = tmp_path / "lastfm"
-        dataset_dir.mkdir()
-        np.save(dataset_dir / "ml_lastfm_node.npy", np.zeros((8, 1), dtype=np.float32))
-
-        resolved = resolve_tgat_dummy_node_dim(
-            dataset="LASTFM",
-            requested_dim=None,
-            processed_data_root=tmp_path,
-        )
-
-        assert resolved == DYGLIB_ALIGNED_FEATURE_DIM
-
-    def test_explicit_config_override_wins(self, tmp_path: Path):
-        resolved = resolve_tgat_dummy_node_dim(
-            dataset="LASTFM",
-            requested_dim=48,
-            processed_data_root=tmp_path,
-        )
-
-        assert resolved == 48
 
 
 class TestResolveNoMemoryQueueSize:

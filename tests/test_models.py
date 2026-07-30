@@ -8,7 +8,6 @@ from frost.models.encoder.dygformer import DyGFormer
 from frost.models.header import (
     AdditiveLinkHead,
     ConcatLinkHead,
-    NodeClassificationHeader,
 )
 from frost.models.contracts import RepresentationKind
 from frost.models.outputs import EncoderResult, RepresentationAdapter
@@ -129,21 +128,6 @@ class TestConcatLinkHead:
         ).squeeze(1)
 
         assert torch.equal(logits[2:], torch.tensor([101.0, 201.0, 310.0, 410.0]))
-
-
-class TestNodeClassificationHeader:
-    def test_output_shape(self):
-        header = NodeClassificationHeader(dim_in=64, d_hid=32, num_class=5)
-        x = torch.randn(10, 64)
-        out = header(x)
-        assert out.shape == (10, 5)
-
-    def test_gradient_flow(self):
-        header = NodeClassificationHeader(dim_in=32, d_hid=16, num_class=3)
-        x = torch.randn(4, 32, requires_grad=True)
-        out = header(x)
-        out.sum().backward()
-        assert x.grad is not None
 
 
 class TestPairAlignedRepresentations:

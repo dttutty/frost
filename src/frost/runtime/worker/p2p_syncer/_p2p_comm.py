@@ -46,11 +46,9 @@ class P2PQHandler(StreamThreadBase):
         p2p_sem: threading.Semaphore,
         stop_ev: threading.Event,
         delta_queue: DeltaQueue,
-        device: torch.device,
         use_shm_instead: bool = False,
     ) -> None:
         super().__init__(name="p2p_comm", stop_ev=stop_ev)
-        self.device = device
         self.mem_p2p_q = mem_p2p_q
         self.box_p2p_q = box_p2p_q
         self.p2p_sem = p2p_sem

@@ -6,9 +6,6 @@ from dataclasses import dataclass
 
 import torch
 
-from frost.utils.tensor_set_fn import TensorSetFn
-
-
 @dataclass(kw_only=True)
 class NodeFeatNid:
     """Pairs node IDs with their corresponding static node-feature rows.
@@ -43,25 +40,12 @@ class NodeFeatNid:
         return self
 
     def merge(self, other: NodeFeatNid) -> NodeFeatNid:
-        """Concatenate two non-overlapping ``NodeFeatNid`` instances in-place.
-
-        Args:
-            other: Another ``NodeFeatNid`` whose node IDs must not intersect
-                with ``self.nid``.
-
-        Returns:
-            ``self`` after appending ``other``'s data.
-
-        Raises:
-            AssertionError: If the two instances share any node IDs.
-        """
-        assert TensorSetFn.intersection(self.nid, other.nid).numel() == 0, (
-            "NID overlap between RootX instances."
-        )
-        if TensorSetFn.intersection(self.nid, other.nid).numel() != 0:
-            raise ValueError("NID overlap between RootX instances.")
+        """Append a non-overlapping feature lookup table in place."""
+        if torch.isin(self.nid, other.nid).any():
+            raise ValueError("NodeFeatNid instances must not overlap.")
         self.nid = torch.cat((self.nid, other.nid), dim=0)
         self.nfeat = torch.cat((self.nfeat, other.nfeat), dim=0)
+        self.is_sorted = False
         return self
 
     def filter_by_nid(self, nid: torch.Tensor) -> NodeFeatNid:
@@ -77,7 +61,3 @@ class NodeFeatNid:
         nid = self.nid[mask]
         nfeat = self.nfeat[mask]
         return self.__class__(nid=nid, nfeat=nfeat)
-
-    def cuda(self) -> NodeFeatNid:
-        """Return a new ``NodeFeatNid`` with all tensors moved to the default CUDA device."""
-        return NodeFeatNid(nid=self.nid.cuda(), nfeat=self.nfeat.cuda())

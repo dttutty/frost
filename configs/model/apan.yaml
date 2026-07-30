@@ -5,7 +5,6 @@ neighborhood:
 encoder:
   _target_: frost.models.encoder.apan.APAN
   d_mem: ${model.embedding_dim}
-  n_neg: ${n_neg}
 state:
   boxsize: 10
   mail_combine: last
@@ -13,6 +12,7 @@ state:
     _target_: frost.models.mem_updater.TransformerMemoryUpdater
     d_time: ${d_time}
     d_mem: ${model.embedding_dim}
+    boxsize: ${model.state.boxsize}
     heads: 2
     dropout: ${dropout}
 head:

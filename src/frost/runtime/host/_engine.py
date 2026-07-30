@@ -111,9 +111,7 @@ class Host:
     def __init__(
         self,
         has_nfeat: bool,
-        has_efeat: bool,
         has_mem: bool,
-        mail_same_plan_as_mem: bool,
         df: pd.DataFrame,
         neg_sampler_train: PrecomputedNegSampler,
         neg_sampler_eval: PrecomputedNegSampler,
@@ -143,9 +141,7 @@ class Host:
         self.ngh_sampler = ngh_sampler
         self.start_time = start_time
         self.has_nfeat = has_nfeat
-        self.has_efeat = has_efeat
         self.has_mem = has_mem
-        self.mail_same_plan_as_mem = mail_same_plan_as_mem
         self.n_gpu = env.n_gpu
         self.batch_size = batch_size
         self.eval_batch_size = (

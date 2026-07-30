@@ -10,7 +10,6 @@ import logging
 import torch
 
 from frost.datatypes.graph import FlatGraph
-from frost.datatypes.meta import Meta
 from frost.datatypes.plan import StaticPlan
 
 from ...datatypes.n_feat_nid import NodeFeatNid
@@ -40,7 +39,6 @@ class StaticAssembler:
     def prepare_nfeat_cache(
         self,
         nfeat_plan: "StaticPlan",
-        meta: "Meta",
     ) -> "NodeFeatNid":
         """Build a sorted ``NodeFeatNid`` lookup table for the current batch.
 
@@ -53,8 +51,6 @@ class StaticAssembler:
 
         Args:
             nfeat_plan: Plan specifying which NIDs to fetch vs. cache.
-            meta: Batch metadata (used for debugging context).
-
         Returns:
             Sorted ``NodeFeatNid`` containing all features needed for this batch.
         """
@@ -102,7 +98,6 @@ class StaticAssembler:
         self,
         flat_graph: FlatGraph,
         nfeat_nid: "NodeFeatNid",
-        meta: "Meta",
         *,
         strict: bool = True,
     ) -> FlatGraph:
@@ -115,7 +110,6 @@ class StaticAssembler:
         Args:
             flat_graph: The FlatGraph to annotate; modified in-place.
             nfeat_nid: Sorted lookup table mapping NID → feature vector.
-            meta: Batch metadata (used for debugging context).
             strict: Whether every valid node in ``flat_graph`` must exist in the
                 lookup table. Root-scoped feature plans use ``False`` so only roots are
                 filled while neighbor rows remain zeroed.
@@ -177,7 +171,6 @@ class StaticAssembler:
         self,
         flat_graph: FlatGraph,
         n_src: int,
-        meta: "Meta",
     ) -> FlatGraph:
         """Gather edge features from shared CPU storage into ``flat_graph.efeat``.
 
@@ -188,8 +181,6 @@ class StaticAssembler:
         Args:
             flat_graph: The FlatGraph to annotate; modified in-place.
             n_src: Number of source nodes in this batch.
-            meta: Batch metadata (used for debugging context).
-
         Returns:
             The same ``flat_graph`` with ``efeat`` populated.
         """

@@ -11,7 +11,6 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from frost.ablation import resolve_dynamic_state_ablation
 from frost.datatypes.env import Env
 from frost.launch.config import (
-    resolve_dynamic_state_fetch_mode,
     resolve_eval_metric,
     resolve_no_memory_queue_size,
     resolve_time_scaling_factor,
@@ -101,7 +100,7 @@ def launch(cfg: DictConfig):
     if cfg.seed is not None:
         set_seed(cfg.seed)
     output_dir = HydraConfig.get().runtime.output_dir
-    init_logging(env.local_rank, env.is_host, output_dir)
+    init_logging(env.local_rank, output_dir)
     # Use a per-job unique namespace for shared-memory segments so concurrent
     # launches cannot collide when they start within the same second.
     run_id = broadcast_data(
@@ -186,11 +185,7 @@ def launch(cfg: DictConfig):
     tgl_sampler_parity = bool(cfg.ngh_sampler.get("tgl_sampler_parity", False))
 
     no_memory_queue_size = resolve_no_memory_queue_size(cfg.get("no_memory_queue_size"))
-    use_shm_instead = resolve_dynamic_state_fetch_mode(
-        cfg,
-        has_mem=has_mem,
-        fanout=fanout,
-    )
+    use_shm_instead = bool(cfg.get("__debug_use_shm_instead", False))
 
     if len(fanout) > 1 and has_mem:
         raise ValueError("Memory models only support 0-hop or 1-hop fanout.")
@@ -348,15 +343,12 @@ def launch(cfg: DictConfig):
             )
         planner = AccessPlanAnalyzer(execution_plan)
         has_nfeat = ndim > 0
-        has_efeat = edim > 0
 
         if_carry_over_route: bool = bool(cfg.get("if_carry_over_route", False))
         dispatch_host(
             lambda: Host(
                 has_nfeat=has_nfeat,
-                has_efeat=has_efeat,
                 has_mem=has_mem,
-                mail_same_plan_as_mem=False,
                 df=df,
                 env=env,
                 start_time=start,
@@ -403,12 +395,6 @@ def launch(cfg: DictConfig):
             plan=execution_plan,
             d_mail=d_mail,
         )
-        if use_shm_instead and not bool(cfg.get("__debug_use_shm_instead", False)):
-            logger.info(
-                "Auto-enabled shared-memory dynamic-state fetch path for root-only memory model "
-                "model=%s.",
-                execution_plan.model_name,
-            )
         dispatch_worker(
             lambda: Worker(
                 n_neg=max_n_neg,

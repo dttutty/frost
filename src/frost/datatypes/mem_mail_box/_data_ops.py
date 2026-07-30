@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import TypeVar
 
 import torch
@@ -10,21 +9,6 @@ from .mail import MailEntry
 from .mem import MemEntry
 
 MemOrMail = TypeVar("MemOrMail", MemEntry, MailEntry)
-
-logger = logging.getLogger(__name__)
-
-
-def box_to_mail(box_ts_nid) -> MailEntry:
-    from .mail import MailEntry
-
-    return MailEntry(
-        nid=box_ts_nid.nid,
-        data=box_ts_nid.data.squeeze(1),
-        ts=box_ts_nid.ts.squeeze(1),
-        is_sorted=box_ts_nid.is_sorted,
-        is_unique=box_ts_nid.is_unique,
-    )
-
 
 def mail_to_box(mem_ts_nid) -> BoxEntry:
     return BoxEntry(
@@ -81,111 +65,6 @@ def keep_last(data: MemOrMail) -> MemOrMail:
     data.is_sorted = True
     data.is_unique = True
     return data
-
-
-def merge_1_mail(box: BoxEntry, mail: MailEntry) -> BoxEntry:
-    """Insert one new mail per node into the circular mailbox buffer (shift-left FIFO).
-
-    Mirrors TGL_ORIGINAL's ``MailBox.update_mailbox`` circular-buffer write for
-    ``deliver_to='neighbors'`` with ``mail_combine='last'`` or ``'mean'``:
-
-        mailbox[nid, next_mail_pos[nid]] = mail
-        next_mail_pos[nid] = (next_mail_pos[nid] + 1) % mailbox_size
-
-    Here we implement equivalent behaviour via a left-shift on the slot axis:
-    slot-0 (oldest) is dropped, all remaining slots shift left by one, and
-    the new mail is written into the last slot (index ``boxsize - 1``).
-
-    Args:
-        box : BoxEntry – current mailbox loaded from the flat graph.
-                         ``nid``  shape [N_all] – may contain -1 padding and
-                         duplicate node IDs (same node can appear multiple times
-                         in the flat graph; all copies carry identical data from
-                         shared memory).
-                         ``data`` shape [N_all, boxsize, D]
-                         ``ts``   shape [N_all, boxsize]
-        mail: MailEntry – new mail per destination node, already de-duplicated
-                         by ``keep_last()`` / ``keep_mean()`` so ``nid`` is
-                         unique and sorted.
-                         ``nid``  shape [M]
-                         ``data`` shape [M, D]
-                         ``ts``   shape [M]
-
-    Returns:
-        BoxEntry  nid=[M], data=[M, boxsize, D], ts=[M, boxsize].
-        The caller (BoxWriter) writes this back to the shared-memory mailbox.
-    """
-    M = mail.nid.numel()
-    boxsize = box.data.shape[1]
-    D = box.data.shape[2]
-    device = box.data.device
-
-    # Zero-initialised output: nodes with no prior mailbox history start empty.
-    out_data = torch.zeros(M, boxsize, D, dtype=box.data.dtype, device=device)
-    out_ts = torch.zeros(M, boxsize, dtype=box.ts.dtype, device=device)
-
-    if M == 0:
-        return BoxEntry(
-            nid=mail.nid,
-            data=out_data,
-            ts=out_ts,
-            is_sorted=mail.is_sorted,
-            is_unique=mail.is_unique,
-        )
-
-    # Build a sorted, unique lookup table from the flat-graph old-box.
-    # box.nid may contain -1 (padding) and duplicate node IDs – filter first.
-    valid_mask_box = box.nid != -1
-    if valid_mask_box.any():
-        valid_box_nid = box.nid[valid_mask_box]  # [V]
-        valid_box_indices = torch.nonzero(valid_mask_box, as_tuple=False).squeeze(
-            -1
-        )  # [V]
-
-        # Sort by nid to enable searchsorted; for duplicates keep the last
-        # occurrence (all duplicates hold identical data from shared memory).
-        sort_idx = torch.argsort(valid_box_nid)
-        sorted_nid = valid_box_nid[sort_idx]  # [V], sorted ascending
-        sorted_global_idx = valid_box_indices[sort_idx]  # [V]
-
-        # Deduplicate: keep the LAST occurrence of each nid in sorted order
-        # (last = highest index -> most recent write, though values are equal).
-        keep = torch.ones(sorted_nid.numel(), dtype=torch.bool, device=device)
-        if sorted_nid.numel() > 1:
-            keep[:-1] = sorted_nid[:-1] != sorted_nid[1:]
-
-        unique_nid_box = sorted_nid[keep]  # [U], strictly increasing
-        unique_global_idx = sorted_global_idx[keep]  # [U]
-
-        # Match each mail destination against the old-box unique nids.
-        pos = torch.searchsorted(unique_nid_box, mail.nid)
-        in_bound = pos < unique_nid_box.numel()
-        pos_safe = pos.clamp(max=unique_nid_box.numel() - 1)
-        found_mask = in_bound & (unique_nid_box[pos_safe] == mail.nid)
-
-        if found_mask.any():
-            found_mail_idx = torch.nonzero(found_mask, as_tuple=False).squeeze(-1)
-            found_box_global_idx = unique_global_idx[pos_safe[found_mask]]
-
-            # Circular-buffer shift: drop slot-0 (oldest), shift everything
-            # left by 1, leaving the last slot empty for the incoming mail.
-            if boxsize > 1:
-                out_data[found_mail_idx, : boxsize - 1, :] = box.data[
-                    found_box_global_idx, 1:, :
-                ]
-                out_ts[found_mail_idx, : boxsize - 1] = box.ts[found_box_global_idx, 1:]
-
-    # Write the new mail into the last (most-recent) slot for every node.
-    out_data[:, boxsize - 1, :] = mail.data
-    out_ts[:, boxsize - 1] = mail.ts
-
-    return BoxEntry(
-        nid=mail.nid,
-        data=out_data,
-        ts=out_ts,
-        is_sorted=mail.is_sorted,
-        is_unique=mail.is_unique,
-    )
 
 
 def keep_mean(data: MemOrMail) -> MemOrMail:

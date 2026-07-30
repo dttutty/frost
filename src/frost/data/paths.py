@@ -106,12 +106,3 @@ def resolve_tgb_raw_dataset_dir(
         else tgb_data_root()
     )
     return resolve_child_directory(root / "raw", raw_name)
-
-
-def resolve_runtime_dataset_dir(
-    dataset: str, *, artifact_data_root: str | Path | None = None
-) -> Path:
-    """Resolve the source directory used by runtime loaders and samplers."""
-    if is_raw_tgb_dataset(dataset):
-        return resolve_tgb_raw_dataset_dir(dataset)
-    return resolve_artifact_dataset_dir(dataset, data_root=artifact_data_root)

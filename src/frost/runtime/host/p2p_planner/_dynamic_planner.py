@@ -1,4 +1,3 @@
-import random
 import threading
 
 import numpy as np
@@ -122,33 +121,6 @@ def handle_remaining(
                 needs[r] = needs[r] - to_transfer
 
     return needs, p2p_plan
-
-
-def deduplicate_updates_random(
-    updates: list[TensorSet], seed: int | None = None
-) -> tuple[list[TensorSet], TensorSet]:
-    """Random deduplication: each node is assigned to exactly one GPU chosen at random."""
-    n_gpus = len(updates)
-
-    empty_tensor = torch.tensor([], dtype=torch.long)
-    if n_gpus > 0 and updates[0].data.is_cuda:
-        empty_tensor = empty_tensor.to(updates[0].data.device)
-
-    empty_ts = TensorSet(empty_tensor)
-    new_updates: list[TensorSet] = [empty_ts] * n_gpus
-
-    if n_gpus == 0:
-        return new_updates, empty_ts
-
-    all_update = empty_ts
-    indices = list(range(n_gpus))
-    random.shuffle(indices)
-
-    for i in indices:
-        new_updates[i] = updates[i] - all_update
-        all_update = all_update | updates[i]
-
-    return new_updates, all_update
 
 
 def deduplicate_updates(

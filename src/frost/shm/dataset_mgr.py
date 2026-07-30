@@ -537,10 +537,8 @@ class DatasetManager:
             n_items=expected_rows,
         )
 
-        src_dtype = _torch_dtype_from_numpy(arr.dtype)
+        _torch_dtype_from_numpy(arr.dtype)
         final_dtype = self.feature_dtype
-        if src_dtype == torch.bool:
-            final_dtype = self.feature_dtype
         feat_shm = csm(f"{self.run_id}_{shm_name}", arr.shape, dtype=final_dtype)
         rows_per_chunk = _rows_per_chunk(
             arr.shape[1], final_dtype, source_itemsize=arr.dtype.itemsize
@@ -579,14 +577,6 @@ class DatasetManager:
         feat_shm = csm(f"{self.run_id}_{shm_name}", feat.shape, dtype=final_dtype)
         feat_shm.copy_(feat)
         return feat_shm, feat.shape[1], final_dtype
-
-    def _create_shm(self, name, data_np, shape):
-        """Host: Allocate and copy data to SHM."""
-        if data_np is None or shape[1] <= 0:
-            return None
-        feat_shm = csm(f"{self.run_id}_{name}", shape, dtype=data_np.dtype)
-        feat_shm.copy_(data_np)
-        return feat_shm
 
     def _attach_shm(self, name, shape, dtype):
         """Worker: Attach to the SHM created by Host."""

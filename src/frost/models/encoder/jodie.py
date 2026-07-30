@@ -1,11 +1,5 @@
-"""JODIE encoder module.
+"""JODIE encoder and time-projection layer."""
 
-Contains the ``JODIE`` encoder, the ``JODIETimeEmbedding`` time-projection
-layer used by JODIE, and ``IdentityNormLayer`` — a simple LayerNorm passthrough
-used when no graph attention is needed.
-"""
-
-import logging
 import math
 from typing import cast
 
@@ -14,54 +8,6 @@ import torch.nn as nn
 
 from frost.datatypes.graph import HierGraph
 from frost.models.outputs import EncoderResult
-
-logger = logging.getLogger(__name__)
-
-
-# --- Helper Modules (Copied & Simplified from layers.py) ---
-
-
-class IdentityNormLayer(nn.Module):
-    """
-    Applies LayerNorm to the target node features.
-    Used as a passthrough layer when the neighborhood is empty.
-    """
-
-    # how to use:
-
-    # # 1. Prepare Target Features (Roots)
-    #     target_feat = hier_graph.root_mem
-    #     if self.dim_node > 0 and hier_graph.root_nfeat is not None:
-    #         target_feat = target_feat + self.n_feat_mapper(hier_graph.root_nfeat)
-
-    #     # 2. Route based on neighborhood existence
-    #     if not hier_graph.neighbors or hier_graph.sampling_config[0] == 0:
-    #         # Fast path: No neighbors to attend to (e.g., APAN or 0-neighbor sampling)
-    #         out = self.identity_norm(target_feat)
-    #     else:
-    #         # Standard path: Attend to neighbors
-    #         nbr = hier_graph.neighbors[0]
-    #         # ... (extract neighbor_feat, edge_feat, dt, mask as we discussed before) ...
-    #         out = self.encoder(
-    #             target_feat=target_feat,
-    #             neighbor_feat=neighbor_feat,
-    #             edge_feat=edge_feat,
-    #             dt=dt,
-    #             mask=mask,
-    #         )
-
-    #     return out
-
-    def __init__(self, d_hid: int) -> None:
-        super().__init__()
-        self.norm = nn.LayerNorm(d_hid)
-
-    def forward(self, target_feat: torch.Tensor) -> torch.Tensor:
-        """
-        target_feat: Tensor of shape [N, d_hid] representing the root/target nodes.
-        """
-        return cast(torch.Tensor, self.norm(target_feat))
-
 
 class JODIETimeEmbedding(nn.Module):
     """
@@ -113,7 +59,6 @@ class JODIE(nn.Module):
         self,
         ndim: int,
         d_mem: int = 100,
-        d_time: int = 100,
     ) -> None:
         """
         Args:

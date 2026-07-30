@@ -39,8 +39,6 @@ class MemoryUpdater(nn.Module):
         d_time: Dimensionality of the time encoding.
         d_mem: Dimensionality of the memory state (output dim of the RNN cell).
         cell: Recurrent cell type — ``"gru"`` (default) or ``"rnn"``.
-        boxsize: Number of mailbox slots per node (unused here; kept for
-            config-schema compatibility).
     """
 
     # Map the exact parameters you need from YAML to the __init__ arguments
@@ -50,7 +48,6 @@ class MemoryUpdater(nn.Module):
         d_time: int,  # from hydra config
         d_mem: int,  # from hydra config
         cell: Literal["rnn", "gru"] = "gru",  # from hydra config
-        boxsize: int = 10,  # from hydra config
     ) -> None:
         super().__init__()
         self.cell = cell

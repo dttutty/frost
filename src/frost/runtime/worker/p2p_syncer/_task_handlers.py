@@ -178,7 +178,6 @@ class MessageHandler(StreamThreadBase):
         h2d_sem: CreditGate,
         mailbox_router: MailboxRouterProto | None,
         n_neg: int = 1,
-        fanout: list[int] | None = None,
     ) -> None:
         super().__init__(name="msg_handler", stop_ev=stop_ev)
 
@@ -191,7 +190,6 @@ class MessageHandler(StreamThreadBase):
         self.box_wr_q = box_wr_q
         self.h2d_sem = h2d_sem
         self.n_neg = n_neg
-        self.fanout = fanout or []
 
     def _process_messages(
         self,

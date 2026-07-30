@@ -130,11 +130,9 @@ class WorkerPipelineMixin:
             h2d_dest_q = self.full_q
 
         self.h2d = H2D(
-            ring_buf=ring_buf,
             nfeat=nfeat,
             efeat=efeat,
             device=self.device,
-            n_neg=self.n_neg,
             node_feature_scope=self.execution_plan.features.node_scope,
             in_q=self.received_q,
             out_q=h2d_dest_q,
@@ -183,7 +181,6 @@ class WorkerPipelineMixin:
             box_wr_q=self.box_wr_q,
             mailbox_router=self.mailbox_router,
             n_neg=self.n_neg,
-            fanout=self.ring_buf.fanout,
         )
         self.box_wr = BoxMailWriter(
             mem_box_store=self.mem_box_store,
@@ -192,7 +189,6 @@ class WorkerPipelineMixin:
             wr_q=self.box_wr_q,
             device=self.device,
             name="box_wr",
-            n_neg=self.n_neg,
             fanout=self.ring_buf.fanout,
         )
         self.p2p_q_handler = P2PQHandler(
@@ -203,7 +199,6 @@ class WorkerPipelineMixin:
             p2p_sem=self.p2p_sem,
             stop_ev=self.stop_ev,
             delta_queue=self.delta_queue,
-            device=self.device,
             use_shm_instead=self.use_shm_instead,
         )
 
