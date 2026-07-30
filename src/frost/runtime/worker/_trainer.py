@@ -277,7 +277,10 @@ class WorkerTrainerMixin:
             Result dataclass containing the aggregated scalar metrics for this epoch.
         """
         avg_loss = self.train_loss_tracker.compute()
-        if self.eval_metric == "ap":
+        if self.train_only:
+            val_auc = val_ap = test_auc = test_ap = 0.0
+            val_mrr = test_mrr = 0.0
+        elif self.eval_metric == "ap":
             val_results = self.val_metrics.compute()
             test_results = self.test_metrics.compute()
             val_auc = val_results["val_auc"].item()

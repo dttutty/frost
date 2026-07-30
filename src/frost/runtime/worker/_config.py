@@ -46,3 +46,4 @@ class WorkerOptions:
     no_memory_queue_size: int = 4
     cpu_benchmark_pid_list: list[int] | None = None
     eval_metric: Literal["ap", "mrr"] = "ap"
+    train_only: bool = False

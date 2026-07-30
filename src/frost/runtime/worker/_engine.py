@@ -146,6 +146,7 @@ class Worker(
                 f"Unsupported eval_metric={options.eval_metric!r}; expected 'ap' or 'mrr'."
             )
         self.eval_metric = options.eval_metric
+        self.train_only = options.train_only
         if options.no_memory_queue_size < 1:
             raise ValueError("no_memory_queue_size must be >= 1.")
         self.no_memory_queue_size = options.no_memory_queue_size

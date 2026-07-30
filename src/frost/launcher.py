@@ -199,6 +199,7 @@ def launch(cfg: DictConfig):
     train_n_neg = neg_sampler_cfg.train.get("n_neg", cfg.n_neg)
     eval_n_neg = neg_sampler_cfg.eval.get("n_neg", cfg.n_neg)
     eval_metric = resolve_eval_metric(cfg.get("eval_metric", "ap"))
+    train_only = bool(cfg.get("benchmark", {}).get("train_only", False))
     if eval_metric == "ap" and eval_n_neg != 1:
         raise ValueError(
             "eval_metric='ap' currently requires neg_sampler.eval.n_neg=1; "
@@ -342,9 +343,7 @@ def launch(cfg: DictConfig):
                     ),
                     dynamic_state_policy=dynamic_state_policy,
                     eval_metric=eval_metric,
-                    train_only=bool(
-                        cfg.get("benchmark", {}).get("train_only", False)
-                    ),
+                    train_only=train_only,
                 ),
             )
         )
@@ -391,6 +390,7 @@ def launch(cfg: DictConfig):
                     no_memory_queue_size=no_memory_queue_size,
                     cpu_benchmark_pid_list=cpu_benchmark_pid_list,
                     eval_metric=eval_metric,
+                    train_only=train_only,
                 ),
             )
         )
