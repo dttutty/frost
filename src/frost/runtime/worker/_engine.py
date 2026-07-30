@@ -238,7 +238,7 @@ class Worker(
                 selection_metric = (
                     result.val_ap if self.eval_metric == "ap" else result.val_mrr
                 )
-                if selection_metric > self.local_best_metric:
+                if not self.train_only and selection_metric > self.local_best_metric:
                     self.local_best_metric = selection_metric
                     self.save_model(os.path.join(self.save_to, "best.ckpt"))
                 self.curr_epoch += 1

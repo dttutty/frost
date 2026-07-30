@@ -279,6 +279,12 @@ class Host:
 
         # Cache result so early_stop_check can read it
         self.last_epoch_result = res
+        if self.train_only:
+            print(
+                f"[Epoch {self.curr_epoch}] Train Loss: {res.train_loss:.4f} "
+                "| evaluation skipped"
+            )
+            return
         selection_score = self._selection_score(res)
         metric_name = self.eval_metric.upper()
         metric_label = (
