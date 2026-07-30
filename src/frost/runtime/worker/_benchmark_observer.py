@@ -40,10 +40,14 @@ class WorkerBenchmarkObserver:
         self.measure_target = _get_non_negative_int_env(
             "FROST_THROUGHPUT_MEASURE_BATCHES", 0
         )
+        self.measure_start_epoch = _get_non_negative_int_env(
+            "FROST_THROUGHPUT_MEASURE_START_EPOCH", 0
+        )
         self.gpu_curve_enabled = _get_bool_env("FROST_GPU_UTIL_CURVE_BENCH", False)
         self.cpu_enabled = _get_bool_env("FROST_CPU_UTIL_BENCH", False)
 
         self.epoch_batches = 0
+        self.completed_epochs = 0
         self.total_batches = 0
         self.measured_batches = 0
         self.measured_events = 0
@@ -79,6 +83,8 @@ class WorkerBenchmarkObserver:
             self.logical_cpus = logical_cpu_count()
 
     def _past_warmup(self, total_count: int, epoch_count: int) -> bool:
+        if self.completed_epochs < self.measure_start_epoch:
+            return False
         if self.warmup_total is not None:
             return total_count > self.warmup_total
         return epoch_count > self.warmup_per_epoch
@@ -141,6 +147,7 @@ class WorkerBenchmarkObserver:
             self.allocated_mib.append(torch.cuda.memory_allocated(self.device) / (1024**2))
 
     def on_epoch_end(self) -> None:
+        self.completed_epochs += 1
         self.epoch_batches = 0
         self._last_window_start = self._window_start
         self._last_window_end = self._window_end
@@ -184,6 +191,7 @@ class WorkerBenchmarkObserver:
                 f"gpu_elapsed_s={gpu_elapsed:.3f} "
                 f"warmup_batches_per_epoch={self.warmup_per_epoch} "
                 f"warmup_batches_total={self.warmup_total} "
+                f"measure_start_epoch={self.measure_start_epoch} "
                 f"measured_batches={self.measured_batches} "
                 f"measure_target={self.measure_target}"
             )
@@ -221,6 +229,7 @@ class WorkerBenchmarkObserver:
         memory = {
             "warmup_batches_per_epoch": self.warmup_per_epoch,
             "warmup_batches_total": self.warmup_total,
+            "measure_start_epoch": self.measure_start_epoch,
             "measure_batches_target": self.measure_target,
             "memory_measured_batches": len(self.reserved_mib),
             **self._summary(self.reserved_mib, "reserved_mib"),
@@ -232,6 +241,7 @@ class WorkerBenchmarkObserver:
                 "APPENDIX_TRAIN_MEMORY_CURVE",
                 warmup_batches_per_epoch=self.warmup_per_epoch,
                 warmup_batches_total=self.warmup_total,
+                measure_start_epoch=self.measure_start_epoch,
                 measure_batches_target=self.measure_target,
                 measured_batches=len(self.reserved_mib),
                 reserved_mib_curve=[round(value, 4) for value in self.reserved_mib],

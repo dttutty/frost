@@ -46,3 +46,31 @@ def test_observer_owns_training_telemetry_lifecycle(monkeypatch, capsys) -> None
     assert "TRAIN_THROUGHPUT_PER_GPU" in output
     assert "APPENDIX_TRAIN_WINDOW" in output
     assert "APPENDIX_TRAIN_MEMORY_SUMMARY" in output
+
+
+def test_observer_skips_complete_epochs_before_measurement(monkeypatch) -> None:
+    monkeypatch.setenv("FROST_THROUGHPUT_WARMUP_BATCHES_PER_EPOCH", "0")
+    monkeypatch.setenv("FROST_THROUGHPUT_MEASURE_START_EPOCH", "1")
+    monkeypatch.setattr(torch.cuda, "Event", lambda **_kwargs: _Event())
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: object())
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda _device: 0)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda _device: 0)
+    observer = WorkerBenchmarkObserver(
+        env=SimpleNamespace(local_rank=0),  # type: ignore[arg-type]
+        device=torch.device("cpu"),
+    )
+
+    observer.on_train_batch_start(8)
+    observer.on_train_batch_end()
+    observer.on_train_batch_start(8)
+    observer.on_train_batch_end()
+    observer.on_epoch_end()
+    assert observer.measured_batches == 0
+
+    observer.on_train_batch_start(8)
+    observer.on_train_batch_end()
+    observer.on_train_batch_start(8)
+    observer.on_train_batch_end()
+
+    assert observer.measured_batches == 1
+    assert observer.measured_events == 8
