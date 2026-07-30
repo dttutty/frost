@@ -184,6 +184,11 @@ class DynamicStateCoordinator:
         if self.mem_task_q is None or self.box_task_q is None:
             raise RuntimeError("Async dynamic-state queues are not initialized.")
 
+        # Snapshot the mailbox input before exposing the memory entry to its
+        # consumer. MemTaskHandler deduplicates MemEntry in place, so cloning
+        # after mem_task_q.put() races field-by-field with that mutation and
+        # can produce an entry whose nid/data/ts row counts disagree.
+        box_root_new_mem = root_new_mem.clone()
         ready_event = cast(CudaEvent, torch.cuda.Event())
         ready_event.record(stream=torch.cuda.current_stream())
         self.mem_task_q.put(
@@ -202,7 +207,7 @@ class DynamicStateCoordinator:
             (
                 BoxTask(
                     pos_efeat=box_pos_efeat,
-                    root_new_mem=root_new_mem.clone(),
+                    root_new_mem=box_root_new_mem,
                     stale_box=context.stale_box,
                     mini_batch_idx=meta.mini_batch_idx,
                     box_plan=plan_set.box_plan,

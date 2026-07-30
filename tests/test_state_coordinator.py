@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from frost.datatypes.graph import FlatGraph
+from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.meta import Meta
 from frost.launch.plan import compile_execution_plan
 from frost.models.contracts import RepresentationKind, RootExpansion
@@ -190,3 +191,52 @@ def test_coordinator_rejects_misaligned_updater_state_synchronously() -> None:
         RuntimeError, match="misaligned positive-root state"
     ):
         model(meta)
+
+
+def test_async_publication_snapshots_box_input_before_memory_queue_put(
+    monkeypatch,
+) -> None:
+    class _FakeEvent:
+        def record(self, *, stream) -> None:
+            del stream
+
+    class _MutatingMemQueue:
+        def put(self, item) -> None:
+            task, _event = item
+            # Model the in-place field replacement performed by keep_last().
+            task.root_new_mem.data = task.root_new_mem.data[:1]
+
+    class _RecordingBoxQueue:
+        def __init__(self) -> None:
+            self.item = None
+
+        def put(self, item) -> None:
+            self.item = item
+
+    monkeypatch.setattr(torch.cuda, "Event", _FakeEvent)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: object())
+    mem_q = _MutatingMemQueue()
+    box_q = _RecordingBoxQueue()
+    coordinator = DynamicStateCoordinator(
+        plan=_plan(),
+        dynamic_state_policy=resolve_dynamic_state_policy("baseline"),
+        mem_task_q=mem_q,
+        box_task_q=box_q,
+        direct_writeback=lambda _request: None,
+    )
+    meta = _make_meta()
+    meta.plan_set = SimpleNamespace(mem_plan=object(), box_plan=object())
+    context = SimpleNamespace(meta=meta, stale_mem=None, stale_box=None)
+    root_new_mem = MemEntry(
+        nid=torch.tensor([1, 2]),
+        data=torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        ts=torch.tensor([5.0, 5.0]),
+    )
+
+    coordinator._publish_async(context, root_new_mem, None, None, None)
+
+    assert box_q.item is not None
+    box_task, _event = box_q.item
+    assert box_task.root_new_mem.nid.shape == (2,)
+    assert box_task.root_new_mem.data.shape == (2, 2)
+    assert box_task.root_new_mem.ts.shape == (2,)
