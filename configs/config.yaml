@@ -5,7 +5,6 @@ defaults:
   # rnd_dst_then_tgb | rnd_dst_then_tgb_wiki
   - neg_sampler: rnd_dst_then_fixed
   - ngh_sampler: recent
-  - precision: base # no need to change mostly
   - _self_
 
 epoch: 100
@@ -29,8 +28,9 @@ ignore_nfeat_on_disk: false
 ignore_efeat_on_disk: false
 no_memory_queue_size: 4
 compile: false
-tf32: false
-amp: false
+compute:
+  tf32: false
+  amp: false
 tqdm: true
 stable_mode: false
 reset_eval_neg_sampler_each_epoch: false

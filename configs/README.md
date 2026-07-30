@@ -14,7 +14,8 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | `eval_metric` | `ap` |
 | `d_time` | `128` |
 | `compile` | `false` |
-| `tf32` | `false` |
+| `compute.tf32` | `false` |
+| `compute.amp` | `false` |
 
 ## Root Experiment Fields
 
@@ -35,7 +36,8 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | `ring_buf_size` | `64` | Number of shared-memory ring-buffer slots per worker GPU. |
 | `if_carry_over_route` | `false` | Allows planner fallback to stale leftovers when next-batch needs cannot be fully satisfied. |
 | `compile` | `false` | Enables `torch.compile` for the assembled worker model. |
-| `tf32` | `false` | Enables TF32 matmul and cuDNN behavior globally. |
+| `compute.tf32` | `false` | Enables TF32 matmul and cuDNN behavior globally. |
+| `compute.amp` | `false` | Enables CUDA automatic mixed precision and gradient scaling. |
 
 ## Hydra Config Groups
 
@@ -45,6 +47,11 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | `loss_fn` | Training loss | `bce` | Fixed |
 | `neg_sampler` | Negative destination sampling | `rnd_dst_then_fixed`, `rnd_dst_then_hist`, `rnd_dst_then_post_train`, `rnd_dst_then_tgb`, `rnd_dst_then_tgb_wiki` | Yes |
 | `ngh_sampler` | Runtime neighborhood-sampling implementation | `recent`, `uniform`, `time_interval_aware` | Yes |
+
+Storage and transport dtypes are fixed runtime invariants: IDs and timestamps
+use `int64`, while features and dynamic-state payloads use `float32`. They are
+not a Hydra config group. Relative-time features are computed before conversion
+to model-side floating point so large absolute timestamps retain low-order bits.
 
 ## Parameter Flow and Coupling
 

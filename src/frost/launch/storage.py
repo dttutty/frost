@@ -12,7 +12,7 @@ from frost.seq_sampler import TemporalGraphType
 from frost.shm.dataset_mgr import DatasetManager
 from frost.shm.mem_mgr import MemBoxStore, MemBoxStoreManager
 from frost.shm.ring_buf import RingBuf, cal_max_buf_size_for_layouts
-from frost.utils.precision import PrecisionSpec
+from frost.utils.dtypes import RuntimeDTypes
 
 
 @dataclass(frozen=True)
@@ -64,15 +64,15 @@ def resolve_batch_layout(
 
 
 def prepare_launch_dataset(
-    *, cfg: DictConfig, env: Env, run_id: str, precision: PrecisionSpec
+    *, cfg: DictConfig, env: Env, run_id: str, dtypes: RuntimeDTypes
 ) -> LaunchDataset:
     prepared = DatasetManager(
         env=env,
         run_id=run_id,
         dataset=cfg.dataset,
-        index_dtype=precision.index_np,
-        time_dtype=precision.time_preprocessing_np,
-        feature_dtype=precision.feature_torch,
+        index_dtype=dtypes.index_np,
+        time_dtype=dtypes.timestamp_np,
+        feature_dtype=dtypes.feature_torch,
         graph_direction=str(cfg.get("graph_direction", "auto")),
         ignore_nfeat_on_disk=bool(cfg.get("ignore_nfeat_on_disk", False)),
         ignore_efeat_on_disk=bool(cfg.get("ignore_efeat_on_disk", False)),
@@ -93,7 +93,7 @@ def prepare_ring_buffer(
     *,
     env: Env,
     run_id: str,
-    precision: PrecisionSpec,
+    dtypes: RuntimeDTypes,
     fanout: list[int],
     root_expansion: RootExpansion,
     train_batch_size: int,
@@ -111,9 +111,9 @@ def prepare_ring_buffer(
     return RingBuf(
         run_id=run_id,
         env=env,
-        ndtype=precision.index_torch,
-        edtype=precision.index_torch,
-        tsdtype=precision.time_preprocessing_torch,
+        ndtype=dtypes.index_torch,
+        edtype=dtypes.index_torch,
+        tsdtype=dtypes.timestamp_torch,
         fanout=fanout,
         max_batch_size=train_batch_size,
         n_neg=max_n_neg,
@@ -128,7 +128,7 @@ def prepare_dynamic_store(
     enabled: bool,
     env: Env,
     run_id: str,
-    precision: PrecisionSpec,
+    dtypes: RuntimeDTypes,
     n_nodes: int,
     boxsize: int,
     d_mem: int,
@@ -138,8 +138,8 @@ def prepare_dynamic_store(
         return None
     return MemBoxStoreManager(
         env=env,
-        mdtype=precision.memory_torch,
-        tdtype=precision.time_preprocessing_torch,
+        mdtype=dtypes.state_torch,
+        tdtype=dtypes.timestamp_torch,
         run_id=run_id,
         n_nodes=n_nodes,
         boxsize=boxsize,

@@ -13,6 +13,7 @@ from frost.models.header import (
 from frost.models.contracts import RepresentationKind
 from frost.models.outputs import EncoderResult, RepresentationAdapter
 from frost.models.modules.time_encoder import TimeEncoder
+from frost.models.encoder.jodie import JODIETimeEmbedding
 
 
 def _adapt(h: torch.Tensor, *, n_src: int, n_neg: int, kind: RepresentationKind):
@@ -217,6 +218,23 @@ class TestTimeEncoder:
         out = enc(t)
         out.sum().backward()
         assert t.grad is not None
+
+
+class TestJODIETimeEmbedding:
+    def test_preserves_small_delta_at_large_absolute_timestamp(self):
+        projection = JODIETimeEmbedding(dim_out=1)
+        with torch.no_grad():
+            projection.time_emb.weight.fill_(100_000_000.0)
+            projection.time_emb.bias.zero_()
+
+        h = torch.ones(1, 1)
+        ts = torch.tensor([1_700_000_001], dtype=torch.int64)
+        mem_ts = torch.tensor([1_700_000_000], dtype=torch.int64)
+
+        out = projection(h, mem_ts, ts)
+
+        expected = 1.0 + 100_000_000.0 / 1_700_000_002.0
+        assert out.item() == pytest.approx(expected, rel=1e-6)
 
 
 class TestDyGFormer:

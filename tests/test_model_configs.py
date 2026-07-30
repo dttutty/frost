@@ -33,10 +33,17 @@ def test_model_configs_compose_and_build(name: str) -> None:
         d_mail=2 * d_mem,
     )
 
-    assert encoder.__class__.__name__.lower().replace("_", "") in name.replace(
-        "_", ""
-    )
+    assert encoder.__class__.__name__.lower().replace("_", "") in name.replace("_", "")
     assert head is not None
+
+
+def test_compute_policy_is_recorded_without_a_precision_config_group() -> None:
+    with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
+        cfg = compose(config_name="config")
+
+    assert cfg.compute.tf32 is False
+    assert cfg.compute.amp is False
+    assert "precision" not in cfg
 
 
 @pytest.mark.parametrize(

@@ -94,10 +94,13 @@ class JODIETimeEmbedding(nn.Module):
         Returns:
             Time-projected embedding of shape ``[N, d_mem]``.
         """
-        # Time difference normalization as per JODIE paper/code
-        ts_f = ts.to(torch.float32)
-        mem_ts_f = mem_ts.to(torch.float32)
-        time_diff = (ts_f - mem_ts_f) / (ts_f + 1.0)
+        # Subtract integral timestamps before conversion so large absolute
+        # timestamps do not lose their low-order bits in float32.  Compute the
+        # ratio in float64, then hand the model a regular float32 feature.
+        elapsed = ts - mem_ts
+        time_diff = (elapsed.to(torch.float64) / (ts.to(torch.float64) + 1.0)).to(
+            torch.float32
+        )
         # Scaling the embedding: h * (1 + w * DyX_t)
         # h dim: [n_nodes, dim_mem]
 

@@ -1,4 +1,0 @@
-index: "int64"    # Must be int64.
-time_for_preprocessing: "int64"   # Must be int64.
-time_for_encoder: "float32"
-efeat_nfeat_mem_mailbox: "float32" # Must be float32.

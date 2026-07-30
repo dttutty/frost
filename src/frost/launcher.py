@@ -42,7 +42,7 @@ from frost.models.contracts import (
 )
 from frost.models.recipes import instantiate_model_recipe
 from frost.utils._logger import init_logging
-from frost.utils.precision import resolve_precision
+from frost.utils.dtypes import RUNTIME_DTYPES
 from frost.utils.utils import broadcast_data, set_seed
 
 faulthandler.enable()
@@ -72,7 +72,7 @@ def launch(cfg: DictConfig):
     """
     _, _, is_host = initialize_process_group()
     configure_torch_backends(
-        use_tf32=bool(cfg.get("tf32", True)),
+        use_tf32=bool(cfg.compute.tf32),
         stable_mode=stable_mode_enabled(cfg),
         is_host=is_host,
     )
@@ -120,9 +120,8 @@ def launch(cfg: DictConfig):
             eval_per_gpu_batch_size,
         )
         logger.info("Using shared-memory run_id=%s", run_id)
-    precision = resolve_precision(cfg)
     dataset = prepare_launch_dataset(
-        cfg=cfg, env=env, run_id=run_id, precision=precision
+        cfg=cfg, env=env, run_id=run_id, dtypes=RUNTIME_DTYPES
     )
     graph = dataset.graph
     df = dataset.frame
@@ -227,7 +226,7 @@ def launch(cfg: DictConfig):
     ring_buf = prepare_ring_buffer(
         env=env,
         run_id=run_id,
-        precision=precision,
+        dtypes=RUNTIME_DTYPES,
         fanout=fanout,
         root_expansion=root_expansion,
         train_batch_size=per_gpu_batch_size,
@@ -241,7 +240,7 @@ def launch(cfg: DictConfig):
         enabled=has_mem,
         env=env,
         run_id=run_id,
-        precision=precision,
+        dtypes=RUNTIME_DTYPES,
         n_nodes=n_nodes,
         boxsize=int(state_cfg["boxsize"]) if state_cfg is not None else 0,
         d_mem=int(state_cfg["updater"]["d_mem"]) if state_cfg is not None else 0,
@@ -366,7 +365,7 @@ def launch(cfg: DictConfig):
                 neg_sampler_train=neg_sampler_train,
                 neg_sampler_eval=neg_sampler_eval,
                 ngh_sampler=ngh_sampler,
-                time_dtype=precision.time_preprocessing_torch,
+                time_dtype=RUNTIME_DTYPES.timestamp_torch,
                 n_epoch=cfg.epoch,
                 patience=cfg.patience,
                 gpu_topo=gpu_topo,
@@ -433,7 +432,7 @@ def launch(cfg: DictConfig):
                 use_shm_instead=use_shm_instead,
                 dynamic_state_ablation=dynamic_state_ablation,
                 compile_model=cfg.get("compile", True),
-                amp=bool(cfg.get("amp", False)),
+                amp=bool(cfg.compute.amp),
                 no_memory_queue_size=no_memory_queue_size,
                 cpu_benchmark_pid_list=cpu_benchmark_pid_list,
                 eval_metric=eval_metric,
