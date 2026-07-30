@@ -342,6 +342,9 @@ def launch(cfg: DictConfig):
                     ),
                     dynamic_state_policy=dynamic_state_policy,
                     eval_metric=eval_metric,
+                    train_only=bool(
+                        cfg.get("benchmark", {}).get("train_only", False)
+                    ),
                 ),
             )
         )

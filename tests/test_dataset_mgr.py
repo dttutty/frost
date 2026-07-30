@@ -93,6 +93,59 @@ def test_load_graph_rejects_bidirectional_mag(tmp_path: Path, monkeypatch) -> No
         dm.load_graph("MAG", np.int64, np.int64)
 
 
+def test_load_graph_normalizes_compressed_upstream_edges(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset_dir = tmp_path / "MAG"
+    dataset_dir.mkdir()
+    frame = pd.DataFrame(
+        {
+            "src": [0, 1],
+            "dst": [1, 2],
+            "time": [10, 20],
+            "int_roll": [0, 1],
+            "ext_roll": [0, 2],
+        }
+    )
+    frame.to_csv(dataset_dir / "edges.csv.zst", index=False)
+    np.savez(
+        dataset_dir / "full_graph_no_reverse_edges.npz",
+        indptr=np.array([0, 1, 2, 2]),
+        indices=np.array([1, 2]),
+        eid=np.array([1, 2]),
+        ts=np.array([10, 20]),
+    )
+    monkeypatch.setenv("FROST_DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(dm, "TemporalGraph", lambda **_: object())
+
+    _, loaded, _, _ = dm.load_graph("MAG", np.int64, np.int64)
+
+    assert loaded.columns.tolist() == ["eid", "src", "dst", "time", "default_split"]
+    assert loaded["eid"].tolist() == [1, 2]
+    assert loaded["default_split"].tolist() == [0, 2]
+
+
+def test_pt_features_keep_compact_storage_dtype(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "edge_features.pt"
+    torch.save(torch.ones((3, 4), dtype=torch.bool), path)
+    monkeypatch.setattr(dm, "csm", lambda _name, shape, dtype: torch.empty(shape, dtype=dtype))
+    manager = dm.DatasetManager(
+        env=None,  # type: ignore[arg-type]
+        run_id="test",
+        dataset="MOCK",
+        index_dtype=np.int64,
+        time_dtype=np.int64,
+        feature_dtype=torch.float32,
+    )
+
+    feature, _, dtype = manager._load_pt_feature_to_shm(
+        path, "edge", "efeat", expected_rows=2
+    )
+
+    assert dtype == torch.bool
+    assert feature.dtype == torch.bool
+
+
 def _write_tgbl_wiki_raw_fixture(tgb_root: Path) -> Path:
     raw_dir = tgb_root / "raw" / "tgbl_wiki"
     raw_dir.mkdir(parents=True)

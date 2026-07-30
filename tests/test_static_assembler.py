@@ -63,3 +63,41 @@ def test_fill_nfeat_non_strict_keeps_unplanned_rows_zero():
     assert out.nfeat is not None
     assert torch.equal(out.nfeat[:4], nfeat_nid.nfeat)
     assert torch.equal(out.nfeat[4:], torch.zeros((2, 2), dtype=torch.float32))
+
+
+def test_prepare_nfeat_cache_casts_compact_storage_to_float32():
+    assembler = StaticAssembler(
+        shared_nfeat=torch.ones((4, 2), dtype=torch.float16),
+        shared_efeat=None,
+        device=torch.device("cpu"),
+    )
+    plan = type(
+        "Plan",
+        (),
+        {
+            "to_cache": type("Ids", (), {"data": torch.tensor([0, 1])})(),
+            "fetch": type("Ids", (), {"data": torch.tensor([0, 1])})(),
+        },
+    )()
+
+    result = assembler.prepare_nfeat_cache(plan)
+
+    assert result.nfeat.dtype == torch.float32
+
+
+def test_fill_efeat_casts_compact_storage_to_float32():
+    assembler = StaticAssembler(
+        shared_nfeat=None,
+        shared_efeat=torch.ones((3, 2), dtype=torch.bool),
+        device=torch.device("cpu"),
+    )
+    graph = FlatGraph(
+        nid=torch.arange(4),
+        eid=torch.tensor([1, -1, -1, 2]),
+        ts=torch.zeros(4),
+    )
+
+    result = assembler.fill_efeat(graph, n_src=1)
+
+    assert result.efeat is not None
+    assert result.efeat.dtype == torch.float32

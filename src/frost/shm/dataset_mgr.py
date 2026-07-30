@@ -36,6 +36,13 @@ from frost.shm._core import get_shared_mem_array as gsm
 from frost.utils.utils import broadcast_data
 
 logger = logging.getLogger(__name__)
+_COMPACT_FEATURE_DTYPES = {
+    torch.bool,
+    torch.uint8,
+    torch.int8,
+    torch.float16,
+    torch.bfloat16,
+}
 _NP_TO_TORCH = {
     np.dtype(np.bool_): torch.bool,
     np.dtype(np.uint8): torch.uint8,
@@ -69,6 +76,34 @@ def _torch_dtype_from_numpy(np_dtype: np.dtype) -> torch.dtype:
         raise TypeError(
             f"Unsupported NumPy dtype for shared memory: {np_dtype}"
         ) from exc
+
+
+def _feature_storage_dtype(
+    source_dtype: torch.dtype, compute_dtype: torch.dtype
+) -> torch.dtype:
+    """Keep naturally compact features compact until selected rows reach a worker."""
+    if source_dtype in _COMPACT_FEATURE_DTYPES:
+        return source_dtype
+    return compute_dtype
+
+
+def _normalize_edge_frame(dataset: str, frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize upstream TGL edge tables to FROST's canonical runtime schema."""
+    if "time" not in frame.columns and "ts" in frame.columns:
+        frame = frame.rename(columns={"ts": "time"})
+    if "default_split" not in frame.columns and "ext_roll" in frame.columns:
+        frame["default_split"] = frame["ext_roll"]
+    if "eid" not in frame.columns:
+        frame["eid"] = np.arange(1, len(frame) + 1, dtype=np.int64)
+
+    required_columns = {"eid", "src", "dst", "time", "default_split"}
+    missing_columns = required_columns.difference(frame.columns)
+    if missing_columns:
+        raise ValueError(
+            f"Dataset {dataset} is missing required edge columns: "
+            f"{sorted(missing_columns)}. Found columns: {list(frame.columns)}"
+        )
+    return frame.loc[:, ["eid", "src", "dst", "time", "default_split"]]
 
 
 def _resolve_npy_alias_path(path: Path) -> Path:
@@ -186,21 +221,14 @@ def load_graph(
     else:
         dataset_dir = resolve_artifact_dataset_dir(d)
         npz_path = resolve_graph_artifact(dataset_dir)
-        csv_path = _resolve_required_dataset_path(d, ["edges.csv"])
+        csv_path = _resolve_required_dataset_path(d, ["edges.csv", "edges.csv.zst"])
         with np.load(npz_path, allow_pickle=False) as npz:
             indptr_arr = np.ascontiguousarray(npz["indptr"], dtype=index_dtype)
             indices_arr = np.ascontiguousarray(npz["indices"], dtype=index_dtype)
             eid_arr = np.ascontiguousarray(npz["eid"], dtype=index_dtype)
             ts_arr = np.ascontiguousarray(npz["ts"], dtype=time_dtype)
-        df = pd.read_csv(csv_path)
+        df = _normalize_edge_frame(d, pd.read_csv(csv_path))
         source_description = npz_path
-    required_columns = {"eid", "src", "dst", "time", "default_split"}
-    missing_columns = required_columns.difference(df.columns)
-    if missing_columns:
-        raise ValueError(
-            f"Dataset {d} is missing required edge columns: "
-            f"{sorted(missing_columns)}. Found columns: {list(df.columns)}"
-        )
     src = df["src"].to_numpy()
     dst = df["dst"].to_numpy()
     n_nodes_infer_from_df = max(src.max(), dst.max()) + 1
@@ -537,8 +565,8 @@ class DatasetManager:
             n_items=expected_rows,
         )
 
-        _torch_dtype_from_numpy(arr.dtype)
-        final_dtype = self.feature_dtype
+        source_dtype = _torch_dtype_from_numpy(arr.dtype)
+        final_dtype = _feature_storage_dtype(source_dtype, self.feature_dtype)
         feat_shm = csm(f"{self.run_id}_{shm_name}", arr.shape, dtype=final_dtype)
         rows_per_chunk = _rows_per_chunk(
             arr.shape[1], final_dtype, source_itemsize=arr.dtype.itemsize
@@ -571,7 +599,7 @@ class DatasetManager:
             n_items=expected_rows,
         )
 
-        final_dtype = self.feature_dtype
+        final_dtype = _feature_storage_dtype(feat.dtype, self.feature_dtype)
         if feat.dtype != final_dtype:
             feat = feat.to(final_dtype)
         feat_shm = csm(f"{self.run_id}_{shm_name}", feat.shape, dtype=final_dtype)

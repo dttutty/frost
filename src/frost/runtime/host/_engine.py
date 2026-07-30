@@ -138,6 +138,7 @@ class Host:
                 f"Unsupported eval_metric={options.eval_metric!r}; expected 'ap' or 'mrr'."
             )
         self.eval_metric = options.eval_metric
+        self.train_only = options.train_only
         self.dynamic_state_policy = (
             options.dynamic_state_policy
             if options.dynamic_state_policy is not None
@@ -350,11 +351,18 @@ class Host:
         for e in range(self.total_epoch):
             logger.info("Starting Epoch %s", e)
             self._handle_a_split(self.tr_df, "train", cur_epoch=e)
-            self._handle_a_split(self.va_df, "val", cur_epoch=e)
-            self._handle_a_split(self.te_df, "test", cur_epoch=e)
+            if self.train_only:
+                self._cleanup_per_epoch()
+            else:
+                self._handle_a_split(self.va_df, "val", cur_epoch=e)
+                self._handle_a_split(self.te_df, "test", cur_epoch=e)
             self.handle_result_q()
-            if self.early_stop_check(e):
+            if not self.train_only and self.early_stop_check(e):
                 break
+
+        if self.train_only:
+            self.shutdown(graceful=True)
+            return
 
         if self.eval_metric == "ap":
             print(

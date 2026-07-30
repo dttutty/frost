@@ -76,7 +76,9 @@ class StaticAssembler:
         else:
             # Standard path: Gather missing features directly from shared memory
             gpu_nid = fetch.to(self.device)
-            gpu_data = self.shared_nfeat[fetch].to(self.device)
+            gpu_data = self.shared_nfeat[fetch].to(
+                device=self.device, dtype=torch.float32
+            )
 
             nfeat_obj = NodeFeatNid(nid=gpu_nid, nfeat=gpu_data)
 
@@ -202,7 +204,7 @@ class StaticAssembler:
 
         # Init zero tensor for edge features on target device
         edge_feat = torch.zeros(
-            (*edges.shape, feat_dim), device=self.device, dtype=efeat.dtype
+            (*edges.shape, feat_dim), device=self.device, dtype=torch.float32
         )
 
         # Return early if no valid edges
@@ -226,7 +228,7 @@ class StaticAssembler:
         cpu_efeat = efeat[valid_eids]
 
         # Transfer to device
-        gpu_valid_efeat = cpu_efeat.to(self.device)
+        gpu_valid_efeat = cpu_efeat.to(device=self.device, dtype=torch.float32)
 
         # Assign features to valid positions
         edge_feat[valid_mask] = gpu_valid_efeat

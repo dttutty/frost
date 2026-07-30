@@ -46,3 +46,4 @@ class HostOptions:
     persist_all_updates_to_cpu: bool = False
     dynamic_state_policy: DynamicStatePolicy | None = None
     eval_metric: Literal["ap", "mrr"] = "ap"
+    train_only: bool = False
