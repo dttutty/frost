@@ -8,9 +8,9 @@ from typing import Literal
 import pandas as pd
 import torch
 
-from frost.ablation import DynamicStateAblation
 from frost.datatypes.env import Env
 from frost.neg_sampler.protocols import NegSamplerProto
+from frost.runtime.experimental.dynamic_state import DynamicStatePolicy
 from frost.runtime.host.protocols import AnalyzerProto
 from frost.sampling.protocols import NeighborhoodSamplerProto
 
@@ -44,5 +44,5 @@ class HostOptions:
     share_negative_sampler_across_splits: bool = False
     normalize_event_time: bool = False
     persist_all_updates_to_cpu: bool = False
-    dynamic_state_ablation: DynamicStateAblation | None = None
+    dynamic_state_policy: DynamicStatePolicy | None = None
     eval_metric: Literal["ap", "mrr"] = "ap"

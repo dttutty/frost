@@ -63,7 +63,6 @@ class DynamicStateAssemblerMixin:
     d_mail: int
     n_neg: int
     root_expansion: RootExpansion
-    use_shm_instead: bool
     mem_task_q: Queue | None
     box_task_q: Queue | None
     mem_wr_q: Queue | None
@@ -198,15 +197,6 @@ class DynamicStateAssemblerMixin:
         kind: Literal["mem", "box"],
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
         """Fill target tensors with delta data received from P2P network strictly."""
-        if self.use_shm_instead:
-            return self._fill_from_shm(
-                kind=kind,
-                target_data=target_data,
-                target_ts=target_ts,
-                graph=graph,
-                valid_mask=valid_mask,
-            )
-
         if delta_source is None:
             return None, None
 
@@ -306,7 +296,7 @@ class DynamicStateAssemblerMixin:
             # on GPU so that _apply_box_mail_delta can do a pure GPU scatter.
             # Pre-load them here (async H2D) instead of synchronous CPU→GPU
             # inside the delta path.
-            if self.boxsize > 1 and not self.use_shm_instead:
+            if self.boxsize > 1:
                 box_delta_mask = self._build_delta_mask(graph, box_plan, valid_mask)
                 delta_nids_gpu = graph.nid[box_delta_mask]
                 if delta_nids_gpu.numel() > 0:
@@ -477,26 +467,7 @@ class DynamicStateAssemblerMixin:
         mem_delta_mask = self._build_delta_mask(graph, mem_plan, strict_mask)
         box_delta_mask = self._build_delta_mask(graph, box_plan, strict_mask)
 
-        if self.use_shm_instead:
-            self._fill_from_delta(
-                None,
-                graph.mem,
-                graph.mem_ts,
-                graph,
-                mem_delta_mask,
-                kind="mem",
-            )
-            self._fill_from_delta(
-                None,
-                graph.box,
-                graph.box_ts,
-                graph,
-                box_delta_mask,
-                kind="box",
-            )
-            return
-
-        assert delta is not None, "delta must be provided when use_shm_instead is False"
+        assert delta is not None, "delta must be provided"
         global_pos, local_pos = self._fill_from_delta(
             delta.mem, graph.mem, graph.mem_ts, graph, mem_delta_mask, kind="mem"
         )

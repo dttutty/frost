@@ -10,7 +10,6 @@ from typing import Callable, Iterator, Protocol, cast
 import torch
 import torch.nn as nn
 
-from frost.ablation import DynamicStateAblation
 from frost.datatypes.graph import FlatGraph, HierGraph
 from frost.datatypes.mem_mail_box._data_ops import keep_last, mail_to_box
 from frost.datatypes.mem_mail_box.box import BoxEntry
@@ -20,6 +19,11 @@ from frost.datatypes.tasks import BoxTask, DirectWritebackRequest, MemTask
 from frost.launch.plan import ExecutionPlan
 from frost.models.contracts import MemoryState, NeighborhoodMailbox
 from frost.runtime.protocols import CudaEvent
+from frost.runtime.experimental.dynamic_state import (
+    DynamicStatePolicy,
+    TransportMode,
+    WritebackTiming,
+)
 from frost.runtime.worker.p2p_syncer.utils._interaction_ops import (
     generate_interaction_mails,
 )
@@ -45,13 +49,13 @@ class DynamicStateCoordinator:
         self,
         *,
         plan: ExecutionPlan,
-        dynamic_state_ablation: DynamicStateAblation,
+        dynamic_state_policy: DynamicStatePolicy,
         mem_task_q: Queue | None,
         box_task_q: Queue | None,
         direct_writeback: Callable[[DirectWritebackRequest], None],
     ) -> None:
         self.plan = plan
-        self.dynamic_state_ablation = dynamic_state_ablation
+        self.dynamic_state_policy = dynamic_state_policy
         self.mem_task_q = mem_task_q
         self.box_task_q = box_task_q
         self.direct_writeback = direct_writeback
@@ -84,7 +88,7 @@ class DynamicStateCoordinator:
     def _capture_stale_state(
         self, meta: Meta
     ) -> tuple[MemEntry | None, BoxEntry | None]:
-        if not self.dynamic_state_ablation.uses_async_dynamic_state_pipeline:
+        if self.dynamic_state_policy.transport is not TransportMode.ASYNC_P2P:
             return None, None
         plan_set = meta.plan_set
         if plan_set is None or plan_set.mem_plan is None or plan_set.box_plan is None:
@@ -139,7 +143,7 @@ class DynamicStateCoordinator:
             )
             flat_nid_cpu = meta.flat_nid_cpu
 
-        if self.dynamic_state_ablation.uses_async_dynamic_state_pipeline:
+        if self.dynamic_state_policy.transport is TransportMode.ASYNC_P2P:
             self._publish_async(
                 context,
                 root_new_mem,
@@ -147,7 +151,7 @@ class DynamicStateCoordinator:
                 graph,
                 flat_nid_cpu,
             )
-        elif self.dynamic_state_ablation.uses_direct_cpu_writeback:
+        elif self.dynamic_state_policy.transport is TransportMode.DIRECT_CPU:
             self._publish_direct(context, root_new_mem, box_pos_efeat)
         else:
             raise RuntimeError("Unsupported dynamic-state runtime configuration.")
@@ -209,7 +213,7 @@ class DynamicStateCoordinator:
         plan_set = meta.plan_set
         mem_filter = None
         box_filter = None
-        if self.dynamic_state_ablation.filter_writeback_by_plan:
+        if self.dynamic_state_policy.filter_writeback_by_plan:
             if plan_set is None or plan_set.mem_plan is None or plan_set.box_plan is None:
                 raise RuntimeError("Plan-filtered writeback requires dynamic plans.")
             if (
@@ -228,7 +232,10 @@ class DynamicStateCoordinator:
             mem_filter_nids=mem_filter,
             box_filter_nids=box_filter,
         )
-        if self.dynamic_state_ablation.direct_cpu_writeback_after_mem_update:
+        if (
+            self.dynamic_state_policy.writeback
+            is WritebackTiming.AFTER_MEMORY_UPDATE
+        ):
             self.direct_writeback(request)
         else:
             meta.direct_writeback_request = request

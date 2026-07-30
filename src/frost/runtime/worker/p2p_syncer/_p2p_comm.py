@@ -46,7 +46,6 @@ class P2PQHandler(StreamThreadBase):
         p2p_sem: threading.Semaphore,
         stop_ev: threading.Event,
         delta_queue: DeltaQueue,
-        use_shm_instead: bool = False,
     ) -> None:
         super().__init__(name="p2p_comm", stop_ev=stop_ev)
         self.mem_p2p_q = mem_p2p_q
@@ -56,7 +55,6 @@ class P2PQHandler(StreamThreadBase):
         self.stop_ev = stop_ev
         self.delta_queue = delta_queue
         self.nccl_p2p = nccl_p2p
-        self.use_shm_instead = use_shm_instead
 
         self.count = 0
 
@@ -146,16 +144,6 @@ class P2PQHandler(StreamThreadBase):
                     f"Rank {self.env.local_rank} starting P2P communication, count={self.count}"
                 )
                 self.count += 1
-                if self.use_shm_instead:
-                    self.p2p_sem.release()
-                    self.delta_queue.put((None, None, []))
-                    logger.debug(
-                        "Rank %s skipped NCCL P2P and posted empty delta via shared memory, count=%s",
-                        self.env.local_rank,
-                        self.count,
-                    )
-                    continue
-
                 world_size = _safe_p2p_world_size(self.nccl_p2p)
                 if world_size == 1:
                     _copy_single_rank_p2p_round(mem_p2p, box_p2p)

@@ -5,11 +5,6 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 
-from frost.ablation import (
-    DYNAMIC_STATE_ABLATION_NO_PLAN_NO_DELTA_POST_MEM_UPDATE_RAW,
-    DYNAMIC_STATE_ABLATION_NO_PLAN_NO_DELTA_POST_STEP_RAW,
-    resolve_dynamic_state_ablation,
-)
 from frost.datatypes.graph import FlatGraph
 from frost.datatypes.meta import Meta
 from frost.launch.plan import compile_execution_plan
@@ -17,6 +12,7 @@ from frost.models.contracts import RepresentationKind, RootExpansion
 from frost.models.outputs import EdgeRepresentations, EncoderResult
 from frost.models.recipes import TGNRecipe
 from frost.models.temporal_link_model import TemporalLinkModel
+from frost.runtime.experimental.dynamic_state import resolve_dynamic_state_policy
 from frost.runtime.worker._state_coordinator import DynamicStateCoordinator
 from frost.utils.tensor_set import TensorSet
 
@@ -114,8 +110,8 @@ def test_post_mem_update_mode_writes_before_encoder() -> None:
     model = _model(events)
     coordinator = DynamicStateCoordinator(
         plan=_plan(),
-        dynamic_state_ablation=resolve_dynamic_state_ablation(
-            DYNAMIC_STATE_ABLATION_NO_PLAN_NO_DELTA_POST_MEM_UPDATE_RAW
+        dynamic_state_policy=resolve_dynamic_state_policy(
+            "no_plan_no_delta_post_mem_update_raw"
         ),
         mem_task_q=None,
         box_task_q=None,
@@ -140,8 +136,8 @@ def test_post_step_mode_defers_writeback_until_worker_step() -> None:
     model = _model(events)
     coordinator = DynamicStateCoordinator(
         plan=_plan(),
-        dynamic_state_ablation=resolve_dynamic_state_ablation(
-            DYNAMIC_STATE_ABLATION_NO_PLAN_NO_DELTA_POST_STEP_RAW
+        dynamic_state_policy=resolve_dynamic_state_policy(
+            "no_plan_no_delta_post_step_raw"
         ),
         mem_task_q=None,
         box_task_q=None,

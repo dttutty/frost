@@ -12,11 +12,16 @@ from typing import cast
 
 import torch
 
-from frost.ablation import DynamicStateAblation
 from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.models.contracts import RootExpansion
 from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
+from frost.runtime.experimental.dynamic_state import (
+    DynamicStatePolicy,
+    PlannerMode,
+    TransportMode,
+    resolve_dynamic_state_policy,
+)
 from frost.runtime.protocols import CudaEvent
 from frost.runtime.worker._dynamic_state import DynamicStateAssemblerMixin, MemAndBox
 from frost.runtime.worker._h2d_credit import CreditGate
@@ -49,12 +54,11 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
         mem_box_store: MemBoxStore,  # Pass shared memory instance here
         n_neg: int = 1,
         root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
-        use_shm_instead: bool = False,
         mem_task_q: Queue | None = None,
         box_task_q: Queue | None = None,
         mem_wr_q: Queue | None = None,
         box_wr_q: Queue | None = None,
-        dynamic_state_ablation: DynamicStateAblation | None = None,
+        dynamic_state_policy: DynamicStatePolicy | None = None,
     ) -> None:
         super().__init__(name="dy_assembler", stop_ev=stop_ev)
         self.in_q = h2d_out_q
@@ -68,15 +72,14 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
         self.d_mail = mem_box_store.box.shape[2]
         self.n_neg = n_neg
         self.root_expansion = root_expansion
-        self.use_shm_instead = use_shm_instead
         self.mem_task_q = mem_task_q
         self.box_task_q = box_task_q
         self.mem_wr_q = mem_wr_q
         self.box_wr_q = box_wr_q
-        self.dynamic_state_ablation = (
-            dynamic_state_ablation
-            if dynamic_state_ablation is not None
-            else DynamicStateAblation(name="baseline")
+        self.dynamic_state_policy = (
+            dynamic_state_policy
+            if dynamic_state_policy is not None
+            else resolve_dynamic_state_policy("baseline")
         )
         self._timing_enabled = _timing_enabled()
         self._h2d_credit_wait_s_curve: list[float] = []
@@ -99,10 +102,10 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
         5. Records a CUDA event and puts ``(meta, event)`` into ``full_q``.
         """
         epoch_count = getattr(self, "epoch_count", 0)
-        dynamic_state_ablation = getattr(
+        dynamic_state_policy = getattr(
             self,
-            "dynamic_state_ablation",
-            DynamicStateAblation(name="baseline"),
+            "dynamic_state_policy",
+            resolve_dynamic_state_policy("baseline"),
         )
         timing_enabled = getattr(self, "_timing_enabled", False)
 
@@ -145,8 +148,8 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
             )
             prepare_end = time.perf_counter()
 
-            if dynamic_state_ablation.disable_p2p_delta:
-                if dynamic_state_ablation.direct_cpu_read_all_positions:
+            if dynamic_state_policy.transport is TransportMode.DIRECT_CPU:
+                if dynamic_state_policy.planner is PlannerMode.NONE:
                     self._fill_all_required_from_shm(
                         meta.flat_graph, meta.n_src, meta.n_neg
                     )
@@ -174,28 +177,26 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
             )
 
             if delta_tuple != "nothing":
-                delta = None
                 p2p_wait_s = 0.0
-                if not self.use_shm_instead:
-                    mem, box, works = delta_tuple
-                    assert mem is not None
-                    assert box is not None
+                mem, box, works = delta_tuple
+                assert mem is not None
+                assert box is not None
 
-                    # Wait for P2P network streams to finish receiving
-                    p2p_wait_start = time.perf_counter()
-                    for work in works:
-                        work.wait()
-                    p2p_wait_s = time.perf_counter() - p2p_wait_start
+                # Wait for P2P network streams to finish receiving
+                p2p_wait_start = time.perf_counter()
+                for work in works:
+                    work.wait()
+                p2p_wait_s = time.perf_counter() - p2p_wait_start
 
-                    box_data = box.data2recv
-                    delta_mem = MemEntry(
-                        nid=mem.recv_nid, data=mem.data2recv, ts=mem.ts2recv
-                    )
-                    delta_box = BoxEntry(
-                        nid=box.recv_nid, data=box_data, ts=box.ts2recv
-                    )
-                    delta = MemAndBox(mem=delta_mem, box=delta_box)
-                    delta = delta.sort_mem_and_box()
+                box_data = box.data2recv
+                delta_mem = MemEntry(
+                    nid=mem.recv_nid, data=mem.data2recv, ts=mem.ts2recv
+                )
+                delta_box = BoxEntry(
+                    nid=box.recv_nid, data=box_data, ts=box.ts2recv
+                )
+                delta = MemAndBox(mem=delta_mem, box=delta_box)
+                delta = delta.sort_mem_and_box()
 
                 # ==========================================================
                 # Apply the received delta to the already partially-filled graph

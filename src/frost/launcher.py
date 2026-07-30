@@ -8,7 +8,6 @@ from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf, open_dict
 
-from frost.ablation import resolve_dynamic_state_ablation
 from frost.datatypes.env import Env
 from frost.launch.config import (
     resolve_eval_metric,
@@ -33,6 +32,10 @@ from frost.launch.storage import (
 )
 from frost.sampling.protocols import NeighborhoodSamplerProto
 from frost.runtime.host._plan_router import detect_gpu_topology
+from frost.runtime.experimental.dynamic_state import (
+    TransportMode,
+    resolve_dynamic_state_policy,
+)
 from frost.neg_sampler import RandomNegLinkSampler
 from frost.neg_sampler.protocols import NegSamplerProto
 from frost.sampling.ngh_sampler import NeighborhoodSampler, NoSampler
@@ -78,7 +81,7 @@ def launch(cfg: DictConfig):
     )
 
     env: Env = Env.initial()
-    dynamic_state_ablation = resolve_dynamic_state_ablation(
+    dynamic_state_policy = resolve_dynamic_state_policy(
         cfg.get("dynamic_state_ablation", "baseline")
     )
     cpu_util_bench_enabled = os.getenv("FROST_CPU_UTIL_BENCH", "").strip().lower() in {
@@ -146,7 +149,7 @@ def launch(cfg: DictConfig):
     execution_plan = compile_execution_plan(recipe)
     has_mem = execution_plan.has_dynamic_state
     state_cfg = recipe.state
-    if dynamic_state_ablation.requires_tgn_boxsize_one_only:
+    if dynamic_state_policy.transport is TransportMode.DIRECT_CPU:
         if not has_mem:
             raise ValueError(
                 "dynamic_state_ablation requires model.state to be configured."
@@ -178,8 +181,6 @@ def launch(cfg: DictConfig):
     tgl_sampler_parity = bool(cfg.ngh_sampler.get("tgl_sampler_parity", False))
 
     no_memory_queue_size = resolve_no_memory_queue_size(cfg.get("no_memory_queue_size"))
-    use_shm_instead = bool(cfg.get("__debug_use_shm_instead", False))
-
     if len(fanout) > 1 and has_mem:
         raise ValueError("Memory models only support 0-hop or 1-hop fanout.")
 
@@ -336,11 +337,10 @@ def launch(cfg: DictConfig):
                     normalize_event_time=bool(
                         cfg.get("normalize_event_time", False)
                     ),
-                    persist_all_updates_to_cpu=(
-                        bool(cfg.get("persist_all_updates_to_cpu", False))
-                        or use_shm_instead
+                    persist_all_updates_to_cpu=bool(
+                        cfg.get("persist_all_updates_to_cpu", False)
                     ),
-                    dynamic_state_ablation=dynamic_state_ablation,
+                    dynamic_state_policy=dynamic_state_policy,
                     eval_metric=eval_metric,
                 ),
             )
@@ -382,8 +382,7 @@ def launch(cfg: DictConfig):
                     learning_rate=cfg.lr,
                     mail_combine=mail_combine,
                     execution_plan=execution_plan,
-                    use_shared_memory_fetch=use_shm_instead,
-                    dynamic_state_ablation=dynamic_state_ablation,
+                    dynamic_state_policy=dynamic_state_policy,
                     compile_model=cfg.get("compile", True),
                     amp=bool(cfg.compute.amp),
                     no_memory_queue_size=no_memory_queue_size,

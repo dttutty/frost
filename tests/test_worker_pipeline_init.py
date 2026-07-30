@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import torch
 
-from frost.ablation import DynamicStateAblation
 from frost.models.contracts import NodeSet, RootExpansion
+from frost.runtime.experimental.dynamic_state import resolve_dynamic_state_policy
 from frost.runtime.worker import _pipeline
 from frost.runtime.worker._pipeline import WorkerPipelineMixin
 
@@ -27,7 +27,7 @@ def test_direct_state_ablation_initializes_delta_queue(monkeypatch):
 
     worker = _PipelineHarness()
     worker.mem_box_store = object()
-    worker.dynamic_state_ablation = DynamicStateAblation(
+    worker.dynamic_state_policy = resolve_dynamic_state_policy(
         "no_plan_no_delta_post_step_raw"
     )
     worker.no_memory_queue_size = 4
@@ -36,7 +36,6 @@ def test_direct_state_ablation_initializes_delta_queue(monkeypatch):
     worker.device = torch.device("cpu")
     worker.n_neg = 1
     worker.h2d_sem = object()
-    worker.use_shm_instead = False
     worker.delta_queue = None
     worker.h2d_out_q = None
     worker.mem_task_q = None

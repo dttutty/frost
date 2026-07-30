@@ -16,7 +16,6 @@ import torch.distributed as dist
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from frost.ablation import DynamicStateAblation
 from frost.runtime.worker.types import (
     BoxP2PQ,
     BoxTaskQ,
@@ -33,6 +32,10 @@ from frost.runtime._thread_base import (
 )
 from frost.runtime.worker._benchmark_observer import WorkerBenchmarkObserver
 from frost.runtime.worker._config import WorkerOptions, WorkerResources
+from frost.runtime.experimental.dynamic_state import (
+    TransportMode,
+    resolve_dynamic_state_policy,
+)
 from frost.runtime.worker._direct_writeback import DirectDynamicStateWriter
 from frost.runtime.worker._checkpoint import WorkerCheckpointMixin
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
@@ -130,11 +133,10 @@ class Worker(
         self.nccl_p2p = resources.p2p_group
         self.device = torch.device(f"cuda:{resources.env.local_rank}")
         self.mail_combine = options.mail_combine
-        self.use_shm_instead = options.use_shared_memory_fetch
-        self.dynamic_state_ablation = (
-            options.dynamic_state_ablation
-            if options.dynamic_state_ablation is not None
-            else DynamicStateAblation(name="baseline")
+        self.dynamic_state_policy = (
+            options.dynamic_state_policy
+            if options.dynamic_state_policy is not None
+            else resolve_dynamic_state_policy("baseline")
         )
         self.compile_model = options.compile_model
         self.amp = options.amp
@@ -163,7 +165,7 @@ class Worker(
         self.p2p_sem = threading.Semaphore(0)
         if (
             self.mem_box_store is not None
-            and self.dynamic_state_ablation.uses_direct_cpu_writeback
+            and self.dynamic_state_policy.transport is TransportMode.DIRECT_CPU
         ):
             self.direct_state_writer = DirectDynamicStateWriter(
                 mem_box_store=self.mem_box_store,
@@ -189,9 +191,9 @@ class Worker(
         """Consume assembled batches and dispatch train, eval, and epoch events."""
         self.start_all_threads()
         if self.mem_box_store is not None:
-            if self.dynamic_state_ablation.max_in_flight_batches is not None:
+            if self.dynamic_state_policy.max_in_flight_batches is not None:
                 max_in_flight_batches = (
-                    self.dynamic_state_ablation.max_in_flight_batches
+                    self.dynamic_state_policy.max_in_flight_batches
                 )
                 initial_slots = max_in_flight_batches * 2
             else:
@@ -253,7 +255,7 @@ class Worker(
                 self.benchmark_observer.finalize()
                 if (
                     self.mem_box_store is not None
-                    and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
+                    and self.dynamic_state_policy.transport is TransportMode.ASYNC_P2P
                 ):
                     assert self.box_task_q is not None
                     assert self.mem_task_q is not None

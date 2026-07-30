@@ -9,10 +9,10 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from frost.ablation import DynamicStateAblation
 from frost.datatypes.env import Env
 from frost.launch.plan import ExecutionPlan
 from frost.models.protocols import MailboxRouterProto, MemoryUpdaterProto
+from frost.runtime.experimental.dynamic_state import DynamicStatePolicy
 from frost.shm.mem_mgr import MemBoxStore
 from frost.shm.ring_buf import RingBuf
 
@@ -40,8 +40,7 @@ class WorkerOptions:
     learning_rate: float
     mail_combine: Literal["last", "mean"] | None
     execution_plan: ExecutionPlan
-    use_shared_memory_fetch: bool = False
-    dynamic_state_ablation: DynamicStateAblation | None = None
+    dynamic_state_policy: DynamicStatePolicy | None = None
     compile_model: bool = True
     amp: bool = False
     no_memory_queue_size: int = 4

@@ -7,7 +7,11 @@ from queue import Queue as Q
 
 import numpy as np
 
-from frost.ablation import DynamicStateAblation
+from frost.runtime.experimental.dynamic_state import (
+    DynamicStatePolicy,
+    PlannerMode,
+    resolve_dynamic_state_policy,
+)
 from frost.runtime.host.types import (
     DynamicPlanInQ,
     DynamicPlanOutQ,
@@ -318,16 +322,16 @@ class PlanRouter:
         if_carry_over_route: bool = False,
         output_dir: str | None = None,
         persist_all_updates_to_cpu: bool = False,
-        dynamic_state_ablation: DynamicStateAblation | None = None,
+        dynamic_state_policy: DynamicStatePolicy | None = None,
     ) -> None:
         self.gpu_dist = build_gpu_distance_matrix(gpu_topo)
         self.n_gpus = len(self.gpu_dist)
         self.stop_ev = stop_ev
         self.analyzer = analyzer
-        self.dynamic_state_ablation = (
-            dynamic_state_ablation
-            if dynamic_state_ablation is not None
-            else DynamicStateAblation(name="baseline")
+        self.dynamic_state_policy = (
+            dynamic_state_policy
+            if dynamic_state_policy is not None
+            else resolve_dynamic_state_policy("baseline")
         )
         self.mem_planner = None
         self.mail_planner = None
@@ -345,7 +349,9 @@ class PlanRouter:
                 output_dir=output_dir,
                 plan_kind="mem",
                 persist_all_updates_to_cpu=persist_all_updates_to_cpu,
-                current_batch_only=self.dynamic_state_ablation.current_batch_dedup_plan_only,
+                current_batch_only=(
+                    self.dynamic_state_policy.planner is PlannerMode.CURRENT_BATCH
+                ),
             )
 
         self.mail_plan_in_q: DynamicPlanInQ | None = None
@@ -359,7 +365,9 @@ class PlanRouter:
                 if_carry_over_route=if_carry_over_route,
                 output_dir=output_dir,
                 persist_all_updates_to_cpu=persist_all_updates_to_cpu,
-                current_batch_only=self.dynamic_state_ablation.current_batch_dedup_plan_only,
+                current_batch_only=(
+                    self.dynamic_state_policy.planner is PlannerMode.CURRENT_BATCH
+                ),
             )
 
         self.nfeat_plan_in_q: StaticPlanInQ | None = None

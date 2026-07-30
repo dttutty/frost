@@ -19,6 +19,7 @@ from frost.models.temporal_link_model import TemporalLinkModel
 from frost.models.protocols import MemoryUpdaterProto
 from frost.shm.ring_buf import RingBuf
 from frost.runtime.worker._state_coordinator import DynamicStateCoordinator
+from frost.runtime.experimental.dynamic_state import TransportMode, WritebackTiming
 
 
 def _tgb_reciprocal_ranks(
@@ -137,7 +138,7 @@ class WorkerTrainerMixin:
             bare.head = cast(nn.Module, torch.compile(bare.head))
         self.state_coordinator = DynamicStateCoordinator(
             plan=self.execution_plan,
-            dynamic_state_ablation=self.dynamic_state_ablation,
+            dynamic_state_policy=self.dynamic_state_policy,
             mem_task_q=self.mem_task_q,
             box_task_q=self.box_task_q,
             direct_writeback=self._write_direct_dynamic_state_request,
@@ -340,13 +341,16 @@ class WorkerTrainerMixin:
             )
         if (
             self.mem_box_store is not None
-            and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
+            and self.dynamic_state_policy.transport is TransportMode.ASYNC_P2P
         ):
             self.p2p_guard.arm()  # Arm guard: wait for P2P before the first AllReduce
         self.grad_scaler.scale(loss).backward()
         self.grad_scaler.step(self.optimizer)
         self.grad_scaler.update()
-        if self.dynamic_state_ablation.direct_cpu_writeback_after_optimizer_step:
+        if (
+            self.dynamic_state_policy.writeback
+            is WritebackTiming.AFTER_OPTIMIZER_STEP
+        ):
             self._flush_deferred_direct_dynamic_state(meta, release_h2d_credits=True)
 
         self.train_loss_tracker.update(loss.detach().float())
@@ -370,11 +374,14 @@ class WorkerTrainerMixin:
         with torch.amp.autocast("cuda", enabled=self.amp):
             with self.state_coordinator.batch(meta):
                 logits = self.model(meta)
-        if self.dynamic_state_ablation.direct_cpu_writeback_after_optimizer_step:
+        if (
+            self.dynamic_state_policy.writeback
+            is WritebackTiming.AFTER_OPTIMIZER_STEP
+        ):
             self._flush_deferred_direct_dynamic_state(meta, release_h2d_credits=True)
         if (
             self.mem_box_store is not None
-            and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
+            and self.dynamic_state_policy.transport is TransportMode.ASYNC_P2P
         ):
             self.p2p_sem.acquire()  # Ensure no other P2P task is in flight during eval
 

@@ -18,6 +18,7 @@ from frost.runtime.worker.types import (
 from frost.runtime.worker.types import AssembledQ, DeltaQueue, H2DOutQ, ReceivedQ
 from frost.datatypes.result import Result
 from frost.runtime._thread_base import join_thread, put_shutdown_sentinel
+from frost.runtime.experimental.dynamic_state import TransportMode
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
 from frost.runtime.worker._host_to_device import H2D
 from frost.runtime.worker._receiver import Receiver
@@ -79,7 +80,8 @@ class WorkerPipelineMixin:
         """Create all queues and background pipeline threads."""
         has_mem = self.mem_box_store is not None
         use_async_dynamic_state_pipeline = (
-            has_mem and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
+            has_mem
+            and self.dynamic_state_policy.transport is TransportMode.ASYNC_P2P
         )
         memory_q_size = _get_memory_worker_queue_size_env(default=1)
         stateless_q_size = self.no_memory_queue_size if not has_mem else memory_q_size
@@ -118,12 +120,11 @@ class WorkerPipelineMixin:
                 h2d_sem=self.h2d_sem,
                 n_neg=self.n_neg,
                 root_expansion=ring_buf.root_expansion,
-                use_shm_instead=self.use_shm_instead,
                 mem_task_q=self.mem_task_q,
                 box_task_q=self.box_task_q,
                 mem_wr_q=self.mem_wr_q,
                 box_wr_q=self.box_wr_q,
-                dynamic_state_ablation=self.dynamic_state_ablation,
+                dynamic_state_policy=self.dynamic_state_policy,
             )
             h2d_dest_q = self.h2d_out_q
         else:
@@ -199,7 +200,6 @@ class WorkerPipelineMixin:
             p2p_sem=self.p2p_sem,
             stop_ev=self.stop_ev,
             delta_queue=self.delta_queue,
-            use_shm_instead=self.use_shm_instead,
         )
 
     def start_all_threads(self) -> None:
@@ -214,7 +214,7 @@ class WorkerPipelineMixin:
         self.receiver.start()
         if self.mem_box_store is not None:
             assert self.dy_asm is not None
-            if self.dynamic_state_ablation.uses_async_dynamic_state_pipeline:
+            if self.dynamic_state_policy.transport is TransportMode.ASYNC_P2P:
                 assert self.p2p_q_handler is not None
                 assert self.mem_handler is not None
                 assert self.box_handler is not None

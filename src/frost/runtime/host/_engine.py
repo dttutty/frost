@@ -10,7 +10,6 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from frost.ablation import DynamicStateAblation
 from frost.runtime.host.types import (
     DynamicPlanOutQ,
     LayoutBundle,
@@ -30,6 +29,10 @@ from frost.runtime._thread_base import (
 from frost.runtime.host import PlanRouter, Scatter
 from frost.runtime.host._batch_balance import make_balance_plan
 from frost.runtime.host._config import HostOptions, HostResources
+from frost.runtime.experimental.dynamic_state import (
+    PlannerMode,
+    resolve_dynamic_state_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -135,10 +138,10 @@ class Host:
                 f"Unsupported eval_metric={options.eval_metric!r}; expected 'ap' or 'mrr'."
             )
         self.eval_metric = options.eval_metric
-        self.dynamic_state_ablation = (
-            options.dynamic_state_ablation
-            if options.dynamic_state_ablation is not None
-            else DynamicStateAblation(name="baseline")
+        self.dynamic_state_policy = (
+            options.dynamic_state_policy
+            if options.dynamic_state_policy is not None
+            else resolve_dynamic_state_policy("baseline")
         )
         if options.no_memory_queue_size < 1:
             raise ValueError("no_memory_queue_size must be >= 1.")
@@ -190,7 +193,8 @@ class Host:
         """
         has_planner = self.has_nfeat or self.has_mem
         enable_mem_mail_planner = (
-            self.has_mem and not self.dynamic_state_ablation.disable_mem_mail_planner
+            self.has_mem
+            and self.dynamic_state_policy.planner is not PlannerMode.NONE
         )
         stateless_q_size = self.no_memory_queue_size if not self.has_mem else 2
         memory_scatter_q_size = MEMORY_SCATTER_QUEUE_SIZE
@@ -225,7 +229,7 @@ class Host:
                 if_carry_over_route=if_carry_over_route,
                 output_dir=output_dir,
                 persist_all_updates_to_cpu=persist_all_updates_to_cpu,
-                dynamic_state_ablation=self.dynamic_state_ablation,
+                dynamic_state_policy=self.dynamic_state_policy,
             )
 
         self.scatter = Scatter(
