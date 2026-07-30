@@ -161,7 +161,7 @@ def _validate_feature_rows(
     n_items: int,
 ) -> None:
     expected_rows = _expected_feature_rows(feat_type, n_items)
-    if actual_rows == expected_rows:
+    if actual_rows == expected_rows or (feat_type == "edge" and actual_rows == n_items):
         return
 
     if feat_type == "edge":
@@ -567,7 +567,11 @@ class DatasetManager:
 
         source_dtype = _torch_dtype_from_numpy(arr.dtype)
         final_dtype = _feature_storage_dtype(source_dtype, self.feature_dtype)
-        feat_shm = csm(f"{self.run_id}_{shm_name}", arr.shape, dtype=final_dtype)
+        output_offset = int(feat_type == "edge" and arr.shape[0] == expected_rows)
+        output_shape = (arr.shape[0] + output_offset, arr.shape[1])
+        feat_shm = csm(f"{self.run_id}_{shm_name}", output_shape, dtype=final_dtype)
+        if output_offset:
+            feat_shm[0].zero_()
         rows_per_chunk = _rows_per_chunk(
             arr.shape[1], final_dtype, source_itemsize=arr.dtype.itemsize
         )
@@ -575,7 +579,7 @@ class DatasetManager:
             end = min(start + rows_per_chunk, arr.shape[0])
             chunk_np = np.array(arr[start:end], copy=True)
             chunk = torch.from_numpy(chunk_np).to(dtype=final_dtype)
-            feat_shm[start:end].copy_(chunk)
+            feat_shm[start + output_offset : end + output_offset].copy_(chunk)
         return feat_shm, arr.shape[1], final_dtype
 
     def _load_pt_feature_to_shm(
@@ -602,8 +606,12 @@ class DatasetManager:
         final_dtype = _feature_storage_dtype(feat.dtype, self.feature_dtype)
         if feat.dtype != final_dtype:
             feat = feat.to(final_dtype)
-        feat_shm = csm(f"{self.run_id}_{shm_name}", feat.shape, dtype=final_dtype)
-        feat_shm.copy_(feat)
+        output_offset = int(feat_type == "edge" and feat.shape[0] == expected_rows)
+        output_shape = (feat.shape[0] + output_offset, feat.shape[1])
+        feat_shm = csm(f"{self.run_id}_{shm_name}", output_shape, dtype=final_dtype)
+        if output_offset:
+            feat_shm[0].zero_()
+        feat_shm[output_offset:].copy_(feat)
         return feat_shm, feat.shape[1], final_dtype
 
     def _attach_shm(self, name, shape, dtype):

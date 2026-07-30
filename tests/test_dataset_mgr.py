@@ -146,6 +146,34 @@ def test_pt_features_keep_compact_storage_dtype(tmp_path: Path, monkeypatch) -> 
     assert feature.dtype == torch.bool
 
 
+def test_unpadded_edge_features_gain_reserved_zero_row(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "edge_features.pt"
+    torch.save(torch.ones((2, 3), dtype=torch.bool), path)
+    monkeypatch.setattr(
+        dm,
+        "csm",
+        lambda _name, shape, dtype: torch.empty(shape, dtype=dtype),
+    )
+    manager = dm.DatasetManager(
+        env=None,  # type: ignore[arg-type]
+        run_id="test",
+        dataset="MOCK",
+        index_dtype=np.int64,
+        time_dtype=np.int64,
+        feature_dtype=torch.float32,
+    )
+
+    feature, _, _ = manager._load_pt_feature_to_shm(
+        path, "edge", "efeat", expected_rows=2
+    )
+
+    assert feature.shape == (3, 3)
+    assert not feature[0].any()
+    assert feature[1:].all()
+
+
 def _write_tgbl_wiki_raw_fixture(tgb_root: Path) -> Path:
     raw_dir = tgb_root / "raw" / "tgbl_wiki"
     raw_dir.mkdir(parents=True)
