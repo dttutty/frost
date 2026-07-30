@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -24,6 +25,15 @@ class _FakeMemUpdater(nn.Module):
             [[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32
         )
         flat_graph.detached_ts = torch.tensor([5.0, 5.0], dtype=torch.float32)
+        return flat_graph
+
+
+class _MisalignedMemUpdater(nn.Module):
+    def forward(self, flat_graph, *_args, **_kwargs):
+        flat_graph.detached_nid = torch.tensor([1, 2], dtype=torch.long)
+        flat_graph.detached_mem = torch.tensor([[1.0, 2.0]], dtype=torch.float32)
+        flat_graph.detached_ts = torch.tensor([5.0, 5.0], dtype=torch.float32)
+        flat_graph.mem = torch.tensor([[1.0, 2.0]], dtype=torch.float32)
         return flat_graph
 
 
@@ -152,3 +162,31 @@ def test_post_step_mode_defers_writeback_until_worker_step() -> None:
     assert events == ["encoder"]
     assert meta.direct_writeback_request is not None
     assert meta.direct_writeback_request.mini_batch_idx == 7
+
+
+def test_coordinator_rejects_misaligned_updater_state_synchronously() -> None:
+    events: list[str] = []
+    model = TemporalLinkModel(
+        encoder=_FakeEncoder(events),
+        mem_updater=_MisalignedMemUpdater(),
+        head=_IdentityHead(),
+        representation=RepresentationKind.NODE_ALIGNED,
+        fanout=(),
+        root_expansion=RootExpansion.ALL_ROOTS,
+    )
+    coordinator = DynamicStateCoordinator(
+        plan=_plan(),
+        dynamic_state_policy=resolve_dynamic_state_policy(
+            "no_plan_no_delta_post_mem_update_raw"
+        ),
+        mem_task_q=None,
+        box_task_q=None,
+        direct_writeback=lambda _request: None,
+    )
+    coordinator.attach(model.mem_updater)
+    meta = _make_meta()
+
+    with coordinator.batch(meta), pytest.raises(
+        RuntimeError, match="misaligned positive-root state"
+    ):
+        model(meta)

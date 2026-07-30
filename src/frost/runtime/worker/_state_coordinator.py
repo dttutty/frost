@@ -127,6 +127,19 @@ class DynamicStateCoordinator:
             ts=flat_graph.detached_ts,
             data=flat_graph.detached_mem,
         )
+        expected_state_rows = meta.n_src * 2
+        state_shapes = {
+            "nid": tuple(root_new_mem.nid.shape),
+            "data": tuple(root_new_mem.data.shape),
+            "ts": tuple(root_new_mem.ts.shape),
+        }
+        if any(shape[0] != expected_state_rows for shape in state_shapes.values()):
+            raise RuntimeError(
+                "Memory updater produced misaligned positive-root state for "
+                f"batch={meta.mini_batch_idx}: expected_rows={expected_state_rows}, "
+                f"shapes={state_shapes}, flat_nid={tuple(flat_graph.nid.shape)}, "
+                f"flat_mem={None if flat_graph.mem is None else tuple(flat_graph.mem.shape)}"
+            )
         box_pos_efeat = (
             flat_graph.efeat[: meta.n_src].clone()
             if flat_graph.efeat is not None
