@@ -13,7 +13,6 @@ from frost.data.graph_policy import graph_filename
 from frost.data.dgb import import_dgb_snapshot
 from frost.data.preparation import (
     convert_tensor_to_numpy,
-    generate_node_roles,
     validate_dataset,
     write_dataset_manifest,
     write_temporal_csr,
@@ -62,13 +61,6 @@ def _build_parser() -> argparse.ArgumentParser:
     graph.add_argument("--output", type=Path)
     _add_graph_direction_args(graph, required=True)
     graph.add_argument("--force", action="store_true")
-
-    roles = subparsers.add_parser(
-        "node-roles", help="build node_role.npy for a bipartite edge table"
-    )
-    roles.add_argument("edges", type=Path)
-    roles.add_argument("--output", type=Path)
-    roles.add_argument("--force", action="store_true")
 
     features = subparsers.add_parser(
         "convert-features", help="convert a plain PyTorch tensor to .npy"
@@ -192,9 +184,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             add_reverse=add_reverse,
             force=args.force,
         )
-    elif args.command == "node-roles":
-        output = args.output or args.edges.parent / "node_role.npy"
-        result = generate_node_roles(args.edges, output, force=args.force)
     elif args.command == "convert-features":
         output = args.output or args.source.with_suffix(".npy")
         result = convert_tensor_to_numpy(args.source, output, force=args.force)

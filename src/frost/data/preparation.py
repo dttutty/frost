@@ -258,40 +258,6 @@ def write_temporal_csr(
     }
 
 
-def generate_node_roles(
-    edges_path: Path,
-    output_path: Path,
-    *,
-    force: bool = False,
-) -> dict[str, int | str]:
-    """Generate a boolean destination-role feature for a bipartite dataset."""
-    frame = load_edges(edges_path)
-    src, dst, _, _ = _edge_arrays(frame)
-    src_nodes = np.unique(src)
-    dst_nodes = np.unique(dst)
-    overlap = np.intersect1d(src_nodes, dst_nodes, assume_unique=True)
-    if overlap.size:
-        preview = overlap[:5].tolist()
-        raise ValueError(
-            "node-role generation requires disjoint source/destination partitions; "
-            f"overlap starts with {preview}"
-        )
-
-    num_nodes = int(max(src.max(), dst.max())) + 1
-    roles = np.zeros((num_nodes, 1), dtype=np.bool_)
-    roles[dst_nodes, 0] = True
-    output_path = _require_writable_target(output_path, force=force)
-    if output_path.suffix != ".npy":
-        raise ValueError(f"node-role output must use the .npy extension: {output_path}")
-    np.save(output_path, roles)
-    return {
-        "output": str(output_path.resolve()),
-        "num_nodes": num_nodes,
-        "source_nodes": len(src_nodes),
-        "destination_nodes": len(dst_nodes),
-    }
-
-
 def convert_tensor_to_numpy(
     source_path: Path,
     output_path: Path,
@@ -434,7 +400,7 @@ def write_dataset_manifest(
         )
 
     artifacts: dict[str, Any] = {}
-    for filename in ("edge_features.npy", "node_role.npy"):
+    for filename in ("edge_features.npy",):
         path = dataset_dir / filename
         if path.is_file():
             array = np.load(path, mmap_mode="r", allow_pickle=False)
@@ -471,10 +437,6 @@ def write_dataset_manifest(
             "generator": "python_random_v1",
             "seed": negative_seed,
             "artifact": "neg_pre_sampling_1_result.csv",
-        },
-        "node_role": {
-            "available": (dataset_dir / "node_role.npy").is_file(),
-            "used_as_default_node_features": False,
         },
         "artifacts": artifacts,
     }
@@ -534,7 +496,6 @@ def validate_dataset(
     row_contracts = {
         "edge_features.npy": num_edges + 1,
         "node_features.npy": num_nodes,
-        "node_role.npy": num_nodes,
     }
     for filename, expected_rows in row_contracts.items():
         path = dataset_dir / filename
@@ -542,29 +503,6 @@ def validate_dataset(
             _validate_array_rows(path, expected_rows)
             optional_shapes[filename] = list(
                 np.load(path, mmap_mode="r", allow_pickle=False).shape
-            )
-
-    role_path = dataset_dir / "node_role.npy"
-    if role_path.is_file():
-        roles = np.load(role_path, mmap_mode="r", allow_pickle=False)
-        if roles.dtype != np.bool_ or roles.ndim != 2 or roles.shape[1] != 1:
-            raise ValueError(
-                "node_role.npy must have shape [num_nodes, 1] and bool dtype"
-            )
-        src = frame["src"].to_numpy(dtype=np.int64)
-        dst = frame["dst"].to_numpy(dtype=np.int64)
-        overlap = np.intersect1d(np.unique(src), np.unique(dst))
-        if overlap.size:
-            raise ValueError("node_role.npy is only valid for disjoint bipartite roles")
-        if bool(roles[src, 0].any()) or not bool(roles[dst, 0].all()):
-            raise ValueError(
-                "node_role.npy must encode source=False and destination=True"
-            )
-        node_features_path = dataset_dir / "node_features.npy"
-        if node_features_path.exists() and node_features_path.samefile(role_path):
-            raise ValueError(
-                "node_role.npy must remain opt-in metadata, not an alias used as "
-                "default node_features.npy"
             )
 
     negative_shape = _validate_precomputed_negatives(dataset_dir, frame)

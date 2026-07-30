@@ -10,7 +10,6 @@ from frost.data.preparation import (
     assign_temporal_splits,
     build_temporal_csr,
     convert_tensor_to_numpy,
-    generate_node_roles,
     validate_dataset,
     write_temporal_csr,
 )
@@ -60,29 +59,6 @@ def test_build_temporal_csr_accepts_legacy_columns_without_reverse() -> None:
     np.testing.assert_array_equal(graph["eid"], [7])
 
 
-def test_generate_node_roles_infers_bipartite_partitions(tmp_path: Path) -> None:
-    edges_path = tmp_path / "edges.csv"
-    output_path = tmp_path / "node_role.npy"
-    _canonical_edges().to_csv(edges_path, index=False)
-
-    summary = generate_node_roles(edges_path, output_path)
-
-    roles = np.load(output_path)
-    assert summary["num_nodes"] == 4
-    assert roles.shape == (4, 1)
-    np.testing.assert_array_equal(roles[:, 0], [False, False, True, True])
-
-
-def test_generate_node_roles_rejects_overlapping_partitions(tmp_path: Path) -> None:
-    edges = _canonical_edges()
-    edges.loc[1, "dst"] = 1
-    edges_path = tmp_path / "edges.csv"
-    edges.to_csv(edges_path, index=False)
-
-    with pytest.raises(ValueError, match="disjoint"):
-        generate_node_roles(edges_path, tmp_path / "node_role.npy")
-
-
 def test_convert_tensor_to_numpy_uses_explicit_paths(tmp_path: Path) -> None:
     source = tmp_path / "features.pt"
     output = tmp_path / "features.npy"
@@ -127,10 +103,6 @@ def test_validate_dataset_checks_graph_and_optional_row_contracts(
         add_reverse=True,
     )
     np.save(dataset_dir / "edge_features.npy", np.zeros((7, 2), dtype=np.float32))
-    np.save(
-        dataset_dir / "node_role.npy",
-        np.array([[False], [False], [True], [True]], dtype=np.bool_),
-    )
     summary = validate_dataset(dataset_dir)
 
     assert summary["dataset"] == "EXAMPLE"

@@ -14,7 +14,6 @@ from frost.data.graph_policy import graph_filename
 from frost.data.preparation import (
     SplitStrategy,
     assign_temporal_splits,
-    generate_node_roles,
     write_temporal_csr,
 )
 
@@ -187,14 +186,6 @@ def import_dgb_snapshot(
             np.save(feature_path, cast)
             feature_meta.update({"representation": "npy", "dtype": str(cast.dtype)})
         artifacts["edge_features"] = feature_meta
-
-    src_nodes = np.unique(edges["src"].to_numpy())
-    dst_nodes = np.unique(edges["dst"].to_numpy())
-    is_bipartite = np.intersect1d(src_nodes, dst_nodes, assume_unique=True).size == 0
-    if is_bipartite:
-        role_path = output_dir / "node_role.npy"
-        generate_node_roles(edges_path, role_path, force=force)
-        artifacts[role_path.name] = {"used_as_default_node_features": False}
 
     graph_path = output_dir / graph_filename(graph_direction)
     graph_summary = write_temporal_csr(

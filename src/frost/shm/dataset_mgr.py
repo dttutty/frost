@@ -110,9 +110,8 @@ def _resolve_npy_alias_path(path: Path) -> Path:
     """Resolve text-alias `.npy` files to the real NumPy payload.
 
     Some dataset snapshots materialize a symlink-like indirection as a tiny
-    UTF-8 text file whose contents are the relative target path, for example
-    `node_features.npy -> node_role.npy`. Follow that chain until we land on an
-    actual NumPy file.
+    UTF-8 text file whose contents are the relative target path. Follow that
+    chain until we land on an actual NumPy file.
     """
 
     seen_paths: set[Path] = set()
