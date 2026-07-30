@@ -27,11 +27,29 @@ def generate_interaction_mails(
     """
     # 1. Derive N
     total_nodes = root_new_mem_orig.nid.shape[0]
+    if root_new_mem_orig.data.shape[0] != total_nodes:
+        raise ValueError(
+            "root_new_mem_orig nid/data rows must match, got "
+            f"nid={tuple(root_new_mem_orig.nid.shape)} "
+            f"data={tuple(root_new_mem_orig.data.shape)}"
+        )
+    if root_new_mem_orig.ts.shape[0] != total_nodes:
+        raise ValueError(
+            "root_new_mem_orig nid/ts rows must match, got "
+            f"nid={tuple(root_new_mem_orig.nid.shape)} "
+            f"ts={tuple(root_new_mem_orig.ts.shape)}"
+        )
     if total_nodes % 2 != 0:
         raise ValueError(
             f"root_new_mem_orig must contain an even [src | dst] layout, got {total_nodes}"
         )
     n = total_nodes // 2
+
+    if edge_feats is not None and edge_feats.shape[0] != n:
+        raise ValueError(
+            "edge feature rows must match the positive interaction count, got "
+            f"edge_feats={tuple(edge_feats.shape)} expected_rows={n}"
+        )
 
     # 2. Split Src and Dst memories
     #    root_new_mem_orig.data layout: [Src_Mem... | Dst_Mem...]
