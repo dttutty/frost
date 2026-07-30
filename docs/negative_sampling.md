@@ -33,9 +33,9 @@ Historical and post-training destination candidates are sampled with replacement
 so a positive edge may receive the same negative destination more than once
 when `n_neg > 1`.
 
-## Difference from DyGLib
+## Historical difference from upstream DyGLib
 
-DyGLib's standard `NegativeEdgeSampler` gives `historical` and `inductive`
+The original DyGLib snapshot (`3aacc36b`) gave `historical` and `inductive`
 different semantics:
 
 - **Historical:** form the global set of historical `(src, dst)` edges, remove
