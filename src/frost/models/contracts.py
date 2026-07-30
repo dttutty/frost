@@ -29,20 +29,9 @@ class NodeSet(StrEnum):
     POSITIVE_NEIGHBORS = "positive_neighbors"
 
 
-class FeatureUse(StrEnum):
-    REQUIRED = "required"
-    OPTIONAL = "optional"
-    SYNTHESIZE_IF_MISSING = "synthesize_if_missing"
-
-
 class RepresentationKind(StrEnum):
     NODE_ALIGNED = "node_aligned"
     PAIR_ALIGNED = "pair_aligned"
-
-
-class ScoringKind(StrEnum):
-    ADDITIVE = "additive"
-    CONCAT = "concat"
 
 
 @dataclass(frozen=True)
@@ -67,13 +56,6 @@ class NeighborhoodContract:
             raise ValueError(f"Fanout values must be positive, got {list(fanout)}.")
         if self.expansion is RootExpansion.POSITIVE_ROOTS and len(fanout) > 1:
             raise ValueError("Positive-root-only expansion currently supports one hop.")
-
-
-@dataclass(frozen=True)
-class FeatureContract:
-    node: FeatureUse
-    edge: FeatureUse
-    node_scope: NodeSet = NodeSet.ALL_SAMPLED
 
 
 @dataclass(frozen=True)
@@ -108,7 +90,6 @@ DynamicStateContract: TypeAlias = Stateless | MemoryState
 @dataclass(frozen=True)
 class ModelContract:
     neighborhood: NeighborhoodContract
-    features: FeatureContract
+    node_feature_scope: NodeSet
     dynamic_state: DynamicStateContract
     representation: RepresentationKind
-    scoring: ScoringKind

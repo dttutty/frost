@@ -6,10 +6,10 @@ from frost.launch.config import (
     resolve_time_scaling_factor,
 )
 from frost.launch.factory import build_worker_modules
-from frost.launch.plan import DatasetSchema, compile_execution_plan
+from frost.launch.plan import compile_execution_plan
+from frost.launch.storage import resolve_batch_layout
 from frost.models.mem_updater import TransformerMemoryUpdater
 from frost.models.recipes import APANRecipe
-from frost.launch.storage import resolve_batch_layout
 
 
 def test_apan_runtime_only_config_builds_worker_modules():
@@ -27,9 +27,9 @@ def test_apan_runtime_only_config_builds_worker_modules():
             "updater": {
                 "_target_": "frost.models.mem_updater.TransformerMemoryUpdater",
                 "d_time": 4,
-                    "d_mem": 8,
-                    "boxsize": 2,
-                    "heads": 2,
+                "d_mem": 8,
+                "boxsize": 2,
+                "heads": 2,
                 "dropout": 0.0,
             },
         },
@@ -38,7 +38,7 @@ def test_apan_runtime_only_config_builds_worker_modules():
             "d_in": 8,
         },
     )
-    plan = compile_execution_plan(recipe, DatasetSchema("EXAMPLE", 10, 0, 0))
+    plan = compile_execution_plan(recipe)
 
     mem_updater, _, _, mailbox_router = build_worker_modules(
         cfg,

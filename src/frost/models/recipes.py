@@ -9,8 +9,6 @@ from hydra.utils import get_class
 from omegaconf import DictConfig, OmegaConf
 
 from frost.models.contracts import (
-    FeatureContract,
-    FeatureUse,
     InteractionMailbox,
     MemoryState,
     ModelContract,
@@ -19,7 +17,6 @@ from frost.models.contracts import (
     NodeSet,
     RepresentationKind,
     RootExpansion,
-    ScoringKind,
     Stateless,
 )
 
@@ -56,14 +53,6 @@ class ModelRecipe:
         return self.CONTRACT
 
 
-_OPTIONAL_FEATURES = FeatureContract(
-    node=FeatureUse.OPTIONAL,
-    edge=FeatureUse.OPTIONAL,
-)
-_SYNTHETIC_FEATURES = FeatureContract(
-    node=FeatureUse.SYNTHESIZE_IF_MISSING,
-    edge=FeatureUse.SYNTHESIZE_IF_MISSING,
-)
 _STANDARD_MEMORY = MemoryState(
     memory_read=NodeSet.ALL_SAMPLED,
     memory_write=NodeSet.POSITIVE_ROOTS,
@@ -76,10 +65,9 @@ class TGNRecipe(ModelRecipe):
     NAME = "tgn"
     CONTRACT = ModelContract(
         neighborhood=NeighborhoodContract(1, 1),
-        features=_OPTIONAL_FEATURES,
+        node_feature_scope=NodeSet.ALL_SAMPLED,
         dynamic_state=_STANDARD_MEMORY,
         representation=RepresentationKind.NODE_ALIGNED,
-        scoring=ScoringKind.ADDITIVE,
     )
 
 
@@ -87,10 +75,9 @@ class JODIERecipe(ModelRecipe):
     NAME = "jodie"
     CONTRACT = ModelContract(
         neighborhood=NeighborhoodContract(0, 0),
-        features=_OPTIONAL_FEATURES,
+        node_feature_scope=NodeSet.ALL_SAMPLED,
         dynamic_state=_STANDARD_MEMORY,
         representation=RepresentationKind.NODE_ALIGNED,
-        scoring=ScoringKind.ADDITIVE,
     )
 
 
@@ -102,11 +89,7 @@ class APANRecipe(ModelRecipe):
             1,
             expansion=RootExpansion.POSITIVE_ROOTS,
         ),
-        features=FeatureContract(
-            node=FeatureUse.OPTIONAL,
-            edge=FeatureUse.OPTIONAL,
-            node_scope=NodeSet.ROOTS,
-        ),
+        node_feature_scope=NodeSet.ROOTS,
         dynamic_state=MemoryState(
             memory_read=NodeSet.ROOTS,
             memory_write=NodeSet.POSITIVE_ROOTS,
@@ -114,7 +97,6 @@ class APANRecipe(ModelRecipe):
             mailbox=NeighborhoodMailbox(),
         ),
         representation=RepresentationKind.NODE_ALIGNED,
-        scoring=ScoringKind.ADDITIVE,
     )
 
 
@@ -122,10 +104,9 @@ class TGATRecipe(ModelRecipe):
     NAME = "tgat"
     CONTRACT = ModelContract(
         neighborhood=NeighborhoodContract(1, 8),
-        features=_SYNTHETIC_FEATURES,
+        node_feature_scope=NodeSet.ALL_SAMPLED,
         dynamic_state=Stateless(),
         representation=RepresentationKind.NODE_ALIGNED,
-        scoring=ScoringKind.CONCAT,
     )
 
 
@@ -133,10 +114,9 @@ class GraphMixerRecipe(ModelRecipe):
     NAME = "graph_mixer"
     CONTRACT = ModelContract(
         neighborhood=NeighborhoodContract(1, 1),
-        features=_OPTIONAL_FEATURES,
+        node_feature_scope=NodeSet.ALL_SAMPLED,
         dynamic_state=Stateless(),
         representation=RepresentationKind.NODE_ALIGNED,
-        scoring=ScoringKind.CONCAT,
     )
 
 
@@ -144,10 +124,9 @@ class TCLRecipe(ModelRecipe):
     NAME = "tcl"
     CONTRACT = ModelContract(
         neighborhood=NeighborhoodContract(1, 1),
-        features=_OPTIONAL_FEATURES,
+        node_feature_scope=NodeSet.ALL_SAMPLED,
         dynamic_state=Stateless(),
         representation=RepresentationKind.PAIR_ALIGNED,
-        scoring=ScoringKind.CONCAT,
     )
 
 
@@ -155,10 +134,9 @@ class DyGFormerRecipe(ModelRecipe):
     NAME = "dygformer"
     CONTRACT = ModelContract(
         neighborhood=NeighborhoodContract(1, 1),
-        features=_SYNTHETIC_FEATURES,
+        node_feature_scope=NodeSet.ALL_SAMPLED,
         dynamic_state=Stateless(),
         representation=RepresentationKind.PAIR_ALIGNED,
-        scoring=ScoringKind.ADDITIVE,
     )
 
 
@@ -166,10 +144,9 @@ class CAWNRecipe(ModelRecipe):
     NAME = "cawn"
     CONTRACT = ModelContract(
         neighborhood=NeighborhoodContract(1, 8),
-        features=_OPTIONAL_FEATURES,
+        node_feature_scope=NodeSet.ALL_SAMPLED,
         dynamic_state=Stateless(),
         representation=RepresentationKind.PAIR_ALIGNED,
-        scoring=ScoringKind.CONCAT,
     )
 
 

@@ -9,7 +9,6 @@ from frost.runtime.host._engine import Host
 def _result(*, val_ap: float, val_mrr: float) -> Result:
     return Result(
         train_loss=1.0,
-        val_loss=1.0,
         val_auc=0.0,
         val_ap=val_ap,
         test_auc=0.0,

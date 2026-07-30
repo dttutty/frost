@@ -16,17 +16,12 @@ def _ts(vals: list[int]) -> TensorSet:
 
 def _meta(mini_batch_idx: int) -> Meta:
     return Meta(
-        cur_epoch=0,
-        cur_macro_of_split=0,
-        n_macro_of_split=1,
-        cur_macro_of_epoch=0,
         split="train",
         n_src=1,
         mini_batch_idx=mini_batch_idx,
         flat_graph=None,
         buf_len=0,
         n_neg=1,
-        fanout=[10],
     )
 
 

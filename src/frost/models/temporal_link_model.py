@@ -28,6 +28,7 @@ class TemporalLinkModel(nn.Module):
         mem_updater: MemoryUpdaterProto | None,
         head: nn.Module,
         representation: RepresentationKind,
+        fanout: tuple[int, ...],
         root_expansion: RootExpansion,
     ) -> None:
         super().__init__()
@@ -35,6 +36,7 @@ class TemporalLinkModel(nn.Module):
         self.mem_updater = mem_updater
         self.head = head
         self.representation_adapter = RepresentationAdapter(representation)
+        self.fanout = fanout
         self.root_expansion = root_expansion
 
     def forward(self, meta: Meta) -> torch.Tensor:
@@ -50,13 +52,13 @@ class TemporalLinkModel(nn.Module):
             )
             meta.flat_graph = flat_graph
 
-        meta.graph = flat_graph.unflatten(
+        graph = flat_graph.unflatten(
             n_src=meta.n_src,
-            fanout=meta.fanout or [],
+            fanout=list(self.fanout),
             n_neg=meta.n_neg,
             root_expansion=self.root_expansion,
         )
-        encoder_result = cast(EncoderResult, self.encoder(graph=meta.graph))
+        encoder_result = cast(EncoderResult, self.encoder(graph=graph))
         edge_representations = self.representation_adapter(
             encoder_result,
             n_src=meta.n_src,

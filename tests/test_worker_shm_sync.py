@@ -84,13 +84,8 @@ def _make_meta(
     box_plan: DynamicPlan,
     *,
     n_src: int = 1,
-    fanout: list[int] | None = None,
 ) -> Meta:
     return Meta(
-        cur_epoch=0,
-        cur_macro_of_split=0,
-        n_macro_of_split=1,
-        cur_macro_of_epoch=0,
         split="train",
         n_src=n_src,
         mini_batch_idx=0,
@@ -98,7 +93,6 @@ def _make_meta(
         buf_len=graph.nid.numel(),
         plan_set=PlanSet(mem_plan=mem_plan, box_plan=box_plan),
         n_neg=1,
-        fanout=[] if fanout is None else fanout,
     )
 
 

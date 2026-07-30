@@ -3,17 +3,14 @@
 import torch
 
 from frost.datatypes.sampled_layout import SampledLayoutView
-from frost.launch.plan import ExecutionPlan, LayoutPlan, SamplingPlan
+from frost.launch.plan import ExecutionPlan, SamplingPlan
 from frost.models.contracts import (
-    FeatureContract,
-    FeatureUse,
     InteractionMailbox,
     MemoryState,
     NeighborhoodMailbox,
     NodeSet,
     RepresentationKind,
     RootExpansion,
-    ScoringKind,
     Stateless,
 )
 from frost.runtime.host.analyzer import AccessPlanAnalyzer
@@ -30,15 +27,9 @@ def _plan(
         model_name="test",
         embedding_dim=8,
         sampling=SamplingPlan(fanout, expansion),
-        layout=LayoutPlan(fanout, expansion),
-        features=FeatureContract(
-            node=FeatureUse.OPTIONAL,
-            edge=FeatureUse.OPTIONAL,
-            node_scope=feature_scope,
-        ),
+        node_feature_scope=feature_scope,
         dynamic_state=state,
         representation=RepresentationKind.NODE_ALIGNED,
-        scoring=ScoringKind.ADDITIVE,
     )
 
 

@@ -12,7 +12,7 @@ from frost.ablation import (
 )
 from frost.datatypes.graph import FlatGraph
 from frost.datatypes.meta import Meta
-from frost.launch.plan import DatasetSchema, compile_execution_plan
+from frost.launch.plan import compile_execution_plan
 from frost.models.contracts import RepresentationKind, RootExpansion
 from frost.models.outputs import EdgeRepresentations, EncoderResult
 from frost.models.recipes import TGNRecipe
@@ -55,7 +55,7 @@ def _plan():
         state={},
         head={},
     )
-    return compile_execution_plan(recipe, DatasetSchema("TEST", 4, 0, 1))
+    return compile_execution_plan(recipe)
 
 
 def _make_meta() -> Meta:
@@ -66,19 +66,13 @@ def _make_meta() -> Meta:
         efeat=torch.tensor([[0.5], [0.0], [0.0]]),
     )
     return Meta(
-        cur_epoch=0,
-        cur_macro_of_split=0,
-        n_macro_of_split=1,
-        cur_macro_of_epoch=0,
         split="train",
         n_src=1,
         mini_batch_idx=7,
         flat_graph=graph,
         buf_len=3,
         n_neg=1,
-        graph=None,
         plan_set=None,
-        fanout=[],
     )
 
 
@@ -88,6 +82,7 @@ def _model(events: list[str]) -> TemporalLinkModel:
         mem_updater=_FakeMemUpdater(),
         head=_IdentityHead(),
         representation=RepresentationKind.NODE_ALIGNED,
+        fanout=(),
         root_expansion=RootExpansion.ALL_ROOTS,
     )
 

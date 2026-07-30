@@ -44,7 +44,7 @@ def test_direct_state_ablation_initializes_delta_queue(monkeypatch):
     worker.mem_wr_q = None
     worker.box_wr_q = None
     worker.execution_plan = SimpleNamespace(
-        features=SimpleNamespace(node_scope=NodeSet.ALL_SAMPLED)
+        node_feature_scope=NodeSet.ALL_SAMPLED
     )
 
     worker._init_pipeline(

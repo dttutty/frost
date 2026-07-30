@@ -12,10 +12,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torchmetrics import MetricCollection
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
-from torchmetrics.functional.classification import (
-    binary_auroc,
-    binary_average_precision,
-)
 
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
@@ -109,6 +105,7 @@ class WorkerTrainerMixin:
             mem_updater=mem_updater,
             head=predictor,
             representation=self.execution_plan.representation,
+            fanout=self.execution_plan.sampling.fanout,
             root_expansion=ring_buf.root_expansion,
         )
 
@@ -158,15 +155,9 @@ class WorkerTrainerMixin:
         self.train_loss_tracker = MeanMetric(process_group=self.nccl).cuda()
         self.val_mrr_tracker = MeanMetric(process_group=self.nccl).cuda()
         self.test_mrr_tracker = MeanMetric(process_group=self.nccl).cuda()
-        self.val_mrr_loss_tracker = MeanMetric(process_group=self.nccl).cuda()
-        self.val_auc_batch_mean = MeanMetric(process_group=self.nccl).cuda()
-        self.val_ap_batch_mean = MeanMetric(process_group=self.nccl).cuda()
-        self.test_auc_batch_mean = MeanMetric(process_group=self.nccl).cuda()
-        self.test_ap_batch_mean = MeanMetric(process_group=self.nccl).cuda()
 
         self.val_metrics = MetricCollection(
             {
-                "val_loss": MeanMetric(process_group=self.nccl),
                 # Use exact distributed metrics here. The binned approximation
                 # can shift the selected best epoch enough to materially change
                 # the reported JODIE parity numbers.
@@ -288,48 +279,30 @@ class WorkerTrainerMixin:
         if self.eval_metric == "ap":
             val_results = self.val_metrics.compute()
             test_results = self.test_metrics.compute()
-            val_loss = val_results["val_loss"].item()
             val_auc = val_results["val_auc"].item()
             val_ap = val_results["val_ap"].item()
             test_auc = test_results["test_auc"].item()
             test_ap = test_results["test_ap"].item()
             val_mrr = test_mrr = 0.0
-            val_auc_batch_mean = self.val_auc_batch_mean.compute().item()
-            val_ap_batch_mean = self.val_ap_batch_mean.compute().item()
-            test_auc_batch_mean = self.test_auc_batch_mean.compute().item()
-            test_ap_batch_mean = self.test_ap_batch_mean.compute().item()
         else:
-            val_loss = self.val_mrr_loss_tracker.compute().item()
             val_auc = val_ap = test_auc = test_ap = 0.0
             val_mrr = self.val_mrr_tracker.compute().item()
             test_mrr = self.test_mrr_tracker.compute().item()
-            val_auc_batch_mean = val_ap_batch_mean = 0.0
-            test_auc_batch_mean = test_ap_batch_mean = 0.0
 
         self.val_metrics.reset()
         self.test_metrics.reset()
         self.train_loss_tracker.reset()
         self.val_mrr_tracker.reset()
         self.test_mrr_tracker.reset()
-        self.val_mrr_loss_tracker.reset()
-        self.val_auc_batch_mean.reset()
-        self.val_ap_batch_mean.reset()
-        self.test_auc_batch_mean.reset()
-        self.test_ap_batch_mean.reset()
 
         res = Result(
             train_loss=avg_loss.item(),
-            val_loss=val_loss,
             val_auc=val_auc,
             val_ap=val_ap,
             test_auc=test_auc,
             test_ap=test_ap,
             val_mrr=val_mrr,
             test_mrr=test_mrr,
-            val_auc_batch_mean=val_auc_batch_mean,
-            val_ap_batch_mean=val_ap_batch_mean,
-            test_auc_batch_mean=test_auc_batch_mean,
-            test_ap_batch_mean=test_ap_batch_mean,
         )
         return res
 
@@ -406,42 +379,21 @@ class WorkerTrainerMixin:
             self.p2p_sem.acquire()  # Ensure no other P2P task is in flight during eval
 
         y_pred = logits.float().sigmoid().squeeze(-1)
-        if self.eval_metric == "ap":
-            if meta.n_neg != 1:
-                raise ValueError(
-                    "eval_metric='ap' currently requires exactly one evaluation "
-                    f"negative per positive edge, got n_neg={meta.n_neg}."
-                )
-            batch_ap = binary_average_precision(
-                y_pred, meta.labels.long(), thresholds=None
+        if self.eval_metric == "ap" and meta.n_neg != 1:
+            raise ValueError(
+                "eval_metric='ap' currently requires exactly one evaluation "
+                f"negative per positive edge, got n_neg={meta.n_neg}."
             )
-            batch_auc = binary_auroc(y_pred, meta.labels.long(), thresholds=None)
 
         if meta.split == "val":
-            logits_flat = logits.float().squeeze(-1)
-            n_pos = meta.n_src
-            loss = F.binary_cross_entropy_with_logits(
-                logits_flat[:n_pos], meta.labels[:n_pos]
-            )
-            negative_logits = logits_flat[n_pos:]
-            negative_labels = meta.labels[n_pos:]
-            if meta.neg_valid_mask is not None:
-                negative_logits = negative_logits[meta.neg_valid_mask]
-                negative_labels = negative_labels[meta.neg_valid_mask]
-            loss = loss + F.binary_cross_entropy_with_logits(
-                negative_logits, negative_labels
-            )
-
             if self.eval_metric == "ap":
                 self.val_metrics.update(
                     preds=y_pred,
                     target=meta.labels.long(),
-                    value=loss,
                 )
-                self.val_ap_batch_mean.update(batch_ap)
-                self.val_auc_batch_mean.update(batch_auc)
             else:
-                self.val_mrr_loss_tracker.update(loss, weight=n_pos)
+                logits_flat = logits.float().squeeze(-1)
+                n_pos = meta.n_src
                 y_pos = logits_flat[:n_pos].unsqueeze(1)
                 y_neg = logits_flat[n_pos:].view(n_pos, meta.n_neg)
                 neg_valid_mask = (
@@ -458,8 +410,6 @@ class WorkerTrainerMixin:
             assert meta.split == "test"
             if self.eval_metric == "ap":
                 self.test_metrics.update(preds=y_pred, target=meta.labels.long())
-                self.test_ap_batch_mean.update(batch_ap)
-                self.test_auc_batch_mean.update(batch_auc)
             else:
                 logits_flat = logits.float().squeeze(-1)
                 n_pos = meta.n_src
@@ -484,5 +434,4 @@ class WorkerTrainerMixin:
         meta.plan_set = None
         meta.labels = None
         meta.neg_valid_mask = None
-        meta.graph = None
         meta.direct_writeback_request = None

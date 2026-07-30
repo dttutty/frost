@@ -103,7 +103,7 @@ class AccessPlanAnalyzer:
         return [int(layout.select(state.mailbox_read).numel()) for layout in layouts]
 
     def get_feat_plan_inputs(self, layouts: list[SampledLayoutView]) -> list[TensorSet]:
-        scope = self.plan.features.node_scope
+        scope = self.plan.node_feature_scope
         return [self._select(layout, scope) for layout in layouts]
 
     def create_mail_planner(

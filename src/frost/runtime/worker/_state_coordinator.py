@@ -133,9 +133,9 @@ class DynamicStateCoordinator:
         if self._neighborhood_mail:
             graph = flat_graph.unflatten(
                 n_src=meta.n_src,
-                fanout=meta.fanout or [],
+                fanout=list(self.plan.sampling.fanout),
                 n_neg=meta.n_neg,
-                root_expansion=self.plan.layout.root_expansion,
+                root_expansion=self.plan.sampling.root_expansion,
             )
             flat_nid_cpu = meta.flat_nid_cpu
 

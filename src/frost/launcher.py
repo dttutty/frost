@@ -24,7 +24,7 @@ from frost.launch.distributed import (
 )
 from frost.launch.dispatch import dispatch_host, dispatch_worker
 from frost.launch.factory import build_worker_modules
-from frost.launch.plan import DatasetSchema, compile_execution_plan
+from frost.launch.plan import compile_execution_plan
 from frost.launch.storage import (
     prepare_dynamic_store,
     prepare_launch_dataset,
@@ -142,15 +142,7 @@ def launch(cfg: DictConfig):
         logger.info("Detected GPU topology from CUDA_VISIBLE_DEVICES: %s", gpu_topo)
 
     recipe = instantiate_model_recipe(cfg.model)
-    execution_plan = compile_execution_plan(
-        recipe,
-        DatasetSchema(
-            name=str(cfg.dataset),
-            n_nodes=n_nodes,
-            node_feature_dim=ndim,
-            edge_feature_dim=edim,
-        ),
-    )
+    execution_plan = compile_execution_plan(recipe)
     has_mem = execution_plan.has_dynamic_state
     state_cfg = recipe.state
     if dynamic_state_ablation.requires_tgn_boxsize_one_only:
@@ -177,7 +169,7 @@ def launch(cfg: DictConfig):
     if has_mem and mail_combine is None:
         raise ValueError("Memory models require model.state.mail_combine.")
     fanout = list(execution_plan.sampling.fanout)
-    root_expansion = execution_plan.layout.root_expansion
+    root_expansion = execution_plan.sampling.root_expansion
     ngh_sampler_strategy = cfg.ngh_sampler.strategy
     time_scaling_factor = resolve_time_scaling_factor(
         cfg.ngh_sampler.get("time_scaling_factor", 0.0)

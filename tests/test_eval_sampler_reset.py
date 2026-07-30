@@ -40,7 +40,6 @@ def test_handle_a_split_resets_eval_sampler_but_not_train_sampler():
     host.batch_size = 1
     host.n_gpu = 1
     host.show_tqdm = False
-    host.cur_macro_of_epoch = 0
     host.mini_batch_idx = 0
     host.plan_router = None
     host.scatter_q = Queue()

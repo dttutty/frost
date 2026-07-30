@@ -170,14 +170,12 @@ class Host:
         self.no_memory_queue_size = no_memory_queue_size
 
         self.stop_ev = threading.Event()
-        self.cur_macro_of_epoch = 0
         self.mini_batch_idx = 0
         self.curr_epoch = 0
         self.best_metric_epoch: int = -1
         self.best_metric_score = float("-inf")
         self.best_metric_result: Result = Result(
             train_loss=float("inf"),
-            val_loss=float("inf"),
             val_auc=0.0,
             val_ap=0.0,
             test_auc=0.0,
@@ -479,12 +477,13 @@ class Host:
                 assert isinstance(gpu, int)
                 meta, layout = self._add_to_td_list(
                     edges,
-                    cur_epoch,
-                    cur_macro_of_split,
-                    n_macro_of_split,
                     split,
                     self.mini_batch_idx,
                     gpu,
+                    is_last_macro_of_epoch=(
+                        split == "test"
+                        and cur_macro_of_split + 1 == n_macro_of_split
+                    ),
                 )
                 meta_bundle.append(meta)
                 layout_bundle.append(layout)
@@ -500,7 +499,6 @@ class Host:
             scatter_put_end = time.perf_counter()
             if timing_enabled and split == "train":
                 self._scatter_q_put_s_curve.append(scatter_put_end - scatter_put_start)
-            self.cur_macro_of_epoch += 1
 
         if timing_enabled and split == "train" and self._scatter_q_put_s_curve:
             import json
@@ -529,18 +527,15 @@ class Host:
             self.plan_router.signal_epoch_end()
         self.scatter_q.put("end_of_epoch")
 
-        self.cur_macro_of_epoch = 0
         self.curr_epoch += 1
 
     def _add_to_td_list(
         self,
         edges: pd.DataFrame,
-        cur_epoch: int,
-        cur_macro_of_split: int,
-        n_macro_of_split: int,
         split: Literal["train", "val", "test"],
         mini_batch_idx: int,
         gpu_id: int,
+        is_last_macro_of_epoch: bool,
     ) -> tuple[Meta, SampledLayoutView]:
         """Build a Meta descriptor and sampled-layout sidecar for one micro-batch.
 
@@ -551,9 +546,6 @@ class Host:
 
         Args:
             edges: Rows of the edge DataFrame assigned to this GPU for this step.
-            cur_epoch: Zero-based epoch index.
-            cur_macro_of_split: Macro-batch index within the current split.
-            n_macro_of_split: Total number of macro-batches in the current split.
             split: String label of the current split.
             mini_batch_idx: Global batch index across all splits and epochs.
             gpu_id: Target GPU rank for this micro-batch.
@@ -629,19 +621,15 @@ class Host:
         )
 
         meta = Meta(
-            cur_epoch=cur_epoch,
             split=split,
-            cur_macro_of_split=cur_macro_of_split,
-            cur_macro_of_epoch=self.cur_macro_of_epoch,
-            n_macro_of_split=n_macro_of_split,
             flat_graph=None,
             n_src=src.shape[0],
             mini_batch_idx=mini_batch_idx,
             plan_set=None,
             buf_len=len,
             n_neg=neg_sampler.n_neg,
+            is_last_macro_of_epoch=is_last_macro_of_epoch,
             neg_valid_mask=neg_valid_mask,
-            fanout=fanout,
         )
 
         return meta, layout

@@ -133,7 +133,7 @@ class WorkerPipelineMixin:
             nfeat=nfeat,
             efeat=efeat,
             device=self.device,
-            node_feature_scope=self.execution_plan.features.node_scope,
+            node_feature_scope=self.execution_plan.node_feature_scope,
             in_q=self.received_q,
             out_q=h2d_dest_q,
             stop_ev=self.stop_ev,

@@ -8,7 +8,7 @@ from hydra.errors import ConfigCompositionException
 from omegaconf import open_dict
 
 from frost.launch.factory import build_worker_modules
-from frost.launch.plan import DatasetSchema, compile_execution_plan
+from frost.launch.plan import compile_execution_plan
 from frost.models.recipes import RECIPE_TYPES, instantiate_model_recipe
 
 
@@ -24,7 +24,7 @@ def test_model_configs_compose_and_build(name: str) -> None:
         cfg.edim = 0
 
     recipe = instantiate_model_recipe(cfg.model)
-    plan = compile_execution_plan(recipe, DatasetSchema("EXAMPLE", 10, 0, 0))
+    plan = compile_execution_plan(recipe)
     d_mem = int(recipe.state["updater"]["d_mem"]) if recipe.state else 0
     _, encoder, head, _ = build_worker_modules(
         cfg,
