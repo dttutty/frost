@@ -80,8 +80,9 @@ Dataset attachment, per-GPU batch layout, ring-buffer sizing, and dynamic-state 
 
 ### Data types (`src/frost/datatypes/`)
 - `meta.py` — `Meta`: batch metadata carrier
-- `access.py` — `Access`: nfeat/mem/box access patterns per batch
-- `graph.py` — `FlatGraph`, `Graph` (inflated), `NeighborOnHop`
+- `sampled_layout.py` — `SampledLayoutView`: semantic `NodeSet` selection over flat sampled layouts
+- `graph.py` — `FlatGraph`, `HierGraph`, `NeighborOnHop`
+- `plan.py` — runtime memory/mailbox/static transfer plans
 - `env.py` — `Env`: distributed rank/device info
 
 ## Data Flow
@@ -89,7 +90,7 @@ Dataset attachment, per-GPU batch layout, ring-buffer sizing, and dynamic-state 
 ```
 Host process
  ├─ ngh_sampler.sample(roots, ts) → RingBuf slot
- ├─ analyzer.count_access(src, dst, all_nid, fanout) → Access
+ ├─ AccessPlanAnalyzer resolves ExecutionPlan node scopes
  └─ scatter_object_list → Workers
                            ├─ Receiver (scatter_object_list)
                            ├─ H2D (load nfeat/efeat/mem/box → GPU)
@@ -113,13 +114,13 @@ Host process
 ## Key Invariants
 
 ### Dimension alignment
-- `d_mem` in `mem_updater/*.yaml` **must equal** `${encoder.out_dim}` for identity-GNN models (JODIE, APAN).
-- APAN's effective 1-hop fanout is `mem_updater.mail_recipients`; all other models derive fanout from `encoder.fanout`.
+- `model.state.updater.d_mem` **must equal** `model.embedding_dim` for JODIE and APAN.
+- Sampling fanout is owned by `model.neighborhood.fanout`; encoders receive it only when their computation needs the value.
 - APAN uses positive-root one-hop sampling declared by its model contract.
 - `d_mail = 2*d_mem + edim` — computed in `launcher.py`; mailbox slot size and `TransformerMemoryUpdater` key/value dim must agree.
-- `GraphMixer`: `fanout[0]` is the total neighbors sampled (node encoder uses all, link encoder uses `num_tokens`). `num_tokens` controls the link encoder neighbor count (default 20). `predictor=graph_mixer` required for DyGLib-compatible concat predictor.
+- `GraphMixer`: `fanout[0]` is the total neighbors sampled (node encoder uses all, link encoder uses `num_tokens`). `num_tokens` controls the link encoder neighbor count (default 20); its recipe declares concat scoring.
 - `TCL`: `num_tokens` should equal `fanout[0]`; `num_depths = fanout[0] + 1`.
-- `CAWN`: default encoder config now uses `ngh_sampler_strategy=time_interval_aware` with `time_scaling_factor=1e-6`; the sampler weight lives in the sampler wrapper, not the encoder module.
+- `CAWN`: DyGLib parity selects `ngh_sampler.strategy=time_interval_aware` with `time_scaling_factor=1e-6`; the weight belongs to sampler config, not the encoder.
 
 ### Representation and scoring compatibility
 - Encoders return `EncoderResult`; `RepresentationAdapter` converts either node-aligned or pair-aligned layouts into `EdgeRepresentations`.
@@ -135,7 +136,7 @@ The `NeighborhoodMailbox` contract must exactly match what `NeighborhoodMailboxR
 ### Sampler invariants
 - `NoSampler.fanout` is always `None`; `TemporalLinkModel` treats it as `[]`.
 - The C++ `SeqSampler` supports `uniform`, `recent`, and `time_interval_aware`; `time_interval_aware` consumes `time_scaling_factor` from config.
-- `time_scaling_factor` is sampler-only config. `launcher.py` must strip it from `encoder_cfg` before instantiating the Python encoder.
+- `time_scaling_factor` is sampler-only config under `ngh_sampler`.
 - `MultiHopNghSampler.sample()` receives `ts` of shape `[n_src]`; must expand to `ts.repeat(2 + n_neg)` before calling C++ `get_historical_neighbors()` (positional-only args).
 
 ### Memory model detached states
@@ -161,44 +162,34 @@ For memory models, the host-side queue defaults are fixed in code to `scatter=64
 
 ## Sweeps
 
-## Adding a New Encoder
+## Adding a New Model
 
-1. Create `src/frost/models/encoder/my_model.py`:
+1. Create an encoder in `src/frost/models/encoder/my_model.py` that returns a structured result:
    ```python
    class MyEncoder(nn.Module):
-       def forward(self, graph: Graph) -> torch.Tensor:
+       def forward(self, graph: HierGraph) -> EncoderResult:
            # graph.root_mem, root_mem_ts, root_ts, root_nfeat, root_nid
            # graph.neighbors[0].nid/ts/mem/efeat  (if 1-hop)
-           return h  # shape [n_root, encoder.out_dim]
+           return EncoderResult(h)
    ```
-2. Create `configs/encoder/my_model.yaml`:
+2. Add a `ModelRecipe` in `src/frost/models/recipes.py` and declare its complete `ModelContract`: neighborhood hop bounds/root expansion, feature requirements and scope, dynamic-state read/write/mailbox semantics, representation kind, and scoring kind.
+3. Create `configs/model/my_model.yaml` as the single composition root:
    ```yaml
-   _target_: frost.models.encoder.my_model.MyEncoder
-   out_dim: 128
-   d_time: ${d_time}
-   ndim: ${ndim}
-   edim: ${edim}
+   _target_: frost.models.recipes.MyModelRecipe
+   embedding_dim: 128
+   neighborhood:
+     fanout: [10]
+   encoder:
+     _target_: frost.models.encoder.my_model.MyEncoder
+     d_out: ${model.embedding_dim}
+   state: null
+   head:
+     _target_: frost.models.header.AdditiveLinkHead
+     d_in: ${model.embedding_dim}
    ```
-3. Run with `run.py encoder=my_model`.
+4. Register the recipe in `RECIPE_TYPES`, add contract/config tests, and run with `run.py model=my_model`.
 
-For memory encoders, implement `MemoryUpdaterProto` and set `d_mem: ${encoder.out_dim}`.
-
-## Adding a New Analyzer
-
-```python
-class MyAnalyzer:
-    def __init__(self, n_neg: int): ...
-    def count_access(self, src, dst, all_nid, fanout, valid_all=None) -> Access:
-        return Access(
-            mem_need=...,    # nodes to read memory for
-            mem_update=...,  # nodes whose memory changes
-            box_need=...,    # nodes to read mailbox for
-            box_update=...,  # nodes whose mailbox changes (must exactly match runtime writes)
-            nfeat_need=...,  # nodes to load node features for
-        )
-```
-
-Config: `configs/access_analyzer/my_analyzer.yaml` with `_target_` and `n_neg: ${n_neg}`.
+Do not add a model-specific analyzer or predictor-layout branch. Extend semantic contract/plan types only when the new model genuinely requires a new runtime capability.
 
 ## Datasets
 
