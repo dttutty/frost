@@ -421,6 +421,19 @@ class Host:
             if getattr(self, "reset_eval_neg_sampler_each_epoch", True):
                 self.neg_sampler_eval.reset()
 
+        debug_max_batches = int(
+            os.environ.get("FROST_DEBUG_MAX_BATCHES_PER_SPLIT", "0")
+        )
+        if debug_max_batches < 0:
+            raise ValueError("FROST_DEBUG_MAX_BATCHES_PER_SPLIT must be >= 0.")
+        if debug_max_batches > 0:
+            max_rows = debug_max_batches * self.n_gpu * (
+                self.batch_size
+                if split == "train"
+                else getattr(self, "eval_batch_size", self.batch_size)
+            )
+            df = df.iloc[:max_rows]
+
         # Use make_balance_plan for balanced GPU distribution
         per_gpu_batch_size = (
             self.batch_size
@@ -433,11 +446,6 @@ class Host:
         df_out = df_out.assign(step_id=step_id, gpu_id=gpu_id)
 
         n_macro_of_split = df_out["step_id"].nunique()
-        debug_max_batches = int(
-            os.environ.get("FROST_DEBUG_MAX_BATCHES_PER_SPLIT", "0")
-        )
-        if debug_max_batches < 0:
-            raise ValueError("FROST_DEBUG_MAX_BATCHES_PER_SPLIT must be >= 0.")
         if debug_max_batches > 0:
             n_macro_of_split = min(n_macro_of_split, debug_max_batches)
         step_desc_map = {
