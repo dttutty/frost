@@ -4,6 +4,7 @@ import os
 import time
 from uuid import uuid4
 
+import pandas as pd
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf, open_dict
@@ -59,6 +60,56 @@ def _uses_dst_partition_random_sampler(sampler_cfg: DictConfig) -> bool:
         str(sampler_cfg.get("_target_", "")) == _RANDOM_NEG_LINK_SAMPLER_TARGET
         and str(sampler_cfg.get("candidate_mode", "all")) == "dst_partition"
     )
+
+
+def _instantiate_negative_samplers(
+    *,
+    sampler_cfg: DictConfig,
+    dataframe: pd.DataFrame,
+    n_nodes: int,
+    dataset: str,
+    train_n_neg: int,
+    eval_n_neg: int,
+    train_only: bool,
+) -> tuple[NegSamplerProto, NegSamplerProto]:
+    """Build only the negative samplers required by the execution mode."""
+    train_uses_dst_partition = _uses_dst_partition_random_sampler(sampler_cfg.train)
+    eval_uses_dst_partition = not train_only and _uses_dst_partition_random_sampler(
+        sampler_cfg.eval
+    )
+    candidate_nodes = None
+    if train_uses_dst_partition or eval_uses_dst_partition:
+        candidate_nodes = RandomNegLinkSampler.candidates_from_dst_nodes(
+            dataframe["dst"].to_numpy(copy=False), n_nodes=n_nodes
+        )
+        logger.info(
+            "Built %d destination-partition negative candidates from the "
+            "already loaded edge frame.",
+            candidate_nodes.numel(),
+        )
+
+    shared_kwargs = {"n_nodes": n_nodes, "dataset": dataset}
+    common_kwargs = {"seed": sampler_cfg.get("seed")}
+    train_sampler: NegSamplerProto = instantiate(
+        sampler_cfg.train,
+        **shared_kwargs,
+        **common_kwargs,
+        **({"candidate_nodes": candidate_nodes} if train_uses_dst_partition else {}),
+        n_neg=train_n_neg,
+    )
+    train_sampler.init_from_df(dataframe)
+    if train_only:
+        return train_sampler, train_sampler
+
+    eval_sampler: NegSamplerProto = instantiate(
+        sampler_cfg.eval,
+        **shared_kwargs,
+        **common_kwargs,
+        **({"candidate_nodes": candidate_nodes} if eval_uses_dst_partition else {}),
+        n_neg=eval_n_neg,
+    )
+    eval_sampler.init_from_df(dataframe)
+    return train_sampler, eval_sampler
 
 
 def launch(cfg: DictConfig):
@@ -197,10 +248,11 @@ def launch(cfg: DictConfig):
     # Determine maximum n_neg between train and eval for shared memory sizing
     neg_sampler_cfg = cfg.neg_sampler
     train_n_neg = neg_sampler_cfg.train.get("n_neg", cfg.n_neg)
-    eval_n_neg = neg_sampler_cfg.eval.get("n_neg", cfg.n_neg)
-    eval_metric = resolve_eval_metric(cfg.get("eval_metric", "ap"))
     train_only = bool(cfg.get("benchmark", {}).get("train_only", False))
-    if eval_metric == "ap" and eval_n_neg != 1:
+    configured_eval_n_neg = neg_sampler_cfg.eval.get("n_neg", cfg.n_neg)
+    eval_n_neg = train_n_neg if train_only else configured_eval_n_neg
+    eval_metric = resolve_eval_metric(cfg.get("eval_metric", "ap"))
+    if not train_only and eval_metric == "ap" and eval_n_neg != 1:
         raise ValueError(
             "eval_metric='ap' currently requires neg_sampler.eval.n_neg=1; "
             f"got {eval_n_neg}. Use eval_metric=mrr for one-vs-many evaluation."
@@ -242,48 +294,16 @@ def launch(cfg: DictConfig):
         if graph is None or df is None:
             raise RuntimeError("Host rank must load graph and dataframe before launch.")
 
-        neg_sampler_cfg = cfg.neg_sampler
-        _shared_kwargs = dict(n_nodes=n_nodes, dataset=cfg.dataset)
-        _common = dict(seed=neg_sampler_cfg.get("seed"))
-        train_uses_dst_partition = _uses_dst_partition_random_sampler(
-            neg_sampler_cfg.train
-        )
-        eval_uses_dst_partition = _uses_dst_partition_random_sampler(
-            neg_sampler_cfg.eval
-        )
-        candidate_nodes = None
-        if train_uses_dst_partition or eval_uses_dst_partition:
-            candidate_nodes = RandomNegLinkSampler.candidates_from_dst_nodes(
-                df["dst"].to_numpy(copy=False), n_nodes=n_nodes
-            )
-            logger.info(
-                "Built %d destination-partition negative candidates from the "
-                "already loaded edge frame.",
-                candidate_nodes.numel(),
-            )
-        train_candidate_kwargs = (
-            {"candidate_nodes": candidate_nodes} if train_uses_dst_partition else {}
-        )
-        eval_candidate_kwargs = (
-            {"candidate_nodes": candidate_nodes} if eval_uses_dst_partition else {}
-        )
-        neg_sampler_train: NegSamplerProto = instantiate(
-            neg_sampler_cfg.train,
-            **_shared_kwargs,
-            **_common,
-            **train_candidate_kwargs,
-            n_neg=train_n_neg,
-        )
-        neg_sampler_eval: NegSamplerProto = instantiate(
-            neg_sampler_cfg.eval,
-            **_shared_kwargs,
-            **_common,
-            **eval_candidate_kwargs,
-            n_neg=eval_n_neg,
-        )
         assert df is not None
-        for _ns in (neg_sampler_train, neg_sampler_eval):
-            _ns.init_from_df(df)
+        neg_sampler_train, neg_sampler_eval = _instantiate_negative_samplers(
+            sampler_cfg=cfg.neg_sampler,
+            dataframe=df,
+            n_nodes=n_nodes,
+            dataset=str(cfg.dataset),
+            train_n_neg=int(train_n_neg),
+            eval_n_neg=int(eval_n_neg),
+            train_only=train_only,
+        )
         ngh_sampler: NeighborhoodSamplerProto
         if not fanout:
             ngh_sampler = NoSampler(
