@@ -77,6 +77,22 @@ The canonical definitions and cross-framework comparison rules live in
 - `edim` is inferred from the materialized edge-feature file or the registered raw dataset source and combines with `d_mem` / `boxsize` to determine mailbox dimensionality: `d_mail = 2 * d_mem + edim`.
 - `model.state.mail_combine` controls mailbox aggregation for memory models. Supported values are `last` and `mean`.
 
+## Presets and Manual Overrides
+
+Configuration has one owner per concern:
+
+| Source | Owns |
+| --- | --- |
+| `configs/model/` | Model component constructor defaults |
+| `src/frost/models/recipes.py` | Model capabilities and runtime contract |
+| `configs/config.yaml` | Shared experiment and runtime defaults |
+
+When tuning manually, keep coupled fields aligned: GraphMixer's `num_tokens`
+cannot exceed its sampled history; TCL's `num_depths` follows `fanout[0] + 1`;
+CAWN cost grows with the product of its fanouts; DyGFormer's sampled sequence
+must remain compatible with its maximum length and patch size. Current values
+remain in configuration rather than prose.
+
 ## TGB Link Prediction
 
 With the official tgbl-wiki-v2 files under
