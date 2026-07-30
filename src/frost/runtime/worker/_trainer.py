@@ -6,6 +6,7 @@ from typing import Any, Literal, cast
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributed.algorithms.ddp_comm_hooks.default_hooks import allreduce_hook
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchmetrics import MetricCollection
@@ -98,7 +99,6 @@ class WorkerTrainerMixin:
         encoder: nn.Module,
         mem_updater: MemoryUpdaterProto | None,
         predictor: nn.Module,
-        criterion: torch.nn.Module,
         optimizer: Literal["adam", "sgd"],
         ring_buf: RingBuf,
         compile_model: bool = True,
@@ -146,10 +146,11 @@ class WorkerTrainerMixin:
             direct_writeback=self._write_direct_dynamic_state_request,
         )
         updater_module = (
-            cast(nn.Module, model.mem_updater) if model.mem_updater is not None else None
+            cast(nn.Module, model.mem_updater)
+            if model.mem_updater is not None
+            else None
         )
         self.state_coordinator.attach(updater_module)
-        self.criterion = criterion
         self.grad_scaler = torch.amp.GradScaler("cuda", enabled=self.amp)
 
     def _init_metrics(self) -> None:
@@ -353,13 +354,17 @@ class WorkerTrainerMixin:
 
             logits_flat = logits.squeeze(-1)
             n_pos = meta.n_src
-            loss = self.criterion(logits_flat[:n_pos], labels[:n_pos])
+            loss = F.binary_cross_entropy_with_logits(
+                logits_flat[:n_pos], labels[:n_pos]
+            )
             negative_logits = logits_flat[n_pos:]
             negative_labels = labels[n_pos:]
             if meta.neg_valid_mask is not None:
                 negative_logits = negative_logits[meta.neg_valid_mask]
                 negative_labels = negative_labels[meta.neg_valid_mask]
-            loss = loss + self.criterion(negative_logits, negative_labels)
+            loss = loss + F.binary_cross_entropy_with_logits(
+                negative_logits, negative_labels
+            )
         if (
             self.mem_box_store is not None
             and self.dynamic_state_ablation.uses_async_dynamic_state_pipeline
@@ -415,13 +420,17 @@ class WorkerTrainerMixin:
         if meta.split == "val":
             logits_flat = logits.float().squeeze(-1)
             n_pos = meta.n_src
-            loss = self.criterion(logits_flat[:n_pos], meta.labels[:n_pos])
+            loss = F.binary_cross_entropy_with_logits(
+                logits_flat[:n_pos], meta.labels[:n_pos]
+            )
             negative_logits = logits_flat[n_pos:]
             negative_labels = meta.labels[n_pos:]
             if meta.neg_valid_mask is not None:
                 negative_logits = negative_logits[meta.neg_valid_mask]
                 negative_labels = negative_labels[meta.neg_valid_mask]
-            loss = loss + self.criterion(negative_logits, negative_labels)
+            loss = loss + F.binary_cross_entropy_with_logits(
+                negative_logits, negative_labels
+            )
 
             if self.eval_metric == "ap":
                 self.val_metrics.update(

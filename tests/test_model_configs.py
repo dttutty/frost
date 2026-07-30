@@ -26,7 +26,7 @@ def test_model_configs_compose_and_build(name: str) -> None:
     recipe = instantiate_model_recipe(cfg.model)
     plan = compile_execution_plan(recipe, DatasetSchema("EXAMPLE", 10, 0, 0))
     d_mem = int(recipe.state["updater"]["d_mem"]) if recipe.state else 0
-    _, encoder, head, _, _ = build_worker_modules(
+    _, encoder, head, _ = build_worker_modules(
         cfg,
         recipe=recipe,
         plan=plan,
@@ -53,6 +53,7 @@ def test_compute_policy_is_recorded_without_a_precision_config_group() -> None:
         "mem_updater=gru",
         "predictor=link",
         "access_analyzer=memory_analyzer",
+        "loss_fn=bce",
         "model=dyrep",
     ],
 )

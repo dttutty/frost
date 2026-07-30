@@ -31,7 +31,6 @@ def build_worker_modules(
     nn.Module,
     nn.Module,
     MailboxRouterProto | None,
-    nn.Module,
 ]:
     mem_updater: MemoryUpdaterProto | None = None
     if recipe.state is not None:
@@ -75,5 +74,4 @@ def build_worker_modules(
         and isinstance(state_contract.mailbox, NeighborhoodMailbox)
         else None
     )
-    loss_fn: nn.Module = instantiate(cfg.loss_fn)
-    return mem_updater, encoder, predictor, mailbox_router, loss_fn
+    return mem_updater, encoder, predictor, mailbox_router

@@ -44,7 +44,6 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | Group | Role | Common Choices | User-Facing? |
 | --- | --- | --- | --- |
 | `model` | Complete model recipe and semantic contract | `tgn`, `jodie`, `apan`, `tgat`, `dygformer`, `graph_mixer`, `tcl`, `cawn` | Yes |
-| `loss_fn` | Training loss | `bce` | Fixed |
 | `neg_sampler` | Negative destination sampling | `rnd_dst_then_fixed`, `rnd_dst_then_hist`, `rnd_dst_then_post_train`, `rnd_dst_then_tgb`, `rnd_dst_then_tgb_wiki` | Yes |
 | `ngh_sampler` | Runtime neighborhood-sampling implementation | `recent`, `uniform`, `time_interval_aware` | Yes |
 
@@ -52,6 +51,9 @@ Storage and transport dtypes are fixed runtime invariants: IDs and timestamps
 use `int64`, while features and dynamic-state payloads use `float32`. They are
 not a Hydra config group. Relative-time features are computed before conversion
 to model-side floating point so large absolute timestamps retain low-order bits.
+The temporal link-prediction objective is likewise fixed to binary
+cross-entropy with logits; changing the objective requires a task-level contract,
+not a different `torch.nn` module target.
 
 ## Parameter Flow and Coupling
 

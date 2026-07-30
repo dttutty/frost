@@ -20,13 +20,7 @@ from frost.launch.storage import resolve_batch_layout
 
 
 def test_apan_runtime_only_config_builds_worker_modules():
-    cfg = OmegaConf.create(
-        {
-            "ndim": 0,
-            "edim": 0,
-            "loss_fn": {"_target_": "torch.nn.BCEWithLogitsLoss"},
-        }
-    )
+    cfg = OmegaConf.create({"ndim": 0, "edim": 0})
     recipe = APANRecipe(
         embedding_dim=8,
         neighborhood={"fanout": [2]},
@@ -53,7 +47,7 @@ def test_apan_runtime_only_config_builds_worker_modules():
     )
     plan = compile_execution_plan(recipe, DatasetSchema("EXAMPLE", 10, 0, 0))
 
-    mem_updater, _, _, mailbox_router, _ = build_worker_modules(
+    mem_updater, _, _, mailbox_router = build_worker_modules(
         cfg,
         recipe=recipe,
         plan=plan,
