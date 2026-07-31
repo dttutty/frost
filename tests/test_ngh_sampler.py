@@ -12,6 +12,7 @@ from frost.models.contracts import RootExpansion
 from frost.sampling.ngh_sampler import (
     NeighborhoodSampler,
     NoSampler,
+    _copy_native_array_into,
     dist_safe_tensor,
 )
 
@@ -94,6 +95,23 @@ def test_dist_safe_tensor_detaches_native_arrays(value, expected_shape) -> None:
 
     assert result.shape == expected_shape
     assert result.dtype == torch.int64
+
+
+def test_copy_native_array_into_detaches_source() -> None:
+    source = np.array([[1, 2], [3, 4]], dtype=np.int64)
+    destination = torch.zeros((2, 2), dtype=torch.int64)
+
+    _copy_native_array_into(destination, source)
+    source.fill(99)
+
+    assert destination.tolist() == [[1, 2], [3, 4]]
+
+
+def test_copy_native_array_into_rejects_shape_mismatch() -> None:
+    destination = torch.zeros((2, 2), dtype=torch.int64)
+
+    with pytest.raises(ValueError, match="does not match destination shape"):
+        _copy_native_array_into(destination, np.zeros((4,), dtype=np.int64))
 
 
 def test_neighborhood_sampler_accepts_one_or_more_hops() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from typing import Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import torch
@@ -95,6 +95,17 @@ def dist_safe_tensor(value, dtype: torch.dtype) -> torch.Tensor:
     if array.size == 0:
         return torch.empty(0, dtype=dtype)
     return torch.from_numpy(np.array(array, copy=True)).to(dtype)
+
+
+def _copy_native_array_into(destination: torch.Tensor, value: object) -> None:
+    """Copy a live native sampler array directly into a CPU destination."""
+    array = np.asarray(value)
+    if array.shape != tuple(destination.shape):
+        raise ValueError(
+            f"Native sampler output shape {array.shape} does not match "
+            f"destination shape {tuple(destination.shape)}."
+        )
+    np.copyto(destination.numpy(), array, casting="same_kind")
 
 
 class NoSampler:
@@ -212,6 +223,7 @@ class NeighborhoodSampler:
         for n_neighbors in self.fanout:
             parent_count = len(current_nid)
             valid_parent = current_nid != self.padding_node_id
+            all_parents_valid = bool(np.all(valid_parent))
             end += parent_count * n_neighbors
             sampled_nid = slot["NID"][start:end].reshape(parent_count, n_neighbors)
             sampled_eid = slot["EID"][start:end].reshape(parent_count, n_neighbors)
@@ -220,21 +232,32 @@ class NeighborhoodSampler:
             sampled_nid.fill_(self.padding_node_id)
             sampled_eid.fill_(-1)
             sampled_ts.zero_()
-            if np.any(valid_parent):
+            if all_parents_valid or bool(np.any(valid_parent)):
+                if all_parents_valid:
+                    query_nid = current_nid
+                    query_ts = current_ts
+                else:
+                    query_nid = current_nid[valid_parent].copy()
+                    query_ts = current_ts[valid_parent].copy()
                 out_nid, out_eid, out_ts = self.seq_sampler.get_historical_neighbors(
-                    current_nid[valid_parent].copy(),
-                    current_ts[valid_parent].copy(),
+                    cast(Any, query_nid),
+                    cast(Any, query_ts),
                     n_neighbors,
                 )
-                sampled_nid[valid_parent] = dist_safe_tensor(
-                    out_nid, root_nid.dtype
-                ).reshape(-1, n_neighbors)
-                sampled_eid[valid_parent] = dist_safe_tensor(
-                    out_eid, pos_eid.dtype
-                ).reshape(-1, n_neighbors)
-                sampled_ts[valid_parent] = dist_safe_tensor(
-                    out_ts, self._time_torch_dtype
-                ).reshape(-1, n_neighbors)
+                if all_parents_valid:
+                    _copy_native_array_into(sampled_nid, out_nid)
+                    _copy_native_array_into(sampled_eid, out_eid)
+                    _copy_native_array_into(sampled_ts, out_ts)
+                else:
+                    sampled_nid[valid_parent] = dist_safe_tensor(
+                        out_nid, root_nid.dtype
+                    ).reshape(-1, n_neighbors)
+                    sampled_eid[valid_parent] = dist_safe_tensor(
+                        out_eid, pos_eid.dtype
+                    ).reshape(-1, n_neighbors)
+                    sampled_ts[valid_parent] = dist_safe_tensor(
+                        out_ts, self._time_torch_dtype
+                    ).reshape(-1, n_neighbors)
 
             current_nid = slot["NID"][start:end].numpy().reshape(-1)
             current_ts = slot["TS"][start:end].numpy().reshape(-1)
