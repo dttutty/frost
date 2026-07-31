@@ -1,12 +1,13 @@
 """Dataset loading and shared-memory feature distribution.
 
-The host process loads graph topology and node/edge features, places the
-features into POSIX shared-memory segments, and broadcasts lightweight
-metadata (shapes, dtypes, paths) to all worker ranks so they can attach to
-the same segments without re-loading from disk.
+The host process loads graph topology and node/edge features, places ordinary
+features into POSIX shared-memory segments, and keeps large PyTorch node
+features file-backed. It broadcasts lightweight metadata so worker ranks can
+attach to the shared storage without materializing duplicate feature tables.
 """
 
 import logging
+import mmap
 import socket
 from pathlib import Path
 
@@ -185,6 +186,20 @@ def _rows_per_chunk(
     return max(1, (128 * 1024 * 1024) // bytes_per_row)
 
 
+def _load_mmap_pt_tensor(path: Path) -> torch.Tensor:
+    """Map a tensor checkpoint without reserving private copy-on-write memory."""
+    with torch.serialization.set_default_mmap_options(mmap.MAP_SHARED):
+        value = torch.load(
+            path,
+            map_location="cpu",
+            mmap=True,
+            weights_only=True,
+        )
+    if not isinstance(value, torch.Tensor):
+        raise TypeError(f"Expected torch.Tensor in {path}, got {type(value)!r}")
+    return value
+
+
 def load_graph(
     d: str,
     index_dtype: np.dtype,
@@ -297,6 +312,7 @@ class DatasetManager:
         self.graph_direction = graph_direction
         self.ignore_nfeat_on_disk = ignore_nfeat_on_disk
         self.ignore_efeat_on_disk = ignore_efeat_on_disk
+        self._file_backed_feature_paths: dict[str, str] = {}
 
     def prepare(
         self,
@@ -324,6 +340,8 @@ class DatasetManager:
         efeat: torch.Tensor | None = None
         n_nodes = n_edges = ndim = edim = 0
         nfeat_rows = efeat_rows = 0
+        nfeat_backing_path: str | None = None
+        efeat_backing_path: str | None = None
         ndtype: torch.dtype | None = None
         edtype: torch.dtype | None = None
         port: int | None = None
@@ -353,6 +371,8 @@ class DatasetManager:
             )
             nfeat_rows = 0 if nfeat is None else int(nfeat.shape[0])
             efeat_rows = 0 if efeat is None else int(efeat.shape[0])
+            nfeat_backing_path = self._file_backed_feature_paths.get("node")
+            efeat_backing_path = self._file_backed_feature_paths.get("edge")
 
             # Prepare metadata for broadcasting
             port = get_free_port()
@@ -365,6 +385,8 @@ class DatasetManager:
                 edtype,
                 nfeat_rows,
                 efeat_rows,
+                nfeat_backing_path,
+                efeat_backing_path,
                 port,
             )
 
@@ -384,13 +406,25 @@ class DatasetManager:
             edtype,
             nfeat_rows,
             efeat_rows,
+            nfeat_backing_path,
+            efeat_backing_path,
             port,
         ) = metadata
 
         if not self.env.is_host:
             # Attach shared memory on workers using broadcasted metadata
-            nfeat = self._attach_shm("nfeat", [nfeat_rows, ndim], ndtype)
-            efeat = self._attach_shm("efeat", [efeat_rows, edim], edtype)
+            nfeat = self._attach_feature(
+                "nfeat",
+                [nfeat_rows, ndim],
+                ndtype,
+                backing_path=nfeat_backing_path,
+            )
+            efeat = self._attach_feature(
+                "efeat",
+                [efeat_rows, edim],
+                edtype,
+                backing_path=efeat_backing_path,
+            )
 
         dist.barrier()  # Ensure all ranks have attached SHM before proceeding
 
@@ -574,9 +608,7 @@ class DatasetManager:
         shm_name: str,
         expected_rows: int,
     ) -> tuple[torch.Tensor, int, torch.dtype]:
-        feat = torch.load(path, map_location="cpu")
-        if not isinstance(feat, torch.Tensor):
-            raise TypeError(f"Expected torch.Tensor in {path}, got {type(feat)!r}")
+        feat = _load_mmap_pt_tensor(path)
         if feat.ndim != 2:
             raise ValueError(
                 f"Expected 2D feature tensor at {path}, got shape {tuple(feat.shape)}"
@@ -589,6 +621,15 @@ class DatasetManager:
         )
 
         final_dtype = _feature_storage_dtype(feat.dtype, self.feature_dtype)
+        if feat_type == "node" and feat.dtype == final_dtype:
+            self._file_backed_feature_paths[feat_type] = str(path.resolve())
+            logger.info(
+                "Using file-backed mmap for %s features from %s",
+                feat_type,
+                path,
+            )
+            return feat, feat.shape[1], final_dtype
+
         if feat.dtype != final_dtype:
             feat = feat.to(final_dtype)
         output_offset = int(feat_type == "edge" and feat.shape[0] == expected_rows)
@@ -598,6 +639,32 @@ class DatasetManager:
             feat_shm[0].zero_()
         feat_shm[output_offset:].copy_(feat)
         return feat_shm, feat.shape[1], final_dtype
+
+    def _attach_feature(
+        self,
+        name: str,
+        shape: list[int],
+        dtype: torch.dtype | None,
+        *,
+        backing_path: str | None,
+    ) -> torch.Tensor | None:
+        if backing_path is None:
+            return self._attach_shm(name, shape, dtype)
+        if dtype is None:
+            raise ValueError(f"File-backed feature {name} is missing its dtype")
+
+        feature = _load_mmap_pt_tensor(Path(backing_path))
+        if list(feature.shape) != shape:
+            raise ValueError(
+                f"File-backed feature shape changed for {backing_path}: "
+                f"expected {shape}, got {list(feature.shape)}"
+            )
+        if feature.dtype != dtype:
+            raise ValueError(
+                f"File-backed feature dtype changed for {backing_path}: "
+                f"expected {dtype}, got {feature.dtype}"
+            )
+        return feature
 
     def _attach_shm(self, name, shape, dtype):
         """Worker: Attach to the SHM created by Host."""

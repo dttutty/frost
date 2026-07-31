@@ -146,6 +146,44 @@ def test_pt_features_keep_compact_storage_dtype(tmp_path: Path, monkeypatch) -> 
     assert feature.dtype == torch.bool
 
 
+def test_pt_node_features_stay_file_backed(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "node_features.pt"
+    expected = torch.arange(12, dtype=torch.float16).reshape(3, 4)
+    torch.save(expected, path)
+    monkeypatch.setattr(
+        dm,
+        "csm",
+        lambda *_args, **_kwargs: pytest.fail(
+            "file-backed node features must not allocate shared memory"
+        ),
+    )
+    manager = dm.DatasetManager(
+        env=None,  # type: ignore[arg-type]
+        run_id="test",
+        dataset="MOCK",
+        index_dtype=np.int64,
+        time_dtype=np.int64,
+        feature_dtype=torch.float32,
+    )
+
+    feature, dim, dtype = manager._load_pt_feature_to_shm(
+        path, "node", "nfeat", expected_rows=3
+    )
+    attached = manager._attach_feature(
+        "nfeat",
+        [3, 4],
+        torch.float16,
+        backing_path=str(path),
+    )
+
+    assert manager._file_backed_feature_paths == {"node": str(path.resolve())}
+    assert dim == 4
+    assert dtype == torch.float16
+    assert attached is not None
+    assert torch.equal(feature, expected)
+    assert torch.equal(attached, expected)
+
+
 def test_unpadded_edge_features_gain_reserved_zero_row(
     tmp_path: Path, monkeypatch
 ) -> None:
