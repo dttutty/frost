@@ -25,7 +25,6 @@ from frost.data.paths import (
     resolve_tgb_raw_dataset_dir,
 )
 from frost.data.tgb import (
-    build_tgbl_wiki_node_features,
     load_tgbl_wiki_edge_features,
     load_tgbl_wiki_runtime_graph,
 )
@@ -345,14 +344,12 @@ class DatasetManager:
                 feat_type="node",
                 shm_name="nfeat",
                 expected_rows=n_nodes,
-                frame=df,
             )
             efeat, edim, edtype = self._load_feature_to_shm(
                 dataset=self.dataset,
                 feat_type="edge",
                 shm_name="efeat",
                 expected_rows=n_edges,
-                frame=df,
             )
             nfeat_rows = 0 if nfeat is None else int(nfeat.shape[0])
             efeat_rows = 0 if efeat is None else int(efeat.shape[0])
@@ -432,7 +429,6 @@ class DatasetManager:
         feat_type: str,
         shm_name: str,
         expected_rows: int,
-        frame: pd.DataFrame | None = None,
     ) -> tuple[torch.Tensor | None, int, torch.dtype | None]:
         """Load a feature matrix and materialize it directly into shared memory."""
         if feat_type == "node" and self.ignore_nfeat_on_disk:
@@ -449,12 +445,18 @@ class DatasetManager:
             return None, 0, None
 
         if is_raw_tgb_dataset(dataset):
-            return self._load_tgbl_wiki_feature_to_shm(
+            if feat_type == "node":
+                logger.info(
+                    "Official tgbl-wiki provides no node features for dataset %s.",
+                    dataset,
+                )
+                return None, 0, None
+            if feat_type != "edge":
+                raise ValueError(f"Unsupported TGB feature type: {feat_type!r}")
+            return self._load_tgbl_wiki_edge_feature_to_shm(
                 dataset=dataset,
-                feat_type=feat_type,
                 shm_name=shm_name,
                 expected_rows=expected_rows,
-                frame=frame,
             )
 
         source = self._resolve_feature_source(dataset, feat_type)
@@ -489,40 +491,25 @@ class DatasetManager:
 
         raise ValueError(f"Unsupported feature source kind: {source_kind}")
 
-    def _load_tgbl_wiki_feature_to_shm(
+    def _load_tgbl_wiki_edge_feature_to_shm(
         self,
         *,
         dataset: str,
-        feat_type: str,
         shm_name: str,
         expected_rows: int,
-        frame: pd.DataFrame | None,
     ) -> tuple[torch.Tensor, int, torch.dtype]:
         raw_dir = resolve_tgb_raw_dataset_dir(dataset)
-        if feat_type == "edge":
-            raw_features = load_tgbl_wiki_edge_features(raw_dir)
-            if raw_features.shape[0] != expected_rows:
-                raise ValueError(
-                    "Official tgbl-wiki edge-feature rows do not match the edge "
-                    f"table: {raw_features.shape[0]} != {expected_rows}"
-                )
-            output_shape = (expected_rows + 1, raw_features.shape[1])
-            output_offset = 1
-        elif feat_type == "node":
-            if frame is None:
-                raise RuntimeError(
-                    "The in-memory TGB node feature adapter requires the edge frame."
-                )
-            raw_features = build_tgbl_wiki_node_features(frame, expected_rows)
-            output_shape = raw_features.shape
-            output_offset = 0
-        else:
-            raise ValueError(f"Unsupported TGB feature type: {feat_type!r}")
+        raw_features = load_tgbl_wiki_edge_features(raw_dir)
+        if raw_features.shape[0] != expected_rows:
+            raise ValueError(
+                "Official tgbl-wiki edge-feature rows do not match the edge "
+                f"table: {raw_features.shape[0]} != {expected_rows}"
+            )
+        output_shape = (expected_rows + 1, raw_features.shape[1])
 
         final_dtype = self.feature_dtype
         feat_shm = csm(f"{self.run_id}_{shm_name}", output_shape, dtype=final_dtype)
-        if output_offset:
-            feat_shm[:output_offset].zero_()
+        feat_shm[:1].zero_()
         rows_per_chunk = _rows_per_chunk(
             raw_features.shape[1],
             final_dtype,
@@ -533,10 +520,9 @@ class DatasetManager:
             chunk = torch.from_numpy(np.array(raw_features[start:end], copy=True)).to(
                 dtype=final_dtype
             )
-            feat_shm[start + output_offset : end + output_offset].copy_(chunk)
+            feat_shm[start + 1 : end + 1].copy_(chunk)
         logger.info(
-            "Built %s features for %s in shared memory from %s",
-            feat_type,
+            "Built edge features for %s in shared memory from %s",
             dataset,
             raw_dir,
         )

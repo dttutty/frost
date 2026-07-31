@@ -114,10 +114,3 @@ def load_tgbl_wiki_edge_features(raw_dir: Path) -> np.ndarray:
             f"Expected a 2D edge feature array in {source}, got {features.shape}"
         )
     return features
-
-
-def build_tgbl_wiki_node_features(frame: pd.DataFrame, num_nodes: int) -> np.ndarray:
-    """Build the user/page role feature used by the existing FROST conversion."""
-    features = np.zeros((num_nodes, 1), dtype=np.bool_)
-    features[np.unique(frame["dst"].to_numpy(dtype=np.int64, copy=False))] = True
-    return features

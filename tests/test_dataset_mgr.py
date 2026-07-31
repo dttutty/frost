@@ -215,7 +215,7 @@ def test_load_graph_builds_tgbl_wiki_from_official_raw_files(
     assert len(captured["indices"]) == 2 * n_edges
 
 
-def test_tgbl_wiki_features_are_built_directly_in_shared_memory(
+def test_tgbl_wiki_edge_features_are_built_without_node_features(
     tmp_path: Path, monkeypatch
 ) -> None:
     _write_tgbl_wiki_raw_fixture(tmp_path)
@@ -225,7 +225,6 @@ def test_tgbl_wiki_features_are_built_directly_in_shared_memory(
         "csm",
         lambda _name, shape, dtype: torch.empty(shape, dtype=dtype),
     )
-    frame = pd.DataFrame({"dst": [3, 4, 4, 3]})
     manager = dm.DatasetManager(
         env=None,  # type: ignore[arg-type]
         run_id="test",
@@ -236,10 +235,10 @@ def test_tgbl_wiki_features_are_built_directly_in_shared_memory(
     )
 
     edge_features, edge_dim, _ = manager._load_feature_to_shm(
-        "TGBL_WIKI", "edge", "efeat", expected_rows=4, frame=frame
+        "TGBL_WIKI", "edge", "efeat", expected_rows=4
     )
     node_features, node_dim, _ = manager._load_feature_to_shm(
-        "TGBL_WIKI", "node", "nfeat", expected_rows=5, frame=frame
+        "TGBL_WIKI", "node", "nfeat", expected_rows=5
     )
 
     assert edge_dim == 2
@@ -248,9 +247,8 @@ def test_tgbl_wiki_features_are_built_directly_in_shared_memory(
     assert torch.equal(
         edge_features[1:], torch.arange(8, dtype=torch.float32).reshape(4, 2)
     )
-    assert node_dim == 1
-    assert node_features is not None
-    assert node_features[:, 0].tolist() == [0.0, 0.0, 0.0, 1.0, 1.0]
+    assert node_dim == 0
+    assert node_features is None
 
 
 def test_tgbl_wiki_runtime_can_read_freshly_extracted_official_csv(

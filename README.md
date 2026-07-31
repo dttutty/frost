@@ -50,9 +50,10 @@ The pinned catalog contains `tgbl-wiki-v2`, `tgbl-review-v2`, `tgbl-coin`,
 datasets are skipped. `--download-only` retains archives without extracting.
 
 FROST currently runs `TGBL_WIKI` directly from the official CSV files. Its edge
-frame, temporal CSR, padded edge features, and node-role features are created in
-memory; no exported `TGBL_WIKI/` artifact directory is needed. The other four
-datasets are downloadable but still need runtime adapters.
+frame, temporal CSR, and padded edge features are created in memory; the
+official dataset provides no node features. No exported `TGBL_WIKI/` artifact
+directory is needed. The other four datasets are downloadable but still need
+runtime adapters.
 
 Materialized FROST datasets can be downloaded from a configured Hugging Face
 dataset repository:
