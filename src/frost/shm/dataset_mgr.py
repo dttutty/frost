@@ -160,7 +160,11 @@ def _validate_feature_rows(
     n_items: int,
 ) -> None:
     expected_rows = _expected_feature_rows(feat_type, n_items)
-    if actual_rows == expected_rows or (feat_type == "edge" and actual_rows == n_items):
+    if (
+        actual_rows == expected_rows
+        or (feat_type == "edge" and actual_rows == n_items)
+        or (feat_type == "node" and actual_rows > n_items)
+    ):
         return
 
     if feat_type == "edge":
@@ -363,6 +367,11 @@ class DatasetManager:
                 shm_name="nfeat",
                 expected_rows=n_nodes,
             )
+            if nfeat is not None:
+                # Feature tables may include isolated nodes absent from the
+                # topology CSR. They still define valid global node IDs and
+                # therefore participate in model-state capacity.
+                n_nodes = max(n_nodes, int(nfeat.shape[0]))
             efeat, edim, edtype = self._load_feature_to_shm(
                 dataset=self.dataset,
                 feat_type="edge",

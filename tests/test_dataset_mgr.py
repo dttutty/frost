@@ -184,6 +184,24 @@ def test_pt_node_features_stay_file_backed(tmp_path: Path, monkeypatch) -> None:
     assert torch.equal(attached, expected)
 
 
+def test_node_features_may_include_isolated_nodes(tmp_path: Path) -> None:
+    path = tmp_path / "node_features.pt"
+
+    dm._validate_feature_rows(
+        feat_type="node",
+        path=path,
+        actual_rows=4,
+        n_items=3,
+    )
+    with pytest.raises(ValueError, match="expected 3"):
+        dm._validate_feature_rows(
+            feat_type="node",
+            path=path,
+            actual_rows=2,
+            n_items=3,
+        )
+
+
 def test_unpadded_edge_features_gain_reserved_zero_row(
     tmp_path: Path, monkeypatch
 ) -> None:
