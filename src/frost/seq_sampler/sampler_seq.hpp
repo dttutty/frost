@@ -110,6 +110,7 @@ public:
         std::vector<TIME_T> out_t(bs * n_ngh, 0.0f);
 
         std::unordered_map<ID_T, TIME_T> batch_max_ts;
+        std::vector<TIME_T> batch_upper_ts;
         if (mimic_tgl_batch_shared_recent) {
             batch_max_ts.reserve(bs);
             for (size_t i = 0; i < bs; ++i) {
@@ -118,6 +119,12 @@ public:
                     batch_max_ts[nid[i]] = ts[i];
                 }
             }
+            batch_upper_ts.resize(bs);
+            // Resolve the shared window once before the parallel loop instead of
+            // repeating an unordered-map lookup for every sampled root.
+            for (size_t i = 0; i < bs; ++i) {
+                batch_upper_ts[i] = batch_max_ts.at(nid[i]);
+            }
         }
 
         {
@@ -125,7 +132,7 @@ public:
 
             const auto sample_recent_with_batch_shared_window =
                 [&](size_t i) {
-                    const TIME_T batch_upper = batch_max_ts.at(nid[i]);
+                    const TIME_T batch_upper = batch_upper_ts[i];
                     auto [start, end] = this->find_edge_range_base(nid[i], batch_upper);
                     if (start > end) {
                         return;
@@ -136,35 +143,39 @@ public:
                         ? start
                         : static_cast<ID_T>(end - n_ngh);
 
-                    std::vector<ID_T> picked;
-                    picked.reserve(static_cast<size_t>(n_ngh));
-
+                    // Two bounded scans avoid allocating a temporary vector for
+                    // every root while preserving TGL's padded chronological order.
+                    size_t take = 0;
                     for (ID_T k = end; k > limit; --k) {
                         if (this->edge_ts[k] < ts[i]) {
-                            picked.push_back(k);
+                            ++take;
                         }
                     }
-
-                    const size_t take = picked.size();
                     if (take == 0) {
                         return;
                     }
 
                     const size_t pad_offset = n_ngh - take;
-                    for (size_t k = 0; k < take; ++k) {
-                        const ID_T edge_idx = picked[take - 1 - k];
-                        out_n[offset + pad_offset + k] = this->indices[edge_idx];
-                        out_e[offset + pad_offset + k] = this->edge_ids[edge_idx];
-                        out_t[offset + pad_offset + k] = this->edge_ts[edge_idx];
+                    size_t write_offset = take;
+                    for (ID_T k = end; k > limit; --k) {
+                        if (this->edge_ts[k] < ts[i]) {
+                            --write_offset;
+                            const size_t out_idx = offset + pad_offset + write_offset;
+                            out_n[out_idx] = this->indices[k];
+                            out_e[out_idx] = this->edge_ids[k];
+                            out_t[out_idx] = this->edge_ts[k];
+                        }
                     }
                 };
 
             if (disable_omp) {
                 for (size_t i = 0; i < bs; ++i) {
-                    std::mt19937 local_rng(seed_val + i);
                     if (mimic_tgl_batch_shared_recent) {
                         sample_recent_with_batch_shared_window(i);
                     } else {
+                        // Keep the original RNG setup on the general path;
+                        // stochastic strategies consume it.
+                        std::mt19937 local_rng(seed_val + i);
                         auto [start, end] = this->find_edge_range_base(nid[i], ts[i]);
 
                         size_t offset = i * n_ngh;
@@ -176,10 +187,12 @@ public:
             } else {
                 #pragma omp parallel for schedule(static)
                 for (size_t i = 0; i < bs; ++i) {
-                    std::mt19937 local_rng(seed_val + i);
                     if (mimic_tgl_batch_shared_recent) {
                         sample_recent_with_batch_shared_window(i);
                     } else {
+                        // Keep the original RNG setup on the general path;
+                        // stochastic strategies consume it.
+                        std::mt19937 local_rng(seed_val + i);
                         auto [start, end] = this->find_edge_range_base(nid[i], ts[i]);
 
                         size_t offset = i * n_ngh;
