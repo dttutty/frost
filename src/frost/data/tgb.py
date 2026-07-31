@@ -36,8 +36,23 @@ def _tgbl_wiki_edgelist_path(raw_dir: Path) -> Path:
 def load_tgbl_wiki_frame(raw_dir: Path) -> pd.DataFrame:
     """Build FROST's canonical edge frame from official tgbl-wiki-v2."""
     source = raw_dir / "ml_tgbl-wiki.pkl"
+    raw_frame: pd.DataFrame | None = None
     if source.is_file():
-        raw_frame = pd.read_pickle(source)
+        try:
+            raw_frame = pd.read_pickle(source)
+        except (ModuleNotFoundError, NotImplementedError):
+            # Pickles produced by newer NumPy/Pandas releases are not always
+            # readable in baseline environments. The official CSV is the
+            # portable source of truth, so fall back to it when available.
+            if not any(
+                path.is_file()
+                for path in (
+                    raw_dir / "tgbl-wiki_edgelist_v2.csv",
+                    raw_dir / "tgbl-wiki_edgelist.csv",
+                )
+            ):
+                raise
+    if raw_frame is not None:
         required_columns = {"u", "i", "ts", "idx"}
         missing_columns = required_columns.difference(raw_frame.columns)
         if missing_columns:

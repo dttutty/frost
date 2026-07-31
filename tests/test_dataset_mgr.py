@@ -308,3 +308,27 @@ def test_tgbl_wiki_runtime_can_read_freshly_extracted_official_csv(
     assert frame["dst"].tolist() == [3, 4]
     assert frame["time"].tolist() == [10, 20]
     assert np.array_equal(features, np.array([[1.5, 2.5], [3.5, 4.5]]))
+
+
+def test_tgbl_wiki_frame_falls_back_when_pickle_is_incompatible(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw_dir = tmp_path / "raw" / "tgbl_wiki"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "ml_tgbl-wiki.pkl").touch()
+    (raw_dir / "tgbl-wiki_edgelist_v2.csv").write_text(
+        "user_id,item_id,timestamp,state_label,features\n"
+        "0,0,10.0,0,1.5\n"
+        "1,1,20.0,0,2.5\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        pd,
+        "read_pickle",
+        lambda _path: (_ for _ in ()).throw(NotImplementedError()),
+    )
+
+    frame = load_tgbl_wiki_frame(raw_dir)
+
+    assert frame["src"].tolist() == [0, 1]
+    assert frame["dst"].tolist() == [2, 3]
