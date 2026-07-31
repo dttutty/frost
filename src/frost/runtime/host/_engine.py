@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -166,6 +167,9 @@ class Host:
         self.last_epoch_result: Result | None = None
         self._shutdown_done = False
         self._timing_enabled = _timing_enabled()
+        self._epoch_wall_enabled = os.environ.get(
+            "FROST_EPOCH_WALL_BENCH", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         self._dispatch_s_curve: list[float] = []
         self._scatter_q_put_s_curve: list[float] = []
 
@@ -355,6 +359,8 @@ class Host:
         _disable_tqdm_monitor_thread()
         self.start_all_threads()
         for e in range(self.total_epoch):
+            epoch_wall_start = time.perf_counter()
+            epoch_wall_start_unix = time.time()
             logger.info("Starting Epoch %s", e)
             self._handle_a_split(self.tr_df, "train", cur_epoch=e)
             if self.train_only:
@@ -363,6 +369,22 @@ class Host:
                 self._handle_a_split(self.va_df, "val", cur_epoch=e)
                 self._handle_a_split(self.te_df, "test", cur_epoch=e)
             self.handle_result_q()
+            if self._epoch_wall_enabled:
+                epoch_wall_end = time.perf_counter()
+                print(
+                    "APPENDIX_TRAIN_EPOCH_WALL "
+                    + json.dumps(
+                        {
+                            "system": "frost",
+                            "epoch": e,
+                            "train_events": len(self.tr_df),
+                            "wall_time_s": epoch_wall_end - epoch_wall_start,
+                            "window_start_unix_s": epoch_wall_start_unix,
+                            "window_end_unix_s": time.time(),
+                        },
+                        sort_keys=True,
+                    )
+                )
             if not self.train_only and self.early_stop_check(e):
                 break
 
