@@ -32,6 +32,15 @@ class _OwnershipIndex:
         return int(self.membership.shape[1])
 
 
+@dataclass(frozen=True)
+class _OwnedNodeIndex:
+    """Sorted node IDs with exactly one selected owner per node."""
+
+    nodes: torch.Tensor
+    owners: torch.Tensor
+    n_gpus: int
+
+
 def _reference_tensor(*groups: list[TensorSet]) -> torch.Tensor:
     for group in groups:
         for tensor_set in group:
@@ -143,10 +152,9 @@ def _route_matrix_from_entries(
         return routes
 
     pair_keys = owners * n_gpus + receivers
-    # Stable two-pass ordering gives pair-major, node-minor deterministic output.
-    node_order = torch.argsort(nodes, stable=True)
-    pair_order = torch.argsort(pair_keys[node_order], stable=True)
-    order = node_order[pair_order]
+    # Entries originate from receiver-major concatenations of sorted TensorSets.
+    # A stable pair sort therefore preserves ascending node order inside each pair.
+    order = torch.argsort(pair_keys, stable=True)
     sorted_keys = pair_keys[order]
     sorted_nodes = nodes[order]
     keys, counts = torch.unique_consecutive(sorted_keys, return_counts=True)
@@ -202,6 +210,55 @@ def _compute_transfer_plan_from_index(
     leftovers = [
         TensorSet(
             index.nodes[index.membership[:, rank] & ~needed_nodes],
+            sort_now=False,
+            ensure_unique=False,
+        )
+        for rank in range(n_gpus)
+    ]
+    return leftovers, routes
+
+
+def _compute_transfer_plan_from_owned_index(
+    needs: list[TensorSet], index: _OwnedNodeIndex
+) -> tuple[list[TensorSet], list[list[TensorSet]]]:
+    """Fast path for the planner's one-owner-per-node update index."""
+    n_gpus = len(needs)
+    if index.n_gpus != n_gpus:
+        raise ValueError(
+            f"Owned-node index has {index.n_gpus} ranks, expected {n_gpus}."
+        )
+
+    reference = _reference_tensor(needs) if needs else index.nodes
+    query_nodes, receivers, _ = _concat_ranked_sets(needs, reference)
+    if query_nodes.numel() == 0 or index.nodes.numel() == 0:
+        positions = torch.zeros(
+            query_nodes.numel(), dtype=torch.long, device=reference.device
+        )
+        valid = torch.zeros(
+            query_nodes.numel(), dtype=torch.bool, device=reference.device
+        )
+    else:
+        positions = torch.searchsorted(index.nodes, query_nodes)
+        in_bounds = positions < index.nodes.numel()
+        positions = positions.clamp_max(index.nodes.numel() - 1)
+        valid = in_bounds & (index.nodes[positions] == query_nodes)
+
+    routes = _route_matrix_from_entries(
+        nodes=query_nodes[valid],
+        owners=index.owners[positions[valid]],
+        receivers=receivers[valid],
+        n_gpus=n_gpus,
+        reference=reference,
+    )
+
+    needed_nodes = torch.zeros(
+        index.nodes.numel(), dtype=torch.bool, device=reference.device
+    )
+    if torch.any(valid):
+        needed_nodes[positions[valid]] = True
+    leftovers = [
+        TensorSet(
+            index.nodes[(index.owners == rank) & ~needed_nodes],
             sort_now=False,
             ensure_unique=False,
         )
@@ -312,36 +369,51 @@ def deduplicate_updates(
 
 def _deduplicate_updates_with_index(
     updates: list[TensorSet], prefer_higher_rank: bool = True
-) -> tuple[list[TensorSet], TensorSet, _OwnershipIndex]:
-    """Resolve update ownership for every node in one batched operation."""
+) -> tuple[list[TensorSet], TensorSet, _OwnedNodeIndex]:
+    """Resolve updates directly into a compact node-to-owner map."""
     n_gpus = len(updates)
     reference = _reference_tensor(updates)
-    index = _build_ownership_index(updates, reference)
-    if n_gpus == 0 or index.nodes.numel() == 0:
+    nodes, owners, _ = _concat_ranked_sets(updates, reference)
+    if n_gpus == 0 or nodes.numel() == 0:
         empty = _empty_set(reference)
+        index = _OwnedNodeIndex(
+            nodes=empty.data,
+            owners=torch.empty(0, dtype=torch.long, device=reference.device),
+            n_gpus=n_gpus,
+        )
         return [_empty_set(reference) for _ in range(n_gpus)], empty, index
 
+    order = torch.argsort(nodes, stable=True)
+    sorted_nodes = nodes[order]
+    sorted_owners = owners[order]
     if prefer_higher_rank:
-        owners = (
-            n_gpus
-            - 1
-            - torch.argmax(
-                torch.flip(index.membership, dims=(1,)).to(torch.int8), dim=1
+        selected = torch.cat(
+            (
+                sorted_nodes[1:] != sorted_nodes[:-1],
+                torch.ones(1, dtype=torch.bool, device=reference.device),
             )
         )
     else:
-        owners = torch.argmax(index.membership.to(torch.int8), dim=1)
-
-    owned_membership = torch.zeros_like(index.membership)
-    owned_membership[
-        torch.arange(index.nodes.numel(), device=reference.device), owners
-    ] = True
-    owned_index = _OwnershipIndex(nodes=index.nodes, membership=owned_membership)
+        selected = torch.cat(
+            (
+                torch.ones(1, dtype=torch.bool, device=reference.device),
+                sorted_nodes[1:] != sorted_nodes[:-1],
+            )
+        )
+    owned_nodes = sorted_nodes[selected]
+    selected_owners = sorted_owners[selected]
+    owned_index = _OwnedNodeIndex(
+        nodes=owned_nodes, owners=selected_owners, n_gpus=n_gpus
+    )
     owned = [
-        TensorSet(index.nodes[owners == rank], sort_now=False, ensure_unique=False)
+        TensorSet(
+            owned_nodes[selected_owners == rank],
+            sort_now=False,
+            ensure_unique=False,
+        )
         for rank in range(n_gpus)
     ]
-    all_updates = TensorSet(index.nodes, sort_now=False, ensure_unique=False)
+    all_updates = TensorSet(owned_nodes, sort_now=False, ensure_unique=False)
     return owned, all_updates, owned_index
 
 
@@ -515,7 +587,7 @@ class DynamicPlanner(ThreadBase):
             next_all_update = next_all_update | update
 
         # 3. Fresh P2P: send this batch's updates to GPUs that need them next batch.
-        _, fresh_p2p = _compute_transfer_plan_from_index(
+        _, fresh_p2p = _compute_transfer_plan_from_owned_index(
             next_all_list, update_ownership
         )
 
@@ -604,7 +676,7 @@ class NeighborhoodDynamicPlanner(DynamicPlanner):
 
         # 2. Fresh P2P: send this batch's updates to GPUs that need them next batch.
         # next_box_fetch_list = nodes that need mailbox reads in the next batch
-        _, p2p = _compute_transfer_plan_from_index(
+        _, p2p = _compute_transfer_plan_from_owned_index(
             next_box_fetch_list, update_ownership
         )
 
