@@ -43,8 +43,8 @@ def _timing_enabled() -> bool:
 class Receiver(ThreadBase):
     """Background thread that receives batches scattered from the host process.
 
-    On each iteration it receives a fixed tensor header followed by an optional
-    tensor payload from the host:
+    On each iteration it receives an encoded tensor payload from its shared
+    control ring:
 
     * ``Meta`` object → assembles a ``FlatGraph`` from the shared ring buffer
       and forwards the annotated ``Meta`` to ``received_q``.
