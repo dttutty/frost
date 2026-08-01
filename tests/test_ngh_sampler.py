@@ -184,6 +184,7 @@ def test_multi_hop_clears_reused_rows_below_padding_parents() -> None:
     )
 
     with patch("frost.sampling.ngh_sampler.SeqSampler") as sampler_type:
+        sampler_type.return_value.get_historical_neighbors_into = None
         sampler_type.return_value.get_historical_neighbors.side_effect = [
             first_hop,
             second_hop,

@@ -67,7 +67,11 @@ def _commit(
     slot: dict[str, torch.Tensor],
     length: int,
 ) -> tuple[torch.Tensor, int]:
-    sampled_nid = slot["NID"][:length].clone()
+    # The host materializes compact access sets synchronously before publishing
+    # the matching control message.  Until that publication a worker cannot
+    # consume or recycle this slot, so a view is sufficient and avoids cloning
+    # the complete sampled layout solely for planner input extraction.
+    sampled_nid = slot["NID"][:length]
     ring_buf.commit_slot(gpu_id)
     return sampled_nid, length
 
@@ -233,31 +237,46 @@ class NeighborhoodSampler:
             sampled_eid.fill_(-1)
             sampled_ts.zero_()
             if all_parents_valid or bool(np.any(valid_parent)):
-                if all_parents_valid:
+                direct_sampler = getattr(
+                    self.seq_sampler, "get_historical_neighbors_into", None
+                )
+                if all_parents_valid and callable(direct_sampler):
+                    direct_sampler(
+                        current_nid,
+                        current_ts,
+                        sampled_nid.numpy(),
+                        sampled_eid.numpy(),
+                        sampled_ts.numpy(),
+                    )
+                else:
+                    # Filtering preserves the historical per-query RNG indexing
+                    # when padded parents appear in a multi-hop layout.
                     query_nid = current_nid
                     query_ts = current_ts
-                else:
-                    query_nid = current_nid[valid_parent].copy()
-                    query_ts = current_ts[valid_parent].copy()
-                out_nid, out_eid, out_ts = self.seq_sampler.get_historical_neighbors(
-                    cast(Any, query_nid),
-                    cast(Any, query_ts),
-                    n_neighbors,
-                )
-                if all_parents_valid:
-                    _copy_native_array_into(sampled_nid, out_nid)
-                    _copy_native_array_into(sampled_eid, out_eid)
-                    _copy_native_array_into(sampled_ts, out_ts)
-                else:
-                    sampled_nid[valid_parent] = dist_safe_tensor(
-                        out_nid, root_nid.dtype
-                    ).reshape(-1, n_neighbors)
-                    sampled_eid[valid_parent] = dist_safe_tensor(
-                        out_eid, pos_eid.dtype
-                    ).reshape(-1, n_neighbors)
-                    sampled_ts[valid_parent] = dist_safe_tensor(
-                        out_ts, self._time_torch_dtype
-                    ).reshape(-1, n_neighbors)
+                    if not all_parents_valid:
+                        query_nid = current_nid[valid_parent].copy()
+                        query_ts = current_ts[valid_parent].copy()
+                    out_nid, out_eid, out_ts = (
+                        self.seq_sampler.get_historical_neighbors(
+                            cast(Any, query_nid),
+                            cast(Any, query_ts),
+                            n_neighbors,
+                        )
+                    )
+                    if all_parents_valid:
+                        _copy_native_array_into(sampled_nid, out_nid)
+                        _copy_native_array_into(sampled_eid, out_eid)
+                        _copy_native_array_into(sampled_ts, out_ts)
+                    else:
+                        sampled_nid[valid_parent] = dist_safe_tensor(
+                            out_nid, root_nid.dtype
+                        ).reshape(-1, n_neighbors)
+                        sampled_eid[valid_parent] = dist_safe_tensor(
+                            out_eid, pos_eid.dtype
+                        ).reshape(-1, n_neighbors)
+                        sampled_ts[valid_parent] = dist_safe_tensor(
+                            out_ts, self._time_torch_dtype
+                        ).reshape(-1, n_neighbors)
 
             current_nid = slot["NID"][start:end].numpy().reshape(-1)
             current_ts = slot["TS"][start:end].numpy().reshape(-1)

@@ -46,6 +46,29 @@ def test_recent_strategy_can_mimic_tgl_batch_shared_window(monkeypatch):
     assert out_ts.tolist() == [[0, 0, 0, 2], [0, 2, 3, 4]]
 
 
+@pytest.mark.parametrize("strategy", ["recent", "uniform", "time_interval_aware"])
+def test_direct_output_matches_returning_api(strategy):
+    sampler = SeqSampler(
+        _make_int64_graph(),
+        strategy=strategy,
+        seed=7,
+        time_scaling_factor=1.0e-6,
+    )
+    nid = np.array([0, 0, -1], dtype=np.int64)
+    ts = np.array([3, 5, 5], dtype=np.int64)
+    expected = sampler.get_historical_neighbors(nid, ts, 3)
+    actual = (
+        np.empty((3, 3), dtype=np.int64),
+        np.empty((3, 3), dtype=np.int64),
+        np.empty((3, 3), dtype=np.int64),
+    )
+
+    sampler.get_historical_neighbors_into(nid, ts, *actual)
+
+    for expected_array, actual_array in zip(expected, actual, strict=True):
+        np.testing.assert_array_equal(actual_array, expected_array)
+
+
 def test_uniform_strategy_can_mimic_tgl_low_degree_recent_branch(monkeypatch):
     monkeypatch.setenv("FROST_DEBUG_TGL_UNIFORM_LOW_DEGREE_RECENT", "1")
     sampler = SeqSampler(_make_int64_graph(), strategy="uniform", seed=0)

@@ -35,6 +35,24 @@ def plan_owned_routes(
     list[list[Int64Array1D]],
 ]: ...
 
+def materialize_node_scopes_32(
+    nid: Int32Array1D,
+    n_root: int,
+    n_positive_root: int,
+    positive_neighbor_start: int,
+    positive_neighbor_end: int,
+    requested_scopes: int,
+) -> tuple[list[Int32Array1D], Int64Array1D]: ...
+
+def materialize_node_scopes_64(
+    nid: Int64Array1D,
+    n_root: int,
+    n_positive_root: int,
+    positive_neighbor_start: int,
+    positive_neighbor_end: int,
+    requested_scopes: int,
+) -> tuple[list[Int64Array1D], Int64Array1D]: ...
+
 class TemporalGraph_32_32:
     """Temporal graph stored in CSR-like format.
 
@@ -90,6 +108,14 @@ class SeqSampler_32_32:
         ts: Sequence[float],
         n_ngh: int = 20,
     ) -> tuple[Int32Array2D, Int32Array2D, Float32Array2D]: ...
+    def get_historical_neighbors_into(
+        self,
+        nid: Int32Array1D,
+        ts: Float32Array1D,
+        out_n: Int32Array2D,
+        out_e: Int32Array2D,
+        out_t: Float32Array2D,
+    ) -> None: ...
     # ... other methods ...
 
 # --- 64-bit Classes ---
@@ -148,6 +174,14 @@ class SeqSampler_64_32:
         ts: Sequence[float],
         n_ngh: int = 20,
     ) -> tuple[Int64Array2D, Int64Array2D, Float32Array2D]: ...
+    def get_historical_neighbors_into(
+        self,
+        nid: Int64Array1D,
+        ts: Float32Array1D,
+        out_n: Int64Array2D,
+        out_e: Int64Array2D,
+        out_t: Float32Array2D,
+    ) -> None: ...
 
 class TemporalGraph_64_64:
     """Temporal graph stored in CSR-like format with int64 timestamps."""
@@ -180,3 +214,11 @@ class SeqSampler_64_64:
         ts: Sequence[int],
         n_ngh: int = 20,
     ) -> tuple[Int64Array2D, Int64Array2D, Int64TimeArray2D]: ...
+    def get_historical_neighbors_into(
+        self,
+        nid: Int64Array1D,
+        ts: Int64TimeArray1D,
+        out_n: Int64Array2D,
+        out_e: Int64Array2D,
+        out_t: Int64TimeArray2D,
+    ) -> None: ...

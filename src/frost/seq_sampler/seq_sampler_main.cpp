@@ -31,6 +31,7 @@ void bind_samplers(nb::module_& m, const std::string& suffix) {
              nb::arg("time_scaling_factor") = 0.0)
         .def("get_all_first_hop_neighbors", &S_Seq::get_all_first_hop_neighbors)
         .def("get_historical_neighbors", &S_Seq::get_historical_neighbors)
+        .def("get_historical_neighbors_into", &S_Seq::get_historical_neighbors_into)
         .def("reset_random_state", &S_Seq::reset_random_state);
 }
 
@@ -45,4 +46,22 @@ NB_MODULE(_core, m) {
         nb::arg("updates"),
         nb::arg("needs"),
         nb::arg("prefer_higher_rank") = true);
+    m.def(
+        "materialize_node_scopes_32",
+        &planner_ownership::materialize_node_scopes<int32_t>,
+        nb::arg("nid"),
+        nb::arg("n_root"),
+        nb::arg("n_positive_root"),
+        nb::arg("positive_neighbor_start"),
+        nb::arg("positive_neighbor_end"),
+        nb::arg("requested_scopes"));
+    m.def(
+        "materialize_node_scopes_64",
+        &planner_ownership::materialize_node_scopes<int64_t>,
+        nb::arg("nid"),
+        nb::arg("n_root"),
+        nb::arg("n_positive_root"),
+        nb::arg("positive_neighbor_start"),
+        nb::arg("positive_neighbor_end"),
+        nb::arg("requested_scopes"));
 }

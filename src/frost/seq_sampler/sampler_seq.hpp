@@ -26,6 +26,108 @@ private:
     int seed_val;
     double time_scaling_factor;
 
+    void sample_historical_neighbors_into_buffers(
+        const ID_T* nid,
+        const TIME_T* ts,
+        size_t bs,
+        int n_ngh,
+        ID_T* out_n,
+        ID_T* out_e,
+        TIME_T* out_t) const
+    {
+        const auto is_env_truthy = [](const char* value) {
+            if (value == nullptr) {
+                return false;
+            }
+            std::string normalized(value);
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+        };
+        const bool disable_omp = is_env_truthy(std::getenv("FROST_SEQSAMPLER_NO_OMP"));
+        const bool mimic_tgl_batch_shared_recent =
+            sample_strategy == "recent" &&
+            is_env_truthy(std::getenv("FROST_DEBUG_TGL_BATCH_SHARED_RECENT"));
+
+        std::unordered_map<ID_T, TIME_T> batch_max_ts;
+        std::vector<TIME_T> batch_upper_ts;
+        if (mimic_tgl_batch_shared_recent) {
+            batch_max_ts.reserve(bs);
+            for (size_t i = 0; i < bs; ++i) {
+                auto it = batch_max_ts.find(nid[i]);
+                if (it == batch_max_ts.end() || it->second < ts[i]) {
+                    batch_max_ts[nid[i]] = ts[i];
+                }
+            }
+            batch_upper_ts.resize(bs);
+            for (size_t i = 0; i < bs; ++i) {
+                batch_upper_ts[i] = batch_max_ts.at(nid[i]);
+            }
+        }
+
+        const auto sample_one = [&](size_t i) {
+            if (mimic_tgl_batch_shared_recent) {
+                const TIME_T batch_upper = batch_upper_ts[i];
+                auto [start, end] = this->find_edge_range_base(nid[i], batch_upper);
+                if (start > end) {
+                    return;
+                }
+
+                const size_t offset = i * n_ngh;
+                const ID_T limit = ((end - start + 1) <= n_ngh)
+                    ? start
+                    : static_cast<ID_T>(end - n_ngh);
+                size_t take = 0;
+                for (ID_T k = end; k > limit; --k) {
+                    if (this->edge_ts[k] < ts[i]) {
+                        ++take;
+                    }
+                }
+                if (take == 0) {
+                    return;
+                }
+
+                const size_t pad_offset = n_ngh - take;
+                size_t write_offset = take;
+                for (ID_T k = end; k > limit; --k) {
+                    if (this->edge_ts[k] < ts[i]) {
+                        --write_offset;
+                        const size_t out_idx = offset + pad_offset + write_offset;
+                        out_n[out_idx] = this->indices[k];
+                        out_e[out_idx] = this->edge_ids[k];
+                        out_t[out_idx] = this->edge_ts[k];
+                    }
+                }
+                return;
+            }
+
+            std::mt19937 local_rng(seed_val + i);
+            auto [start, end] = this->find_edge_range_base(nid[i], ts[i]);
+            const size_t offset = i * n_ngh;
+            this->perform_sampling(
+                start,
+                end,
+                n_ngh,
+                sample_strategy,
+                local_rng,
+                time_scaling_factor,
+                &out_n[offset],
+                &out_e[offset],
+                &out_t[offset]);
+        };
+
+        if (disable_omp) {
+            for (size_t i = 0; i < bs; ++i) {
+                sample_one(i);
+            }
+        } else {
+            #pragma omp parallel for schedule(static)
+            for (size_t i = 0; i < bs; ++i) {
+                sample_one(i);
+            }
+        }
+    }
+
 public:
     SeqSampler(
         const TemporalGraph<ID_T, TIME_T>& g,
@@ -90,120 +192,60 @@ public:
             throw std::invalid_argument("get_historical_neighbors requires n_ngh > 0");
         }
 
-        const auto is_env_truthy = [](const char* value) {
-            if (value == nullptr) {
-                return false;
-            }
-            std::string normalized(value);
-            std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
-        };
-        const bool disable_omp = is_env_truthy(std::getenv("FROST_SEQSAMPLER_NO_OMP"));
-        const bool mimic_tgl_batch_shared_recent =
-            sample_strategy == "recent" &&
-            is_env_truthy(std::getenv("FROST_DEBUG_TGL_BATCH_SHARED_RECENT"));
-
         size_t bs = nid.size();
         std::vector<ID_T> out_n(bs * n_ngh, -1);
         std::vector<ID_T> out_e(bs * n_ngh, -1);
         std::vector<TIME_T> out_t(bs * n_ngh, 0.0f);
 
-        std::unordered_map<ID_T, TIME_T> batch_max_ts;
-        std::vector<TIME_T> batch_upper_ts;
-        if (mimic_tgl_batch_shared_recent) {
-            batch_max_ts.reserve(bs);
-            for (size_t i = 0; i < bs; ++i) {
-                auto it = batch_max_ts.find(nid[i]);
-                if (it == batch_max_ts.end() || it->second < ts[i]) {
-                    batch_max_ts[nid[i]] = ts[i];
-                }
-            }
-            batch_upper_ts.resize(bs);
-            // Resolve the shared window once before the parallel loop instead of
-            // repeating an unordered-map lookup for every sampled root.
-            for (size_t i = 0; i < bs; ++i) {
-                batch_upper_ts[i] = batch_max_ts.at(nid[i]);
-            }
+        {
+            nb::gil_scoped_release release;
+            sample_historical_neighbors_into_buffers(
+                nid.data(), ts.data(), bs, n_ngh,
+                out_n.data(), out_e.data(), out_t.data());
+        } // GIL reacquired here before creating Python objects
+
+        return { vec2npy_2d(out_n, bs, n_ngh), vec2npy_2d(out_e, bs, n_ngh), vec2npy_2d(out_t, bs, n_ngh) };
+    }
+
+    using ConstIdArray =
+        nb::ndarray<const ID_T, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+    using ConstTimeArray =
+        nb::ndarray<const TIME_T, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+    using IdOutputArray =
+        nb::ndarray<ID_T, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+    using TimeOutputArray =
+        nb::ndarray<TIME_T, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+
+    void get_historical_neighbors_into(
+        ConstIdArray nid,
+        ConstTimeArray ts,
+        IdOutputArray out_n,
+        IdOutputArray out_e,
+        TimeOutputArray out_t)
+    {
+        const size_t bs = nid.shape(0);
+        if (ts.shape(0) != bs) {
+            throw std::invalid_argument(
+                "get_historical_neighbors_into requires nid and ts to have equal lengths");
+        }
+        if (out_n.shape(0) != bs || out_e.shape(0) != bs || out_t.shape(0) != bs) {
+            throw std::invalid_argument(
+                "get_historical_neighbors_into output row counts must match the input length");
+        }
+        const size_t n_ngh = out_n.shape(1);
+        if (n_ngh == 0 || out_e.shape(1) != n_ngh || out_t.shape(1) != n_ngh) {
+            throw std::invalid_argument(
+                "get_historical_neighbors_into outputs must have equal positive widths");
         }
 
         {
             nb::gil_scoped_release release;
-
-            const auto sample_recent_with_batch_shared_window =
-                [&](size_t i) {
-                    const TIME_T batch_upper = batch_upper_ts[i];
-                    auto [start, end] = this->find_edge_range_base(nid[i], batch_upper);
-                    if (start > end) {
-                        return;
-                    }
-
-                    const size_t offset = i * n_ngh;
-                    const ID_T limit = ((end - start + 1) <= n_ngh)
-                        ? start
-                        : static_cast<ID_T>(end - n_ngh);
-
-                    // Two bounded scans avoid allocating a temporary vector for
-                    // every root while preserving TGL's padded chronological order.
-                    size_t take = 0;
-                    for (ID_T k = end; k > limit; --k) {
-                        if (this->edge_ts[k] < ts[i]) {
-                            ++take;
-                        }
-                    }
-                    if (take == 0) {
-                        return;
-                    }
-
-                    const size_t pad_offset = n_ngh - take;
-                    size_t write_offset = take;
-                    for (ID_T k = end; k > limit; --k) {
-                        if (this->edge_ts[k] < ts[i]) {
-                            --write_offset;
-                            const size_t out_idx = offset + pad_offset + write_offset;
-                            out_n[out_idx] = this->indices[k];
-                            out_e[out_idx] = this->edge_ids[k];
-                            out_t[out_idx] = this->edge_ts[k];
-                        }
-                    }
-                };
-
-            if (disable_omp) {
-                for (size_t i = 0; i < bs; ++i) {
-                    if (mimic_tgl_batch_shared_recent) {
-                        sample_recent_with_batch_shared_window(i);
-                    } else {
-                        // Keep the original RNG setup on the general path;
-                        // stochastic strategies consume it.
-                        std::mt19937 local_rng(seed_val + i);
-                        auto [start, end] = this->find_edge_range_base(nid[i], ts[i]);
-
-                        size_t offset = i * n_ngh;
-                        this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
-                                        time_scaling_factor,
-                                        &out_n[offset], &out_e[offset], &out_t[offset]);
-                    }
-                }
-            } else {
-                #pragma omp parallel for schedule(static)
-                for (size_t i = 0; i < bs; ++i) {
-                    if (mimic_tgl_batch_shared_recent) {
-                        sample_recent_with_batch_shared_window(i);
-                    } else {
-                        // Keep the original RNG setup on the general path;
-                        // stochastic strategies consume it.
-                        std::mt19937 local_rng(seed_val + i);
-                        auto [start, end] = this->find_edge_range_base(nid[i], ts[i]);
-
-                        size_t offset = i * n_ngh;
-                        this->perform_sampling(start, end, n_ngh, sample_strategy, local_rng,
-                                        time_scaling_factor,
-                                        &out_n[offset], &out_e[offset], &out_t[offset]);
-                    }
-                }
-            }
-        } // GIL reacquired here before creating Python objects
-
-        return { vec2npy_2d(out_n, bs, n_ngh), vec2npy_2d(out_e, bs, n_ngh), vec2npy_2d(out_t, bs, n_ngh) };
+            std::fill(out_n.data(), out_n.data() + bs * n_ngh, static_cast<ID_T>(-1));
+            std::fill(out_e.data(), out_e.data() + bs * n_ngh, static_cast<ID_T>(-1));
+            std::fill(out_t.data(), out_t.data() + bs * n_ngh, static_cast<TIME_T>(0));
+            sample_historical_neighbors_into_buffers(
+                nid.data(), ts.data(), bs, static_cast<int>(n_ngh),
+                out_n.data(), out_e.data(), out_t.data());
+        }
     }
 };

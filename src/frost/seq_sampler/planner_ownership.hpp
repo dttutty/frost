@@ -1,10 +1,12 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include <nanobind/ndarray.h>
@@ -13,6 +15,12 @@
 #include "sampler_common.h"
 
 namespace planner_ownership {
+
+constexpr uint8_t kAllSampled = 1U << 0;
+constexpr uint8_t kRoots = 1U << 1;
+constexpr uint8_t kPositiveRoots = 1U << 2;
+constexpr uint8_t kPositiveNeighbors = 1U << 3;
+constexpr size_t kScopeCount = 4;
 
 using Int64Array =
     nb::ndarray<int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
@@ -171,6 +179,137 @@ inline nb::tuple plan_owned_routes(
         routes.append(row);
     }
     return nb::make_tuple(owned, vec2npy(result.all_nodes), routes);
+}
+
+template <typename ID_T>
+using NodeArray =
+    nb::ndarray<const ID_T, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+
+template <typename ID_T>
+inline nb::tuple materialize_node_scopes(
+    NodeArray<ID_T> nid,
+    size_t n_root,
+    size_t n_positive_root,
+    size_t positive_neighbor_start,
+    size_t positive_neighbor_end,
+    uint8_t requested_scopes) {
+    if (n_positive_root > n_root || n_root > nid.size()) {
+        throw std::invalid_argument("invalid root boundaries for node-scope materialization");
+    }
+    if (positive_neighbor_start > positive_neighbor_end ||
+        positive_neighbor_end > nid.size()) {
+        throw std::invalid_argument(
+            "invalid positive-neighbor boundaries for node-scope materialization");
+    }
+
+    std::array<size_t, kScopeCount> raw_counts{};
+    ID_T max_node = static_cast<ID_T>(-1);
+    const auto occurrence_mask = [&](size_t index) {
+        uint8_t mask = 0;
+        if ((requested_scopes & kAllSampled) != 0) {
+            mask |= kAllSampled;
+        }
+        if (index < n_root && (requested_scopes & kRoots) != 0) {
+            mask |= kRoots;
+        }
+        if (index < n_positive_root && (requested_scopes & kPositiveRoots) != 0) {
+            mask |= kPositiveRoots;
+        }
+        if (index >= positive_neighbor_start && index < positive_neighbor_end &&
+            (requested_scopes & kPositiveNeighbors) != 0) {
+            mask |= kPositiveNeighbors;
+        }
+        return mask;
+    };
+
+    {
+        nb::gil_scoped_release release;
+        for (size_t index = 0; index < nid.size(); ++index) {
+            const ID_T node = nid.data()[index];
+            if (node < 0) {
+                continue;
+            }
+            const uint8_t mask = occurrence_mask(index);
+            if ((mask & kAllSampled) != 0) {
+                ++raw_counts[0];
+            }
+            if ((mask & kRoots) != 0) {
+                ++raw_counts[1];
+            }
+            if ((mask & kPositiveRoots) != 0) {
+                ++raw_counts[2];
+            }
+            if ((mask & kPositiveNeighbors) != 0) {
+                ++raw_counts[3];
+            }
+            max_node = std::max(max_node, node);
+        }
+    }
+
+    std::array<std::vector<ID_T>, kScopeCount> outputs;
+    if (max_node >= 0 && requested_scopes != 0) {
+        constexpr int64_t dense_max_nodes = 4'000'000;
+        constexpr size_t dense_max_sparsity = 16;
+        const int64_t dense_span = static_cast<int64_t>(max_node) + 1;
+        const bool use_dense =
+            dense_span <= dense_max_nodes &&
+            static_cast<uint64_t>(dense_span) <=
+                std::max<uint64_t>(65'536, nid.size() * dense_max_sparsity);
+
+        if (use_dense) {
+            std::vector<uint8_t> marks(static_cast<size_t>(dense_span), 0);
+            {
+                nb::gil_scoped_release release;
+                for (size_t index = 0; index < nid.size(); ++index) {
+                    const ID_T node = nid.data()[index];
+                    if (node >= 0) {
+                        marks[static_cast<size_t>(node)] |= occurrence_mask(index);
+                    }
+                }
+            }
+            for (int64_t node = 0; node < dense_span; ++node) {
+                const uint8_t mask = marks[static_cast<size_t>(node)];
+                for (size_t scope = 0; scope < kScopeCount; ++scope) {
+                    if ((mask & (1U << scope)) != 0) {
+                        outputs[scope].push_back(static_cast<ID_T>(node));
+                    }
+                }
+            }
+        } else {
+            std::unordered_map<ID_T, uint8_t> marks;
+            marks.reserve(std::min<size_t>(nid.size(), 1'000'000));
+            {
+                nb::gil_scoped_release release;
+                for (size_t index = 0; index < nid.size(); ++index) {
+                    const ID_T node = nid.data()[index];
+                    if (node >= 0) {
+                        marks[node] |= occurrence_mask(index);
+                    }
+                }
+            }
+            std::vector<ID_T> nodes;
+            nodes.reserve(marks.size());
+            for (const auto& [node, _mask] : marks) {
+                nodes.push_back(node);
+            }
+            std::sort(nodes.begin(), nodes.end());
+            for (const ID_T node : nodes) {
+                const uint8_t mask = marks.at(node);
+                for (size_t scope = 0; scope < kScopeCount; ++scope) {
+                    if ((mask & (1U << scope)) != 0) {
+                        outputs[scope].push_back(node);
+                    }
+                }
+            }
+        }
+    }
+
+    nb::list scope_arrays;
+    for (auto& output : outputs) {
+        scope_arrays.append(vec2npy(output));
+    }
+    std::vector<int64_t> counts(raw_counts.begin(), raw_counts.end());
+    return nb::make_tuple(scope_arrays, vec2npy(counts));
 }
 
 }  // namespace planner_ownership

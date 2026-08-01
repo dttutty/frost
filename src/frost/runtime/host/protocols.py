@@ -7,7 +7,7 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
-from frost.runtime.host.types import DynamicPlanInQ, DynamicPlanOutQ
+from frost.runtime.host.types import AccessPlanInputs, DynamicPlanInQ, DynamicPlanOutQ
 from frost.datatypes.sampled_layout import SampledLayoutView
 from frost.runtime._thread_base import ThreadBase
 from frost.utils.tensor_set import TensorSet
@@ -16,6 +16,15 @@ from frost.utils.tensor_set import TensorSet
 @runtime_checkable
 class AnalyzerProto(Protocol):
     """Access-analysis and planner factory contract consumed by ``Host``."""
+
+    def analyze_batch(
+        self,
+        layouts: list[SampledLayoutView],
+        *,
+        include_node_features: bool,
+    ) -> AccessPlanInputs: ...
+
+    def can_share_memory_mailbox_planner(self) -> bool: ...
 
     def get_mem_plan_inputs(
         self, layouts: list[SampledLayoutView]
