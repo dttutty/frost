@@ -65,7 +65,12 @@ def resolve_batch_layout(
 
 
 def prepare_launch_dataset(
-    *, cfg: DictConfig, env: Env, run_id: str, dtypes: RuntimeDTypes
+    *,
+    cfg: DictConfig,
+    env: Env,
+    run_id: str,
+    dtypes: RuntimeDTypes,
+    feature_numa_node: int | None = None,
 ) -> LaunchDataset:
     prepared = DatasetManager(
         env=env,
@@ -77,6 +82,7 @@ def prepare_launch_dataset(
         graph_direction=str(cfg.get("graph_direction", "auto")),
         ignore_nfeat_on_disk=bool(cfg.get("ignore_nfeat_on_disk", False)),
         ignore_efeat_on_disk=bool(cfg.get("ignore_efeat_on_disk", False)),
+        feature_numa_node=feature_numa_node,
     ).prepare()
     graph, frame, n_nodes, _, ndim, edim, _, _, nfeat, efeat, _ = prepared
     return LaunchDataset(
@@ -154,6 +160,7 @@ def prepare_dynamic_store(
     boxsize: int,
     d_mem: int,
     edim: int,
+    numa_node: int | None = None,
 ) -> MemBoxStore | None:
     if not enabled:
         return None
@@ -166,4 +173,5 @@ def prepare_dynamic_store(
         boxsize=boxsize,
         d_mem=d_mem,
         edim=edim,
+        numa_node=numa_node,
     ).prepare()

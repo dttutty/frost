@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from queue import Queue as Q
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -21,6 +21,11 @@ from frost.runtime._thread_base import join_thread, put_shutdown_sentinel
 from frost.runtime.experimental.dynamic_state import TransportMode
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
 from frost.runtime.worker._host_to_device import H2D
+from frost.runtime.worker._feature_staging import (
+    FeaturePrefetcher,
+    FeatureStagePayload,
+    FeatureStageRing,
+)
 from frost.runtime.worker._receiver import Receiver
 from frost.runtime.worker.p2p_syncer._p2p_comm import P2PQHandler
 from frost.runtime.worker.p2p_syncer._task_handlers import (
@@ -68,6 +73,9 @@ class WorkerPipelineMixin:
     box_handler: MessageHandler | None
     box_wr: BoxMailWriter | None
     p2p_q_handler: P2PQHandler | None
+    feature_prefetcher: FeaturePrefetcher | None
+    feature_ring: FeatureStageRing | None
+    feature_q: Q[FeatureStagePayload] | None
 
     def __getattr__(self, name: str) -> Any:
         raise AttributeError(name)
@@ -90,6 +98,26 @@ class WorkerPipelineMixin:
         self.result_q = Q(maxsize=1)
         self.received_q = Q(maxsize=stateless_q_size)
         self.full_q = Q(maxsize=stateless_q_size)
+
+        has_static_features = nfeat is not None or efeat is not None
+        self.feature_prefetcher = None
+        self.feature_ring = None
+        self.feature_q = None
+        if has_static_features:
+            feature_depth = stateless_q_size + 1
+            self.feature_ring = FeatureStageRing(depth=feature_depth)
+            self.feature_q = Q(maxsize=stateless_q_size)
+            self.feature_prefetcher = FeaturePrefetcher(
+                nfeat=nfeat,
+                efeat=efeat,
+                in_q=self.received_q,
+                out_q=self.feature_q,
+                ring=self.feature_ring,
+                stop_ev=self.stop_ev,
+            )
+            h2d_source_q: Q[FeatureStagePayload] = self.feature_q
+        else:
+            h2d_source_q = cast(Q[FeatureStagePayload], self.received_q)
 
         self.receiver = Receiver(
             env=self.env,
@@ -138,9 +166,10 @@ class WorkerPipelineMixin:
             efeat=efeat,
             device=self.device,
             node_feature_scope=self.execution_plan.node_feature_scope,
-            in_q=self.received_q,
+            in_q=h2d_source_q,
             out_q=h2d_dest_q,
             stop_ev=self.stop_ev,
+            feature_ring=self.feature_ring,
         )
 
     def _init_mem_box_threads(self) -> None:
@@ -214,6 +243,8 @@ class WorkerPipelineMixin:
         DynamicAssembler) when a ``MemBoxStore`` is present.
         """
         self.h2d.start()
+        if self.feature_prefetcher is not None:
+            self.feature_prefetcher.start()
         self.receiver.start()
         if self.mem_box_store is not None:
             assert self.dy_asm is not None
@@ -234,6 +265,9 @@ class WorkerPipelineMixin:
         put_shutdown_sentinel(self.received_q, None)
         put_shutdown_sentinel(self.full_q, None)
 
+        if self.feature_q is not None:
+            put_shutdown_sentinel(self.feature_q, None)
+
         if self.h2d_out_q is not None:
             put_shutdown_sentinel(self.h2d_out_q, None)
         if self.delta_queue is not None:
@@ -253,6 +287,7 @@ class WorkerPipelineMixin:
 
     def _join_pipeline_threads(self, timeout_s: float) -> None:
         join_thread(self.h2d, timeout_s, logger)
+        join_thread(self.feature_prefetcher, timeout_s, logger)
         join_thread(self.receiver, timeout_s, logger)
         join_thread(self.mem_handler, timeout_s, logger)
         join_thread(self.mem_wr, timeout_s, logger)

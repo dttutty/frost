@@ -38,7 +38,7 @@ def test_auto_policy_places_each_worker_with_its_gpu(monkeypatch) -> None:
     ) == (1, "auto-selected visible GPU 1 NUMA node")
 
 
-def test_auto_policy_leaves_workers_unbound_when_gpus_share_numa(monkeypatch) -> None:
+def test_auto_policy_places_workers_when_gpus_share_numa(monkeypatch) -> None:
     monkeypatch.setattr(
         affinity, "detect_visible_gpu_numa_nodes", lambda *_args, **_kwargs: [0, 0]
     )
@@ -47,8 +47,8 @@ def test_auto_policy_leaves_workers_unbound_when_gpus_share_numa(monkeypatch) ->
         "auto", n_gpu=2, local_rank=0, cuda_visible_devices="0,1"
     )
 
-    assert node is None
-    assert "visible GPUs share one NUMA node" in reason
+    assert node == 0
+    assert "visible GPU 0 NUMA node" in reason
 
 
 def test_auto_policy_leaves_host_on_full_cpuset(monkeypatch) -> None:
@@ -83,7 +83,7 @@ def test_shared_memory_nodes_follow_gpus_only_in_auto(monkeypatch) -> None:
     detected[:] = [0, 0, 0]
     assert affinity.resolve_gpu_shm_numa_nodes(
         "auto", n_gpu=3, cuda_visible_devices="0,1,2"
-    ) == [None, None, None]
+    ) == [0, 0, 0]
 
     detected[:] = [0, None, 2]
     assert affinity.resolve_gpu_shm_numa_nodes(
@@ -118,15 +118,21 @@ def test_configure_process_affinity_intersects_cpuset(tmp_path: Path, monkeypatc
     assert status.memory_bound
 
 
-def test_auto_worker_binds_memory_without_restricting_cpus(monkeypatch) -> None:
+def test_auto_worker_binds_cpu_and_memory_to_gpu_node(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.setattr(
         affinity, "detect_visible_gpu_numa_nodes", lambda *_args, **_kwargs: [0, 1]
     )
+    node_dir = tmp_path / "node1"
+    node_dir.mkdir()
+    (node_dir / "cpulist").write_text("2-3\n", encoding="utf-8")
     monkeypatch.setattr(affinity.os, "sched_getaffinity", lambda _pid: {0, 1, 2, 3})
+    selected: list[set[int]] = []
     monkeypatch.setattr(
         affinity.os,
         "sched_setaffinity",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("must not bind CPUs")),
+        lambda _pid, cpus: selected.append(set(cpus)),
     )
     memory_nodes: list[int] = []
     monkeypatch.setattr(
@@ -134,14 +140,38 @@ def test_auto_worker_binds_memory_without_restricting_cpus(monkeypatch) -> None:
     )
 
     status = affinity.configure_process_affinity(
-        "auto", n_gpu=2, local_rank=1, cuda_visible_devices="0,1"
+        "auto",
+        n_gpu=2,
+        local_rank=1,
+        cuda_visible_devices="0,1",
+        sysfs_root=tmp_path,
     )
 
+    assert selected == [{2, 3}]
     assert memory_nodes == [1]
     assert status.node == 1
-    assert status.cpu_count == 4
-    assert not status.cpu_bound
+    assert status.cpu_count == 2
+    assert status.cpu_bound
     assert status.memory_bound
+
+
+def test_shared_gpu_node_requires_common_topology(monkeypatch) -> None:
+    detected: list[int | None] = [0, 0]
+    monkeypatch.setattr(
+        affinity,
+        "detect_visible_gpu_numa_nodes",
+        lambda *_args, **_kwargs: detected,
+    )
+    assert affinity.resolve_shared_gpu_numa_node(
+        "auto", n_gpu=2, cuda_visible_devices="0,1"
+    ) == 0
+    detected[:] = [0, 1]
+    assert (
+        affinity.resolve_shared_gpu_numa_node(
+            "auto", n_gpu=2, cuda_visible_devices="0,1"
+        )
+        is None
+    )
 
 
 def test_off_policy_does_not_change_affinity(monkeypatch) -> None:

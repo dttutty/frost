@@ -65,10 +65,11 @@ def resolve_numa_node(
 ) -> tuple[int | None, str]:
     """Resolve ``auto``/``off``/explicit-node launch policy for one local rank.
 
-    Under ``auto``, GPU workers follow the NUMA node of their own visible GPU.
-    The host rank deliberately keeps the launcher's full CPU cpuset and default
-    first-touch memory policy: sampling and planning are CPU-heavy and benefit
-    from physical cores across sockets, while worker-side staging remains local
+    Under ``auto``, GPU workers follow the NUMA node of their own visible GPU,
+    including when all visible GPUs share one node.  The host rank deliberately
+    keeps the launcher's full CPU cpuset and default first-touch memory policy:
+    sampling and planning are CPU-heavy and benefit from physical cores across
+    sockets, while worker-side feature gathering and H2D staging must stay local
     to the target GPU.  ``local_rank=None`` retains the topology-only resolution
     used by callers that do not yet know the rank.
     """
@@ -98,12 +99,6 @@ def resolve_numa_node(
         known = [node for node in nodes if node is not None and node >= 0]
         if len(known) != n_gpu:
             return None, f"GPU NUMA topology is incomplete: {nodes}"
-        if len(set(known)) == 1:
-            return (
-                None,
-                "auto visible GPUs share one NUMA node; keeping the full "
-                "CPU cpuset and first-touch memory policy",
-            )
         gpu_node = nodes[local_rank]
         if gpu_node is None or gpu_node < 0:
             return None, f"visible GPU {local_rank} has no known NUMA node"
@@ -135,13 +130,29 @@ def resolve_gpu_shm_numa_nodes(
     nodes = detect_visible_gpu_numa_nodes(n_gpu, cuda_visible_devices)
     if len(nodes) != n_gpu or any(node is None or node < 0 for node in nodes):
         return [None] * n_gpu
-    known_nodes: list[int | None] = [int(node) for node in nodes if node is not None]
-    if len(set(known_nodes)) <= 1:
-        # The host sampler uses cores across sockets and writes each ring before
-        # workers clone it into staging. Binding every rank and ring to one
-        # socket would turn half of those producer writes into remote traffic.
-        return [None] * n_gpu
-    return known_nodes
+    return [int(node) for node in nodes if node is not None]
+
+
+def resolve_shared_gpu_numa_node(
+    policy: str | int,
+    *,
+    n_gpu: int,
+    cuda_visible_devices: str | None,
+) -> int | None:
+    """Return one NUMA node for storage consumed by every visible GPU.
+
+    A shared feature or dynamic-state table can be bound safely only when all
+    visible GPUs have the same local node.  Per-GPU rings use
+    :func:`resolve_gpu_shm_numa_nodes` instead.  Explicit policies rely on the
+    host process-wide bind so region-level placement is unnecessary.
+    """
+    if str(policy).strip().lower() != "auto":
+        return None
+    nodes = detect_visible_gpu_numa_nodes(n_gpu, cuda_visible_devices)
+    if len(nodes) != n_gpu or any(node is None or node < 0 for node in nodes):
+        return None
+    known = {int(node) for node in nodes if node is not None}
+    return next(iter(known)) if len(known) == 1 else None
 
 
 def _bind_memory_to_node(node: int) -> None:
@@ -199,24 +210,6 @@ def configure_process_affinity(
         )
 
     allowed = set(os.sched_getaffinity(0))
-    auto_worker = (
-        str(policy).strip().lower() == "auto"
-        and local_rank is not None
-        and 0 <= local_rank < n_gpu
-    )
-    if auto_worker:
-        try:
-            _bind_memory_to_node(node)
-        except (OSError, AttributeError) as exc:
-            return AffinityStatus(
-                node,
-                len(allowed),
-                False,
-                False,
-                f"memory bind unavailable: {exc}",
-            )
-        return AffinityStatus(node, len(allowed), False, True, reason)
-
     cpulist_path = sysfs_root / f"node{node}" / "cpulist"
     try:
         node_cpus = parse_cpu_list(cpulist_path.read_text(encoding="utf-8"))

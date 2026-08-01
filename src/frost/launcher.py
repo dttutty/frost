@@ -16,7 +16,10 @@ from frost.launch.config import (
     resolve_time_scaling_factor,
     stable_mode_enabled,
 )
-from frost.launch.affinity import resolve_gpu_shm_numa_nodes
+from frost.launch.affinity import (
+    resolve_gpu_shm_numa_nodes,
+    resolve_shared_gpu_numa_node,
+)
 from frost.launch.distributed import (
     configure_torch_backends,
     create_worker_process_groups,
@@ -176,8 +179,23 @@ def launch(cfg: DictConfig):
             eval_per_gpu_batch_size,
         )
         logger.info("Using shared-memory run_id=%s", run_id)
+    cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    gpu_shm_numa_nodes = resolve_gpu_shm_numa_nodes(
+        cfg.get("numa_policy", "auto"),
+        n_gpu=env.n_gpu,
+        cuda_visible_devices=cuda_visible_devices,
+    )
+    shared_gpu_numa_node = resolve_shared_gpu_numa_node(
+        cfg.get("numa_policy", "auto"),
+        n_gpu=env.n_gpu,
+        cuda_visible_devices=cuda_visible_devices,
+    )
     dataset = prepare_launch_dataset(
-        cfg=cfg, env=env, run_id=run_id, dtypes=RUNTIME_DTYPES
+        cfg=cfg,
+        env=env,
+        run_id=run_id,
+        dtypes=RUNTIME_DTYPES,
+        feature_numa_node=shared_gpu_numa_node,
     )
     graph = dataset.graph
     df = dataset.frame
@@ -193,15 +211,15 @@ def launch(cfg: DictConfig):
         cfg_dict = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False)
         print(cfg_dict)
     gpu_topo = detect_gpu_topology(
-        env.n_gpu, cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES")
-    )
-    gpu_shm_numa_nodes = resolve_gpu_shm_numa_nodes(
-        cfg.get("numa_policy", "auto"),
-        n_gpu=env.n_gpu,
-        cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+        env.n_gpu, cuda_visible_devices=cuda_visible_devices
     )
     if env.is_host:
         logger.info("Detected GPU topology from CUDA_VISIBLE_DEVICES: %s", gpu_topo)
+        logger.info(
+            "NUMA storage placement: graph_rings=%s, shared_features/state=%s",
+            gpu_shm_numa_nodes,
+            shared_gpu_numa_node,
+        )
 
     recipe = instantiate_model_recipe(cfg.model)
     execution_plan = compile_execution_plan(recipe)
@@ -294,6 +312,7 @@ def launch(cfg: DictConfig):
         boxsize=int(state_cfg["boxsize"]) if state_cfg is not None else 0,
         d_mem=int(state_cfg["updater"]["d_mem"]) if state_cfg is not None else 0,
         edim=int(cfg.edim),
+        numa_node=shared_gpu_numa_node,
     )
 
     if env.is_host:

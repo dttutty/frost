@@ -39,6 +39,7 @@ class StaticAssembler:
     def prepare_nfeat_cache(
         self,
         nfeat_plan: "StaticPlan",
+        staged_nfeat: torch.Tensor | None = None,
     ) -> "NodeFeatNid":
         """Build a sorted ``NodeFeatNid`` lookup table for the current batch.
 
@@ -76,9 +77,23 @@ class StaticAssembler:
         else:
             # Standard path: Gather missing features directly from shared memory
             gpu_nid = fetch.to(self.device)
-            gpu_data = self.shared_nfeat[fetch].to(
-                device=self.device, dtype=torch.float32
-            )
+            if staged_nfeat is None:
+                gpu_data = self.shared_nfeat[fetch].to(
+                    device=self.device, dtype=torch.float32
+                )
+            else:
+                if staged_nfeat.shape[0] != fetch.numel():
+                    raise ValueError(
+                        "staged node-feature rows do not match the access plan: "
+                        f"{staged_nfeat.shape[0]} != {fetch.numel()}"
+                    )
+                # This copy is deliberately synchronous: the reusable staging
+                # slot can be returned as soon as H2D finishes this batch.
+                gpu_data = staged_nfeat.to(
+                    device=self.device,
+                    dtype=torch.float32,
+                    non_blocking=False,
+                )
 
             nfeat_obj = NodeFeatNid(nid=gpu_nid, nfeat=gpu_data)
 
@@ -95,6 +110,34 @@ class StaticAssembler:
                 self.nfeat_delta = None
 
         return nfeat_obj
+
+    def fill_staged_efeat(
+        self,
+        flat_graph: FlatGraph,
+        *,
+        staged_efeat: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> FlatGraph:
+        """Scatter packed CPU-staged edge rows into a GPU flat graph."""
+        if staged_efeat.shape[0] != positions.numel():
+            raise ValueError(
+                "staged edge-feature rows do not match their positions: "
+                f"{staged_efeat.shape[0]} != {positions.numel()}"
+            )
+        edge_feat = torch.zeros(
+            (flat_graph.eid.shape[0], staged_efeat.shape[1]),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        gpu_positions = positions.to(self.device, non_blocking=False)
+        gpu_values = staged_efeat.to(
+            device=self.device,
+            dtype=torch.float32,
+            non_blocking=False,
+        )
+        edge_feat[gpu_positions] = gpu_values
+        flat_graph.efeat = edge_feat
+        return flat_graph
 
     def fill_nfeat(
         self,

@@ -109,6 +109,7 @@ class MemBoxStoreManager:
         edim: int,  # from hydra config
         mdtype: torch.dtype,
         tdtype: torch.dtype,
+        numa_node: int | None = None,
     ):
         self.env = env
         self.run_id = run_id
@@ -118,6 +119,7 @@ class MemBoxStoreManager:
         self.boxsize = boxsize
         self.d_mem = d_mem
         self.d_mail = 2 * d_mem + edim
+        self.numa_node = numa_node
 
         # Initialize internal state
         self.state: Optional[MemBoxStore] = None
@@ -138,11 +140,36 @@ class MemBoxStoreManager:
         mem = mem_ts = box = box_ts = box_pos = None
 
         if self.env.is_host:
-            mem = csm(f"{self.run_id}_mem", [n_nodes, d_mem], self.mdtype)
-            mem_ts = csm(f"{self.run_id}_mem_ts", [n_nodes], self.tdtype)
-            box = csm(f"{self.run_id}_box", mail_shape, self.mdtype)
-            box_ts = csm(f"{self.run_id}_box_ts", [n_nodes, boxsize], self.tdtype)
-            box_pos = csm(f"{self.run_id}_box_pos", [n_nodes], torch.int64)
+            mem = csm(
+                f"{self.run_id}_mem",
+                [n_nodes, d_mem],
+                self.mdtype,
+                numa_node=self.numa_node,
+            )
+            mem_ts = csm(
+                f"{self.run_id}_mem_ts",
+                [n_nodes],
+                self.tdtype,
+                numa_node=self.numa_node,
+            )
+            box = csm(
+                f"{self.run_id}_box",
+                mail_shape,
+                self.mdtype,
+                numa_node=self.numa_node,
+            )
+            box_ts = csm(
+                f"{self.run_id}_box_ts",
+                [n_nodes, boxsize],
+                self.tdtype,
+                numa_node=self.numa_node,
+            )
+            box_pos = csm(
+                f"{self.run_id}_box_pos",
+                [n_nodes],
+                torch.int64,
+                numa_node=self.numa_node,
+            )
 
             # Initialize memory states to zero
             mem.zero_()

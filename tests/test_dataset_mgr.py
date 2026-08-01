@@ -128,7 +128,11 @@ def test_load_graph_normalizes_compressed_upstream_edges(
 def test_pt_features_keep_compact_storage_dtype(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "edge_features.pt"
     torch.save(torch.ones((3, 4), dtype=torch.bool), path)
-    monkeypatch.setattr(dm, "csm", lambda _name, shape, dtype: torch.empty(shape, dtype=dtype))
+    monkeypatch.setattr(
+        dm,
+        "csm",
+        lambda _name, shape, dtype, **_kwargs: torch.empty(shape, dtype=dtype),
+    )
     manager = dm.DatasetManager(
         env=None,  # type: ignore[arg-type]
         run_id="test",
@@ -210,7 +214,7 @@ def test_unpadded_edge_features_gain_reserved_zero_row(
     monkeypatch.setattr(
         dm,
         "csm",
-        lambda _name, shape, dtype: torch.empty(shape, dtype=dtype),
+        lambda _name, shape, dtype, **_kwargs: torch.empty(shape, dtype=dtype),
     )
     manager = dm.DatasetManager(
         env=None,  # type: ignore[arg-type]
@@ -279,7 +283,7 @@ def test_tgbl_wiki_edge_features_are_built_without_node_features(
     monkeypatch.setattr(
         dm,
         "csm",
-        lambda _name, shape, dtype: torch.empty(shape, dtype=dtype),
+        lambda _name, shape, dtype, **_kwargs: torch.empty(shape, dtype=dtype),
     )
     manager = dm.DatasetManager(
         env=None,  # type: ignore[arg-type]

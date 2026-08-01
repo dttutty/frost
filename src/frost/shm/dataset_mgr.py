@@ -306,6 +306,7 @@ class DatasetManager:
         graph_direction: str = "auto",
         ignore_nfeat_on_disk: bool = False,
         ignore_efeat_on_disk: bool = False,
+        feature_numa_node: int | None = None,
     ):
         self.env = env
         self.run_id = run_id
@@ -316,6 +317,7 @@ class DatasetManager:
         self.graph_direction = graph_direction
         self.ignore_nfeat_on_disk = ignore_nfeat_on_disk
         self.ignore_efeat_on_disk = ignore_efeat_on_disk
+        self.feature_numa_node = feature_numa_node
         self._file_backed_feature_paths: dict[str, str] = {}
 
     def prepare(
@@ -551,7 +553,12 @@ class DatasetManager:
         output_shape = (expected_rows + 1, raw_features.shape[1])
 
         final_dtype = self.feature_dtype
-        feat_shm = csm(f"{self.run_id}_{shm_name}", output_shape, dtype=final_dtype)
+        feat_shm = csm(
+            f"{self.run_id}_{shm_name}",
+            output_shape,
+            dtype=final_dtype,
+            numa_node=self.feature_numa_node,
+        )
         feat_shm[:1].zero_()
         rows_per_chunk = _rows_per_chunk(
             raw_features.shape[1],
@@ -597,7 +604,12 @@ class DatasetManager:
         final_dtype = _feature_storage_dtype(source_dtype, self.feature_dtype)
         output_offset = int(feat_type == "edge" and arr.shape[0] == expected_rows)
         output_shape = (arr.shape[0] + output_offset, arr.shape[1])
-        feat_shm = csm(f"{self.run_id}_{shm_name}", output_shape, dtype=final_dtype)
+        feat_shm = csm(
+            f"{self.run_id}_{shm_name}",
+            output_shape,
+            dtype=final_dtype,
+            numa_node=self.feature_numa_node,
+        )
         if output_offset:
             feat_shm[0].zero_()
         rows_per_chunk = _rows_per_chunk(
@@ -643,7 +655,12 @@ class DatasetManager:
             feat = feat.to(final_dtype)
         output_offset = int(feat_type == "edge" and feat.shape[0] == expected_rows)
         output_shape = (feat.shape[0] + output_offset, feat.shape[1])
-        feat_shm = csm(f"{self.run_id}_{shm_name}", output_shape, dtype=final_dtype)
+        feat_shm = csm(
+            f"{self.run_id}_{shm_name}",
+            output_shape,
+            dtype=final_dtype,
+            numa_node=self.feature_numa_node,
+        )
         if output_offset:
             feat_shm[0].zero_()
         feat_shm[output_offset:].copy_(feat)
