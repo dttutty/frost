@@ -172,6 +172,12 @@ class Host:
         ).strip().lower() in {"1", "true", "yes", "on"}
         self._dispatch_s_curve: list[float] = []
         self._scatter_q_put_s_curve: list[float] = []
+        self._macro_prepare_s_curve: list[float] = []
+        self._macro_total_s_curve: list[float] = []
+        self._tensorize_s_curve: list[float] = []
+        self._negative_sample_s_curve: list[float] = []
+        self._neighborhood_sample_s_curve: list[float] = []
+        self._metadata_s_curve: list[float] = []
 
         self._init_pipeline(
             resources.env,
@@ -491,6 +497,7 @@ class Host:
             assert isinstance(cur_macro_of_split, int)
             if cur_macro_of_split >= n_macro_of_split:
                 break
+            macro_start = time.perf_counter()
             meta_bundle: MetaBundle = []
             layout_bundle: LayoutBundle = []
             for gpu, edges in step_df.groupby("gpu_id", sort=False):
@@ -508,6 +515,9 @@ class Host:
                 meta_bundle.append(meta)
                 layout_bundle.append(layout)
                 self.mini_batch_idx += 1
+            prepare_end = time.perf_counter()
+            if timing_enabled and split == "train":
+                self._macro_prepare_s_curve.append(prepare_end - macro_start)
             if self.plan_router is not None:
                 dispatch_start = time.perf_counter()
                 self.plan_router.dispatch(meta_bundle, layout_bundle)
@@ -519,6 +529,7 @@ class Host:
             scatter_put_end = time.perf_counter()
             if timing_enabled and split == "train":
                 self._scatter_q_put_s_curve.append(scatter_put_end - scatter_put_start)
+                self._macro_total_s_curve.append(scatter_put_end - macro_start)
 
         if timing_enabled and split == "train" and self._scatter_q_put_s_curve:
             import json
@@ -528,6 +539,20 @@ class Host:
                 "split": split,
                 "epoch": cur_epoch,
                 "batch_count": len(self._scatter_q_put_s_curve),
+                "macro_prepare_s_curve": [
+                    round(v, 6) for v in self._macro_prepare_s_curve
+                ],
+                "macro_total_s_curve": [
+                    round(v, 6) for v in self._macro_total_s_curve
+                ],
+                "tensorize_s_curve": [round(v, 6) for v in self._tensorize_s_curve],
+                "negative_sample_s_curve": [
+                    round(v, 6) for v in self._negative_sample_s_curve
+                ],
+                "neighborhood_sample_s_curve": [
+                    round(v, 6) for v in self._neighborhood_sample_s_curve
+                ],
+                "metadata_s_curve": [round(v, 6) for v in self._metadata_s_curve],
                 "dispatch_s_curve": [round(v, 6) for v in self._dispatch_s_curve],
                 "scatter_q_put_s_curve": [
                     round(v, 6) for v in self._scatter_q_put_s_curve
@@ -573,16 +598,22 @@ class Host:
         Returns:
             A ``(Meta, SampledLayoutView)`` tuple.
         """
+        timing_enabled = self._timing_enabled and split == "train"
+        stage_start = time.perf_counter()
         # show edges["time"].values for debug
         # logger.info(f"Edge times: {edges['time'].values}")
         src = torch.from_numpy(edges["src"].to_numpy(copy=True)).to(torch.long)
         dst = torch.from_numpy(edges["dst"].to_numpy(copy=True)).to(torch.long)
         ts = torch.from_numpy(edges["time"].to_numpy(copy=True)).to(self.time_dtype)
         eid = torch.from_numpy(edges["eid"].to_numpy(copy=True)).to(torch.long)
+        stage_end = time.perf_counter()
+        if timing_enabled:
+            self._tensorize_s_curve.append(stage_end - stage_start)
         # show ts content for debug
 
         # TGL parity mode shares a single RNG stream across train/val/test negatives.
         # Otherwise val/test use the dedicated eval sampler.
+        stage_start = stage_end
         neg_sampler = (
             self.neg_sampler_train
             if split == "train" or self.share_neg_sampler_across_splits
@@ -603,8 +634,12 @@ class Host:
                     "Negative validity mask must match sampled negatives: "
                     f"got {tuple(neg_valid_mask.shape)} and {tuple(neg_dst.shape)}."
                 )
+        stage_end = time.perf_counter()
+        if timing_enabled:
+            self._negative_sample_s_curve.append(stage_end - stage_start)
 
         # handle different model types
+        stage_start = stage_end
         roots = torch.cat([src, dst, neg_dst])
         sample_nid, sample_ts = _prepare_sampler_inputs(
             roots=roots,
@@ -620,6 +655,10 @@ class Host:
             pos_eid=eid,
             gpu_id=gpu_id,
         )
+        stage_end = time.perf_counter()
+        if timing_enabled:
+            self._neighborhood_sample_s_curve.append(stage_end - stage_start)
+        stage_start = stage_end
         fanout = (
             list(self.ngh_sampler.fanout)
             if self.ngh_sampler.fanout is not None
@@ -644,6 +683,8 @@ class Host:
             is_last_macro_of_epoch=is_last_macro_of_epoch,
             neg_valid_mask=neg_valid_mask,
         )
+        if timing_enabled:
+            self._metadata_s_curve.append(time.perf_counter() - stage_start)
 
         return meta, layout
 
