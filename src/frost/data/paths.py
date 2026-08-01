@@ -89,6 +89,34 @@ def is_raw_tgb_dataset(dataset: str) -> bool:
     return dataset.strip().upper() in _TGB_RAW_DIRECTORY_NAMES
 
 
+def static_features_present_on_disk(
+    dataset: str,
+    *,
+    ignore_node_features: bool = False,
+    ignore_edge_features: bool = False,
+) -> bool:
+    """Probe static-feature presence without importing the training runtime.
+
+    Launch uses this before Torch/CUDA worker initialization so automatic NUMA
+    affinity is in place before allocators and thread pools first-touch memory.
+    DatasetManager remains the authority for loading and validating the files.
+    """
+    if is_raw_tgb_dataset(dataset):
+        # Official tgbl-wiki has edge features and no node features.
+        return not ignore_edge_features
+
+    dataset_dir = resolve_artifact_dataset_dir(dataset)
+    if not ignore_node_features and any(
+        (dataset_dir / f"node_features.{suffix}").exists()
+        for suffix in ("npy", "pt")
+    ):
+        return True
+    return not ignore_edge_features and any(
+        (dataset_dir / f"edge_features.{suffix}").exists()
+        for suffix in ("npy", "pt")
+    )
+
+
 def resolve_tgb_raw_dataset_dir(
     dataset: str, *, data_root: str | Path | None = None
 ) -> Path:

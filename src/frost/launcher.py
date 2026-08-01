@@ -17,7 +17,6 @@ from frost.launch.config import (
     stable_mode_enabled,
 )
 from frost.launch.affinity import (
-    configure_process_affinity,
     resolve_numa_runtime_plan,
     resolve_shared_gpu_numa_node,
 )
@@ -207,16 +206,6 @@ def launch(cfg: DictConfig):
         cuda_visible_devices=cuda_visible_devices,
         has_static_features=has_static_features,
     )
-    if str(cfg.get("numa_policy", "auto")).strip().lower() == "auto" and not env.is_host:
-        worker_affinity = configure_process_affinity(
-            "auto",
-            n_gpu=env.n_gpu,
-            local_rank=env.local_rank,
-            cuda_visible_devices=cuda_visible_devices,
-            apply_auto_worker=numa_runtime.localize_workers,
-        )
-        if env.local_rank == 0:
-            print(worker_affinity.describe())
     gpu_shm_numa_nodes = list(numa_runtime.graph_ring_nodes)
     with open_dict(cfg):
         cfg.ndim = ndim
