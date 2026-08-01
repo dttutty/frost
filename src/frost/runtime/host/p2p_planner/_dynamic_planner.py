@@ -39,6 +39,13 @@ class _OwnedNodeIndex:
     nodes: torch.Tensor
     owners: torch.Tensor
     n_gpus: int
+    dense_owners: torch.Tensor | None = None
+    dense_owners_numpy: np.ndarray | None = None
+
+
+_DENSE_OWNER_MAX_NODES = 4_000_000
+_DENSE_OWNER_MAX_SPARSITY = 16
+_NUMPY_OWNER_MAX_INPUTS = 65_536
 
 
 def _reference_tensor(*groups: list[TensorSet]) -> torch.Tensor:
@@ -218,9 +225,9 @@ def _compute_transfer_plan_from_index(
     return leftovers, routes
 
 
-def _compute_transfer_plan_from_owned_index(
+def _route_from_owned_index(
     needs: list[TensorSet], index: _OwnedNodeIndex
-) -> tuple[list[TensorSet], list[list[TensorSet]]]:
+) -> list[list[TensorSet]]:
     """Fast path for the planner's one-owner-per-node update index."""
     n_gpus = len(needs)
     if index.n_gpus != n_gpus:
@@ -229,42 +236,52 @@ def _compute_transfer_plan_from_owned_index(
         )
 
     reference = _reference_tensor(needs) if needs else index.nodes
+    if index.dense_owners_numpy is not None and reference.device.type == "cpu":
+        routes = _empty_route_matrix(n_gpus, reference)
+        dense_owners_numpy = index.dense_owners_numpy
+        for receiver, need in enumerate(needs):
+            query = _coerce_like(need.data, reference).numpy()
+            numpy_in_bounds = (query >= 0) & (query < dense_owners_numpy.size)
+            routed_nodes = query[numpy_in_bounds]
+            routed_owners = dense_owners_numpy[routed_nodes]
+            numpy_routed = routed_owners >= 0
+            routed_nodes = routed_nodes[numpy_routed]
+            routed_owners = routed_owners[numpy_routed]
+            for sender in range(n_gpus):
+                selected = routed_nodes[routed_owners == sender]
+                if selected.size:
+                    routes[sender][receiver] = TensorSet(
+                        torch.from_numpy(selected),
+                        sort_now=False,
+                        ensure_unique=False,
+                    )
+        return routes
+
     query_nodes, receivers, _ = _concat_ranked_sets(needs, reference)
     if query_nodes.numel() == 0 or index.nodes.numel() == 0:
-        positions = torch.zeros(
+        valid = torch.zeros(query_nodes.numel(), dtype=torch.bool, device=reference.device)
+        query_owners = torch.zeros(
             query_nodes.numel(), dtype=torch.long, device=reference.device
         )
-        valid = torch.zeros(
-            query_nodes.numel(), dtype=torch.bool, device=reference.device
-        )
+    elif index.dense_owners is not None:
+        in_bounds = (query_nodes >= 0) & (query_nodes < index.dense_owners.numel())
+        safe_nodes = query_nodes.clamp(0, index.dense_owners.numel() - 1).long()
+        query_owners = index.dense_owners[safe_nodes].long()
+        valid = in_bounds & (query_owners >= 0)
     else:
         positions = torch.searchsorted(index.nodes, query_nodes)
         in_bounds = positions < index.nodes.numel()
         positions = positions.clamp_max(index.nodes.numel() - 1)
         valid = in_bounds & (index.nodes[positions] == query_nodes)
+        query_owners = index.owners[positions]
 
-    routes = _route_matrix_from_entries(
+    return _route_matrix_from_entries(
         nodes=query_nodes[valid],
-        owners=index.owners[positions[valid]],
+        owners=query_owners[valid],
         receivers=receivers[valid],
         n_gpus=n_gpus,
         reference=reference,
     )
-
-    needed_nodes = torch.zeros(
-        index.nodes.numel(), dtype=torch.bool, device=reference.device
-    )
-    if torch.any(valid):
-        needed_nodes[positions[valid]] = True
-    leftovers = [
-        TensorSet(
-            index.nodes[(index.owners == rank) & ~needed_nodes],
-            sort_now=False,
-            ensure_unique=False,
-        )
-        for rank in range(n_gpus)
-    ]
-    return leftovers, routes
 
 
 def compute_p2p_transfer_plan(
@@ -383,27 +400,73 @@ def _deduplicate_updates_with_index(
         )
         return [_empty_set(reference) for _ in range(n_gpus)], empty, index
 
-    order = torch.argsort(nodes, stable=True)
-    sorted_nodes = nodes[order]
-    sorted_owners = owners[order]
-    if prefer_higher_rank:
-        selected = torch.cat(
-            (
-                sorted_nodes[1:] != sorted_nodes[:-1],
-                torch.ones(1, dtype=torch.bool, device=reference.device),
+    max_node = max(int(update.data[-1]) for update in updates if update.data.numel())
+    dense_span = max_node + 1
+    use_dense = (
+        max_node >= 0
+        and dense_span <= _DENSE_OWNER_MAX_NODES
+        and dense_span <= max(65_536, nodes.numel() * _DENSE_OWNER_MAX_SPARSITY)
+    )
+
+    dense_owners: torch.Tensor | None = None
+    dense_owners_numpy: np.ndarray | None = None
+    if use_dense:
+        rank_order = range(n_gpus) if prefer_higher_rank else range(n_gpus - 1, -1, -1)
+        if (
+            reference.device.type == "cpu"
+            and nodes.numel() <= _NUMPY_OWNER_MAX_INPUTS
+        ):
+            dense_owners_numpy = np.full(dense_span, -1, dtype=np.int16)
+            for rank in rank_order:
+                update_numpy = _coerce_like(updates[rank].data, reference).numpy()
+                dense_owners_numpy[update_numpy] = rank
+            owned_nodes_numpy = np.flatnonzero(dense_owners_numpy >= 0).astype(
+                reference.numpy().dtype, copy=False
             )
-        )
+            selected_owners_numpy = dense_owners_numpy[owned_nodes_numpy].astype(
+                np.int64, copy=False
+            )
+            owned_nodes = torch.from_numpy(owned_nodes_numpy)
+            selected_owners = torch.from_numpy(selected_owners_numpy)
+        else:
+            dense_owners = torch.full(
+                (dense_span,), -1, dtype=torch.int16, device=reference.device
+            )
+            for rank in rank_order:
+                update_tensor = _coerce_like(updates[rank].data, reference)
+                dense_owners[update_tensor.long()] = rank
+            owned_nodes = (
+                torch.nonzero(dense_owners >= 0, as_tuple=False)
+                .flatten()
+                .to(reference.dtype)
+            )
+            selected_owners = dense_owners[owned_nodes.long()].long()
     else:
-        selected = torch.cat(
-            (
-                torch.ones(1, dtype=torch.bool, device=reference.device),
-                sorted_nodes[1:] != sorted_nodes[:-1],
+        order = torch.argsort(nodes, stable=True)
+        sorted_nodes = nodes[order]
+        sorted_owners = owners[order]
+        if prefer_higher_rank:
+            selected = torch.cat(
+                (
+                    sorted_nodes[1:] != sorted_nodes[:-1],
+                    torch.ones(1, dtype=torch.bool, device=reference.device),
+                )
             )
-        )
-    owned_nodes = sorted_nodes[selected]
-    selected_owners = sorted_owners[selected]
+        else:
+            selected = torch.cat(
+                (
+                    torch.ones(1, dtype=torch.bool, device=reference.device),
+                    sorted_nodes[1:] != sorted_nodes[:-1],
+                )
+            )
+        owned_nodes = sorted_nodes[selected]
+        selected_owners = sorted_owners[selected]
     owned_index = _OwnedNodeIndex(
-        nodes=owned_nodes, owners=selected_owners, n_gpus=n_gpus
+        nodes=owned_nodes,
+        owners=selected_owners,
+        n_gpus=n_gpus,
+        dense_owners=dense_owners,
+        dense_owners_numpy=dense_owners_numpy,
     )
     owned = [
         TensorSet(
@@ -587,9 +650,7 @@ class DynamicPlanner(ThreadBase):
             next_all_update = next_all_update | update
 
         # 3. Fresh P2P: send this batch's updates to GPUs that need them next batch.
-        _, fresh_p2p = _compute_transfer_plan_from_owned_index(
-            next_all_list, update_ownership
-        )
+        fresh_p2p = _route_from_owned_index(next_all_list, update_ownership)
 
         # 4. Writeback policy:
         #    - Shared-memory direct-fetch mode must persist every owned update now,
@@ -676,9 +737,7 @@ class NeighborhoodDynamicPlanner(DynamicPlanner):
 
         # 2. Fresh P2P: send this batch's updates to GPUs that need them next batch.
         # next_box_fetch_list = nodes that need mailbox reads in the next batch
-        _, p2p = _compute_transfer_plan_from_owned_index(
-            next_box_fetch_list, update_ownership
-        )
+        p2p = _route_from_owned_index(next_box_fetch_list, update_ownership)
 
         # 3. Writeback all updated nodes to keep ring buffer state consistent on CPU.
         writeback_list = deduplicate_update_list
