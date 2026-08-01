@@ -38,6 +38,11 @@ stable_mode: false
 # first-touch storage placement. GPUs spanning NUMA nodes are always localized.
 # Use "off" to disable placement or a node ID to bind every local rank there.
 numa_policy: auto # auto | off | NUMA node ID
+# auto assigns each worker at most 32 threads from its GPU-local physical-core
+# budget; the host is resolved separately. Use "inherit" to leave OMP/MKL
+# untouched, or a positive integer for a fixed default. Explicit environment
+# values always win.
+cpu_threads: auto # auto | inherit | positive integer
 reset_eval_neg_sampler_each_epoch: false
 share_neg_sampler_across_splits: false
 normalize_event_time: false

@@ -29,11 +29,6 @@ supported. Shell exports override `.env.local`.
 
 Run TGN with two GPU workers and one host rank:
 
-```bash
-CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --nproc_per_node=3 run.py \
-  model=tgn dataset=LASTFM
-```
-
 In general, `nproc_per_node = number of GPU workers + 1`.
 
 ## Datasets

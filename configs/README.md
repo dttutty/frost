@@ -34,6 +34,8 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | `n_neg` | `1` | Number of negative samples per positive edge. Propagates into the negative sampler and related components. |
 | `eval_metric` | `ap` | Evaluation, checkpoint-selection, logging, and early-stopping metric. Supported values are `ap` and `mrr`; AP remains the default. |
 | `ring_buf_size` | `64` | Number of shared-memory ring-buffer slots per worker GPU. |
+| `numa_policy` | `auto` | Topology-aware CPU and shared-memory placement. Use `off` to disable it or a NUMA node ID to bind every local rank there. |
+| `cpu_threads` | `auto` | OMP/MKL thread policy. Automatic workers receive at most 32 threads from their GPU-local physical-core budget; the host is resolved separately. Use `inherit` or a positive integer to override. |
 | `if_carry_over_route` | `false` | Allows planner fallback to stale leftovers when next-batch needs cannot be fully satisfied. |
 | `compile` | `false` | Enables `torch.compile` for the assembled worker model. |
 | `compute.tf32` | `false` | Enables TF32 matmul and cuDNN behavior globally. |
@@ -75,6 +77,7 @@ The canonical definitions and cross-framework comparison rules live in
 - `macro_batch_size`, `n_neg`, `model.neighborhood.fanout`, the model layout contract, and `ring_buf_size` determine ring-buffer capacity and pipeline depth.
 - The runtime neighborhood sampler is configured under `ngh_sampler`. In particular, `ngh_sampler.strategy` selects `uniform`, `recent`, or `time_interval_aware`, and `ngh_sampler.time_scaling_factor` is consumed by the `time_interval_aware` sampler.
 - GPU placement is auto-detected from `CUDA_VISIBLE_DEVICES` plus `nvidia-smi topo -m`. The planner distinguishes three levels when available: NVLink peers, same-NUMA peers, and cross-NUMA peers.
+- `cpu_threads=auto` divides each NUMA node's physical cores among the GPU workers attached to that node, caps each worker at 32 threads, and resolves the host independently. Explicit `OMP_NUM_THREADS` or `MKL_NUM_THREADS` values take precedence per variable.
 - `edim` is inferred from the materialized edge-feature file or the registered raw dataset source and combines with `d_mem` / `boxsize` to determine mailbox dimensionality: `d_mail = 2 * d_mem + edim`.
 - `model.state.mail_combine` controls mailbox aggregation for memory models. Supported values are `last` and `mean`.
 
@@ -101,13 +104,6 @@ With the official tgbl-wiki-v2 files under
 
 ```bash
 uv run frost-data fetch-tgb tgbl-wiki
-```
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --nproc_per_node=3 run.py \
-  model=tgn dataset=TGBL_WIKI \
-  neg_sampler=rnd_dst_then_tgb_wiki eval_metric=mrr \
-  macro_batch_size=4096 eval_macro_batch_size=128
 ```
 
 Training still uses one random negative per positive. Only validation and test

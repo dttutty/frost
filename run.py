@@ -25,6 +25,7 @@ def main(cfg: DictConfig):
     from frost.data.paths import static_features_present_on_disk
     from frost.launch.affinity import (
         configure_process_affinity,
+        configure_process_threads,
         resolve_numa_runtime_plan,
     )
 
@@ -52,8 +53,16 @@ def main(cfg: DictConfig):
         cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
         apply_auto_worker=numa_runtime.localize_workers,
     )
+    threading = configure_process_threads(
+        cfg.get("cpu_threads", "auto"),
+        n_gpu=n_gpu,
+        local_rank=local_rank,
+        numa_policy=numa_policy,
+        cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+    )
     if local_rank == 0 or local_rank == local_world_size - 1:
         print(affinity.describe())
+    print(f"CPU threading rank={local_rank}: {threading.describe()}")
 
     applied = _apply_stable_mode_env(cfg)
     if applied:

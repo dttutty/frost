@@ -7,6 +7,7 @@ import ctypes.util
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import MutableMapping
 
 from frost.launch.gpu_topology import detect_visible_gpu_numa_nodes
 
@@ -46,6 +47,32 @@ class NumaRuntimePlan:
     reason: str
 
 
+@dataclass(frozen=True)
+class ThreadingStatus:
+    """Resolved CPU thread-pool environment for one local rank."""
+
+    target_threads: int | None
+    omp_threads: str | None
+    mkl_threads: str | None
+    omp_source: str
+    mkl_source: str
+    reason: str
+
+    def describe(self) -> str:
+        target = "inherit" if self.target_threads is None else str(self.target_threads)
+        return (
+            f"CPU threading: target={target}, "
+            f"OMP_NUM_THREADS={self.omp_threads or 'unset'} ({self.omp_source}), "
+            f"MKL_NUM_THREADS={self.mkl_threads or 'unset'} ({self.mkl_source}); "
+            f"{self.reason}"
+        )
+
+
+THREAD_ENV_KEYS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS")
+AUTO_THREAD_ENV_MARKER = "FROST_AUTO_THREAD_ENV"
+DEFAULT_MAX_AUTO_THREADS = 32
+
+
 def parse_cpu_list(value: str) -> set[int]:
     """Parse Linux cpulist syntax such as ``0-3,8,10-11``."""
     cpus: set[int] = set()
@@ -64,6 +91,244 @@ def parse_cpu_list(value: str) -> set[int]:
     if not cpus:
         raise ValueError("CPU list is empty.")
     return cpus
+
+
+def mark_auto_thread_environment(
+    environ: MutableMapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Mark thread variables that were absent before ``torchrun`` starts.
+
+    ``torch.distributed.run`` otherwise injects ``OMP_NUM_THREADS=1`` before
+    the child executes :mod:`run`, which makes that launcher default
+    indistinguishable from a user override.  The maintained ``frost-train``
+    entry point calls this helper in the parent.  A temporary value suppresses
+    torchrun's warning; each child replaces marked variables with its
+    role-aware value before importing Torch.
+    """
+    target = os.environ if environ is None else environ
+    managed = tuple(key for key in THREAD_ENV_KEYS if key not in target)
+    for key in managed:
+        target[key] = "1"
+    if managed:
+        target[AUTO_THREAD_ENV_MARKER] = ",".join(managed)
+    else:
+        target.pop(AUTO_THREAD_ENV_MARKER, None)
+    return managed
+
+
+def _marked_auto_thread_variables(
+    environ: MutableMapping[str, str],
+) -> set[str]:
+    raw = environ.get(AUTO_THREAD_ENV_MARKER, "")
+    return {
+        value.strip()
+        for value in raw.split(",")
+        if value.strip() in THREAD_ENV_KEYS
+    }
+
+
+def _read_node_cpus(node: int, *, node_sysfs_root: Path) -> set[int] | None:
+    try:
+        return parse_cpu_list(
+            (node_sysfs_root / f"node{node}" / "cpulist").read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, ValueError):
+        return None
+
+
+def count_physical_cores(
+    cpus: set[int],
+    *,
+    cpu_sysfs_root: Path = Path("/sys/devices/system/cpu"),
+) -> tuple[int, bool]:
+    """Count physical cores in a logical CPU set using Linux topology IDs.
+
+    The boolean reports whether every CPU had readable topology.  Falling back
+    to logical CPUs keeps launch functional on restricted containers, while
+    the status reason makes the less conservative estimate visible.
+    """
+    if not cpus:
+        return 0, True
+    physical: set[tuple[int, int]] = set()
+    for cpu in cpus:
+        topology = cpu_sysfs_root / f"cpu{cpu}" / "topology"
+        try:
+            package = int(
+                (topology / "physical_package_id").read_text(encoding="utf-8")
+            )
+            core = int((topology / "core_id").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return len(cpus), False
+        physical.add((package, core))
+    return len(physical), True
+
+
+def _parse_thread_policy(policy: str | int) -> int | None:
+    normalized = str(policy).strip().lower()
+    if normalized == "auto":
+        return None
+    if normalized in {"inherit", "off", "none"}:
+        return 0
+    try:
+        threads = int(normalized)
+    except ValueError as exc:
+        raise ValueError(
+            "cpu_threads must be 'auto', 'inherit', or a positive integer."
+        ) from exc
+    if threads < 1:
+        raise ValueError("cpu_threads must be a positive integer.")
+    return threads
+
+
+def resolve_auto_process_threads(
+    *,
+    n_gpu: int,
+    local_rank: int,
+    numa_policy: str | int,
+    cuda_visible_devices: str | None,
+    max_threads: int = DEFAULT_MAX_AUTO_THREADS,
+    node_sysfs_root: Path = Path("/sys/devices/system/node"),
+    cpu_sysfs_root: Path = Path("/sys/devices/system/cpu"),
+) -> tuple[int, str]:
+    """Choose a topology-aware thread count for one host or GPU rank."""
+    if n_gpu < 1:
+        raise ValueError("n_gpu must be positive when resolving CPU threads.")
+    if not 0 <= local_rank <= n_gpu:
+        raise ValueError(f"local_rank must be in 0..{n_gpu}, got {local_rank}.")
+    if max_threads < 1:
+        raise ValueError("max_threads must be positive.")
+
+    allowed = (
+        set(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else set(range(os.cpu_count() or 1))
+    )
+    if local_rank == n_gpu:
+        physical, exact = count_physical_cores(
+            allowed, cpu_sysfs_root=cpu_sysfs_root
+        )
+        threads = max(1, min(max_threads, physical))
+        qualifier = "physical" if exact else "logical fallback"
+        return threads, f"host rank uses up to {max_threads} of {physical} {qualifier} cores"
+
+    normalized_numa = str(numa_policy).strip().lower()
+    explicit_node: int | None = None
+    if normalized_numa not in {"auto", "off", "none", "false"}:
+        try:
+            explicit_node = int(normalized_numa)
+        except ValueError:
+            explicit_node = None
+
+    gpu_nodes = detect_visible_gpu_numa_nodes(n_gpu, cuda_visible_devices)
+    node = explicit_node
+    workers_on_node = n_gpu
+    if node is None and len(gpu_nodes) == n_gpu:
+        candidate = gpu_nodes[local_rank]
+        if candidate is not None and candidate >= 0:
+            node = int(candidate)
+            workers_on_node = sum(value == candidate for value in gpu_nodes)
+    elif node is not None:
+        workers_on_node = n_gpu
+
+    candidate_cpus = allowed
+    if node is not None:
+        node_cpus = _read_node_cpus(node, node_sysfs_root=node_sysfs_root)
+        if node_cpus is not None and node_cpus & allowed:
+            candidate_cpus = node_cpus & allowed
+        else:
+            node = None
+            workers_on_node = n_gpu
+
+    physical, exact = count_physical_cores(
+        candidate_cpus, cpu_sysfs_root=cpu_sysfs_root
+    )
+    threads = max(1, min(max_threads, physical // max(1, workers_on_node)))
+    qualifier = "physical" if exact else "logical fallback"
+    location = f"NUMA node {node}" if node is not None else "allowed CPU set"
+    return (
+        threads,
+        f"GPU worker shares {physical} {qualifier} cores on {location} with "
+        f"{workers_on_node} worker(s), capped at {max_threads}",
+    )
+
+
+def resolve_common_worker_threads(
+    *,
+    n_gpu: int,
+    numa_policy: str | int = "auto",
+    cuda_visible_devices: str | None = None,
+    max_threads: int = DEFAULT_MAX_AUTO_THREADS,
+    node_sysfs_root: Path = Path("/sys/devices/system/node"),
+    cpu_sysfs_root: Path = Path("/sys/devices/system/cpu"),
+) -> int:
+    """Return one conservative automatic value usable by external runtimes."""
+    return min(
+        resolve_auto_process_threads(
+            n_gpu=n_gpu,
+            local_rank=rank,
+            numa_policy=numa_policy,
+            cuda_visible_devices=cuda_visible_devices,
+            max_threads=max_threads,
+            node_sysfs_root=node_sysfs_root,
+            cpu_sysfs_root=cpu_sysfs_root,
+        )[0]
+        for rank in range(n_gpu)
+    )
+
+
+def configure_process_threads(
+    policy: str | int,
+    *,
+    n_gpu: int,
+    local_rank: int,
+    numa_policy: str | int,
+    cuda_visible_devices: str | None,
+    environ: MutableMapping[str, str] | None = None,
+    max_threads: int = DEFAULT_MAX_AUTO_THREADS,
+    node_sysfs_root: Path = Path("/sys/devices/system/node"),
+    cpu_sysfs_root: Path = Path("/sys/devices/system/cpu"),
+) -> ThreadingStatus:
+    """Apply role-aware OMP/MKL defaults without replacing user values."""
+    target_env = os.environ if environ is None else environ
+    managed = _marked_auto_thread_variables(target_env)
+    parsed = _parse_thread_policy(policy)
+    if parsed == 0:
+        target_threads = None
+        reason = "cpu_threads=inherit leaves thread-pool environment unchanged"
+    elif parsed is not None:
+        target_threads = parsed
+        reason = f"explicit cpu_threads={parsed}"
+    else:
+        target_threads, reason = resolve_auto_process_threads(
+            n_gpu=n_gpu,
+            local_rank=local_rank,
+            numa_policy=numa_policy,
+            cuda_visible_devices=cuda_visible_devices,
+            max_threads=max_threads,
+            node_sysfs_root=node_sysfs_root,
+            cpu_sysfs_root=cpu_sysfs_root,
+        )
+
+    sources: dict[str, str] = {}
+    for key in THREAD_ENV_KEYS:
+        if key in target_env and key not in managed:
+            sources[key] = "environment"
+        elif target_threads is None:
+            sources[key] = "inherited" if key in target_env else "unset"
+        else:
+            target_env[key] = str(target_threads)
+            sources[key] = "auto" if parsed is None else "config"
+    target_env.pop(AUTO_THREAD_ENV_MARKER, None)
+    return ThreadingStatus(
+        target_threads=target_threads,
+        omp_threads=target_env.get("OMP_NUM_THREADS"),
+        mkl_threads=target_env.get("MKL_NUM_THREADS"),
+        omp_source=sources["OMP_NUM_THREADS"],
+        mkl_source=sources["MKL_NUM_THREADS"],
+        reason=reason,
+    )
 
 
 def resolve_numa_node(
