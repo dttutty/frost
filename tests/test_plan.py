@@ -167,6 +167,19 @@ class TestPlanSet:
         assert ps_moved.box_plan is None
         assert ps_moved.nfeat_plan is None
 
+    def test_to_device_preserves_shared_dynamic_plan(self):
+        shared_plan = DynamicPlan(
+            p2p=[_ts([1])],
+            fetch=_ts([2]),
+            recv_counts=np.array([1]),
+            send_counts=np.array([1]),
+        )
+        ps = PlanSet(mem_plan=shared_plan, box_plan=shared_plan)
+
+        ps_moved = ps.to(torch.device("cpu"))
+
+        assert ps_moved.mem_plan is ps_moved.box_plan
+
     def test_repr(self):
         ps = PlanSet()
         r = repr(ps)

@@ -36,13 +36,36 @@ class MemAndBox:
         assert self.box is not None
         return self.mem.is_sorted and self.box.is_sorted
 
-    def sort_mem_and_box(self) -> MemAndBox:
+    def sort_mem_and_box(self, *, shared_nid_order: bool = False) -> MemAndBox:
         """Sort both mem and box entries by NID in-place and return self.
 
         Returns:
             The same ``MemAndBox`` instance with both entries sorted.
         """
         if self.is_mem_box_sorted:
+            return self
+
+        if shared_nid_order and not self.mem.is_sorted and not self.box.is_sorted:
+            if self.mem.nid.shape != self.box.nid.shape:
+                raise RuntimeError(
+                    "Shared memory/mailbox plan produced mismatched delta shapes."
+                )
+            sorted_indices = torch.argsort(self.mem.nid)
+            sorted_nids = self.mem.nid[sorted_indices]
+            self.mem = MemEntry(
+                nid=sorted_nids,
+                data=self.mem.data[sorted_indices],
+                ts=self.mem.ts[sorted_indices],
+                is_sorted=True,
+                is_unique=self.mem.is_unique,
+            )
+            self.box = BoxEntry(
+                nid=sorted_nids,
+                data=self.box.data[sorted_indices],
+                ts=self.box.ts[sorted_indices],
+                is_sorted=True,
+                is_unique=self.box.is_unique,
+            )
             return self
 
         if self.mem is not None:
@@ -52,6 +75,24 @@ class MemAndBox:
             self.box = self.box.sort_by_nid()
 
         return self
+
+
+@dataclass(frozen=True, kw_only=True)
+class _AssemblyLookup:
+    """Precomputed graph/source positions for one dynamic plan."""
+
+    shared_graph_positions: torch.Tensor
+    shared_source_positions: torch.Tensor
+    delta_graph_positions: torch.Tensor
+    delta_nids: torch.Tensor
+
+
+@dataclass(frozen=True, kw_only=True)
+class DynamicAssemblyLayout:
+    """Reusable memory/mailbox lookups for one assembled graph."""
+
+    mem: _AssemblyLookup
+    box: _AssemblyLookup
 
 
 class DynamicStateAssemblerMixin:
@@ -87,15 +128,64 @@ class DynamicStateAssemblerMixin:
         root_mask[:n_root] = valid_mask[:n_root]
         return root_mask
 
+    def _build_assembly_lookup(
+        self,
+        plan: DynamicPlan | None,
+        required_positions: torch.Tensor,
+        required_nids: torch.Tensor,
+    ) -> _AssemblyLookup:
+        if plan is None or plan.fetch_on_gpu is None or plan.fetch_on_gpu.numel() == 0:
+            empty = required_positions.new_empty(0)
+            return _AssemblyLookup(
+                shared_graph_positions=empty,
+                shared_source_positions=empty,
+                delta_graph_positions=required_positions,
+                delta_nids=required_nids,
+            )
+
+        shared_nids = plan.fetch_on_gpu
+        positions = torch.searchsorted(shared_nids, required_nids)
+        in_bounds = positions < shared_nids.numel()
+        safe_positions = positions.clamp_max(shared_nids.numel() - 1)
+        found = in_bounds & (shared_nids[safe_positions] == required_nids)
+        return _AssemblyLookup(
+            shared_graph_positions=required_positions[found],
+            shared_source_positions=safe_positions[found],
+            delta_graph_positions=required_positions[~found],
+            delta_nids=required_nids[~found],
+        )
+
+    def _build_assembly_layout(
+        self,
+        graph: FlatGraph,
+        mem_plan: DynamicPlan | None,
+        box_plan: DynamicPlan | None,
+        n_src: int,
+        n_neg: int,
+    ) -> DynamicAssemblyLayout:
+        required_mask = self._strict_assembly_mask(graph, n_src, n_neg)
+        required_positions = torch.nonzero(required_mask, as_tuple=False).squeeze(-1)
+        required_nids = graph.nid[required_positions]
+        mem_lookup = self._build_assembly_lookup(
+            mem_plan, required_positions, required_nids
+        )
+        box_lookup = (
+            mem_lookup
+            if box_plan is mem_plan
+            else self._build_assembly_lookup(
+                box_plan, required_positions, required_nids
+            )
+        )
+        return DynamicAssemblyLayout(mem=mem_lookup, box=box_lookup)
+
     def _fill_from_shared(
         self,
         plan: DynamicPlan | None,
+        lookup: _AssemblyLookup,
         shared_data: torch.Tensor,
         shared_ts: torch.Tensor,
         target_data: torch.Tensor,
         target_ts: torch.Tensor,
-        graph: FlatGraph,
-        valid_mask: torch.Tensor,
     ) -> None:
         """Fetch data from shared memory and scatter matched entries into target tensors.
 
@@ -128,31 +218,15 @@ class DynamicStateAssemblerMixin:
             f"shared_data and shared_ts must have the same first dimension, "
             f"got {shared_data.shape[0]} and {shared_ts.shape[0]}"
         )
-        assert valid_mask.dtype == torch.bool, "valid_mask must be a bool tensor"
-
         unique_data_gpu = shared_data[fetch_nids].to(self.device)
         unique_ts_gpu = shared_ts[fetch_nids].to(self.device)
-        unique_nids_gpu = fetch_on_gpu
 
-        query_nids = graph.nid[valid_mask]
-        if query_nids.numel() == 0:
-            return
-
-        idx = torch.searchsorted(unique_nids_gpu, query_nids)
-        in_bounds = idx < unique_nids_gpu.numel()
-        safe_idx = idx.clamp_max(unique_nids_gpu.numel() - 1)
-        found_mask = in_bounds & (unique_nids_gpu[safe_idx] == query_nids)
-
-        if not torch.any(found_mask):
-            return
-
-        global_positions = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)[
-            found_mask
+        target_data[lookup.shared_graph_positions] = unique_data_gpu[
+            lookup.shared_source_positions
         ]
-        local_positions = safe_idx[found_mask]
-
-        target_data[global_positions] = unique_data_gpu[local_positions]
-        target_ts[global_positions] = unique_ts_gpu[local_positions]
+        target_ts[lookup.shared_graph_positions] = unique_ts_gpu[
+            lookup.shared_source_positions
+        ]
 
     def _fill_from_shm(
         self,
@@ -192,35 +266,35 @@ class DynamicStateAssemblerMixin:
         delta_source,
         target_data: torch.Tensor,
         target_ts: torch.Tensor,
-        graph: FlatGraph,
-        valid_mask: torch.Tensor,
+        lookup: _AssemblyLookup,
         kind: Literal["mem", "box"],
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
         """Fill target tensors with delta data received from P2P network strictly."""
         if delta_source is None:
             return None, None
 
-        assert valid_mask.dtype == torch.bool, "valid_mask must be a bool tensor"
         assert delta_source.nid.dim() == 1, "delta_source.nid must be a 1D tensor"
 
+        if lookup.delta_nids.numel() == 0:
+            return None, None
         if delta_source.nid.numel() == 0:
-            return None, None
-
-        valid_nids = graph.nid[valid_mask]
-        if valid_nids.numel() == 0:
-            return None, None
-
-        pos = torch.searchsorted(delta_source.nid, valid_nids)
-        in_bound = pos < delta_source.nid.numel()
-        pos_safe = pos.clamp(max=delta_source.nid.numel() - 1)
-        found = in_bound & (delta_source.nid[pos_safe] == valid_nids)
-        if not bool(found.all()):
-            missing = valid_nids[~found]
             raise RuntimeError(
-                f"Delta source is missing {missing.numel()} planned node ids"
+                f"Delta {kind} source is empty for {lookup.delta_nids.numel()} planned nodes"
             )
 
-        global_positions = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
+        pos = torch.searchsorted(delta_source.nid, lookup.delta_nids)
+        in_bound = pos < delta_source.nid.numel()
+        pos_safe = pos.clamp(max=delta_source.nid.numel() - 1)
+        found = in_bound & (delta_source.nid[pos_safe] == lookup.delta_nids)
+        if found.device.type == "cuda":
+            torch._assert_async(found.all())
+        elif not bool(found.all()):
+            missing = lookup.delta_nids[~found]
+            raise RuntimeError(
+                f"Delta {kind} source is missing {missing.numel()} planned node ids"
+            )
+
+        global_positions = lookup.delta_graph_positions
         local_positions = pos_safe
 
         target_data[global_positions] = delta_source.data[local_positions]
@@ -235,7 +309,7 @@ class DynamicStateAssemblerMixin:
         box_plan: DynamicPlan | None,
         n_src: int,
         n_neg: int | None = None,
-    ) -> None:
+    ) -> DynamicAssemblyLayout:
         """Step 1: Initialize tensors and fill local shared memory data."""
         num_nodes = graph.nid.shape[0]
 
@@ -263,7 +337,9 @@ class DynamicStateAssemblerMixin:
             )
 
         batch_n_neg = self.n_neg if n_neg is None else n_neg
-        valid_mask = self._strict_assembly_mask(graph, n_src, batch_n_neg)
+        layout = self._build_assembly_layout(
+            graph, mem_plan, box_plan, n_src, batch_n_neg
+        )
 
         # Fill local unique data immediately
         if mem_plan is not None:
@@ -271,24 +347,22 @@ class DynamicStateAssemblerMixin:
             assert graph.mem_ts is not None
             self._fill_from_shared(
                 mem_plan,
+                layout.mem,
                 self.shared.mem,
                 self.shared.mem_ts,
                 graph.mem,
                 graph.mem_ts,
-                graph,
-                valid_mask,
             )
         if box_plan is not None:
             assert graph.box is not None
             assert graph.box_ts is not None
             self._fill_from_shared(
                 box_plan,
+                layout.box,
                 self.shared.box,
                 self.shared.box_ts,
                 graph.box,
                 graph.box_ts,
-                graph,
-                valid_mask,
             )
 
             # Neighborhood-mail optimization: pre-fill box for delta nodes.
@@ -297,25 +371,26 @@ class DynamicStateAssemblerMixin:
             # Pre-load them here (async H2D) instead of synchronous CPU→GPU
             # inside the delta path.
             if self.boxsize > 1:
-                box_delta_mask = self._build_delta_mask(graph, box_plan, valid_mask)
-                delta_nids_gpu = graph.nid[box_delta_mask]
+                delta_positions = layout.box.delta_graph_positions
+                delta_nids_gpu = layout.box.delta_nids
                 if delta_nids_gpu.numel() > 0:
                     delta_nids_cpu = delta_nids_gpu.cpu().long()
                     # Batch H2D: old ring-buffer contents
-                    graph.box[box_delta_mask] = self.shared.box[delta_nids_cpu].to(
+                    graph.box[delta_positions] = self.shared.box[delta_nids_cpu].to(
                         self.device
                     )
-                    graph.box_ts[box_delta_mask] = self.shared.box_ts[
+                    graph.box_ts[delta_positions] = self.shared.box_ts[
                         delta_nids_cpu
                     ].to(self.device)
                     # Cache ring-buffer write positions on GPU for later
                     graph._box_pos_delta = self.shared.box_pos[delta_nids_cpu].to(
                         self.device
                     )
-                    graph._box_delta_mask = box_delta_mask
+                    graph._box_delta_positions = delta_positions
                 else:
                     graph._box_pos_delta = None
-                    graph._box_delta_mask = None
+                    graph._box_delta_positions = None
+        return layout
 
     def _fill_all_required_from_shm(
         self, graph: FlatGraph, n_src: int, n_neg: int | None = None
@@ -341,58 +416,13 @@ class DynamicStateAssemblerMixin:
             strict_mask,
         )
 
-    def _build_delta_mask(
-        self,
-        graph: FlatGraph,
-        plan: DynamicPlan | None,
-        required_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Compute a boolean mask for positions that must be filled from the P2P delta.
-
-        A position requires delta data when:
-        * it is marked in ``required_mask`` (or ``graph.nid[i] != -1`` by default), AND
-        * the NID is not already covered by the local shared fetch.
-
-        Args:
-            graph: The current FlatGraph whose ``nid`` tensor is queried.
-            plan: The DynamicPlan holding locally fetched NIDs; if ``None`` all
-                valid positions are considered remote.
-
-        Returns:
-            Boolean tensor of shape ``[graph.nid.shape[0]]`` where ``True``
-            means the position must be filled from the delta.
-        """
-        graph_nid = graph.nid
-        assert graph_nid.dim() == 1, "graph.nid must be 1D"
-
-        base_mask = graph_nid != -1 if required_mask is None else required_mask
-        if not torch.any(base_mask):
-            return base_mask
-
-        if plan is None or plan.fetch_on_gpu is None or plan.fetch_on_gpu.numel() == 0:
-            return base_mask
-
-        shared_nids = plan.fetch_on_gpu
-        assert shared_nids.dim() == 1, "plan.fetch_on_gpu must be 1D"
-
-        query_nids = graph_nid[base_mask]
-        pos = torch.searchsorted(shared_nids, query_nids)
-
-        in_bound = pos < shared_nids.numel()
-        pos_safe = pos.clamp(max=shared_nids.numel() - 1)
-        in_shared = in_bound & (shared_nids[pos_safe] == query_nids)
-
-        delta_mask = base_mask.clone()
-        delta_mask[torch.nonzero(base_mask, as_tuple=False).squeeze(-1)] = ~in_shared
-        return delta_mask
-
     def _apply_box_mail_delta(
         self,
         delta_box: BoxEntry,
         graph: FlatGraph,
-        box_delta_mask: torch.Tensor,
+        lookup: _AssemblyLookup,
     ) -> None:
-        """Insert P2P delta mail (boxsize=1) into pre-filled box on GPU.
+        """Insert one-slot P2P delta mail into a multi-slot box on GPU.
 
         Relies on ``prepare_shared_features`` having already loaded the old
         ring-buffer contents and ``box_pos`` for delta nodes into
@@ -402,12 +432,12 @@ class DynamicStateAssemblerMixin:
         if delta_box.nid.numel() == 0:
             return
 
-        # Use the pre-cached delta mask and box_pos from prepare_shared_features
-        cached_mask = graph._box_delta_mask
+        # Use the pre-cached graph positions and box_pos from shared preparation.
+        cached_positions = graph._box_delta_positions
         cached_pos = graph._box_pos_delta
-        if cached_mask is not None and cached_pos is not None:
+        if cached_positions is not None and cached_pos is not None:
             # Fast path: graph.box already has old ring-buffer contents.
-            valid_nids = graph.nid[cached_mask]
+            valid_nids = lookup.delta_nids
             if valid_nids.numel() == 0:
                 return
 
@@ -419,9 +449,7 @@ class DynamicStateAssemblerMixin:
             if not found_mask.any():
                 return
 
-            global_positions = torch.nonzero(cached_mask, as_tuple=False).squeeze(-1)[
-                found_mask
-            ]
+            global_positions = cached_positions[found_mask]
             local_positions = pos_safe[found_mask]
 
             # Ring-buffer write position (already on GPU)
@@ -441,7 +469,7 @@ class DynamicStateAssemblerMixin:
 
             # Clean up cached attributes
             graph._box_pos_delta = None
-            graph._box_delta_mask = None
+            graph._box_delta_positions = None
         else:
             # Fallback: pre-fill was skipped (no delta nodes).
             # Nothing to do—graph.box is already complete from plan fetch.
@@ -455,6 +483,7 @@ class DynamicStateAssemblerMixin:
         box_plan: DynamicPlan | None,
         n_src: int,
         n_neg: int | None = None,
+        layout: DynamicAssemblyLayout | None = None,
     ) -> None:
         """Step 2: Apply network delta data to positions not covered by local shared."""
         assert graph.mem is not None
@@ -463,32 +492,31 @@ class DynamicStateAssemblerMixin:
         assert graph.box_ts is not None
 
         batch_n_neg = self.n_neg if n_neg is None else n_neg
-        strict_mask = self._strict_assembly_mask(graph, n_src, batch_n_neg)
-        mem_delta_mask = self._build_delta_mask(graph, mem_plan, strict_mask)
-        box_delta_mask = self._build_delta_mask(graph, box_plan, strict_mask)
+        if layout is None:
+            layout = self._build_assembly_layout(
+                graph, mem_plan, box_plan, n_src, batch_n_neg
+            )
 
         assert delta is not None, "delta must be provided"
         global_pos, local_pos = self._fill_from_delta(
-            delta.mem, graph.mem, graph.mem_ts, graph, mem_delta_mask, kind="mem"
+            delta.mem, graph.mem, graph.mem_ts, layout.mem, kind="mem"
         )
 
         # P2P delta box now always has boxsize=1 (single mail).
         # For boxsize > 1, merge P2P mail into the full box from CPU.
         delta_box_slots = delta.box.data.shape[1] if delta.box.data.dim() == 3 else 1
         if self.boxsize > 1 and delta_box_slots == 1:
-            self._apply_box_mail_delta(delta.box, graph, box_delta_mask)
+            self._apply_box_mail_delta(delta.box, graph, layout.box)
         elif (
             global_pos is not None
             and delta.box.nid.numel() > 0
-            and torch.equal(mem_delta_mask, box_delta_mask)
-            and delta.mem.nid.numel() == delta.box.nid.numel()
-            and torch.equal(delta.mem.nid, delta.box.nid)
+            and layout.mem is layout.box
         ):
             graph.box[global_pos] = delta.box.data[local_pos]
             graph.box_ts[global_pos] = delta.box.ts[local_pos]
         else:
             self._fill_from_delta(
-                delta.box, graph.box, graph.box_ts, graph, box_delta_mask, kind="box"
+                delta.box, graph.box, graph.box_ts, layout.box, kind="box"
             )
 
     def _drain_prior_eval_writebacks(self, *, split: str) -> None:

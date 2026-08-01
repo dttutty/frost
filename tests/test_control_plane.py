@@ -104,6 +104,35 @@ def test_meta_tensor_codec_handles_absent_plans_and_mask() -> None:
     assert decoded.plan_set == PlanSet()
 
 
+def test_meta_tensor_codec_preserves_shared_dynamic_plan() -> None:
+    shared_plan = _dynamic(0)
+    shared = Meta(
+        split="train",
+        n_src=2,
+        mini_batch_idx=0,
+        flat_graph=None,
+        buf_len=6,
+        n_neg=1,
+        plan_set=PlanSet(mem_plan=shared_plan, box_plan=shared_plan),
+    )
+    distinct = Meta(
+        split="train",
+        n_src=2,
+        mini_batch_idx=0,
+        flat_graph=None,
+        buf_len=6,
+        n_neg=1,
+        plan_set=PlanSet(mem_plan=shared_plan, box_plan=_dynamic(0)),
+    )
+
+    shared_payload = encode_meta(shared, n_gpus=2)
+    decoded = decode_meta(shared_payload, n_gpus=2)
+
+    assert decoded.plan_set is not None
+    assert decoded.plan_set.mem_plan is decoded.plan_set.box_plan
+    assert shared_payload.numel() < encode_meta(distinct, n_gpus=2).numel()
+
+
 @pytest.mark.parametrize("kind", list(ControlMessageKind))
 def test_control_header_round_trip(kind: ControlMessageKind) -> None:
     payload_length = 13 if kind is ControlMessageKind.BATCH else 0
@@ -124,4 +153,4 @@ def test_sentinel_header_rejects_payload() -> None:
 def test_shared_control_capacity_covers_plans_and_mask() -> None:
     assert control_payload_capacity(
         n_gpus=4, node_capacity=100, mask_capacity=300
-    ) == 1741
+    ) == 1742

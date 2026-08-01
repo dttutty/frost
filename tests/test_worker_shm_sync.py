@@ -8,10 +8,13 @@ import torch
 from frost.models.contracts import RootExpansion
 
 from frost.datatypes.graph import FlatGraph
+from frost.datatypes.mem_mail_box.box import BoxEntry
+from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.meta import Meta
 from frost.datatypes.plan import DynamicPlan, PlanSet
 from frost.datatypes.tasks import P2PTask
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
+from frost.runtime.worker._dynamic_state import MemAndBox
 from frost.runtime.worker.p2p_syncer._p2p_comm import P2PQHandler
 from frost.shm.mem_mgr import MemBoxStore
 from frost.utils.tensor_set import TensorSet
@@ -163,6 +166,49 @@ def _make_handler() -> P2PQHandler:
 
 
 class TestDynamicAssembler:
+    def test_shared_plan_reuses_layout_and_delta_order(self):
+        store = _make_store(boxsize=1)
+        assembler = _make_assembler(store)
+        graph = _make_graph([1, 4, 2])
+        shared_plan = _make_plan([1, 2])
+
+        layout = assembler.prepare_shared_features(
+            graph, shared_plan, shared_plan, n_src=1
+        )
+        delta = MemAndBox(
+            mem=MemEntry(
+                nid=torch.tensor([4]),
+                data=torch.tensor([[40.0, 41.0]]),
+                ts=torch.tensor([4.0]),
+                is_sorted=True,
+            ),
+            box=BoxEntry(
+                nid=torch.tensor([4]),
+                data=torch.tensor([[[42.0, 43.0, 44.0]]]),
+                ts=torch.tensor([[4.0]]),
+                is_sorted=True,
+            ),
+        )
+
+        assembler.apply_delta_features(
+            graph,
+            delta,
+            shared_plan,
+            shared_plan,
+            n_src=1,
+            layout=layout,
+        )
+
+        assert layout.mem is layout.box
+        assert graph.mem is not None
+        assert graph.box is not None
+        assert graph.mem.tolist() == [
+            store.mem[1].tolist(),
+            [40.0, 41.0],
+            store.mem[2].tolist(),
+        ]
+        assert graph.box[1].tolist() == [[42.0, 43.0, 44.0]]
+
     def test_four_h2d_slots_allow_n_plus_2_to_read_stale_shared_state(self):
         store = _make_store(boxsize=1)
         assembler = _make_assembler(store)

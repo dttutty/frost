@@ -93,6 +93,15 @@ class DynamicStateCoordinator:
         plan_set = meta.plan_set
         if plan_set is None or plan_set.mem_plan is None or plan_set.box_plan is None:
             raise RuntimeError("Dynamic-state batch is missing memory/mailbox plans.")
+        if plan_set.mem_plan is plan_set.box_plan:
+            send_nids = self._union_planned_p2p_nids(plan_set.mem_plan)
+            valid = self._stale_source_mask(meta, send_nids)
+            if valid is None:
+                return None, None
+            return (
+                self._select_stale_mem_source(meta, send_nids, valid=valid),
+                self._select_stale_box_source(meta, send_nids, valid=valid),
+            )
         mem_send_nids = self._union_planned_p2p_nids(plan_set.mem_plan)
         box_send_nids = self._union_planned_p2p_nids(plan_set.box_plan)
         return (
@@ -291,8 +300,21 @@ class DynamicStateCoordinator:
         return entry
 
     @staticmethod
-    def _select_stale_mem_source(
+    def _stale_source_mask(
         meta: Meta, planned_send_nids: torch.Tensor
+    ) -> torch.Tensor | None:
+        graph = meta.flat_graph
+        if graph is None or planned_send_nids.numel() == 0:
+            return None
+        valid = (graph.nid != -1) & isin_sorted(graph.nid, planned_send_nids)
+        return valid if torch.any(valid) else None
+
+    @staticmethod
+    def _select_stale_mem_source(
+        meta: Meta,
+        planned_send_nids: torch.Tensor,
+        *,
+        valid: torch.Tensor | None = None,
     ) -> MemEntry | None:
         graph = meta.flat_graph
         if (
@@ -302,8 +324,11 @@ class DynamicStateCoordinator:
             or planned_send_nids.numel() == 0
         ):
             return None
-        valid = (graph.nid != -1) & isin_sorted(graph.nid, planned_send_nids)
-        if not torch.any(valid):
+        if valid is None:
+            valid = DynamicStateCoordinator._stale_source_mask(
+                meta, planned_send_nids
+            )
+        if valid is None:
             return None
         return keep_last(
             MemEntry(nid=graph.nid[valid], data=graph.mem[valid], ts=graph.mem_ts[valid])
@@ -311,7 +336,11 @@ class DynamicStateCoordinator:
 
     @classmethod
     def _select_stale_box_source(
-        cls, meta: Meta, planned_send_nids: torch.Tensor
+        cls,
+        meta: Meta,
+        planned_send_nids: torch.Tensor,
+        *,
+        valid: torch.Tensor | None = None,
     ) -> BoxEntry | None:
         graph = meta.flat_graph
         if (
@@ -321,8 +350,9 @@ class DynamicStateCoordinator:
             or planned_send_nids.numel() == 0
         ):
             return None
-        valid = (graph.nid != -1) & isin_sorted(graph.nid, planned_send_nids)
-        if not torch.any(valid):
+        if valid is None:
+            valid = cls._stale_source_mask(meta, planned_send_nids)
+        if valid is None:
             return None
         return cls._dedupe_box_entry(
             BoxEntry(nid=graph.nid[valid], data=graph.box[valid], ts=graph.box_ts[valid])

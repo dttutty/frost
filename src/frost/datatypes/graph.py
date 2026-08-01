@@ -48,7 +48,7 @@ class FlatGraph:
     detached_ts: Tensor | None = None
     detached_nid: Tensor | None = None
     _box_pos_delta: Tensor | None = None
-    _box_delta_mask: Tensor | None = None
+    _box_delta_positions: Tensor | None = None
 
     def to(self, device: torch.device) -> FlatGraph:
         """Return a new ``FlatGraph`` with all tensors moved to ``device``."""
@@ -75,8 +75,8 @@ class FlatGraph:
             _box_pos_delta=self._box_pos_delta.to(device)
             if self._box_pos_delta is not None
             else None,
-            _box_delta_mask=self._box_delta_mask.to(device)
-            if self._box_delta_mask is not None
+            _box_delta_positions=self._box_delta_positions.to(device)
+            if self._box_delta_positions is not None
             else None,
         )
 

@@ -21,7 +21,7 @@ class ControlMessageKind(IntEnum):
 
 
 CONTROL_HEADER_SIZE = 2
-CONTROL_CODEC_VERSION = 1
+CONTROL_CODEC_VERSION = 2
 _SPLIT_TO_CODE = {"train": 0, "val": 1, "test": 2}
 _CODE_TO_SPLIT = {value: key for key, value in _SPLIT_TO_CODE.items()}
 
@@ -180,8 +180,13 @@ def encode_meta(meta: Meta, *, n_gpus: int) -> torch.Tensor:
     else:
         encoder.scalar(meta.neg_valid_mask.numel())
         encoder.tensor(meta.neg_valid_mask)
+    shared_dynamic_plan = (
+        plan_set.mem_plan is not None and plan_set.box_plan is plan_set.mem_plan
+    )
+    encoder.scalar(int(shared_dynamic_plan))
     _encode_dynamic_plan(encoder, plan_set.mem_plan, n_gpus)
-    _encode_dynamic_plan(encoder, plan_set.box_plan, n_gpus)
+    if not shared_dynamic_plan:
+        _encode_dynamic_plan(encoder, plan_set.box_plan, n_gpus)
     _encode_static_plan(encoder, plan_set.nfeat_plan)
     return encoder.finish()
 
@@ -208,9 +213,18 @@ def decode_meta(payload: torch.Tensor, *, n_gpus: int) -> Meta:
     neg_valid_mask = (
         None if mask_length < 0 else decoder.tensor(mask_length).to(torch.bool)
     )
+    shared_dynamic_plan = bool(decoder.scalar())
+    mem_plan = _decode_dynamic_plan(decoder, n_gpus)
+    if shared_dynamic_plan and mem_plan is None:
+        raise ValueError("Shared dynamic plan cannot be absent.")
+    box_plan = (
+        mem_plan
+        if shared_dynamic_plan
+        else _decode_dynamic_plan(decoder, n_gpus)
+    )
     plan_set = PlanSet(
-        mem_plan=_decode_dynamic_plan(decoder, n_gpus),
-        box_plan=_decode_dynamic_plan(decoder, n_gpus),
+        mem_plan=mem_plan,
+        box_plan=box_plan,
         nfeat_plan=_decode_static_plan(decoder),
     )
     if decoder.offset != payload.numel():

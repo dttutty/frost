@@ -22,7 +22,7 @@ def control_payload_capacity(
     # Each of memory and mailbox may contain n_gpus P2P node lists plus fetch
     # and writeback lists. Static features add cache/fetch, while the negative
     # mask is bounded independently by the sampled graph layout capacity.
-    scalar_fields = 17 + 6 * n_gpus
+    scalar_fields = 18 + 6 * n_gpus
     return (
         scalar_fields
         + (2 * n_gpus + 6) * node_capacity

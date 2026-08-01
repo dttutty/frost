@@ -139,7 +139,7 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
             h2d_wait_end = time.perf_counter()
 
             prepare_start = time.perf_counter()
-            self.prepare_shared_features(
+            assembly_layout = self.prepare_shared_features(
                 graph=meta.flat_graph,
                 mem_plan=meta.plan_set.mem_plan,
                 box_plan=meta.plan_set.box_plan,
@@ -196,7 +196,12 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
                     nid=box.recv_nid, data=box_data, ts=box.ts2recv
                 )
                 delta = MemAndBox(mem=delta_mem, box=delta_box)
-                delta = delta.sort_mem_and_box()
+                shared_dynamic_plan = (
+                    meta.plan_set.mem_plan is meta.plan_set.box_plan
+                )
+                delta = delta.sort_mem_and_box(
+                    shared_nid_order=shared_dynamic_plan
+                )
 
                 # ==========================================================
                 # Apply the received delta to the already partially-filled graph
@@ -209,6 +214,7 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
                     box_plan=meta.plan_set.box_plan,
                     n_src=meta.n_src,
                     n_neg=meta.n_neg,
+                    layout=assembly_layout,
                 )
                 apply_delta_end = time.perf_counter()
             else:

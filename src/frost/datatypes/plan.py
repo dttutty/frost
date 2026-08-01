@@ -23,9 +23,17 @@ class PlanSet:
 
     def to(self, device: torch.device) -> PlanSet:
         """Recursively move all child plans to the target device."""
+        mem_plan = self.mem_plan.to(device) if self.mem_plan is not None else None
+        box_plan = (
+            mem_plan
+            if self.box_plan is self.mem_plan
+            else self.box_plan.to(device)
+            if self.box_plan is not None
+            else None
+        )
         return PlanSet(
-            mem_plan=self.mem_plan.to(device) if self.mem_plan is not None else None,
-            box_plan=self.box_plan.to(device) if self.box_plan is not None else None,
+            mem_plan=mem_plan,
+            box_plan=box_plan,
             nfeat_plan=self.nfeat_plan.to(device)
             if self.nfeat_plan is not None
             else None,
