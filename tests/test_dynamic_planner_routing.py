@@ -11,6 +11,7 @@ import torch
 
 from frost.runtime.host.p2p_planner._dynamic_planner import (
     DynamicPlanner,
+    _deduplicate_and_route_updates,
     compute_p2p_transfer_plan,
     deduplicate_updates,
     handle_remaining,
@@ -165,6 +166,37 @@ def test_batched_transfer_with_empty_availability_leaves_needs_unrouted() -> Non
 def test_batched_transfer_rejects_mismatched_rank_counts() -> None:
     with pytest.raises(ValueError, match="equal rank counts"):
         compute_p2p_transfer_plan([_ts([1])], [_ts([1]), _ts([2])])
+
+
+@pytest.mark.parametrize("node_offset", [0, 5_000_000])
+@pytest.mark.parametrize("prefer_higher_rank", [False, True])
+def test_native_owned_routes_match_reference_for_dense_and_sparse_ids(
+    node_offset: int, prefer_higher_rank: bool
+) -> None:
+    updates = [
+        _ts([node_offset + 1, node_offset + 3]),
+        _ts([node_offset + 2, node_offset + 3]),
+        _ts([node_offset + 1, node_offset + 4]),
+    ]
+    needs = [
+        _ts([node_offset + 1, node_offset + 2, node_offset + 5]),
+        _ts([node_offset + 3, node_offset + 4]),
+        _ts([node_offset + 1, node_offset + 3]),
+    ]
+
+    owned, all_updates, routes = _deduplicate_and_route_updates(
+        updates, needs, prefer_higher_rank=prefer_higher_rank
+    )
+
+    expected_owned, expected_union = deduplicate_updates(
+        updates, prefer_higher_rank=prefer_higher_rank
+    )
+    _, expected_routes = _naive_transfer(needs, expected_owned)
+    assert [_values(value) for value in owned] == [
+        _values(value) for value in expected_owned
+    ]
+    assert _values(all_updates) == _values(expected_union)
+    assert _matrix_values(routes) == expected_routes
 
 
 def test_dynamic_planner_reuses_deduplicated_ownership_for_routes() -> None:

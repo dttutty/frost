@@ -12,6 +12,7 @@ from frost.runtime.host.types import (
 )
 from frost.datatypes.plan import DynamicPlan
 from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
+from frost.seq_sampler import _core as _native
 from frost.utils.tensor_set import TensorSet
 
 
@@ -440,6 +441,53 @@ def _deduplicate_updates_with_index(
     return owned, all_updates, owned_index
 
 
+def _deduplicate_and_route_updates(
+    updates: list[TensorSet],
+    needs: list[TensorSet],
+    prefer_higher_rank: bool = True,
+) -> tuple[list[TensorSet], TensorSet, list[list[TensorSet]]]:
+    """Run the common ownership-and-routing path in one serial native pass."""
+    if len(updates) != len(needs):
+        raise ValueError(
+            f"updates and needs must have equal rank counts, got {len(updates)} "
+            f"and {len(needs)}."
+        )
+    native_compatible = hasattr(_native, "plan_owned_routes") and all(
+        tensor_set.data.device.type == "cpu"
+        and tensor_set.data.dtype == torch.long
+        for group in (updates, needs)
+        for tensor_set in group
+    )
+    if native_compatible:
+        owned_arrays, all_nodes_array, route_arrays = _native.plan_owned_routes(
+            [tensor_set.data.numpy() for tensor_set in updates],
+            [tensor_set.data.numpy() for tensor_set in needs],
+            prefer_higher_rank,
+        )
+        owned = [
+            TensorSet(torch.from_numpy(nodes), sort_now=False, ensure_unique=False)
+            for nodes in owned_arrays
+        ]
+        all_nodes = TensorSet(
+            torch.from_numpy(all_nodes_array), sort_now=False, ensure_unique=False
+        )
+        routes = [
+            [
+                TensorSet(
+                    torch.from_numpy(nodes), sort_now=False, ensure_unique=False
+                )
+                for nodes in row
+            ]
+            for row in route_arrays
+        ]
+        return owned, all_nodes, routes
+
+    owned, all_nodes, index = _deduplicate_updates_with_index(
+        updates, prefer_higher_rank=prefer_higher_rank
+    )
+    return owned, all_nodes, _route_from_owned_index(needs, index)
+
+
 class DynamicPlanner(ThreadBase):
     """Per-batch P2P and writeback planner for memory/mailbox.
 
@@ -600,8 +648,8 @@ class DynamicPlanner(ThreadBase):
             raw_need_counts = [len(ts) for ts in all_list]
 
         # 1. Deduplicate: each updated node is owned by exactly one GPU.
-        deduplicate_update_list, all_update, update_ownership = (
-            _deduplicate_updates_with_index(update_list)
+        deduplicate_update_list, all_update, fresh_p2p = (
+            _deduplicate_and_route_updates(update_list, next_all_list)
         )
 
         # 2. Union of next batch's updates — nodes that will be refreshed anyway.
@@ -609,10 +657,7 @@ class DynamicPlanner(ThreadBase):
         for update in next_update_list:
             next_all_update = next_all_update | update
 
-        # 3. Fresh P2P: send this batch's updates to GPUs that need them next batch.
-        fresh_p2p = _route_from_owned_index(next_all_list, update_ownership)
-
-        # 4. Writeback policy:
+        # 3. Writeback policy:
         #    - Shared-memory direct-fetch mode must persist every owned update now,
         #      because later readers bypass P2P and re-read remote state from CPU.
         #    - The one-step deferred writeback optimization is only sound when stale
@@ -627,7 +672,7 @@ class DynamicPlanner(ThreadBase):
                 for per_gpu_update in deduplicate_update_list
             ]
 
-        # 5. Prefetch for next batch and optional stale P2P.
+        # 4. Prefetch for next batch and optional stale P2P.
         if self.if_carry_over_route:
             # Nodes next batch needs that fresh updates can't cover → try stale GPU mem.
             stale_needs = [next_need - all_update for next_need in next_all_list]
@@ -653,7 +698,7 @@ class DynamicPlanner(ThreadBase):
             next_prefetch = [next_need - all_update for next_need in next_all_list]
             p2p = fresh_p2p
 
-        # 6. Build per-GPU count matrix and plans.
+        # 5. Build per-GPU count matrix and plans.
         p2p_cts = np.zeros((n_gpus, n_gpus), dtype=np.int32)
         for src in range(n_gpus):
             for dst in range(n_gpus):
@@ -691,18 +736,14 @@ class NeighborhoodDynamicPlanner(DynamicPlanner):
 
         # 1. Deduplicate: each updated node is owned by exactly one GPU.
         # box_update_list = neighborhood-mail recipients for the current batch
-        deduplicate_update_list, all_update, update_ownership = (
-            _deduplicate_updates_with_index(box_update_list)
+        deduplicate_update_list, all_update, p2p = (
+            _deduplicate_and_route_updates(box_update_list, next_box_fetch_list)
         )
 
-        # 2. Fresh P2P: send this batch's updates to GPUs that need them next batch.
-        # next_box_fetch_list = nodes that need mailbox reads in the next batch
-        p2p = _route_from_owned_index(next_box_fetch_list, update_ownership)
-
-        # 3. Writeback all updated nodes to keep ring buffer state consistent on CPU.
+        # 2. Writeback all updated nodes to keep ring buffer state consistent on CPU.
         writeback_list = deduplicate_update_list
 
-        # 4. Build per-GPU count matrix and plans.
+        # 3. Build per-GPU count matrix and plans.
         p2p_cts = np.zeros((n_gpus, n_gpus), dtype=np.int32)
         for src in range(n_gpus):
             for dst in range(n_gpus):

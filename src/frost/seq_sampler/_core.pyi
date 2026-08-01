@@ -25,6 +25,16 @@ Int64TimeArray1D: TypeAlias = npt.NDArray[np.int64]
 Int64TimeArray2D: TypeAlias = npt.NDArray[np.int64]
 Int64TimeArray3D: TypeAlias = npt.NDArray[np.int64]
 
+def plan_owned_routes(
+    updates: Sequence[Int64Array1D],
+    needs: Sequence[Int64Array1D],
+    prefer_higher_rank: bool = True,
+) -> tuple[
+    list[Int64Array1D],
+    Int64Array1D,
+    list[list[Int64Array1D]],
+]: ...
+
 class TemporalGraph_32_32:
     """Temporal graph stored in CSR-like format.
 

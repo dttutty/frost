@@ -1,4 +1,5 @@
 #include <nanobind/nanobind.h>
+#include "planner_ownership.hpp"
 #include "sampler_common.h"
 #include "sampler_seq.hpp" // Include the template implementation directly because templates cannot be compiled separately.
 
@@ -38,4 +39,10 @@ NB_MODULE(_core, m) {
     bind_samplers<int32_t, float>(m, "32_32");
     bind_samplers<int64_t, float>(m, "64_32");
     bind_samplers<int64_t, int64_t>(m, "64_64");
+    m.def(
+        "plan_owned_routes",
+        &planner_ownership::plan_owned_routes,
+        nb::arg("updates"),
+        nb::arg("needs"),
+        nb::arg("prefer_higher_rank") = true);
 }
