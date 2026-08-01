@@ -17,7 +17,8 @@ from frost.launch.config import (
     stable_mode_enabled,
 )
 from frost.launch.affinity import (
-    resolve_gpu_shm_numa_nodes,
+    configure_process_affinity,
+    resolve_numa_runtime_plan,
     resolve_shared_gpu_numa_node,
 )
 from frost.launch.distributed import (
@@ -180,11 +181,6 @@ def launch(cfg: DictConfig):
         )
         logger.info("Using shared-memory run_id=%s", run_id)
     cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-    gpu_shm_numa_nodes = resolve_gpu_shm_numa_nodes(
-        cfg.get("numa_policy", "auto"),
-        n_gpu=env.n_gpu,
-        cuda_visible_devices=cuda_visible_devices,
-    )
     shared_gpu_numa_node = resolve_shared_gpu_numa_node(
         cfg.get("numa_policy", "auto"),
         n_gpu=env.n_gpu,
@@ -204,6 +200,24 @@ def launch(cfg: DictConfig):
     edim = dataset.edim
     nfeat = dataset.nfeat
     efeat = dataset.efeat
+    has_static_features = ndim > 0 or edim > 0
+    numa_runtime = resolve_numa_runtime_plan(
+        cfg.get("numa_policy", "auto"),
+        n_gpu=env.n_gpu,
+        cuda_visible_devices=cuda_visible_devices,
+        has_static_features=has_static_features,
+    )
+    if str(cfg.get("numa_policy", "auto")).strip().lower() == "auto" and not env.is_host:
+        worker_affinity = configure_process_affinity(
+            "auto",
+            n_gpu=env.n_gpu,
+            local_rank=env.local_rank,
+            cuda_visible_devices=cuda_visible_devices,
+            apply_auto_worker=numa_runtime.localize_workers,
+        )
+        if env.local_rank == 0:
+            print(worker_affinity.describe())
+    gpu_shm_numa_nodes = list(numa_runtime.graph_ring_nodes)
     with open_dict(cfg):
         cfg.ndim = ndim
         cfg.edim = edim
@@ -218,8 +232,12 @@ def launch(cfg: DictConfig):
         logger.info(
             "NUMA storage placement: graph_rings=%s, shared_features/state=%s",
             gpu_shm_numa_nodes,
-            shared_gpu_numa_node,
+            {
+                "features": shared_gpu_numa_node,
+                "state": numa_runtime.shared_state_node,
+            },
         )
+        logger.info("NUMA runtime policy: %s", numa_runtime.reason)
 
     recipe = instantiate_model_recipe(cfg.model)
     execution_plan = compile_execution_plan(recipe)
@@ -312,7 +330,7 @@ def launch(cfg: DictConfig):
         boxsize=int(state_cfg["boxsize"]) if state_cfg is not None else 0,
         d_mem=int(state_cfg["updater"]["d_mem"]) if state_cfg is not None else 0,
         edim=int(cfg.edim),
-        numa_node=shared_gpu_numa_node,
+        numa_node=numa_runtime.shared_state_node,
     )
 
     if env.is_host:

@@ -36,6 +36,16 @@ class AffinityStatus:
         )
 
 
+@dataclass(frozen=True)
+class NumaRuntimePlan:
+    """Feature- and topology-aware placement for post-dataset allocations."""
+
+    localize_workers: bool
+    graph_ring_nodes: tuple[int | None, ...]
+    shared_state_node: int | None
+    reason: str
+
+
 def parse_cpu_list(value: str) -> set[int]:
     """Parse Linux cpulist syntax such as ``0-3,8,10-11``."""
     cpus: set[int] = set()
@@ -155,6 +165,69 @@ def resolve_shared_gpu_numa_node(
     return next(iter(known)) if len(known) == 1 else None
 
 
+def resolve_numa_runtime_plan(
+    policy: str | int,
+    *,
+    n_gpu: int,
+    cuda_visible_devices: str | None,
+    has_static_features: bool,
+) -> NumaRuntimePlan:
+    """Compile allocation placement after dataset feature metadata is known.
+
+    Same-node featureless workloads keep the original broad CPU/first-touch
+    behavior because their bottleneck is host sampling rather than static
+    feature gather.  Static features make worker CPU and H2D locality critical.
+    GPUs spanning multiple NUMA nodes also require per-worker/ring locality even
+    without static features.
+    """
+    normalized = str(policy).strip().lower()
+    if normalized != "auto":
+        return NumaRuntimePlan(
+            localize_workers=False,
+            graph_ring_nodes=tuple([None] * n_gpu),
+            shared_state_node=None,
+            reason=f"runtime placement inherited from numa_policy={policy}",
+        )
+
+    nodes = detect_visible_gpu_numa_nodes(n_gpu, cuda_visible_devices)
+    if len(nodes) != n_gpu or any(node is None or node < 0 for node in nodes):
+        return NumaRuntimePlan(
+            localize_workers=False,
+            graph_ring_nodes=tuple([None] * n_gpu),
+            shared_state_node=None,
+            reason=f"GPU NUMA topology is incomplete: {nodes}",
+        )
+
+    known_nodes = tuple(int(node) for node in nodes if node is not None)
+    unique_nodes = set(known_nodes)
+    spans_nodes = len(unique_nodes) > 1
+    localize = has_static_features or spans_nodes
+    if not localize:
+        return NumaRuntimePlan(
+            localize_workers=False,
+            graph_ring_nodes=tuple([None] * n_gpu),
+            shared_state_node=None,
+            reason=(
+                "same-node featureless workload keeps broad worker CPU and "
+                "first-touch storage placement"
+            ),
+        )
+
+    shared_state_node = (
+        next(iter(unique_nodes)) if has_static_features and not spans_nodes else None
+    )
+    return NumaRuntimePlan(
+        localize_workers=True,
+        graph_ring_nodes=known_nodes,
+        shared_state_node=shared_state_node,
+        reason=(
+            "static feature gather requires GPU-local workers and storage"
+            if has_static_features
+            else "visible GPUs span NUMA nodes"
+        ),
+    )
+
+
 def _bind_memory_to_node(node: int) -> None:
     library = ctypes.util.find_library("numa") or "libnuma.so.1"
     numa = ctypes.CDLL(library, use_errno=True)
@@ -189,6 +262,7 @@ def configure_process_affinity(
     local_rank: int | None = None,
     cuda_visible_devices: str | None = None,
     sysfs_root: Path = Path("/sys/devices/system/node"),
+    apply_auto_worker: bool = True,
 ) -> AffinityStatus:
     """Bind this rank before it creates threads or shared-memory allocations."""
     node, reason = resolve_numa_node(
@@ -204,6 +278,24 @@ def configure_process_affinity(
             else 0
         )
         return AffinityStatus(None, cpu_count, False, False, reason)
+    auto_worker = (
+        str(policy).strip().lower() == "auto"
+        and local_rank is not None
+        and 0 <= local_rank < n_gpu
+    )
+    if auto_worker and not apply_auto_worker:
+        cpu_count = (
+            len(os.sched_getaffinity(0))
+            if hasattr(os, "sched_getaffinity")
+            else 0
+        )
+        return AffinityStatus(
+            None,
+            cpu_count,
+            False,
+            False,
+            "auto runtime plan keeps the worker on the full CPU cpuset",
+        )
     if not hasattr(os, "sched_setaffinity"):
         return AffinityStatus(
             None, 0, False, False, "CPU affinity is unsupported"

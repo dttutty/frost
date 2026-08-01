@@ -33,8 +33,12 @@ def main(cfg: DictConfig):
         n_gpu=max(0, local_world_size - 1),
         local_rank=local_rank,
         cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+        apply_auto_worker=False,
     )
-    if local_rank == 0 or local_rank == local_world_size - 1:
+    normalized_numa_policy = str(cfg.get("numa_policy", "auto")).strip().lower()
+    if local_rank == local_world_size - 1 or (
+        local_rank == 0 and normalized_numa_policy != "auto"
+    ):
         print(affinity.describe())
 
     applied = _apply_stable_mode_env(cfg)

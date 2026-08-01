@@ -69,7 +69,6 @@ def test_shared_memory_nodes_follow_gpus_only_in_auto(monkeypatch) -> None:
         "detect_visible_gpu_numa_nodes",
         lambda *_args, **_kwargs: detected,
     )
-
     assert affinity.resolve_gpu_shm_numa_nodes(
         "auto", n_gpu=3, cuda_visible_devices="0,1,2"
     ) == [0, 1, 2]
@@ -172,6 +171,73 @@ def test_shared_gpu_node_requires_common_topology(monkeypatch) -> None:
         )
         is None
     )
+
+
+def test_runtime_plan_keeps_same_node_featureless_workload_broad(monkeypatch) -> None:
+    monkeypatch.setattr(
+        affinity, "detect_visible_gpu_numa_nodes", lambda *_args, **_kwargs: [0, 0]
+    )
+    plan = affinity.resolve_numa_runtime_plan(
+        "auto",
+        n_gpu=2,
+        cuda_visible_devices="0,1",
+        has_static_features=False,
+    )
+    assert not plan.localize_workers
+    assert plan.graph_ring_nodes == (None, None)
+    assert plan.shared_state_node is None
+
+
+def test_runtime_plan_localizes_same_node_feature_workload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        affinity, "detect_visible_gpu_numa_nodes", lambda *_args, **_kwargs: [0, 0]
+    )
+    plan = affinity.resolve_numa_runtime_plan(
+        "auto",
+        n_gpu=2,
+        cuda_visible_devices="0,1",
+        has_static_features=True,
+    )
+    assert plan.localize_workers
+    assert plan.graph_ring_nodes == (0, 0)
+    assert plan.shared_state_node == 0
+
+
+def test_runtime_plan_localizes_cross_numa_featureless_workload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        affinity, "detect_visible_gpu_numa_nodes", lambda *_args, **_kwargs: [0, 1]
+    )
+    plan = affinity.resolve_numa_runtime_plan(
+        "auto",
+        n_gpu=2,
+        cuda_visible_devices="0,1",
+        has_static_features=False,
+    )
+    assert plan.localize_workers
+    assert plan.graph_ring_nodes == (0, 1)
+    assert plan.shared_state_node is None
+
+
+def test_auto_worker_affinity_can_remain_broad(monkeypatch) -> None:
+    monkeypatch.setattr(
+        affinity, "detect_visible_gpu_numa_nodes", lambda *_args, **_kwargs: [0, 0]
+    )
+    monkeypatch.setattr(affinity.os, "sched_getaffinity", lambda _pid: {0, 1, 2, 3})
+    monkeypatch.setattr(
+        affinity.os,
+        "sched_setaffinity",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must stay broad")),
+    )
+    status = affinity.configure_process_affinity(
+        "auto",
+        n_gpu=2,
+        local_rank=0,
+        cuda_visible_devices="0,1",
+        apply_auto_worker=False,
+    )
+    assert status.node is None
+    assert not status.cpu_bound
+    assert "full CPU cpuset" in status.reason
 
 
 def test_off_policy_does_not_change_affinity(monkeypatch) -> None:

@@ -32,11 +32,11 @@ compute:
   amp: false
 tqdm: true
 stable_mode: false
-# In auto mode, keep the host sampler on the full CPU cpuset while binding each
-# worker and its graph/feature staging memory to that GPU's NUMA node. Shared
-# feature and dynamic-state tables also use the common GPU NUMA node when all
-# visible GPUs are local to one node. Use "off" to disable placement or an
-# integer node ID to force every local rank's CPU and memory onto one node.
+# In auto mode, keep the host sampler on the full CPU cpuset. Static-feature
+# workloads bind each worker and its graph/feature staging memory to that GPU's
+# NUMA node; same-node featureless workloads keep broad worker CPU and
+# first-touch storage placement. GPUs spanning NUMA nodes are always localized.
+# Use "off" to disable placement or a node ID to bind every local rank there.
 numa_policy: auto # auto | off | NUMA node ID
 reset_eval_neg_sampler_each_epoch: false
 share_neg_sampler_across_splits: false
