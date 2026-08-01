@@ -1,4 +1,5 @@
 import threading
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -14,6 +15,201 @@ from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 from frost.utils.tensor_set import TensorSet
 
 
+@dataclass(frozen=True)
+class _OwnershipIndex:
+    """Sorted node IDs and their per-rank availability.
+
+    ``membership[node_idx, rank]`` is true when that rank owns or has the node.
+    Building this once lets routing query every receiver in one ``searchsorted``
+    instead of running ``torch.isin`` for every sender/receiver pair.
+    """
+
+    nodes: torch.Tensor
+    membership: torch.Tensor
+
+    @property
+    def n_gpus(self) -> int:
+        return int(self.membership.shape[1])
+
+
+def _reference_tensor(*groups: list[TensorSet]) -> torch.Tensor:
+    for group in groups:
+        for tensor_set in group:
+            if tensor_set.data.numel() > 0:
+                return tensor_set.data
+    for group in groups:
+        if group:
+            return group[0].data
+    return torch.empty(0, dtype=torch.long)
+
+
+def _coerce_like(tensor: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    if tensor.device != reference.device or tensor.dtype != reference.dtype:
+        return tensor.to(device=reference.device, dtype=reference.dtype)
+    return tensor
+
+
+def _empty_set(reference: torch.Tensor) -> TensorSet:
+    return TensorSet.empty_like(reference)
+
+
+def _empty_route_matrix(n_gpus: int, reference: torch.Tensor) -> list[list[TensorSet]]:
+    return [[_empty_set(reference) for _ in range(n_gpus)] for _ in range(n_gpus)]
+
+
+def _build_ownership_index(
+    sets_by_rank: list[TensorSet], reference: torch.Tensor | None = None
+) -> _OwnershipIndex:
+    """Batch all per-rank sets into one sorted node-to-rank membership index."""
+    n_gpus = len(sets_by_rank)
+    ref = reference if reference is not None else _reference_tensor(sets_by_rank)
+    nonempty = [
+        (rank, _coerce_like(tensor_set.data, ref))
+        for rank, tensor_set in enumerate(sets_by_rank)
+        if tensor_set.data.numel() > 0
+    ]
+    if not nonempty:
+        return _OwnershipIndex(
+            nodes=torch.empty(0, dtype=ref.dtype, device=ref.device),
+            membership=torch.empty((0, n_gpus), dtype=torch.bool, device=ref.device),
+        )
+
+    nodes = torch.cat([data for _, data in nonempty])
+    owners = torch.cat(
+        [
+            torch.full((data.numel(),), rank, dtype=torch.long, device=ref.device)
+            for rank, data in nonempty
+        ]
+    )
+    order = torch.argsort(nodes, stable=True)
+    sorted_nodes = nodes[order]
+    sorted_owners = owners[order]
+    unique_nodes, inverse = torch.unique_consecutive(sorted_nodes, return_inverse=True)
+    membership = torch.zeros(
+        (unique_nodes.numel(), n_gpus), dtype=torch.bool, device=ref.device
+    )
+    membership[inverse, sorted_owners] = True
+    return _OwnershipIndex(nodes=unique_nodes, membership=membership)
+
+
+def _concat_ranked_sets(
+    sets_by_rank: list[TensorSet], reference: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+    """Concatenate sorted sets with rank labels and prefix offsets."""
+    chunks: list[torch.Tensor] = []
+    rank_chunks: list[torch.Tensor] = []
+    offsets = [0]
+    for rank, tensor_set in enumerate(sets_by_rank):
+        data = _coerce_like(tensor_set.data, reference)
+        chunks.append(data)
+        rank_chunks.append(
+            torch.full((data.numel(),), rank, dtype=torch.long, device=reference.device)
+        )
+        offsets.append(offsets[-1] + data.numel())
+    if not chunks or offsets[-1] == 0:
+        empty = torch.empty(0, dtype=reference.dtype, device=reference.device)
+        empty_ranks = torch.empty(0, dtype=torch.long, device=reference.device)
+        return empty, empty_ranks, offsets
+    return torch.cat(chunks), torch.cat(rank_chunks), offsets
+
+
+def _lookup_membership(
+    index: _OwnershipIndex, query: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return ``(positions, valid)`` for sorted-index membership queries."""
+    if query.numel() == 0 or index.nodes.numel() == 0:
+        return (
+            torch.zeros(query.numel(), dtype=torch.long, device=query.device),
+            torch.zeros(query.numel(), dtype=torch.bool, device=query.device),
+        )
+    positions = torch.searchsorted(index.nodes, query)
+    in_bounds = positions < index.nodes.numel()
+    safe_positions = positions.clamp_max(index.nodes.numel() - 1)
+    valid = in_bounds & (index.nodes[safe_positions] == query)
+    return safe_positions, valid
+
+
+def _route_matrix_from_entries(
+    *,
+    nodes: torch.Tensor,
+    owners: torch.Tensor,
+    receivers: torch.Tensor,
+    n_gpus: int,
+    reference: torch.Tensor,
+) -> list[list[TensorSet]]:
+    """Group routed nodes into the established ``[sender][receiver]`` layout."""
+    routes = _empty_route_matrix(n_gpus, reference)
+    if nodes.numel() == 0:
+        return routes
+
+    pair_keys = owners * n_gpus + receivers
+    # Stable two-pass ordering gives pair-major, node-minor deterministic output.
+    node_order = torch.argsort(nodes, stable=True)
+    pair_order = torch.argsort(pair_keys[node_order], stable=True)
+    order = node_order[pair_order]
+    sorted_keys = pair_keys[order]
+    sorted_nodes = nodes[order]
+    keys, counts = torch.unique_consecutive(sorted_keys, return_counts=True)
+
+    offset = 0
+    for key, count in zip(keys.tolist(), counts.tolist()):
+        sender, receiver = divmod(int(key), n_gpus)
+        routes[sender][receiver] = TensorSet(
+            sorted_nodes[offset : offset + count],
+            sort_now=False,
+            ensure_unique=False,
+        )
+        offset += count
+    return routes
+
+
+def _compute_transfer_plan_from_index(
+    needs: list[TensorSet], index: _OwnershipIndex
+) -> tuple[list[TensorSet], list[list[TensorSet]]]:
+    """Route all receiver needs through one batched ownership lookup."""
+    n_gpus = len(needs)
+    if index.n_gpus != n_gpus:
+        raise ValueError(
+            f"Ownership index has {index.n_gpus} ranks, expected {n_gpus}."
+        )
+    reference = _reference_tensor(needs) if needs else index.nodes
+    query_nodes, receivers, _ = _concat_ranked_sets(needs, reference)
+    positions, valid = _lookup_membership(index, query_nodes)
+
+    if query_nodes.numel() == 0 or index.nodes.numel() == 0:
+        matched = torch.zeros(
+            (query_nodes.numel(), n_gpus),
+            dtype=torch.bool,
+            device=reference.device,
+        )
+    else:
+        matched = index.membership[positions] & valid.unsqueeze(1)
+
+    query_indices, owners = torch.nonzero(matched, as_tuple=True)
+    routes = _route_matrix_from_entries(
+        nodes=query_nodes[query_indices],
+        owners=owners,
+        receivers=receivers[query_indices],
+        n_gpus=n_gpus,
+        reference=reference,
+    )
+
+    needed_nodes = torch.zeros(
+        index.nodes.numel(), dtype=torch.bool, device=reference.device
+    )
+    if torch.any(valid):
+        needed_nodes[positions[valid]] = True
+    leftovers = [
+        TensorSet(
+            index.nodes[index.membership[:, rank] & ~needed_nodes],
+            sort_now=False,
+            ensure_unique=False,
+        )
+        for rank in range(n_gpus)
+    ]
+    return leftovers, routes
+
+
 def compute_p2p_transfer_plan(
     needs: list[TensorSet],
     avails: list[TensorSet],
@@ -21,47 +217,14 @@ def compute_p2p_transfer_plan(
     list[TensorSet],  # leftovers_on_gpu
     list[list[TensorSet]],  # p2p_transfer_plan
 ]:
-    """Sender-centric fresh P2P plan: each sender distributes its new updates to
-    receivers that need them next batch."""
-    n_gpus = len(needs)
-
-    ref_ts = None
-    if n_gpus > 0:
-        if len(needs[0]) > 0:
-            ref_ts = needs[0]
-        elif len(avails[0]) > 0:
-            ref_ts = avails[0]
-
-    if ref_ts is not None:
-        empty_tensor = torch.tensor(
-            [], dtype=ref_ts.data.dtype, device=ref_ts.data.device
+    """Sender-centric fresh P2P plan using one batched ownership lookup."""
+    if len(needs) != len(avails):
+        raise ValueError(
+            f"needs and avails must have equal rank counts, got {len(needs)} and {len(avails)}."
         )
-    else:
-        empty_tensor = torch.tensor([], dtype=torch.long)
-
-    empty_ts = TensorSet(empty_tensor)
-
-    p2p_plan: list[list[TensorSet]] = [
-        [empty_ts for _ in range(n_gpus)] for _ in range(n_gpus)
-    ]
-    leftovers: list[TensorSet] = []
-
-    for s in range(n_gpus):
-        new_update = avails[s]
-        everything_sender_sends = empty_ts
-
-        for r in range(n_gpus):
-            need = needs[r]
-            to_transfer = new_update & need
-
-            if len(to_transfer) > 0:
-                p2p_plan[s][r] = to_transfer
-                everything_sender_sends = everything_sender_sends | to_transfer
-
-        leftover = new_update - everything_sender_sends
-        leftovers.append(leftover)
-
-    return leftovers, p2p_plan
+    reference = _reference_tensor(needs, avails)
+    index = _build_ownership_index(avails, reference)
+    return _compute_transfer_plan_from_index(needs, index)
 
 
 def handle_remaining(
@@ -82,45 +245,58 @@ def handle_remaining(
         stale_p2p:       [src][dst] transfer plan for stale nodes.
     """
     n_gpus = len(gpus_distance)
-
-    ref_ts = None
-    if n_gpus > 0:
-        if len(needs[0]) > 0:
-            ref_ts = needs[0]
-        elif len(avails[0]) > 0:
-            ref_ts = avails[0]
-
-    if ref_ts is not None:
-        empty_tensor = torch.tensor(
-            [], dtype=ref_ts.data.dtype, device=ref_ts.data.device
+    if gpus_distance.shape != (n_gpus, n_gpus):
+        raise ValueError("gpus_distance must be a square matrix.")
+    if len(needs) != n_gpus or len(avails) != n_gpus:
+        raise ValueError(
+            "needs, avails, and gpus_distance must describe the same rank count."
         )
-    else:
-        empty_tensor = torch.tensor([], dtype=torch.long)
+    if n_gpus == 0:
+        return [], []
 
-    empty_ts = TensorSet(empty_tensor)
+    reference = _reference_tensor(needs, avails)
+    index = _build_ownership_index(avails, reference)
+    query_nodes, receivers, offsets = _concat_ranked_sets(needs, reference)
+    positions, valid = _lookup_membership(index, query_nodes)
+    chosen_owners = torch.full(
+        (query_nodes.numel(),), -1, dtype=torch.long, device=reference.device
+    )
 
-    p2p_plan: list[list[TensorSet]] = [
-        [empty_ts for _ in range(n_gpus)] for _ in range(n_gpus)
+    valid_indices = torch.nonzero(valid, as_tuple=False).flatten()
+    if valid_indices.numel() > 0:
+        valid_receivers = receivers[valid_indices]
+        available = index.membership[positions[valid_indices]]
+        # Stable source-rank ordering preserves the old tie-break within each
+        # ascending distance bucket.
+        priority = torch.from_numpy(
+            np.argsort(gpus_distance, axis=0, kind="stable").astype(np.int64)
+        ).to(reference.device)
+        candidates = priority[:, valid_receivers].T
+        available_by_priority = available.gather(1, candidates)
+        has_owner = torch.any(available_by_priority, dim=1)
+        first_available = torch.argmax(available_by_priority.to(torch.int8), dim=1)
+        selected = candidates.gather(1, first_available.unsqueeze(1)).squeeze(1)
+        chosen_owners[valid_indices[has_owner]] = selected[has_owner]
+
+    routed = chosen_owners >= 0
+    routes = _route_matrix_from_entries(
+        nodes=query_nodes[routed],
+        owners=chosen_owners[routed],
+        receivers=receivers[routed],
+        n_gpus=n_gpus,
+        reference=reference,
+    )
+    remaining = [
+        TensorSet(
+            query_nodes[offsets[rank] : offsets[rank + 1]][
+                ~routed[offsets[rank] : offsets[rank + 1]]
+            ],
+            sort_now=False,
+            ensure_unique=False,
+        )
+        for rank in range(n_gpus)
     ]
-
-    unique_distances = sorted(np.unique(gpus_distance))
-
-    for dist in unique_distances:
-        pairs = np.argwhere(gpus_distance == dist)
-
-        for s, r in pairs:
-            if len(needs[r]) == 0:
-                continue
-            if len(avails[s]) == 0:
-                continue
-
-            to_transfer = avails[s] & needs[r]
-
-            if len(to_transfer) > 0:
-                p2p_plan[s][r] = p2p_plan[s][r] | to_transfer
-                needs[r] = needs[r] - to_transfer
-
-    return needs, p2p_plan
+    return remaining, routes
 
 
 def deduplicate_updates(
@@ -128,26 +304,45 @@ def deduplicate_updates(
 ) -> tuple[list[TensorSet], TensorSet]:
     """Deterministic deduplication: when prefer_higher_rank=True,
     higher-rank GPU wins conflicting node ownership."""
+    owned, all_updates, _ = _deduplicate_updates_with_index(
+        updates, prefer_higher_rank=prefer_higher_rank
+    )
+    return owned, all_updates
+
+
+def _deduplicate_updates_with_index(
+    updates: list[TensorSet], prefer_higher_rank: bool = True
+) -> tuple[list[TensorSet], TensorSet, _OwnershipIndex]:
+    """Resolve update ownership for every node in one batched operation."""
     n_gpus = len(updates)
+    reference = _reference_tensor(updates)
+    index = _build_ownership_index(updates, reference)
+    if n_gpus == 0 or index.nodes.numel() == 0:
+        empty = _empty_set(reference)
+        return [_empty_set(reference) for _ in range(n_gpus)], empty, index
 
-    empty_tensor = torch.tensor([], dtype=torch.long)
-    if n_gpus > 0 and updates[0].data.is_cuda:
-        empty_tensor = empty_tensor.to(updates[0].data.device)
+    if prefer_higher_rank:
+        owners = (
+            n_gpus
+            - 1
+            - torch.argmax(
+                torch.flip(index.membership, dims=(1,)).to(torch.int8), dim=1
+            )
+        )
+    else:
+        owners = torch.argmax(index.membership.to(torch.int8), dim=1)
 
-    empty_ts = TensorSet(empty_tensor)
-    new_updates: list[TensorSet] = [empty_ts] * n_gpus
-
-    if n_gpus == 0:
-        return new_updates, empty_ts
-
-    all_update = empty_ts
-    iterator = range(n_gpus - 1, -1, -1) if prefer_higher_rank else range(n_gpus)
-
-    for i in iterator:
-        new_updates[i] = updates[i] - all_update
-        all_update = all_update | updates[i]
-
-    return new_updates, all_update
+    owned_membership = torch.zeros_like(index.membership)
+    owned_membership[
+        torch.arange(index.nodes.numel(), device=reference.device), owners
+    ] = True
+    owned_index = _OwnershipIndex(nodes=index.nodes, membership=owned_membership)
+    owned = [
+        TensorSet(index.nodes[owners == rank], sort_now=False, ensure_unique=False)
+        for rank in range(n_gpus)
+    ]
+    all_updates = TensorSet(index.nodes, sort_now=False, ensure_unique=False)
+    return owned, all_updates, owned_index
 
 
 class DynamicPlanner(ThreadBase):
@@ -310,7 +505,9 @@ class DynamicPlanner(ThreadBase):
             raw_need_counts = [len(ts) for ts in all_list]
 
         # 1. Deduplicate: each updated node is owned by exactly one GPU.
-        deduplicate_update_list, all_update = deduplicate_updates(update_list)
+        deduplicate_update_list, all_update, update_ownership = (
+            _deduplicate_updates_with_index(update_list)
+        )
 
         # 2. Union of next batch's updates — nodes that will be refreshed anyway.
         next_all_update = TensorSet.empty_like(all_update.data)
@@ -318,7 +515,9 @@ class DynamicPlanner(ThreadBase):
             next_all_update = next_all_update | update
 
         # 3. Fresh P2P: send this batch's updates to GPUs that need them next batch.
-        _, fresh_p2p = compute_p2p_transfer_plan(next_all_list, deduplicate_update_list)
+        _, fresh_p2p = _compute_transfer_plan_from_index(
+            next_all_list, update_ownership
+        )
 
         # 4. Writeback policy:
         #    - Shared-memory direct-fetch mode must persist every owned update now,
@@ -399,11 +598,15 @@ class NeighborhoodDynamicPlanner(DynamicPlanner):
 
         # 1. Deduplicate: each updated node is owned by exactly one GPU.
         # box_update_list = neighborhood-mail recipients for the current batch
-        deduplicate_update_list, all_update = deduplicate_updates(box_update_list)
+        deduplicate_update_list, all_update, update_ownership = (
+            _deduplicate_updates_with_index(box_update_list)
+        )
 
         # 2. Fresh P2P: send this batch's updates to GPUs that need them next batch.
         # next_box_fetch_list = nodes that need mailbox reads in the next batch
-        _, p2p = compute_p2p_transfer_plan(next_box_fetch_list, deduplicate_update_list)
+        _, p2p = _compute_transfer_plan_from_index(
+            next_box_fetch_list, update_ownership
+        )
 
         # 3. Writeback all updated nodes to keep ring buffer state consistent on CPU.
         writeback_list = deduplicate_update_list
