@@ -95,6 +95,15 @@ def resolve_numa_node(
             )
         if local_rank < 0 or local_rank >= n_gpu:
             return None, f"local rank {local_rank} is outside 0..{n_gpu}"
+        known = [node for node in nodes if node is not None and node >= 0]
+        if len(known) != n_gpu:
+            return None, f"GPU NUMA topology is incomplete: {nodes}"
+        if len(set(known)) == 1:
+            return (
+                None,
+                "auto visible GPUs share one NUMA node; keeping the full "
+                "CPU cpuset and first-touch memory policy",
+            )
         gpu_node = nodes[local_rank]
         if gpu_node is None or gpu_node < 0:
             return None, f"visible GPU {local_rank} has no known NUMA node"
@@ -107,6 +116,32 @@ def resolve_numa_node(
     if len(unique) != 1:
         return None, f"visible GPUs span NUMA nodes {sorted(unique)}"
     return known[0], "auto-selected common visible-GPU NUMA node"
+
+
+def resolve_gpu_shm_numa_nodes(
+    policy: str | int,
+    *,
+    n_gpu: int,
+    cuda_visible_devices: str | None,
+) -> list[int | None]:
+    """Return per-GPU region placement for host-created shared memory.
+
+    Only ``auto`` applies per-region placement. ``off`` leaves pages on the
+    default first-touch policy, while an explicit node already binds the host
+    process and therefore needs no region-level override.
+    """
+    if str(policy).strip().lower() != "auto":
+        return [None] * n_gpu
+    nodes = detect_visible_gpu_numa_nodes(n_gpu, cuda_visible_devices)
+    if len(nodes) != n_gpu or any(node is None or node < 0 for node in nodes):
+        return [None] * n_gpu
+    known_nodes: list[int | None] = [int(node) for node in nodes if node is not None]
+    if len(set(known_nodes)) <= 1:
+        # The host sampler uses cores across sockets and writes each ring before
+        # workers clone it into staging. Binding every rank and ring to one
+        # socket would turn half of those producer writes into remote traffic.
+        return [None] * n_gpu
+    return known_nodes
 
 
 def _bind_memory_to_node(node: int) -> None:

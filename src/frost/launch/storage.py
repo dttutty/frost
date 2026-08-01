@@ -102,6 +102,7 @@ def prepare_ring_buffer(
     train_n_neg: int,
     eval_n_neg: int,
     ring_buf_size: int,
+    gpu_numa_nodes: list[int | None] | None = None,
 ) -> RingBuf:
     max_n_neg = max(train_n_neg, eval_n_neg)
     slot_capacity = cal_max_buf_size_for_layouts(
@@ -121,6 +122,7 @@ def prepare_ring_buffer(
         root_expansion=root_expansion,
         max_size=ring_buf_size,
         slot_capacity=slot_capacity,
+        gpu_numa_nodes=gpu_numa_nodes,
     )
 
 

@@ -38,6 +38,19 @@ def test_auto_policy_places_each_worker_with_its_gpu(monkeypatch) -> None:
     ) == (1, "auto-selected visible GPU 1 NUMA node")
 
 
+def test_auto_policy_leaves_workers_unbound_when_gpus_share_numa(monkeypatch) -> None:
+    monkeypatch.setattr(
+        affinity, "detect_visible_gpu_numa_nodes", lambda *_args, **_kwargs: [0, 0]
+    )
+
+    node, reason = affinity.resolve_numa_node(
+        "auto", n_gpu=2, local_rank=0, cuda_visible_devices="0,1"
+    )
+
+    assert node is None
+    assert "visible GPUs share one NUMA node" in reason
+
+
 def test_auto_policy_leaves_host_on_full_cpuset(monkeypatch) -> None:
     monkeypatch.setattr(
         affinity, "detect_visible_gpu_numa_nodes", lambda *_args, **_kwargs: [0, 0]
@@ -47,6 +60,35 @@ def test_auto_policy_leaves_host_on_full_cpuset(monkeypatch) -> None:
     )
     assert node is None
     assert "host rank keeps the full CPU cpuset" in reason
+
+
+def test_shared_memory_nodes_follow_gpus_only_in_auto(monkeypatch) -> None:
+    detected: list[int | None] = [0, 1, 2]
+    monkeypatch.setattr(
+        affinity,
+        "detect_visible_gpu_numa_nodes",
+        lambda *_args, **_kwargs: detected,
+    )
+
+    assert affinity.resolve_gpu_shm_numa_nodes(
+        "auto", n_gpu=3, cuda_visible_devices="0,1,2"
+    ) == [0, 1, 2]
+    assert affinity.resolve_gpu_shm_numa_nodes(
+        "off", n_gpu=3, cuda_visible_devices="0,1,2"
+    ) == [None, None, None]
+    assert affinity.resolve_gpu_shm_numa_nodes(
+        1, n_gpu=3, cuda_visible_devices="0,1,2"
+    ) == [None, None, None]
+
+    detected[:] = [0, 0, 0]
+    assert affinity.resolve_gpu_shm_numa_nodes(
+        "auto", n_gpu=3, cuda_visible_devices="0,1,2"
+    ) == [None, None, None]
+
+    detected[:] = [0, None, 2]
+    assert affinity.resolve_gpu_shm_numa_nodes(
+        "auto", n_gpu=3, cuda_visible_devices="0,1,2"
+    ) == [None, None, None]
 
 
 def test_configure_process_affinity_intersects_cpuset(tmp_path: Path, monkeypatch) -> None:

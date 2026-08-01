@@ -6,6 +6,7 @@ worker has its own independent head/tail pair so the host can push data to
 multiple workers without coordination between workers.
 """
 
+import logging
 import time
 
 import torch
@@ -16,6 +17,9 @@ from frost.datatypes.env import Env
 from frost.models.contracts import RootExpansion
 
 from ._core import create_shared_mem_array, get_shared_mem_array
+
+logger = logging.getLogger(__name__)
+
 
 def cal_max_buf_size(
     n_src: int,
@@ -103,6 +107,7 @@ class RingBuf:
         edtype: torch.dtype,
         tsdtype: torch.dtype,
         slot_capacity: int | None = None,
+        gpu_numa_nodes: list[int | None] | None = None,
     ) -> None:
         self.env = env
         self.n_gpu = env.n_gpu
@@ -115,6 +120,21 @@ class RingBuf:
         self.tsdtype = tsdtype
         self.root_expansion = root_expansion
         self.fanout = fanout
+        self.gpu_numa_nodes: list[int | None] = (
+            [None] * self.n_gpu
+            if gpu_numa_nodes is None
+            else list(gpu_numa_nodes)
+        )
+        if len(self.gpu_numa_nodes) != self.n_gpu:
+            raise ValueError(
+                "gpu_numa_nodes must contain one entry per GPU: "
+                f"got {len(self.gpu_numa_nodes)} for {self.n_gpu} GPUs."
+            )
+        if any(node is not None and node < 0 for node in self.gpu_numa_nodes):
+            raise ValueError(
+                "gpu_numa_nodes entries must be non-negative or None: "
+                f"{self.gpu_numa_nodes}"
+            )
 
         total = (
             cal_max_buf_size(max_batch_size, fanout, n_neg, root_expansion)
@@ -148,12 +168,23 @@ class RingBuf:
             self.tail.zero_()
 
             for g_idx in range(self.n_gpu):
+                numa_node = self.gpu_numa_nodes[g_idx]
                 for buf_idx in range(self.max_size):
                     for key, (shape, dtype) in self.schema.items():
                         name = f"{prefix}_RING_BUF_gpu{g_idx}_b{buf_idx}_{key}"
-                        self.buffers[g_idx][buf_idx][key] = create_shared_mem_array(
-                            name, shape, dtype
+                        self.buffers[g_idx][buf_idx][key] = (
+                            create_shared_mem_array(
+                                name,
+                                shape,
+                                dtype,
+                                numa_node=numa_node,
+                            )
                         )
+
+            logger.info(
+                "RingBuf data placement by logical GPU: %s",
+                self.gpu_numa_nodes,
+            )
 
             # Sync once after all SHM allocations are done
             dist.barrier()

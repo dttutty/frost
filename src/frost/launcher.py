@@ -16,6 +16,7 @@ from frost.launch.config import (
     resolve_time_scaling_factor,
     stable_mode_enabled,
 )
+from frost.launch.affinity import resolve_gpu_shm_numa_nodes
 from frost.launch.distributed import (
     configure_torch_backends,
     create_worker_process_groups,
@@ -194,6 +195,11 @@ def launch(cfg: DictConfig):
     gpu_topo = detect_gpu_topology(
         env.n_gpu, cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES")
     )
+    gpu_shm_numa_nodes = resolve_gpu_shm_numa_nodes(
+        cfg.get("numa_policy", "auto"),
+        n_gpu=env.n_gpu,
+        cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+    )
     if env.is_host:
         logger.info("Detected GPU topology from CUDA_VISIBLE_DEVICES: %s", gpu_topo)
 
@@ -270,6 +276,7 @@ def launch(cfg: DictConfig):
         train_n_neg=train_n_neg,
         eval_n_neg=eval_n_neg,
         ring_buf_size=int(cfg.ring_buf_size),
+        gpu_numa_nodes=gpu_shm_numa_nodes,
     )
     control_plane = prepare_control_plane(
         env=env,

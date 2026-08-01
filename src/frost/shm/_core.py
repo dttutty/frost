@@ -7,7 +7,11 @@ exit.  The host process is responsible for physically unlinking segments at
 shutdown; workers only close their mappings.
 """
 import atexit
+import ctypes
+import ctypes.util
+import functools
 import logging
+import os
 import signal
 import sys
 from multiprocessing import resource_tracker, shared_memory
@@ -75,6 +79,79 @@ if hasattr(resource_tracker, "_resource_tracker"):
 _TRACKED_SHM_OBJECTS: dict[str, shared_memory.SharedMemory] = {}
 _IS_HOST_PROCESS = False
 _CLEANUP_DONE = False
+_NUMA_BIND_WARNED_NODES: set[int] = set()
+
+_MPOL_BIND = 2
+
+
+@functools.cache
+def _load_numa_library() -> ctypes.CDLL:
+    library = ctypes.util.find_library("numa") or "libnuma.so.1"
+    numa = ctypes.CDLL(library, use_errno=True)
+    numa.mbind.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_ulong,
+        ctypes.c_uint,
+    ]
+    numa.mbind.restype = ctypes.c_long
+    return numa
+
+
+def _mbind_address_to_node(address: int, length: int, node: int) -> None:
+    """Apply a NUMA bind policy to an untouched virtual-memory region."""
+    if address <= 0:
+        raise ValueError(f"address must be positive, got {address}")
+    if length <= 0:
+        raise ValueError(f"length must be positive, got {length}")
+    if node < 0:
+        raise ValueError(f"NUMA node must be non-negative, got {node}")
+
+    bits_per_word = ctypes.sizeof(ctypes.c_ulong) * 8
+    word_count = node // bits_per_word + 1
+    mask_type = ctypes.c_ulong * word_count
+    mask = mask_type()
+    mask[node // bits_per_word] = 1 << (node % bits_per_word)
+    max_node_bits = word_count * bits_per_word
+
+    numa = _load_numa_library()
+    ctypes.set_errno(0)
+    result = numa.mbind(
+        ctypes.c_void_p(address),
+        ctypes.c_ulong(length),
+        _MPOL_BIND,
+        mask,
+        ctypes.c_ulong(max_node_bits),
+        0,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        if error:
+            raise OSError(error, os.strerror(error))
+        raise OSError("mbind failed without reporting errno")
+
+
+def _bind_shared_memory_before_touch(
+    shm: shared_memory.SharedMemory, *, length: int, node: int
+) -> bool:
+    """Bind a new SHM mapping before first touch, with a safe fallback."""
+    try:
+        buffer = cast(memoryview, shm.buf)
+        address = ctypes.addressof(ctypes.c_char.from_buffer(buffer))
+        _mbind_address_to_node(address, length, node)
+    except (OSError, ValueError, AttributeError) as exc:
+        if node not in _NUMA_BIND_WARNED_NODES:
+            logger.warning(
+                "Could not bind shared-memory pages to NUMA node %d; "
+                "falling back to first-touch placement: %s",
+                node,
+                exc,
+            )
+            _NUMA_BIND_WARNED_NODES.add(node)
+        return False
+    return True
 
 
 def _normalize_shm_name(name: str) -> str:
@@ -174,7 +251,11 @@ def cleanup_all_shm(is_host: bool = True) -> None:
 
 
 def create_shared_mem_array(
-    name: str, shape: list | tuple, dtype: torch.dtype
+    name: str,
+    shape: list | tuple,
+    dtype: torch.dtype,
+    *,
+    numa_node: int | None = None,
 ) -> torch.Tensor:
     """Allocate a new POSIX shared-memory segment and return it as a zero-filled tensor.
 
@@ -188,6 +269,8 @@ def create_shared_mem_array(
             prefix by :func:`_normalize_shm_name`).
         shape: Shape of the resulting tensor.
         dtype: PyTorch dtype; must exist in the ``_TORCH_TO_NP`` mapping.
+        numa_node: Optional NUMA node for the segment's physical pages. The
+            policy is applied after mmap and before the zero-fill first touch.
 
     Returns:
         A CPU tensor backed by the shared-memory segment, initialised to zero.
@@ -210,6 +293,9 @@ def create_shared_mem_array(
 
     # Keep a reference to the shm object to prevent GC from unmapping the memory
     _TRACKED_SHM_OBJECTS[shm.name] = shm
+
+    if numa_node is not None:
+        _bind_shared_memory_before_touch(shm, length=num_bytes, node=numa_node)
 
     np_arr = np.ndarray(shape, dtype=np_dtype, buffer=shm.buf)
     tensor = torch.from_numpy(np_arr)

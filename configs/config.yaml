@@ -32,10 +32,10 @@ compute:
   amp: false
 tqdm: true
 stable_mode: false
-# In auto mode, bind each GPU worker's new memory to that GPU's NUMA node while
-# keeping CPU-heavy workers and the host rank on the full CPU cpuset. Use "off"
-# to disable placement or an integer node ID to force every local rank's CPU and
-# memory onto one node.
+# In auto mode, apply GPU-local worker-memory and ring-buffer placement only
+# when visible GPUs span NUMA nodes. If they share one NUMA node, keep all ranks
+# on the full CPU cpuset with first-touch memory. Use "off" to disable placement
+# or an integer node ID to force every local rank's CPU and memory onto one node.
 numa_policy: auto # auto | off | NUMA node ID
 reset_eval_neg_sampler_each_epoch: false
 share_neg_sampler_across_splits: false
