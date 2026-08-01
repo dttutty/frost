@@ -95,19 +95,24 @@ class Receiver(ThreadBase):
 
         while not self.stop_ev.is_set():
             recv_start = time.perf_counter()
-            kind, payload = self.control_plane.receive()
-            recv_end = time.perf_counter()
-            decode_start = recv_end
+            kind, shared_payload = self.control_plane.receive()
             try:
-                msg: Meta | str | None
-                if kind is ControlMessageKind.BATCH:
-                    msg = decode_meta(payload, n_gpus=self.env.n_gpu)
-                elif kind is ControlMessageKind.END_OF_EPOCH:
-                    msg = "end_of_epoch"
-                else:
-                    msg = None
+                # Decoded plans outlive the control-ring slot.  Copy the encoded
+                # block once so TensorSet views remain worker-local after the host
+                # reuses the shared slot, and release producer backpressure before
+                # the Python object reconstruction begins.
+                payload = shared_payload.clone()
             finally:
                 self.control_plane.release()
+            recv_end = time.perf_counter()
+            decode_start = recv_end
+            msg: Meta | str | None
+            if kind is ControlMessageKind.BATCH:
+                msg = decode_meta(payload, n_gpus=self.env.n_gpu)
+            elif kind is ControlMessageKind.END_OF_EPOCH:
+                msg = "end_of_epoch"
+            else:
+                msg = None
             decode_end = time.perf_counter()
             self._recv_seq += 1
 
