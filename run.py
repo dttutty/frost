@@ -24,14 +24,17 @@ def _apply_stable_mode_env(cfg: DictConfig) -> dict[str, str]:
 def main(cfg: DictConfig):
     from frost.launch.affinity import configure_process_affinity
 
-    rank = int(os.environ.get("RANK", "0"))
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))
+    local_world_size = int(
+        os.environ.get("LOCAL_WORLD_SIZE", os.environ.get("WORLD_SIZE", "1"))
+    )
     affinity = configure_process_affinity(
         cfg.get("numa_policy", "auto"),
-        n_gpu=max(0, world_size - 1),
+        n_gpu=max(0, local_world_size - 1),
+        local_rank=local_rank,
         cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
     )
-    if rank == 0:
+    if local_rank == 0 or local_rank == local_world_size - 1:
         print(affinity.describe())
 
     applied = _apply_stable_mode_env(cfg)

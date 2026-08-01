@@ -32,8 +32,10 @@ compute:
   amp: false
 tqdm: true
 stable_mode: false
-# Bind all local ranks and their shared-memory allocations to the common NUMA
-# node of the visible GPUs. Use "off" to disable or an integer node ID to force.
+# In auto mode, bind each GPU worker's new memory to that GPU's NUMA node while
+# keeping CPU-heavy workers and the host rank on the full CPU cpuset. Use "off"
+# to disable placement or an integer node ID to force every local rank's CPU and
+# memory onto one node.
 numa_policy: auto # auto | off | NUMA node ID
 reset_eval_neg_sampler_each_epoch: false
 share_neg_sampler_across_splits: false
