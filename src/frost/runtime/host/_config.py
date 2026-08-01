@@ -13,6 +13,7 @@ from frost.neg_sampler.protocols import NegSamplerProto
 from frost.runtime.experimental.dynamic_state import DynamicStatePolicy
 from frost.runtime.host.protocols import AnalyzerProto
 from frost.sampling.protocols import NeighborhoodSamplerProto
+from frost.shm.control_plane import SharedControlPlane
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class HostResources:
     env: Env
     analyzer: AnalyzerProto
     gpu_topology: list
+    control_plane: SharedControlPlane
 
 
 @dataclass(frozen=True)

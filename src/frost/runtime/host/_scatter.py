@@ -19,8 +19,8 @@ from frost.runtime._thread_base import ThreadBase
 from frost.runtime.control_plane import (
     ControlMessageKind,
     encode_meta,
-    make_control_header,
 )
+from frost.shm.control_plane import SharedControlPlane
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,7 @@ class Scatter(ThreadBase):
         env: Env,
         result_q: Q[Result],
         stop_ev: threading.Event,
+        control_plane: SharedControlPlane,
     ) -> None:
         super().__init__(name="scatter", stop_ev=stop_ev)
         self.n_gpu = n_gpu
@@ -74,6 +75,7 @@ class Scatter(ThreadBase):
         self.nfeat_plan_out_q = nfeat_plan_out_q
         self.stop_ev = stop_ev
         self.result_q = result_q
+        self.control_plane = control_plane
 
         self.world_size: int = env.world_size
         self.local_rank: int = env.local_rank
@@ -97,39 +99,25 @@ class Scatter(ThreadBase):
             raise ValueError(
                 f"Expected {self.n_gpu} worker messages, got {len(per_worker)}."
             )
-        worker_ranks = [r for r in range(self.world_size) if r != self.host_rank]
         call_start = time.perf_counter()
-        messages: list[tuple[torch.Tensor, torch.Tensor | None]] = []
+        messages: list[tuple[ControlMessageKind, torch.Tensor | None]] = []
         for message in per_worker:
             if isinstance(message, Meta):
                 payload = encode_meta(message, n_gpus=self.n_gpu)
-                header = make_control_header(
-                    ControlMessageKind.BATCH, payload.numel()
-                )
+                kind = ControlMessageKind.BATCH
             elif message == "end_of_epoch":
                 payload = None
-                header = make_control_header(ControlMessageKind.END_OF_EPOCH)
+                kind = ControlMessageKind.END_OF_EPOCH
             elif message is None:
                 payload = None
-                header = make_control_header(ControlMessageKind.SHUTDOWN)
+                kind = ControlMessageKind.SHUTDOWN
             else:
                 raise TypeError(f"Unsupported control message {message!r}.")
-            messages.append((header, payload))
+            messages.append((kind, payload))
         encode_end = time.perf_counter()
 
-        works: list[dist.Work] = []
-        for rank, (header, payload) in zip(worker_ranks, messages):
-            header_work = dist.isend(header, dst=rank)
-            if header_work is None:
-                raise RuntimeError("Gloo header isend returned no work handle.")
-            works.append(header_work)
-            if payload is not None:
-                payload_work = dist.isend(payload, dst=rank)
-                if payload_work is None:
-                    raise RuntimeError("Gloo payload isend returned no work handle.")
-                works.append(payload_work)
-        for work in works:
-            work.wait()
+        for gpu_id, (kind, payload) in enumerate(messages):
+            self.control_plane.publish(gpu_id, kind, payload)
         send_end = time.perf_counter()
         if self._timing_enabled:
             self._control_encode_s_curve.append(encode_end - call_start)

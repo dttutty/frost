@@ -175,6 +175,7 @@ class Worker(
 
         self._init_pipeline(
             resources.ring_buffer,
+            resources.control_plane,
             resources.node_features,
             resources.edge_features,
         )

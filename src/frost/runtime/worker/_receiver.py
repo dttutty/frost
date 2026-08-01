@@ -22,12 +22,11 @@ from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 from frost.runtime.control_plane import (
-    CONTROL_HEADER_SIZE,
     ControlMessageKind,
     decode_meta,
-    parse_control_header,
 )
 from frost.shm.ring_buf import RingBuf
+from frost.shm.control_plane import SharedControlPlane
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +68,7 @@ class Receiver(ThreadBase):
         result_q: Q[Result],
         stop_ev: threading.Event,
         ring_buf: RingBuf,
+        control_plane: SharedControlPlane,
     ) -> None:
         super().__init__(name="receiver", stop_ev=stop_ev)
         self.env: Env = env
@@ -78,6 +78,7 @@ class Receiver(ThreadBase):
         self._gather_seq = 0
         self._recv_seq = 0
         self.ring_buf = ring_buf
+        self.control_plane = control_plane
         self._timing_enabled = _timing_enabled()
         self._scatter_wait_s_curve: list[float] = []
         self._control_decode_s_curve: list[float] = []
@@ -94,24 +95,19 @@ class Receiver(ThreadBase):
 
         while not self.stop_ev.is_set():
             recv_start = time.perf_counter()
-            header = torch.empty(CONTROL_HEADER_SIZE, dtype=torch.int64)
-            dist.recv(header, src=self.env.host_rank)
-            kind, payload_length = parse_control_header(header)
-            payload: torch.Tensor | None = None
-            if payload_length:
-                payload = torch.empty(payload_length, dtype=torch.int64)
-                dist.recv(payload, src=self.env.host_rank)
+            kind, payload = self.control_plane.receive()
             recv_end = time.perf_counter()
             decode_start = recv_end
-            msg: Meta | str | None
-            if kind is ControlMessageKind.BATCH:
-                if payload is None:
-                    raise RuntimeError("Batch control message has no payload.")
-                msg = decode_meta(payload, n_gpus=self.env.n_gpu)
-            elif kind is ControlMessageKind.END_OF_EPOCH:
-                msg = "end_of_epoch"
-            else:
-                msg = None
+            try:
+                msg: Meta | str | None
+                if kind is ControlMessageKind.BATCH:
+                    msg = decode_meta(payload, n_gpus=self.env.n_gpu)
+                elif kind is ControlMessageKind.END_OF_EPOCH:
+                    msg = "end_of_epoch"
+                else:
+                    msg = None
+            finally:
+                self.control_plane.release()
             decode_end = time.perf_counter()
             self._recv_seq += 1
 

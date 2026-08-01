@@ -34,6 +34,7 @@ from frost.runtime.experimental.dynamic_state import (
     PlannerMode,
     resolve_dynamic_state_policy,
 )
+from frost.shm.control_plane import SharedControlPlane
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,7 @@ class Host:
         self._init_pipeline(
             resources.env,
             resources.gpu_topology,
+            resources.control_plane,
             options.carry_over_route,
             options.output_dir,
             options.persist_all_updates_to_cpu,
@@ -192,6 +194,7 @@ class Host:
         self,
         env: Env,
         gpu_topo: list,
+        control_plane: SharedControlPlane,
         if_carry_over_route: bool,
         output_dir: str | None,
         persist_all_updates_to_cpu: bool,
@@ -252,6 +255,7 @@ class Host:
             env=env,
             result_q=self.result_q,
             stop_ev=self.stop_ev,
+            control_plane=control_plane,
         )
 
     def _init_dataset(self, df: pd.DataFrame) -> None:

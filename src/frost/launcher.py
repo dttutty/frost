@@ -26,6 +26,7 @@ from frost.launch.dispatch import dispatch_host, dispatch_worker
 from frost.launch.factory import build_worker_modules
 from frost.launch.plan import compile_execution_plan
 from frost.launch.storage import (
+    prepare_control_plane,
     prepare_dynamic_store,
     prepare_launch_dataset,
     prepare_ring_buffer,
@@ -270,6 +271,12 @@ def launch(cfg: DictConfig):
         eval_n_neg=eval_n_neg,
         ring_buf_size=int(cfg.ring_buf_size),
     )
+    control_plane = prepare_control_plane(
+        env=env,
+        run_id=run_id,
+        ring_buffer=ring_buf,
+        n_nodes=n_nodes,
+    )
 
     shared = prepare_dynamic_store(
         enabled=has_mem,
@@ -335,6 +342,7 @@ def launch(cfg: DictConfig):
                     env=env,
                     analyzer=planner,
                     gpu_topology=gpu_topo,
+                    control_plane=control_plane,
                 ),
                 options=HostOptions(
                     has_node_features=has_nfeat,
@@ -395,6 +403,7 @@ def launch(cfg: DictConfig):
                     encoder=encoder,
                     predictor=predictor,
                     ring_buffer=ring_buf,
+                    control_plane=control_plane,
                     mailbox_router=mailbox_router,
                 ),
                 options=WorkerOptions(

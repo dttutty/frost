@@ -14,6 +14,7 @@ from frost.runtime.control_plane import (
     make_control_header,
     parse_control_header,
 )
+from frost.shm.control_plane import control_payload_capacity
 from frost.utils.tensor_set import TensorSet
 
 
@@ -118,3 +119,9 @@ def test_sentinel_header_rejects_payload() -> None:
     )
     with pytest.raises(ValueError, match="cannot carry"):
         parse_control_header(header)
+
+
+def test_shared_control_capacity_covers_plans_and_mask() -> None:
+    assert control_payload_capacity(
+        n_gpus=4, node_capacity=100, mask_capacity=300
+    ) == 1741

@@ -48,6 +48,7 @@ def test_direct_state_ablation_initializes_delta_queue(monkeypatch):
 
     worker._init_pipeline(
         ring_buf=SimpleNamespace(root_expansion=RootExpansion.ALL_ROOTS),
+        control_plane=object(),
         nfeat=None,
         efeat=None,
     )

@@ -10,6 +10,7 @@ from frost.datatypes.env import Env
 from frost.models.contracts import RootExpansion
 from frost.seq_sampler import TemporalGraphType
 from frost.shm.dataset_mgr import DatasetManager
+from frost.shm.control_plane import SharedControlPlane, control_payload_capacity
 from frost.shm.mem_mgr import MemBoxStore, MemBoxStoreManager
 from frost.shm.ring_buf import RingBuf, cal_max_buf_size_for_layouts
 from frost.utils.dtypes import RuntimeDTypes
@@ -120,6 +121,24 @@ def prepare_ring_buffer(
         root_expansion=root_expansion,
         max_size=ring_buf_size,
         slot_capacity=slot_capacity,
+    )
+
+
+def prepare_control_plane(
+    *, env: Env, run_id: str, ring_buffer: RingBuf, n_nodes: int
+) -> SharedControlPlane:
+    """Create the tensor-payload control ring shared by host and workers."""
+    node_capacity = min(ring_buffer.slot_capacity, n_nodes)
+    payload_capacity = control_payload_capacity(
+        n_gpus=env.n_gpu,
+        node_capacity=node_capacity,
+        mask_capacity=ring_buffer.slot_capacity,
+    )
+    return SharedControlPlane(
+        env=env,
+        run_id=run_id,
+        payload_capacity=payload_capacity,
+        max_size=2,
     )
 
 

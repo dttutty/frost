@@ -14,6 +14,7 @@ from frost.launch.plan import ExecutionPlan
 from frost.models.protocols import MailboxRouterProto, MemoryUpdaterProto
 from frost.runtime.experimental.dynamic_state import DynamicStatePolicy
 from frost.shm.mem_mgr import MemBoxStore
+from frost.shm.control_plane import SharedControlPlane
 from frost.shm.ring_buf import RingBuf
 
 
@@ -29,6 +30,7 @@ class WorkerResources:
     encoder: nn.Module
     predictor: nn.Module
     ring_buffer: RingBuf
+    control_plane: SharedControlPlane
     mailbox_router: MailboxRouterProto | None
 
 

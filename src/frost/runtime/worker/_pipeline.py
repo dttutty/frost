@@ -29,6 +29,7 @@ from frost.runtime.worker.p2p_syncer._task_handlers import (
 )
 from frost.runtime.worker.p2p_syncer._writer import BoxMailWriter, SharedMemWriter
 from frost.shm.ring_buf import RingBuf
+from frost.shm.control_plane import SharedControlPlane
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,7 @@ class WorkerPipelineMixin:
     def _init_pipeline(
         self,
         ring_buf: RingBuf,
+        control_plane: SharedControlPlane,
         nfeat: torch.Tensor | None,
         efeat: torch.Tensor | None,
     ) -> None:
@@ -95,6 +97,7 @@ class WorkerPipelineMixin:
             result_q=self.result_q,
             stop_ev=self.stop_ev,
             ring_buf=ring_buf,
+            control_plane=control_plane,
         )
 
         if has_mem:
