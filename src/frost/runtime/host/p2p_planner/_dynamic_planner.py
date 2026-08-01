@@ -70,7 +70,8 @@ def _empty_set(reference: torch.Tensor) -> TensorSet:
 
 
 def _empty_route_matrix(n_gpus: int, reference: torch.Tensor) -> list[list[TensorSet]]:
-    return [[_empty_set(reference) for _ in range(n_gpus)] for _ in range(n_gpus)]
+    empty = _empty_set(reference)
+    return [[empty for _ in range(n_gpus)] for _ in range(n_gpus)]
 
 
 def _build_ownership_index(
@@ -390,8 +391,8 @@ def _deduplicate_updates_with_index(
     """Resolve updates directly into a compact node-to-owner map."""
     n_gpus = len(updates)
     reference = _reference_tensor(updates)
-    nodes, owners, _ = _concat_ranked_sets(updates, reference)
-    if n_gpus == 0 or nodes.numel() == 0:
+    n_inputs = sum(update.data.numel() for update in updates)
+    if n_gpus == 0 or n_inputs == 0:
         empty = _empty_set(reference)
         index = _OwnedNodeIndex(
             nodes=empty.data,
@@ -405,7 +406,7 @@ def _deduplicate_updates_with_index(
     use_dense = (
         max_node >= 0
         and dense_span <= _DENSE_OWNER_MAX_NODES
-        and dense_span <= max(65_536, nodes.numel() * _DENSE_OWNER_MAX_SPARSITY)
+        and dense_span <= max(65_536, n_inputs * _DENSE_OWNER_MAX_SPARSITY)
     )
 
     dense_owners: torch.Tensor | None = None
@@ -414,7 +415,7 @@ def _deduplicate_updates_with_index(
         rank_order = range(n_gpus) if prefer_higher_rank else range(n_gpus - 1, -1, -1)
         if (
             reference.device.type == "cpu"
-            and nodes.numel() <= _NUMPY_OWNER_MAX_INPUTS
+            and n_inputs <= _NUMPY_OWNER_MAX_INPUTS
         ):
             dense_owners_numpy = np.full(dense_span, -1, dtype=np.int16)
             for rank in rank_order:
@@ -442,6 +443,7 @@ def _deduplicate_updates_with_index(
             )
             selected_owners = dense_owners[owned_nodes.long()].long()
     else:
+        nodes, owners, _ = _concat_ranked_sets(updates, reference)
         order = torch.argsort(nodes, stable=True)
         sorted_nodes = nodes[order]
         sorted_owners = owners[order]
