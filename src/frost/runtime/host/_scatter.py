@@ -3,9 +3,11 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Sequence
 from queue import Queue as Q
-from typing import Literal, cast
+from typing import Literal
 
+import torch
 import torch.distributed as dist
 
 from frost.runtime.host.types import MetaBundle
@@ -14,6 +16,11 @@ from frost.datatypes.meta import Meta
 from frost.datatypes.plan import DynamicPlan, PlanSet, StaticPlan
 from frost.datatypes.result import Result
 from frost.runtime._thread_base import ThreadBase
+from frost.runtime.control_plane import (
+    ControlMessageKind,
+    encode_meta,
+    make_control_header,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +39,8 @@ class Scatter(ThreadBase):
 
     Consumes MetaBundles (lists of ``Meta`` objects, one per GPU) from ``in_q``,
     attaches per-GPU ``PlanSet`` data from the planner output queues, and uses
-    ``dist.scatter_object_list`` to push each ``Meta`` to its assigned Worker rank.
+    a tensorized point-to-point control plane to push each ``Meta`` to its assigned
+    Worker rank. Sampled graph arrays remain in the shared-memory ring buffer.
     At end-of-epoch it also collects results from Workers via ``dist.gather_object``
     and forwards them to ``result_q`` for the Host to consume.
 
@@ -76,28 +84,57 @@ class Scatter(ThreadBase):
         self._mail_plan_wait_s_curve: list[float] = []
         self._nfeat_plan_wait_s_curve: list[float] = []
         self._scatter_call_s_curve: list[float] = []
+        self._control_encode_s_curve: list[float] = []
+        self._control_send_s_curve: list[float] = []
 
         assert self.local_rank == self.host_rank
 
-    def _scatter_to_workers(self, per_worker: list[Meta | str | None]) -> None:
-        """Scatter one object to each rank via collective scatter.
-
-        per_worker is indexed by *worker order* (len == n_gpu).
-        We build a world_size-length list indexed by rank.
-        """
-        scatter_input: list[Meta | str | None] = [None] * self.world_size
+    def _send_to_workers(
+        self, per_worker: Sequence[Meta | str | None]
+    ) -> None:
+        """Encode and asynchronously send one control message per worker."""
+        if len(per_worker) != self.n_gpu:
+            raise ValueError(
+                f"Expected {self.n_gpu} worker messages, got {len(per_worker)}."
+            )
         worker_ranks = [r for r in range(self.world_size) if r != self.host_rank]
-        for rank, obj in zip(worker_ranks, per_worker):
-            scatter_input[rank] = obj
-        # Host's own slot (scatter_input[host_rank]) stays None
-        output: list[None] = [None]
-        scatter_start = time.perf_counter()
-        dist.scatter_object_list(
-            output, scatter_object_input_list=scatter_input, src=self.host_rank
-        )
-        scatter_end = time.perf_counter()
+        call_start = time.perf_counter()
+        messages: list[tuple[torch.Tensor, torch.Tensor | None]] = []
+        for message in per_worker:
+            if isinstance(message, Meta):
+                payload = encode_meta(message, n_gpus=self.n_gpu)
+                header = make_control_header(
+                    ControlMessageKind.BATCH, payload.numel()
+                )
+            elif message == "end_of_epoch":
+                payload = None
+                header = make_control_header(ControlMessageKind.END_OF_EPOCH)
+            elif message is None:
+                payload = None
+                header = make_control_header(ControlMessageKind.SHUTDOWN)
+            else:
+                raise TypeError(f"Unsupported control message {message!r}.")
+            messages.append((header, payload))
+        encode_end = time.perf_counter()
+
+        works: list[dist.Work] = []
+        for rank, (header, payload) in zip(worker_ranks, messages):
+            header_work = dist.isend(header, dst=rank)
+            if header_work is None:
+                raise RuntimeError("Gloo header isend returned no work handle.")
+            works.append(header_work)
+            if payload is not None:
+                payload_work = dist.isend(payload, dst=rank)
+                if payload_work is None:
+                    raise RuntimeError("Gloo payload isend returned no work handle.")
+                works.append(payload_work)
+        for work in works:
+            work.wait()
+        send_end = time.perf_counter()
         if self._timing_enabled:
-            self._scatter_call_s_curve.append(scatter_end - scatter_start)
+            self._control_encode_s_curve.append(encode_end - call_start)
+            self._control_send_s_curve.append(send_end - encode_end)
+            self._scatter_call_s_curve.append(send_end - call_start)
 
     def _gather_from_workers(self) -> Result:
         """Gather results from all workers via collective gather."""
@@ -124,14 +161,14 @@ class Scatter(ThreadBase):
             meta_2_scatter = self.in_q.get(block=True)
 
             if meta_2_scatter is None:
-                self._scatter_to_workers([None] * self.n_gpu)
+                self._send_to_workers([None] * self.n_gpu)
                 # raise RuntimeError("Scatter received None, shutting down...")
                 break
             elif meta_2_scatter == "end_of_epoch":
                 logger.warning(
                     "end_of_epoch received by Scatter, sending control signal to Workers..."
                 )
-                self._scatter_to_workers(["end_of_epoch"] * self.n_gpu)
+                self._send_to_workers(["end_of_epoch"] * self.n_gpu)
                 data = self._gather_from_workers()
                 self.result_q.put(data)
                 continue
@@ -149,7 +186,7 @@ class Scatter(ThreadBase):
                             mem_wait_end - mem_wait_start
                         )
                     if mem_plan is None and self.stop_ev.is_set():
-                        self._scatter_to_workers([None] * self.n_gpu)
+                        self._send_to_workers([None] * self.n_gpu)
                         break
                 if self.mail_plan_out_q is not None:
                     mail_wait_start = time.perf_counter()
@@ -160,7 +197,7 @@ class Scatter(ThreadBase):
                             mail_wait_end - mail_wait_start
                         )
                     if mail_plan is None and self.stop_ev.is_set():
-                        self._scatter_to_workers([None] * self.n_gpu)
+                        self._send_to_workers([None] * self.n_gpu)
                         break
                 if self.nfeat_plan_out_q is not None:
                     nfeat_wait_start = time.perf_counter()
@@ -171,10 +208,10 @@ class Scatter(ThreadBase):
                             nfeat_wait_end - nfeat_wait_start
                         )
                     if nfeat_plan is None and self.stop_ev.is_set():
-                        self._scatter_to_workers([None] * self.n_gpu)
+                        self._send_to_workers([None] * self.n_gpu)
                         break
                 if self.stop_ev.is_set():
-                    self._scatter_to_workers([None] * self.n_gpu)
+                    self._send_to_workers([None] * self.n_gpu)
                     break
                 for i, m in enumerate(meta_2_scatter):
                     safe_mem = mem_plan[i] if mem_plan is not None else None
@@ -185,7 +222,7 @@ class Scatter(ThreadBase):
                         box_plan=safe_mail,
                         nfeat_plan=safe_nfeat,
                     )
-                self._scatter_to_workers(cast(list[Meta | str | None], meta_2_scatter))
+                self._send_to_workers(meta_2_scatter)
 
         if self._timing_enabled and self._scatter_call_s_curve:
             payload = {
@@ -203,6 +240,12 @@ class Scatter(ThreadBase):
                 ],
                 "scatter_call_s_curve": [
                     round(v, 6) for v in self._scatter_call_s_curve
+                ],
+                "control_encode_s_curve": [
+                    round(v, 6) for v in self._control_encode_s_curve
+                ],
+                "control_send_s_curve": [
+                    round(v, 6) for v in self._control_send_s_curve
                 ],
             }
             print(

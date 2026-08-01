@@ -1,7 +1,7 @@
 """Receiver thread for the worker-side pipeline.
 
-Receives ``Meta`` objects scattered by the host via ``dist.scatter_object_list``
-and forwards them into the ``received_q`` for downstream H2D processing.
+Receives tensor-encoded ``Meta`` control messages from the host and forwards
+them into the ``received_q`` for downstream H2D processing.
 Epoch-end results are gathered back to the host via ``dist.gather_object``.
 """
 
@@ -12,8 +12,6 @@ import threading
 import time
 from queue import Empty
 from queue import Queue as Q
-from typing import cast
-
 import torch
 import torch.distributed as dist
 
@@ -23,6 +21,12 @@ from frost.datatypes.graph import FlatGraph
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
 from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
+from frost.runtime.control_plane import (
+    CONTROL_HEADER_SIZE,
+    ControlMessageKind,
+    decode_meta,
+    parse_control_header,
+)
 from frost.shm.ring_buf import RingBuf
 
 logger = logging.getLogger(__name__)
@@ -40,8 +44,8 @@ def _timing_enabled() -> bool:
 class Receiver(ThreadBase):
     """Background thread that receives batches scattered from the host process.
 
-    On each iteration it calls ``dist.scatter_object_list`` to receive the
-    next message from the host:
+    On each iteration it receives a fixed tensor header followed by an optional
+    tensor payload from the host:
 
     * ``Meta`` object → assembles a ``FlatGraph`` from the shared ring buffer
       and forwards the annotated ``Meta`` to ``received_q``.
@@ -76,6 +80,7 @@ class Receiver(ThreadBase):
         self.ring_buf = ring_buf
         self._timing_enabled = _timing_enabled()
         self._scatter_wait_s_curve: list[float] = []
+        self._control_decode_s_curve: list[float] = []
         self._ring_buf_wait_s_curve: list[float] = []
 
     @torch.no_grad()
@@ -88,16 +93,26 @@ class Receiver(ThreadBase):
         batch_count = 0
 
         while not self.stop_ev.is_set():
-            # Receive via collective scatter
-            output: list[Meta | str | None] = [None]
-            scatter_start = time.perf_counter()
-            dist.scatter_object_list(
-                output,
-                scatter_object_input_list=[None] * self.env.world_size,
-                src=self.env.host_rank,
-            )
-            scatter_end = time.perf_counter()
-            msg = output[0]
+            recv_start = time.perf_counter()
+            header = torch.empty(CONTROL_HEADER_SIZE, dtype=torch.int64)
+            dist.recv(header, src=self.env.host_rank)
+            kind, payload_length = parse_control_header(header)
+            payload: torch.Tensor | None = None
+            if payload_length:
+                payload = torch.empty(payload_length, dtype=torch.int64)
+                dist.recv(payload, src=self.env.host_rank)
+            recv_end = time.perf_counter()
+            decode_start = recv_end
+            msg: Meta | str | None
+            if kind is ControlMessageKind.BATCH:
+                if payload is None:
+                    raise RuntimeError("Batch control message has no payload.")
+                msg = decode_meta(payload, n_gpus=self.env.n_gpu)
+            elif kind is ControlMessageKind.END_OF_EPOCH:
+                msg = "end_of_epoch"
+            else:
+                msg = None
+            decode_end = time.perf_counter()
             self._recv_seq += 1
 
             if msg is None:
@@ -119,7 +134,9 @@ class Receiver(ThreadBase):
                 dist.gather_object(result, dst=self.env.host_rank)
 
             else:
-                meta = cast(Meta, msg)
+                if not isinstance(msg, Meta):
+                    raise TypeError(f"Unexpected control message {msg!r}.")
+                meta = msg
                 batch_count += 1
                 ring_buf_start = time.perf_counter()
                 buf = self.ring_buf.get(meta.buf_len, block=True)
@@ -141,22 +158,27 @@ class Receiver(ThreadBase):
                 self.ring_buf.release()
 
                 if self._timing_enabled:
-                    self._scatter_wait_s_curve.append(scatter_end - scatter_start)
+                    self._scatter_wait_s_curve.append(recv_end - recv_start)
+                    self._control_decode_s_curve.append(decode_end - decode_start)
                     self._ring_buf_wait_s_curve.append(ring_buf_end - ring_buf_start)
                 self.received_q.put(meta, block=True)
 
         if self._timing_enabled and self._scatter_wait_s_curve:
-            payload = {
+            timing_payload = {
                 "system": "frost",
                 "rank": self.env.local_rank,
                 "batch_count": batch_count,
                 "scatter_wait_s_curve": [
                     round(v, 6) for v in self._scatter_wait_s_curve
                 ],
+                "control_decode_s_curve": [
+                    round(v, 6) for v in self._control_decode_s_curve
+                ],
                 "ring_buf_wait_s_curve": [
                     round(v, 6) for v in self._ring_buf_wait_s_curve
                 ],
             }
             print(
-                f"APPENDIX_RECEIVER_TIMING_CURVE {json.dumps(payload, sort_keys=True)}"
+                "APPENDIX_RECEIVER_TIMING_CURVE "
+                f"{json.dumps(timing_payload, sort_keys=True)}"
             )

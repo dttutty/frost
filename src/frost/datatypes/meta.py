@@ -17,7 +17,7 @@ from .plan import PlanSet
 class Meta:
     """All information a worker needs to execute one training or evaluation step.
 
-    Scattered from the host to each worker via ``scatter_object_list``.  The
+    Tensor-encoded by the host and sent to one worker through the control plane. The
     Attributes:
         split: Data split this batch belongs to.
         n_src: Number of source nodes in this batch (before ``2 + n_neg``
