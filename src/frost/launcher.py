@@ -24,6 +24,7 @@ from frost.launch.distributed import (
 )
 from frost.launch.dispatch import dispatch_host, dispatch_worker
 from frost.launch.factory import build_worker_modules
+from frost.launch.gpu_topology import detect_gpu_topology
 from frost.launch.plan import compile_execution_plan
 from frost.launch.storage import (
     prepare_control_plane,
@@ -33,7 +34,6 @@ from frost.launch.storage import (
     resolve_batch_layout,
 )
 from frost.sampling.protocols import NeighborhoodSamplerProto
-from frost.runtime.host._plan_router import detect_gpu_topology
 from frost.runtime.experimental.dynamic_state import (
     TransportMode,
     resolve_dynamic_state_policy,

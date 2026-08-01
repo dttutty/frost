@@ -22,6 +22,18 @@ def _apply_stable_mode_env(cfg: DictConfig) -> dict[str, str]:
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig):
+    from frost.launch.affinity import configure_process_affinity
+
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    affinity = configure_process_affinity(
+        cfg.get("numa_policy", "auto"),
+        n_gpu=max(0, world_size - 1),
+        cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+    )
+    if rank == 0:
+        print(affinity.describe())
+
     applied = _apply_stable_mode_env(cfg)
     if applied:
         print(

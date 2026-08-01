@@ -1,10 +1,10 @@
 import numpy as np
 
-from frost.runtime.host._plan_router import (
+from frost.launch.gpu_topology import (
     _parse_nvidia_smi_topology,
-    build_gpu_distance_matrix,
     detect_gpu_topology,
 )
+from frost.runtime.host._plan_router import build_gpu_distance_matrix
 
 
 def test_build_gpu_distance_matrix_three_levels() -> None:
@@ -36,6 +36,19 @@ Legend:
     assert numa == {0: 0, 1: 0, 2: 1}
 
 
+def test_parse_nvidia_smi_topology_with_nic_columns() -> None:
+    topo_output = """
+\tGPU0\tGPU1\tNIC0\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID
+GPU0\tX\tNV4\tNODE\t0-15\t0\tN/A
+GPU1\tNV4\tX\tPIX\t0-15\t0\tN/A
+NIC0\tNODE\tPIX\tX
+
+Legend:
+"""
+    _, numa = _parse_nvidia_smi_topology(topo_output)
+    assert numa == {0: 0, 1: 0}
+
+
 def test_detect_gpu_topology_groups_nvlink_then_numa(monkeypatch) -> None:
     topo_output = """
 \tGPU0\tGPU1\tGPU2\tGPU3\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID
@@ -61,7 +74,7 @@ Legend:
         raise AssertionError(args)
 
     monkeypatch.setattr(
-        "frost.runtime.host._plan_router._run_nvidia_smi", fake_run_nvidia_smi
+        "frost.launch.gpu_topology._run_nvidia_smi", fake_run_nvidia_smi
     )
     topo = detect_gpu_topology(n_gpu=4, cuda_visible_devices="0,1,2,3")
     dist = build_gpu_distance_matrix(topo)
