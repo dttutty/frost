@@ -1,4 +1,7 @@
+import json
+import os
 import threading
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -14,6 +17,15 @@ from frost.datatypes.plan import DynamicPlan
 from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 from frost.seq_sampler import _core as _native
 from frost.utils.tensor_set import TensorSet
+
+
+def _timing_enabled() -> bool:
+    return os.environ.get("FROST_HOST_TIMING_BENCH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 @dataclass(frozen=True)
@@ -552,7 +564,8 @@ class DynamicPlanner(ThreadBase):
         current_batch_only: bool = False,
     ) -> None:
         super().__init__(name="dynamic_planner", stop_ev=stop_ev)
-        del output_dir, plan_kind
+        del output_dir
+        self.plan_kind = plan_kind
         self.gpus_distance = gpus_distance
         self.n_gpus = len(self.gpus_distance)
         self.in_q = in_q
@@ -562,6 +575,30 @@ class DynamicPlanner(ThreadBase):
         self.pending: MetasDyNeed | None = None
         self.persist_all_updates_to_cpu = persist_all_updates_to_cpu
         self.current_batch_only = current_batch_only
+        self._timing_enabled = _timing_enabled()
+        self._plan_s_curve: list[float] = []
+        self._out_q_put_s_curve: list[float] = []
+
+    def _put_plan(self, plan: list[DynamicPlan]) -> None:
+        start = time.perf_counter()
+        self.out_q.put(plan)
+        if self._timing_enabled:
+            self._out_q_put_s_curve.append(time.perf_counter() - start)
+
+    def _emit_timing(self) -> None:
+        if not self._timing_enabled or not self._plan_s_curve:
+            return
+        payload = {
+            "system": "frost",
+            "plan_kind": self.plan_kind,
+            "batch_count": len(self._plan_s_curve),
+            "plan_s_curve": self._plan_s_curve,
+            "out_q_put_s_curve": self._out_q_put_s_curve,
+        }
+        print(
+            "APPENDIX_DYNAMIC_PLANNER_TIMING_CURVE "
+            f"{json.dumps(payload, sort_keys=True)}"
+        )
 
     def _plan_current_batch_only(
         self,
@@ -607,7 +644,12 @@ class DynamicPlanner(ThreadBase):
                 if in_q_data == "end_of_epoch":
                     continue
                 all_needs, all_pos_root, _raw_need_counts, _metas = in_q_data
-                self.out_q.put(self._plan_current_batch_only(all_needs, all_pos_root))
+                start = time.perf_counter()
+                plan = self._plan_current_batch_only(all_needs, all_pos_root)
+                if self._timing_enabled:
+                    self._plan_s_curve.append(time.perf_counter() - start)
+                self._put_plan(plan)
+            self._emit_timing()
             return
 
         while not self.stop_ev.is_set():
@@ -634,6 +676,7 @@ class DynamicPlanner(ThreadBase):
                 next_needs: list[TensorSet] = [empty_ts for _ in range(self.n_gpus)]
                 next_updates: list[TensorSet] = [empty_ts for _ in range(self.n_gpus)]
 
+                start = time.perf_counter()
                 plan = self._plan(
                     all_needs,
                     all_pos_root,
@@ -642,7 +685,9 @@ class DynamicPlanner(ThreadBase):
                     metas,
                     raw_need_counts=raw_need_counts,
                 )
-                self.out_q.put(plan)
+                if self._timing_enabled:
+                    self._plan_s_curve.append(time.perf_counter() - start)
+                self._put_plan(plan)
                 self.pending = None
                 continue
 
@@ -652,6 +697,7 @@ class DynamicPlanner(ThreadBase):
                 self.fetch = all_needs  # first batch: fetch everything from CPU
             else:
                 all_needs, all_pos_root, raw_need_counts, metas = self.pending
+                start = time.perf_counter()
                 plan = self._plan(
                     all_needs,
                     all_pos_root,
@@ -660,8 +706,11 @@ class DynamicPlanner(ThreadBase):
                     metas,
                     raw_need_counts=raw_need_counts,
                 )
-                self.out_q.put(plan)
+                if self._timing_enabled:
+                    self._plan_s_curve.append(time.perf_counter() - start)
+                self._put_plan(plan)
                 self.pending = in_q_data
+        self._emit_timing()
 
     def _plan(
         self,

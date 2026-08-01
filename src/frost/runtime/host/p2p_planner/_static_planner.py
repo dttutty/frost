@@ -1,5 +1,8 @@
+import json
 import logging
+import os
 import threading
+import time
 from queue import Queue
 from typing import Literal
 
@@ -12,6 +15,15 @@ from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 from frost.utils.tensor_set import TensorSet
 
 logger = logging.getLogger(__name__)
+
+
+def _timing_enabled() -> bool:
+    return os.environ.get("FROST_HOST_TIMING_BENCH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 class StaticPlanner(ThreadBase):
@@ -36,6 +48,15 @@ class StaticPlanner(ThreadBase):
         self.out_q = out_q
         self.stop_ev = stop_ev
         self.pending: list[TensorSet] | None = None
+        self._timing_enabled = _timing_enabled()
+        self._plan_s_curve: list[float] = []
+        self._out_q_put_s_curve: list[float] = []
+
+    def _put_plan(self, plan: list[StaticPlan]) -> None:
+        start = time.perf_counter()
+        self.out_q.put(plan)
+        if self._timing_enabled:
+            self._out_q_put_s_curve.append(time.perf_counter() - start)
 
     def logic(self) -> None:
         """Main planning loop for static node features.
@@ -68,8 +89,11 @@ class StaticPlanner(ThreadBase):
                     for _ in range(self.n_gpus)
                 ]
 
+                start = time.perf_counter()
                 plan = self._plan(avails, next_needs)
-                self.out_q.put(plan)
+                if self._timing_enabled:
+                    self._plan_s_curve.append(time.perf_counter() - start)
+                self._put_plan(plan)
                 self.pending = None
                 continue
 
@@ -82,10 +106,25 @@ class StaticPlanner(ThreadBase):
             else:  # not first batch
                 avails = self.pending
 
+                start = time.perf_counter()
                 plan = self._plan(avails, need)
+                if self._timing_enabled:
+                    self._plan_s_curve.append(time.perf_counter() - start)
 
-                self.out_q.put(plan)
+                self._put_plan(plan)
                 self.pending = need
+        if self._timing_enabled and self._plan_s_curve:
+            payload = {
+                "system": "frost",
+                "plan_kind": "nfeat",
+                "batch_count": len(self._plan_s_curve),
+                "plan_s_curve": self._plan_s_curve,
+                "out_q_put_s_curve": self._out_q_put_s_curve,
+            }
+            print(
+                "APPENDIX_STATIC_PLANNER_TIMING_CURVE "
+                f"{json.dumps(payload, sort_keys=True)}"
+            )
 
     def _plan(
         self,

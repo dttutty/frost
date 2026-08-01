@@ -1,7 +1,10 @@
+import json
 import logging
+import os
 import re
 import subprocess
 import threading
+import time
 from collections import defaultdict, deque
 from queue import Queue as Q
 
@@ -28,6 +31,15 @@ from frost.runtime.host.protocols import AnalyzerProto
 logger = logging.getLogger(__name__)
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 _GPU_LABEL_RE = re.compile(r"^GPU(\d+)$")
+
+
+def _timing_enabled() -> bool:
+    return os.environ.get("FROST_HOST_TIMING_BENCH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _run_nvidia_smi(args: list[str]) -> str | None:
@@ -336,6 +348,13 @@ class PlanRouter:
         self.mem_planner = None
         self.mail_planner = None
         self.nfeat_planner = None
+        self._timing_enabled = _timing_enabled()
+        self._mem_inputs_s_curve: list[float] = []
+        self._mem_q_put_s_curve: list[float] = []
+        self._mail_inputs_s_curve: list[float] = []
+        self._mail_q_put_s_curve: list[float] = []
+        self._nfeat_inputs_s_curve: list[float] = []
+        self._nfeat_q_put_s_curve: list[float] = []
 
         self.mem_plan_in_q: DynamicPlanInQ | None = None
         if mem_plan_out_q:
@@ -392,20 +411,35 @@ class PlanRouter:
         assert len(metas) == self.n_gpus
 
         if self.mem_plan_in_q is not None:
+            start = time.perf_counter()
             mem_needs, mem_updates = self.analyzer.get_mem_plan_inputs(layouts)
             mem_raw_need_counts = self.analyzer.get_mem_plan_raw_need_counts(layouts)
+            inputs_end = time.perf_counter()
             self.mem_plan_in_q.put((mem_needs, mem_updates, mem_raw_need_counts, metas))
+            if self._timing_enabled:
+                self._mem_inputs_s_curve.append(inputs_end - start)
+                self._mem_q_put_s_curve.append(time.perf_counter() - inputs_end)
 
         if self.mail_plan_in_q is not None:
+            start = time.perf_counter()
             box_needs, box_updates = self.analyzer.get_mail_plan_inputs(layouts)
             box_raw_need_counts = self.analyzer.get_mail_plan_raw_need_counts(layouts)
+            inputs_end = time.perf_counter()
             self.mail_plan_in_q.put(
                 (box_needs, box_updates, box_raw_need_counts, metas)
             )
+            if self._timing_enabled:
+                self._mail_inputs_s_curve.append(inputs_end - start)
+                self._mail_q_put_s_curve.append(time.perf_counter() - inputs_end)
 
         if self.nfeat_plan_in_q is not None:
+            start = time.perf_counter()
             nfeat_needs = self.analyzer.get_feat_plan_inputs(layouts)
+            inputs_end = time.perf_counter()
             self.nfeat_plan_in_q.put(nfeat_needs)
+            if self._timing_enabled:
+                self._nfeat_inputs_s_curve.append(inputs_end - start)
+                self._nfeat_q_put_s_curve.append(time.perf_counter() - inputs_end)
 
     def signal_epoch_end(self) -> None:
         """Forward the end-of-epoch sentinel to all sub-planners."""
@@ -428,3 +462,17 @@ class PlanRouter:
         join_thread(self.mem_planner, join_timeout_s, logger)
         join_thread(self.mail_planner, join_timeout_s, logger)
         join_thread(self.nfeat_planner, join_timeout_s, logger)
+        if self._timing_enabled:
+            payload = {
+                "system": "frost",
+                "mem_inputs_s_curve": self._mem_inputs_s_curve,
+                "mem_q_put_s_curve": self._mem_q_put_s_curve,
+                "mail_inputs_s_curve": self._mail_inputs_s_curve,
+                "mail_q_put_s_curve": self._mail_q_put_s_curve,
+                "nfeat_inputs_s_curve": self._nfeat_inputs_s_curve,
+                "nfeat_q_put_s_curve": self._nfeat_q_put_s_curve,
+            }
+            print(
+                "APPENDIX_PLAN_ROUTER_TIMING_CURVE "
+                f"{json.dumps(payload, sort_keys=True)}"
+            )
