@@ -45,6 +45,9 @@ class _OwnedNodeIndex:
 
 _DENSE_OWNER_MAX_NODES = 4_000_000
 _DENSE_OWNER_MAX_SPARSITY = 16
+_NATIVE_ROUTE_MIN_ENTRIES = 80_000
+_NATIVE_ROUTE_MIN_MAX_NODE = 65_536
+_NATIVE_ROUTE_MIN_RANKS = 5
 
 
 def _reference_tensor(*groups: list[TensorSet]) -> torch.Tensor:
@@ -452,7 +455,26 @@ def _deduplicate_and_route_updates(
             f"updates and needs must have equal rank counts, got {len(updates)} "
             f"and {len(needs)}."
         )
-    native_compatible = hasattr(_native, "plan_owned_routes") and all(
+    n_entries = sum(
+        tensor_set.data.numel()
+        for group in (updates, needs)
+        for tensor_set in group
+    )
+    max_node = max(
+        (
+            int(tensor_set.data[-1])
+            for group in (updates, needs)
+            for tensor_set in group
+            if tensor_set.data.numel() > 0
+        ),
+        default=-1,
+    )
+    use_native = (
+        n_entries >= _NATIVE_ROUTE_MIN_ENTRIES
+        or max_node >= _NATIVE_ROUTE_MIN_MAX_NODE
+        or len(updates) >= _NATIVE_ROUTE_MIN_RANKS
+    )
+    native_compatible = use_native and hasattr(_native, "plan_owned_routes") and all(
         tensor_set.data.device.type == "cpu"
         and tensor_set.data.dtype == torch.long
         for group in (updates, needs)
@@ -482,10 +504,26 @@ def _deduplicate_and_route_updates(
         ]
         return owned, all_nodes, routes
 
-    owned, all_nodes, index = _deduplicate_updates_with_index(
-        updates, prefer_higher_rank=prefer_higher_rank
+    reference = _reference_tensor(updates, needs)
+    empty = _empty_set(reference)
+    owned = [empty for _ in updates]
+    all_nodes = empty
+    rank_order = (
+        range(len(updates) - 1, -1, -1)
+        if prefer_higher_rank
+        else range(len(updates))
     )
-    return owned, all_nodes, _route_from_owned_index(needs, index)
+    for rank in rank_order:
+        owned[rank] = updates[rank] - all_nodes
+        all_nodes = all_nodes | updates[rank]
+
+    routes = _empty_route_matrix(len(updates), reference)
+    for sender, available in enumerate(owned):
+        for receiver, need in enumerate(needs):
+            routed = available & need
+            if routed.data.numel() > 0:
+                routes[sender][receiver] = routed
+    return owned, all_nodes, routes
 
 
 class DynamicPlanner(ThreadBase):

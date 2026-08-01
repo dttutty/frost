@@ -171,8 +171,14 @@ def test_batched_transfer_rejects_mismatched_rank_counts() -> None:
 @pytest.mark.parametrize("node_offset", [0, 5_000_000])
 @pytest.mark.parametrize("prefer_higher_rank", [False, True])
 def test_native_owned_routes_match_reference_for_dense_and_sparse_ids(
-    node_offset: int, prefer_higher_rank: bool
+    node_offset: int,
+    prefer_higher_rank: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "frost.runtime.host.p2p_planner._dynamic_planner._NATIVE_ROUTE_MIN_ENTRIES",
+        0,
+    )
     updates = [
         _ts([node_offset + 1, node_offset + 3]),
         _ts([node_offset + 2, node_offset + 3]),
