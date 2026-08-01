@@ -40,12 +40,10 @@ class _OwnedNodeIndex:
     owners: torch.Tensor
     n_gpus: int
     dense_owners: torch.Tensor | None = None
-    dense_owners_numpy: np.ndarray | None = None
 
 
 _DENSE_OWNER_MAX_NODES = 4_000_000
 _DENSE_OWNER_MAX_SPARSITY = 16
-_NUMPY_OWNER_MAX_INPUTS = 65_536
 
 
 def _reference_tensor(*groups: list[TensorSet]) -> torch.Tensor:
@@ -237,27 +235,6 @@ def _route_from_owned_index(
         )
 
     reference = _reference_tensor(needs) if needs else index.nodes
-    if index.dense_owners_numpy is not None and reference.device.type == "cpu":
-        routes = _empty_route_matrix(n_gpus, reference)
-        dense_owners_numpy = index.dense_owners_numpy
-        for receiver, need in enumerate(needs):
-            query = _coerce_like(need.data, reference).numpy()
-            numpy_in_bounds = (query >= 0) & (query < dense_owners_numpy.size)
-            routed_nodes = query[numpy_in_bounds]
-            routed_owners = dense_owners_numpy[routed_nodes]
-            numpy_routed = routed_owners >= 0
-            routed_nodes = routed_nodes[numpy_routed]
-            routed_owners = routed_owners[numpy_routed]
-            for sender in range(n_gpus):
-                selected = routed_nodes[routed_owners == sender]
-                if selected.size:
-                    routes[sender][receiver] = TensorSet(
-                        torch.from_numpy(selected),
-                        sort_now=False,
-                        ensure_unique=False,
-                    )
-        return routes
-
     query_nodes, receivers, _ = _concat_ranked_sets(needs, reference)
     if query_nodes.numel() == 0 or index.nodes.numel() == 0:
         valid = torch.zeros(query_nodes.numel(), dtype=torch.bool, device=reference.device)
@@ -410,38 +387,20 @@ def _deduplicate_updates_with_index(
     )
 
     dense_owners: torch.Tensor | None = None
-    dense_owners_numpy: np.ndarray | None = None
     if use_dense:
         rank_order = range(n_gpus) if prefer_higher_rank else range(n_gpus - 1, -1, -1)
-        if (
-            reference.device.type == "cpu"
-            and n_inputs <= _NUMPY_OWNER_MAX_INPUTS
-        ):
-            dense_owners_numpy = np.full(dense_span, -1, dtype=np.int16)
-            for rank in rank_order:
-                update_numpy = _coerce_like(updates[rank].data, reference).numpy()
-                dense_owners_numpy[update_numpy] = rank
-            owned_nodes_numpy = np.flatnonzero(dense_owners_numpy >= 0).astype(
-                reference.numpy().dtype, copy=False
-            )
-            selected_owners_numpy = dense_owners_numpy[owned_nodes_numpy].astype(
-                np.int64, copy=False
-            )
-            owned_nodes = torch.from_numpy(owned_nodes_numpy)
-            selected_owners = torch.from_numpy(selected_owners_numpy)
-        else:
-            dense_owners = torch.full(
-                (dense_span,), -1, dtype=torch.int16, device=reference.device
-            )
-            for rank in rank_order:
-                update_tensor = _coerce_like(updates[rank].data, reference)
-                dense_owners[update_tensor.long()] = rank
-            owned_nodes = (
-                torch.nonzero(dense_owners >= 0, as_tuple=False)
-                .flatten()
-                .to(reference.dtype)
-            )
-            selected_owners = dense_owners[owned_nodes.long()].long()
+        dense_owners = torch.full(
+            (dense_span,), -1, dtype=torch.int16, device=reference.device
+        )
+        for rank in rank_order:
+            update_tensor = _coerce_like(updates[rank].data, reference)
+            dense_owners[update_tensor.long()] = rank
+        owned_nodes = (
+            torch.nonzero(dense_owners >= 0, as_tuple=False)
+            .flatten()
+            .to(reference.dtype)
+        )
+        selected_owners = dense_owners[owned_nodes.long()].long()
     else:
         nodes, owners, _ = _concat_ranked_sets(updates, reference)
         order = torch.argsort(nodes, stable=True)
@@ -468,7 +427,6 @@ def _deduplicate_updates_with_index(
         owners=selected_owners,
         n_gpus=n_gpus,
         dense_owners=dense_owners,
-        dense_owners_numpy=dense_owners_numpy,
     )
     owned = [
         TensorSet(
