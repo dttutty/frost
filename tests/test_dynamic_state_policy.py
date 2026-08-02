@@ -5,6 +5,7 @@ from frost.runtime.experimental.dynamic_state import (
     TransportMode,
     WritebackTiming,
     resolve_dynamic_state_policy,
+    single_gpu_resident_dynamic_state_policy,
 )
 
 
@@ -60,3 +61,11 @@ def test_resolve_dynamic_state_policy(
 def test_resolve_dynamic_state_policy_rejects_unknown_name() -> None:
     with pytest.raises(ValueError, match="Unsupported dynamic_state_ablation"):
         resolve_dynamic_state_policy("unknown")
+
+
+def test_single_gpu_resident_policy_is_internal_gpu_local_path() -> None:
+    policy = single_gpu_resident_dynamic_state_policy()
+    assert policy.name == "single_gpu_resident"
+    assert policy.planner is PlannerMode.NONE
+    assert policy.transport is TransportMode.GPU_LOCAL
+    assert policy.writeback is WritebackTiming.AFTER_MEMORY_UPDATE

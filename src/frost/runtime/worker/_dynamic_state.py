@@ -250,7 +250,7 @@ class DynamicStateAssemblerMixin:
             shared_data = self.shared.box
             shared_ts = self.shared.box_ts
 
-        fetch_nids = valid_nids.cpu().long()
+        fetch_nids = valid_nids.to(shared_data.device).long()
         global_positions = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
 
         target_data[global_positions] = shared_data[fetch_nids].to(self.device)

@@ -49,3 +49,4 @@ class WorkerOptions:
     cpu_benchmark_pid_list: list[int] | None = None
     eval_metric: Literal["ap", "mrr"] = "ap"
     train_only: bool = False
+    single_gpu_resident: bool = False

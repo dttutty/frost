@@ -31,6 +31,15 @@ Run TGN with two GPU workers and one host rank:
 
 In general, `nproc_per_node = number of GPU workers + 1`.
 
+For one GPU, the same entry can select the dedicated resident backend. It keeps
+the full static feature tables and dynamic memory/mailbox tensors on the GPU,
+skips DDP, feature staging, dynamic access planning, and P2P state transport,
+while retaining the host sampler rank:
+
+The default is `off`. `auto` enables the backend only for one worker when its
+persistent tensors fit `runtime.single_gpu_resident_memory_fraction` of device
+memory; `on` reports an error instead of silently falling back.
+
 ## Datasets
 
 Download the complete official TGB link-prediction catalog with `aria2c`:

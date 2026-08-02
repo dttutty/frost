@@ -14,7 +14,7 @@ from typing import Literal, cast
 import torch
 
 from frost.datatypes.meta import Meta
-from frost.models.contracts import NodeSet
+from frost.models.contracts import NodeSet, RootExpansion
 from frost.runtime.protocols import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
 from frost.runtime.worker._static_assembler import StaticAssembler
@@ -55,6 +55,9 @@ class H2D(StreamThreadBase):
         device: torch.device,
         node_feature_scope: NodeSet = NodeSet.ALL_SAMPLED,
         feature_ring: FeatureStageRing | None = None,
+        resident_features: bool = False,
+        fanout: list[int] | None = None,
+        root_expansion: RootExpansion = RootExpansion.ALL_ROOTS,
     ) -> None:
         super().__init__(name="h2d", stop_ev=stop_ev)
         self.nfeat = nfeat
@@ -65,6 +68,9 @@ class H2D(StreamThreadBase):
         self.stop_ev = stop_ev
         self.node_feature_scope = node_feature_scope
         self.feature_ring = feature_ring
+        self.resident_features = resident_features
+        self.fanout = fanout or []
+        self.root_expansion = root_expansion
         self.st_asm = StaticAssembler(
             shared_nfeat=nfeat, shared_efeat=efeat, device=self.device
         )
@@ -136,22 +142,32 @@ class H2D(StreamThreadBase):
                     meta.neg_valid_mask = meta.neg_valid_mask.to(self.device)
 
                 if self.nfeat is not None:
-                    assert (
-                        meta.plan_set is not None
-                        and meta.plan_set.nfeat_plan is not None
-                    )
-                    nfeat = self.st_asm.prepare_nfeat_cache(
-                        nfeat_plan=meta.plan_set.nfeat_plan,
-                        staged_nfeat=(
-                            staged.node_values if staged is not None else None
-                        ),
-                    )
+                    if self.resident_features:
+                        meta.flat_graph = self.st_asm.fill_resident_nfeat(
+                            meta.flat_graph,
+                            n_src=meta.n_src,
+                            n_neg=meta.n_neg,
+                            fanout=self.fanout,
+                            root_expansion=self.root_expansion,
+                            scope=self.node_feature_scope,
+                        )
+                    else:
+                        assert (
+                            meta.plan_set is not None
+                            and meta.plan_set.nfeat_plan is not None
+                        )
+                        nfeat = self.st_asm.prepare_nfeat_cache(
+                            nfeat_plan=meta.plan_set.nfeat_plan,
+                            staged_nfeat=(
+                                staged.node_values if staged is not None else None
+                            ),
+                        )
 
-                    meta.flat_graph = self.st_asm.fill_nfeat(
-                        flat_graph=meta.flat_graph,
-                        nfeat_nid=nfeat,
-                        strict=self.node_feature_scope is NodeSet.ALL_SAMPLED,
-                    )
+                        meta.flat_graph = self.st_asm.fill_nfeat(
+                            flat_graph=meta.flat_graph,
+                            nfeat_nid=nfeat,
+                            strict=self.node_feature_scope is NodeSet.ALL_SAMPLED,
+                        )
             finally:
                 if staged is not None:
                     if self.feature_ring is None:

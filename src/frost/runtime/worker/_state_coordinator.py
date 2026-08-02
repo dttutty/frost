@@ -173,7 +173,10 @@ class DynamicStateCoordinator:
                 graph,
                 flat_nid_cpu,
             )
-        elif self.dynamic_state_policy.transport is TransportMode.DIRECT_CPU:
+        elif self.dynamic_state_policy.transport in {
+            TransportMode.DIRECT_CPU,
+            TransportMode.GPU_LOCAL,
+        }:
             self._publish_direct(context, root_new_mem, box_pos_efeat)
         else:
             raise RuntimeError("Unsupported dynamic-state runtime configuration.")

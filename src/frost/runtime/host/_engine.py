@@ -205,11 +205,11 @@ class Host:
         sub-planner threads via PlanRouter.dispatch(), then puts MetaBundle into scatter_q.
         No dedicated thread for routing — it is inlined into the main thread.
         """
-        has_planner = self.has_nfeat or self.has_mem
         enable_mem_mail_planner = (
             self.has_mem
             and self.dynamic_state_policy.planner is not PlannerMode.NONE
         )
+        has_planner = self.has_nfeat or enable_mem_mail_planner
         stateless_q_size = self.no_memory_queue_size if not self.has_mem else 2
         memory_scatter_q_size = MEMORY_SCATTER_QUEUE_SIZE
         memory_mem_plan_out_q_size = MEMORY_MEM_PLAN_OUT_QUEUE_SIZE

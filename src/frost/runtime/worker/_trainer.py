@@ -99,6 +99,7 @@ class WorkerTrainerMixin:
         optimizer: Literal["adam", "sgd"],
         ring_buf: RingBuf,
         compile_model: bool = True,
+        use_ddp: bool = True,
     ) -> None:
         """Create model, optimizer, and wrap with DDP."""
         model = TemporalLinkModel(
@@ -118,15 +119,20 @@ class WorkerTrainerMixin:
             raise ValueError(f"Unsupported optimizer: {optimizer}")
 
         model.cuda()
-        ddp_model = DDP(model, process_group=self.nccl, find_unused_parameters=False)
-        self.model = ddp_model
-        self.p2p_guard = P2PGuardCommHook(self.p2p_sem)
-        _guard = self.p2p_guard
+        if use_ddp:
+            ddp_model = DDP(
+                model, process_group=self.nccl, find_unused_parameters=False
+            )
+            self.model = ddp_model
+            self.p2p_guard = P2PGuardCommHook(self.p2p_sem)
+            _guard = self.p2p_guard
 
-        def p2p_guard_comm_hook(state, bucket):
-            return _guard(state, bucket)
+            def p2p_guard_comm_hook(state, bucket):
+                return _guard(state, bucket)
 
-        ddp_model.register_comm_hook(state=self.nccl, hook=p2p_guard_comm_hook)
+            ddp_model.register_comm_hook(state=self.nccl, hook=p2p_guard_comm_hook)
+        else:
+            self.model = model
         if compile_model:
             # Compile only tensor-heavy submodules; Meta graph assembly remains eager.
             bare = model
@@ -245,8 +251,13 @@ class WorkerTrainerMixin:
         self.box_wr_q.join()
 
     def _write_direct_dynamic_state_request(self, request) -> None:
-        assert self.direct_state_writer is not None
-        self.direct_state_writer.write(
+        writer = (
+            self.gpu_resident_state_writer
+            if self.dynamic_state_policy.transport is TransportMode.GPU_LOCAL
+            else self.direct_state_writer
+        )
+        assert writer is not None
+        writer.write(
             request,
             release_h2d_credits=True,
         )
@@ -260,8 +271,13 @@ class WorkerTrainerMixin:
         request = meta.direct_writeback_request
         if request is None:
             return
-        assert self.direct_state_writer is not None
-        self.direct_state_writer.write(
+        writer = (
+            self.gpu_resident_state_writer
+            if self.dynamic_state_policy.transport is TransportMode.GPU_LOCAL
+            else self.direct_state_writer
+        )
+        assert writer is not None
+        writer.write(
             request,
             release_h2d_credits=release_h2d_credits,
         )

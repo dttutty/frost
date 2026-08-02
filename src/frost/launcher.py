@@ -5,6 +5,7 @@ import time
 from uuid import uuid4
 
 import pandas as pd
+import torch
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf, open_dict
@@ -37,10 +38,18 @@ from frost.launch.storage import (
     prepare_ring_buffer,
     resolve_batch_layout,
 )
+from frost.launch.single_gpu_resident import (
+    SingleGpuResidentDecision,
+    SingleGpuResidentMode,
+    estimate_resident_storage_bytes,
+    parse_single_gpu_resident_mode,
+    resolve_single_gpu_resident,
+)
 from frost.sampling.protocols import NeighborhoodSamplerProto
 from frost.runtime.experimental.dynamic_state import (
     TransportMode,
     resolve_dynamic_state_policy,
+    single_gpu_resident_dynamic_state_policy,
 )
 from frost.neg_sampler import RandomNegLinkSampler
 from frost.neg_sampler.protocols import NegSamplerProto
@@ -275,6 +284,85 @@ def launch(cfg: DictConfig):
             raise TypeError("model.state.updater must resolve to a mapping")
         d_mail = 2 * int(updater_cfg["d_mem"]) + cfg.edim
 
+    runtime_cfg = cfg.get("runtime", {})
+    resident_raw_mode = runtime_cfg.get("single_gpu_resident", "off")
+    resident_mode = parse_single_gpu_resident_mode(resident_raw_mode)
+    resident_fraction = float(
+        runtime_cfg.get("single_gpu_resident_memory_fraction", 0.7)
+    )
+    resident_required_bytes = estimate_resident_storage_bytes(
+        node_features=nfeat,
+        edge_features=efeat,
+        n_nodes=n_nodes,
+        boxsize=int(state_cfg["boxsize"]) if state_cfg is not None else 0,
+        d_mem=(
+            int(state_cfg["updater"]["d_mem"])
+            if state_cfg is not None
+            else 0
+        ),
+        d_mail=d_mail,
+        state_dtype=RUNTIME_DTYPES.state_torch,
+        timestamp_dtype=RUNTIME_DTYPES.timestamp_torch,
+    )
+    total_device_bytes = 0
+    if resident_mode is not SingleGpuResidentMode.OFF:
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "runtime.single_gpu_resident requires an available CUDA device."
+            )
+        total_device_bytes = torch.cuda.get_device_properties(0).total_memory
+    resident_decision = resolve_single_gpu_resident(
+        resident_mode,
+        n_gpu=env.n_gpu,
+        required_bytes=resident_required_bytes,
+        total_device_bytes=total_device_bytes,
+        memory_fraction=resident_fraction,
+    )
+    if resident_decision.enabled and has_mem:
+        state_contract = execution_plan.dynamic_state
+        supported_state = (
+            isinstance(state_contract, MemoryState)
+            and isinstance(state_contract.mailbox, InteractionMailbox)
+            and len(execution_plan.sampling.fanout) <= 1
+            and state_cfg is not None
+            and int(state_cfg["boxsize"]) == 1
+        )
+        if not supported_state:
+            reason = (
+                "dynamic state currently requires an interaction mailbox, "
+                "boxsize=1, and at most one sampling hop"
+            )
+            if resident_decision.mode is SingleGpuResidentMode.ON:
+                raise ValueError(
+                    "runtime.single_gpu_resident=on is unsupported: " + reason + "."
+                )
+            resident_decision = SingleGpuResidentDecision(
+                enabled=False,
+                mode=resident_decision.mode,
+                required_bytes=resident_decision.required_bytes,
+                budget_bytes=resident_decision.budget_bytes,
+                reason=reason,
+            )
+    single_gpu_resident = resident_decision.enabled
+    if single_gpu_resident:
+        if str(cfg.get("dynamic_state_ablation", "baseline")) != "baseline":
+            raise ValueError(
+                "runtime.single_gpu_resident cannot be combined with "
+                "dynamic_state_ablation."
+            )
+        if has_mem:
+            dynamic_state_policy = single_gpu_resident_dynamic_state_policy()
+    if env.is_host:
+        logger.info(
+            "Single-GPU resident backend: enabled=%s, mode=%s, "
+            "persistent=%.2f GiB, budget=%.2f GiB (%s)",
+            single_gpu_resident,
+            resident_decision.mode.value,
+            resident_decision.required_bytes / 2**30,
+            resident_decision.budget_bytes / 2**30,
+            resident_decision.reason,
+        )
+
     nccl_ddp, nccl_p2p = create_worker_process_groups(env)
 
     # Determine maximum n_neg between train and eval for shared memory sizing
@@ -320,6 +408,7 @@ def launch(cfg: DictConfig):
         d_mem=int(state_cfg["updater"]["d_mem"]) if state_cfg is not None else 0,
         edim=int(cfg.edim),
         numa_node=numa_runtime.shared_state_node,
+        gpu_resident=single_gpu_resident,
     )
 
     if env.is_host:
@@ -362,7 +451,7 @@ def launch(cfg: DictConfig):
                 tgl_sampler_parity=tgl_sampler_parity,
             )
         planner = AccessPlanAnalyzer(execution_plan)
-        has_nfeat = ndim > 0
+        has_nfeat = ndim > 0 and not single_gpu_resident
 
         if_carry_over_route: bool = bool(cfg.get("if_carry_over_route", False))
         dispatch_host(
@@ -453,6 +542,7 @@ def launch(cfg: DictConfig):
                     cpu_benchmark_pid_list=cpu_benchmark_pid_list,
                     eval_metric=eval_metric,
                     train_only=train_only,
+                    single_gpu_resident=single_gpu_resident,
                 ),
             )
         )

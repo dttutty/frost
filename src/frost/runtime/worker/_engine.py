@@ -37,6 +37,9 @@ from frost.runtime.experimental.dynamic_state import (
     resolve_dynamic_state_policy,
 )
 from frost.runtime.worker._direct_writeback import DirectDynamicStateWriter
+from frost.runtime.worker._gpu_resident_writeback import (
+    GpuResidentDynamicStateWriter,
+)
 from frost.runtime.worker._checkpoint import WorkerCheckpointMixin
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
 from frost.runtime.worker._h2d_credit import BatchAwareCreditManager
@@ -110,6 +113,7 @@ class Worker(
     box_wr: BoxMailWriter | None = None
     p2p_q_handler: P2PQHandler | None = None
     direct_state_writer: DirectDynamicStateWriter | None = None
+    gpu_resident_state_writer: GpuResidentDynamicStateWriter | None = None
 
     model: TemporalLinkModel | DDP
     optimizer: torch.optim.Optimizer
@@ -132,6 +136,22 @@ class Worker(
         self.nccl = resources.ddp_group
         self.nccl_p2p = resources.p2p_group
         self.device = torch.device(f"cuda:{resources.env.local_rank}")
+        self.single_gpu_resident = options.single_gpu_resident
+        if self.single_gpu_resident and resources.env.n_gpu != 1:
+            raise ValueError("The GPU-resident backend requires exactly one worker.")
+        node_features = resources.node_features
+        edge_features = resources.edge_features
+        if self.single_gpu_resident:
+            node_features = (
+                None
+                if node_features is None
+                else node_features.to(self.device, dtype=torch.float32)
+            )
+            edge_features = (
+                None
+                if edge_features is None
+                else edge_features.to(self.device, dtype=torch.float32)
+            )
         self.mail_combine = options.mail_combine
         self.dynamic_state_policy = (
             options.dynamic_state_policy
@@ -172,12 +192,21 @@ class Worker(
                 mem_box_store=self.mem_box_store,
                 h2d_sem=self.h2d_sem,
             )
+        if (
+            self.mem_box_store is not None
+            and self.dynamic_state_policy.transport is TransportMode.GPU_LOCAL
+        ):
+            self.gpu_resident_state_writer = GpuResidentDynamicStateWriter(
+                mem_box_store=self.mem_box_store,
+                h2d_sem=self.h2d_sem,
+                mail_combine=self.mail_combine or "last",
+            )
 
         self._init_pipeline(
             resources.ring_buffer,
             resources.control_plane,
-            resources.node_features,
-            resources.edge_features,
+            node_features,
+            edge_features,
         )
         self._init_model(
             resources.encoder,
@@ -186,6 +215,7 @@ class Worker(
             options.optimizer,
             resources.ring_buffer,
             compile_model=self.compile_model,
+            use_ddp=not self.single_gpu_resident,
         )
         self._init_metrics()
 

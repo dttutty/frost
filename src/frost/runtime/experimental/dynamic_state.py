@@ -15,6 +15,7 @@ class PlannerMode(StrEnum):
 class TransportMode(StrEnum):
     ASYNC_P2P = "async_p2p"
     DIRECT_CPU = "direct_cpu"
+    GPU_LOCAL = "gpu_local"
 
 
 class WritebackTiming(StrEnum):
@@ -64,6 +65,16 @@ _POLICIES = {
         filter_writeback_by_plan=True,
     ),
 }
+
+
+def single_gpu_resident_dynamic_state_policy() -> DynamicStatePolicy:
+    """Return the internal policy used by the GPU-resident worker backend."""
+    return DynamicStatePolicy(
+        name="single_gpu_resident",
+        planner=PlannerMode.NONE,
+        transport=TransportMode.GPU_LOCAL,
+        writeback=WritebackTiming.AFTER_MEMORY_UPDATE,
+    )
 
 
 def resolve_dynamic_state_policy(raw: object) -> DynamicStatePolicy:

@@ -161,9 +161,32 @@ def prepare_dynamic_store(
     d_mem: int,
     edim: int,
     numa_node: int | None = None,
+    gpu_resident: bool = False,
 ) -> MemBoxStore | None:
     if not enabled:
         return None
+    if gpu_resident:
+        if env.is_host:
+            return None
+        device = torch.device(f"cuda:{env.local_rank}")
+        d_mail = 2 * d_mem + edim
+        return MemBoxStore(
+            mem=torch.zeros((n_nodes, d_mem), dtype=dtypes.state_torch, device=device),
+            mem_ts=torch.zeros(
+                n_nodes, dtype=dtypes.timestamp_torch, device=device
+            ),
+            box=torch.zeros(
+                (n_nodes, boxsize, d_mail),
+                dtype=dtypes.state_torch,
+                device=device,
+            ),
+            box_ts=torch.zeros(
+                (n_nodes, boxsize),
+                dtype=dtypes.timestamp_torch,
+                device=device,
+            ),
+            box_pos=torch.zeros(n_nodes, dtype=torch.int64, device=device),
+        )
     return MemBoxStoreManager(
         env=env,
         mdtype=dtypes.state_torch,

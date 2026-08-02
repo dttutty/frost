@@ -11,6 +11,7 @@ import torch
 
 from frost.datatypes.graph import FlatGraph
 from frost.datatypes.plan import StaticPlan
+from frost.models.contracts import NodeSet, RootExpansion
 
 from ...datatypes.n_feat_nid import NodeFeatNid
 
@@ -78,7 +79,8 @@ class StaticAssembler:
             # Standard path: Gather missing features directly from shared memory
             gpu_nid = fetch.to(self.device)
             if staged_nfeat is None:
-                gpu_data = self.shared_nfeat[fetch].to(
+                feature_ids = fetch.to(self.shared_nfeat.device)
+                gpu_data = self.shared_nfeat[feature_ids].to(
                     device=self.device, dtype=torch.float32
                 )
             else:
@@ -212,6 +214,53 @@ class StaticAssembler:
         flat_graph.nfeat = node_feat
         return flat_graph
 
+    def fill_resident_nfeat(
+        self,
+        flat_graph: FlatGraph,
+        *,
+        n_src: int,
+        n_neg: int,
+        fanout: list[int],
+        root_expansion: RootExpansion,
+        scope: NodeSet,
+    ) -> FlatGraph:
+        """Gather the contract-selected rows from a full GPU feature table."""
+        assert self.shared_nfeat is not None
+        if self.shared_nfeat.device != self.device:
+            raise ValueError("Resident node features must live on the worker GPU.")
+
+        nodes = flat_graph.nid
+        selected = torch.zeros_like(nodes, dtype=torch.bool)
+        n_root = n_src * (2 + n_neg)
+        if scope is NodeSet.ALL_SAMPLED:
+            selected[:] = True
+        elif scope is NodeSet.ROOTS:
+            selected[:n_root] = True
+        elif scope is NodeSet.POSITIVE_ROOTS:
+            selected[: 2 * n_src] = True
+        elif scope is NodeSet.POSITIVE_NEIGHBORS:
+            if root_expansion is not RootExpansion.POSITIVE_ROOTS or not fanout:
+                raise ValueError(
+                    "positive-neighbor features require positive-root sampling"
+                )
+            selected[n_root : n_root + 2 * n_src * fanout[0]] = True
+        elif scope is not NodeSet.NONE:
+            raise ValueError(f"Unsupported resident node-feature scope: {scope}")
+        selected &= nodes != -1
+
+        node_feat = torch.zeros(
+            (nodes.numel(), self.shared_nfeat.shape[1]),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        positions = torch.nonzero(selected, as_tuple=False).squeeze(-1)
+        if positions.numel() > 0:
+            node_feat[positions] = self.shared_nfeat[nodes[positions].long()].to(
+                torch.float32
+            )
+        flat_graph.nfeat = node_feat
+        return flat_graph
+
     def fill_efeat(
         self,
         flat_graph: FlatGraph,
@@ -267,14 +316,15 @@ class StaticAssembler:
 
         # ---------------------------------------------
 
-        # Gather features on CPU
-        cpu_efeat = efeat[valid_eids]
+        feature_ids = valid_eids.to(efeat.device)
+        gathered_efeat = efeat[feature_ids]
 
         # Transfer to device
-        gpu_valid_efeat = cpu_efeat.to(device=self.device, dtype=torch.float32)
+        gpu_valid_efeat = gathered_efeat.to(device=self.device, dtype=torch.float32)
 
         # Assign features to valid positions
-        edge_feat[valid_mask] = gpu_valid_efeat
+        valid_positions = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
+        edge_feat[valid_positions.to(self.device)] = gpu_valid_efeat
 
         flat_graph.efeat = edge_feat
 

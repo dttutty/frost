@@ -48,3 +48,9 @@ share_neg_sampler_across_splits: false
 normalize_event_time: false
 persist_all_updates_to_cpu: false
 dynamic_state_ablation: baseline
+runtime:
+  # Keep static features plus memory/mailbox on the sole worker GPU. This is a
+  # separate internal backend selected through the normal frost-train entry.
+  single_gpu_resident: off # off | auto | on
+  # Leave the rest of device memory available for model weights and activations.
+  single_gpu_resident_memory_fraction: 0.7

@@ -103,7 +103,7 @@ class WorkerPipelineMixin:
         self.feature_prefetcher = None
         self.feature_ring = None
         self.feature_q = None
-        if has_static_features:
+        if has_static_features and not getattr(self, "single_gpu_resident", False):
             feature_depth = stateless_q_size + 1
             self.feature_ring = FeatureStageRing(depth=feature_depth)
             self.feature_q = Q(maxsize=stateless_q_size)
@@ -156,6 +156,11 @@ class WorkerPipelineMixin:
                 mem_wr_q=self.mem_wr_q,
                 box_wr_q=self.box_wr_q,
                 dynamic_state_policy=self.dynamic_state_policy,
+                wait_for_resident_write=(
+                    self.gpu_resident_state_writer.wait_for_latest_write
+                    if getattr(self, "gpu_resident_state_writer", None) is not None
+                    else None
+                ),
             )
             h2d_dest_q = self.h2d_out_q
         else:
@@ -170,6 +175,9 @@ class WorkerPipelineMixin:
             out_q=h2d_dest_q,
             stop_ev=self.stop_ev,
             feature_ring=self.feature_ring,
+            resident_features=getattr(self, "single_gpu_resident", False),
+            fanout=list(getattr(ring_buf, "fanout", [])),
+            root_expansion=ring_buf.root_expansion,
         )
 
     def _init_mem_box_threads(self) -> None:

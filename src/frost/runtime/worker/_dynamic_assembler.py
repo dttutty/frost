@@ -8,7 +8,7 @@ import os
 import threading
 import time
 from queue import Queue
-from typing import cast
+from typing import Callable, cast
 
 import torch
 
@@ -59,6 +59,7 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
         mem_wr_q: Queue | None = None,
         box_wr_q: Queue | None = None,
         dynamic_state_policy: DynamicStatePolicy | None = None,
+        wait_for_resident_write: Callable[[torch.cuda.Stream], None] | None = None,
     ) -> None:
         super().__init__(name="dy_assembler", stop_ev=stop_ev)
         self.in_q = h2d_out_q
@@ -81,6 +82,7 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
             if dynamic_state_policy is not None
             else resolve_dynamic_state_policy("baseline")
         )
+        self.wait_for_resident_write = wait_for_resident_write
         self._timing_enabled = _timing_enabled()
         self._h2d_credit_wait_s_curve: list[float] = []
         self._prepare_shared_s_curve: list[float] = []
@@ -138,6 +140,11 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
                 self.h2d_sem.acquire()
             h2d_wait_end = time.perf_counter()
 
+            if wait_for_resident_write := getattr(
+                self, "wait_for_resident_write", None
+            ):
+                wait_for_resident_write(torch.cuda.current_stream(self.device))
+
             prepare_start = time.perf_counter()
             assembly_layout = self.prepare_shared_features(
                 graph=meta.flat_graph,
@@ -148,7 +155,10 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
             )
             prepare_end = time.perf_counter()
 
-            if dynamic_state_policy.transport is TransportMode.DIRECT_CPU:
+            if dynamic_state_policy.transport in {
+                TransportMode.DIRECT_CPU,
+                TransportMode.GPU_LOCAL,
+            }:
                 if dynamic_state_policy.planner is PlannerMode.NONE:
                     self._fill_all_required_from_shm(
                         meta.flat_graph, meta.n_src, meta.n_neg
