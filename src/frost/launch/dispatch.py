@@ -30,6 +30,12 @@ def dispatch_host(factory: Callable[[], HostRuntime]) -> None:
         host = factory()
         host.run()
         failed = False
+    except BaseException:
+        # Runtime cleanup may need to call os._exit when a transport thread is
+        # stuck.  Record the originating exception before cleanup so that the
+        # forced exit cannot erase the only useful traceback.
+        logger.exception("Host runtime failed before cleanup")
+        raise
     finally:
         if host is not None:
             host.shutdown(graceful=not failed)
@@ -45,6 +51,9 @@ def dispatch_worker(factory: Callable[[], WorkerRuntime]) -> None:
         worker = factory()
         worker.run()
         failed = False
+    except BaseException:
+        logger.exception("Worker runtime failed before cleanup")
+        raise
     finally:
         if worker is not None:
             worker.cleanup(graceful=not failed)
