@@ -29,7 +29,7 @@ def test_worker_run_keeps_grad_enabled_for_training(monkeypatch) -> None:
 
     stop_ev = threading.Event()
     full_q: Queue = Queue()
-    meta = SimpleNamespace(split="train", labels=torch.ones(1), n_src=1)
+    meta = SimpleNamespace(split="train", labels=torch.ones(1), n_src=1, n_neg=1)
     full_q.put((meta, _FakeCudaEvent()))
 
     observed: list[bool] = []

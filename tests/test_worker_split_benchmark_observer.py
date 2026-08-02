@@ -34,7 +34,7 @@ def test_split_observer_is_disabled_by_default(
     observer = observer_module.WorkerSplitBenchmarkObserver(
         env=_Env(), device=torch.device("cuda:0")
     )
-    observer.on_batch_start(split="val", epoch=1, events=200)
+    observer.on_batch_start(split="val", epoch=1, events=200, scored_pairs=400)
     observer.on_batch_end()
     observer.on_epoch_end()
     assert capsys.readouterr().out == ""
@@ -54,9 +54,9 @@ def test_split_observer_emits_events_per_second(
     observer = observer_module.WorkerSplitBenchmarkObserver(
         env=_Env(), device=torch.device("cuda:0")
     )
-    observer.on_batch_start(split="val", epoch=2, events=200)
+    observer.on_batch_start(split="val", epoch=2, events=200, scored_pairs=20200)
     observer.on_batch_end()
-    observer.on_batch_start(split="val", epoch=2, events=100)
+    observer.on_batch_start(split="val", epoch=2, events=100, scored_pairs=10100)
     observer.on_batch_end()
     observer.on_epoch_end()
 
@@ -71,9 +71,42 @@ def test_split_observer_emits_events_per_second(
         "events": 300,
         "events_per_sec": 150.0,
         "rank": 0,
+        "scored_pairs": 30300,
+        "scored_pairs_per_sec": 15150.0,
         "split": "val",
         "system": "frost",
+        "warmup_batches": 0,
     }
+
+
+def test_split_observer_excludes_warmup_batches(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("FROST_BENCHMARK_SPLIT_THROUGHPUT", "1")
+    monkeypatch.setenv("FROST_SPLIT_THROUGHPUT_WARMUP_BATCHES_TEST", "1")
+    _FakeEvent.timestamps = iter((2000.0, 3000.0))
+    monkeypatch.setattr(observer_module.torch.cuda, "Event", _FakeEvent)
+    monkeypatch.setattr(
+        observer_module.torch.cuda,
+        "current_stream",
+        lambda _device: object(),
+    )
+    observer = observer_module.WorkerSplitBenchmarkObserver(
+        env=_Env(), device=torch.device("cuda:0")
+    )
+    observer.on_batch_start(split="test", epoch=1, events=200, scored_pairs=20200)
+    observer.on_batch_end()
+    observer.on_batch_start(split="test", epoch=1, events=100, scored_pairs=10100)
+    observer.on_batch_end()
+    observer.on_epoch_end()
+
+    _, encoded = capsys.readouterr().out.strip().split(" ", 1)
+    payload = json.loads(encoded)
+    assert payload["warmup_batches"] == 1
+    assert payload["batches"] == 1
+    assert payload["events"] == 100
+    assert payload["scored_pairs"] == 10100
+    assert payload["elapsed_s"] == 1.0
 
 
 def test_invalid_split_benchmark_env_is_rejected(

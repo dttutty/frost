@@ -472,16 +472,24 @@ class Host:
             if getattr(self, "reset_eval_neg_sampler_each_epoch", True):
                 self.neg_sampler_eval.reset()
 
+        split_debug_env = f"FROST_DEBUG_MAX_BATCHES_{split.upper()}"
         debug_max_batches = int(
-            os.environ.get("FROST_DEBUG_MAX_BATCHES_PER_SPLIT", "0")
+            os.environ.get(
+                split_debug_env,
+                os.environ.get("FROST_DEBUG_MAX_BATCHES_PER_SPLIT", "0"),
+            )
         )
         if debug_max_batches < 0:
-            raise ValueError("FROST_DEBUG_MAX_BATCHES_PER_SPLIT must be >= 0.")
+            raise ValueError(f"{split_debug_env} must be >= 0.")
         if debug_max_batches > 0:
-            max_rows = debug_max_batches * self.n_gpu * (
-                self.batch_size
-                if split == "train"
-                else getattr(self, "eval_batch_size", self.batch_size)
+            max_rows = (
+                debug_max_batches
+                * self.n_gpu
+                * (
+                    self.batch_size
+                    if split == "train"
+                    else getattr(self, "eval_batch_size", self.batch_size)
+                )
             )
             df = df.iloc[:max_rows]
 

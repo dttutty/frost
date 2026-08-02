@@ -269,6 +269,7 @@ class Worker(
                     split=meta.split,
                     epoch=self.curr_epoch + 1,
                     events=meta.n_src,
+                    scored_pairs=meta.n_src * (1 + meta.n_neg),
                 )
                 torch.cuda.current_stream().wait_event(ready_event)
                 if meta.split == "train":
