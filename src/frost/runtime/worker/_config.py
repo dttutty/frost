@@ -50,3 +50,4 @@ class WorkerOptions:
     eval_metric: Literal["ap", "mrr"] = "ap"
     train_only: bool = False
     single_gpu_resident: bool = False
+    early_stop_tolerance: float = 0.0

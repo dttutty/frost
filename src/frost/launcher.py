@@ -475,6 +475,9 @@ def launch(cfg: DictConfig):
                     timestamp_dtype=RUNTIME_DTYPES.timestamp_torch,
                     epochs=cfg.epoch,
                     patience=cfg.patience,
+                    early_stop_tolerance=float(
+                        cfg.get("early_stop_tolerance", 0.0)
+                    ),
                     carry_over_route=if_carry_over_route,
                     show_progress=bool(cfg.get("tqdm", False)),
                     no_memory_queue_size=no_memory_queue_size,
@@ -543,6 +546,9 @@ def launch(cfg: DictConfig):
                     eval_metric=eval_metric,
                     train_only=train_only,
                     single_gpu_resident=single_gpu_resident,
+                    early_stop_tolerance=float(
+                        cfg.get("early_stop_tolerance", 0.0)
+                    ),
                 ),
             )
         )

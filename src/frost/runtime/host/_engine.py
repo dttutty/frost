@@ -27,6 +27,7 @@ from frost.runtime._thread_base import (
     join_thread,
     put_shutdown_sentinel,
 )
+from frost.runtime._early_stopping import is_significant_improvement
 from frost.runtime.host import PlanRouter, Scatter
 from frost.runtime.host._batch_balance import make_balance_plan
 from frost.runtime.host._config import HostOptions, HostResources
@@ -164,6 +165,9 @@ class Host:
         )
         self.total_epoch = options.epochs
         self.patience = options.patience
+        if options.early_stop_tolerance < 0:
+            raise ValueError("early_stop_tolerance must be >= 0.")
+        self.early_stop_tolerance = options.early_stop_tolerance
         self.patience_counter = 0
         self.last_epoch_result: Result | None = None
         self._shutdown_done = False
@@ -300,10 +304,15 @@ class Host:
             )
             return
         selection_score = self._selection_score(res)
+        is_improvement = is_significant_improvement(
+            selection_score,
+            self.best_metric_score,
+            self.early_stop_tolerance,
+        )
         metric_name = self.eval_metric.upper()
         metric_label = (
             f"Val {metric_name}(New high)"
-            if selection_score > self.best_metric_score
+            if is_improvement
             else f"Val {metric_name}"
         )
 
@@ -340,7 +349,11 @@ class Host:
         is_best = False
 
         selection_score = self._selection_score(res)
-        if selection_score > self.best_metric_score:
+        if is_significant_improvement(
+            selection_score,
+            self.best_metric_score,
+            self.early_stop_tolerance,
+        ):
             self.best_metric_epoch = cur_epoch + 1
             self.best_metric_score = selection_score
             self.best_metric_result = res

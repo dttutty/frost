@@ -10,6 +10,7 @@ epoch: 100
 macro_batch_size: 4000 # total batch size across all GPUs
 eval_macro_batch_size: null # defaults to macro_batch_size; reduce for TGB one-vs-many evaluation
 patience: 100
+early_stop_tolerance: 0.0
 dropout: 0.2
 seed: 42
 d_time: 128

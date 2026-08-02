@@ -38,6 +38,7 @@ class HostOptions:
     timestamp_dtype: torch.dtype
     epochs: int
     patience: int
+    early_stop_tolerance: float = 0.0
     carry_over_route: bool = False
     show_progress: bool = False
     no_memory_queue_size: int = 4

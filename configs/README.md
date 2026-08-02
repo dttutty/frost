@@ -25,6 +25,7 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | `macro_batch_size` | `4000` | Total batch size across all GPUs. The launcher auto-computes `per_gpu_batch_size = macro_batch_size // n_gpu`. |
 | `eval_macro_batch_size` | `null` | Total validation/test batch size across GPUs. Defaults to `macro_batch_size`; use a smaller value for TGB one-vs-many evaluation. |
 | `patience` | `100` | Early stopping patience in epochs. |
+| `early_stop_tolerance` | `0.0` | Minimum relative validation-metric improvement required to reset early stopping. Use `1e-6` for the official TGB protocol. |
 | `dropout` | `0.2` | Shared dropout hyperparameter forwarded into several encoders and memory modules. |
 | `seed` | `42` | Shared random seed for sampling and reproducibility. |
 | `d_time` | `128` | Time encoding dimension. |

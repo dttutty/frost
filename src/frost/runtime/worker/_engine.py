@@ -30,6 +30,7 @@ from frost.models.temporal_link_model import TemporalLinkModel
 from frost.runtime._thread_base import (
     destroy_process_group,
 )
+from frost.runtime._early_stopping import is_significant_improvement
 from frost.runtime.worker._benchmark_observer import WorkerBenchmarkObserver
 from frost.runtime.worker._config import WorkerOptions, WorkerResources
 from frost.runtime.experimental.dynamic_state import (
@@ -167,6 +168,9 @@ class Worker(
             )
         self.eval_metric = options.eval_metric
         self.train_only = options.train_only
+        if options.early_stop_tolerance < 0:
+            raise ValueError("early_stop_tolerance must be >= 0.")
+        self.early_stop_tolerance = options.early_stop_tolerance
         if options.no_memory_queue_size < 1:
             raise ValueError("no_memory_queue_size must be >= 1.")
         self.no_memory_queue_size = options.no_memory_queue_size
@@ -269,7 +273,14 @@ class Worker(
                 selection_metric = (
                     result.val_ap if self.eval_metric == "ap" else result.val_mrr
                 )
-                if not self.train_only and selection_metric > self.local_best_metric:
+                if (
+                    not self.train_only
+                    and is_significant_improvement(
+                        selection_metric,
+                        self.local_best_metric,
+                        self.early_stop_tolerance,
+                    )
+                ):
                     self.local_best_metric = selection_metric
                     self.save_model(os.path.join(self.save_to, "best.ckpt"))
                 self.curr_epoch += 1
