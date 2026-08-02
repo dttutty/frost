@@ -159,27 +159,38 @@ class WorkerTrainerMixin:
 
     def _init_metrics(self) -> None:
         """Create torchmetrics trackers for training and evaluation."""
-        self.train_loss_tracker = MeanMetric(process_group=self.nccl).cuda()
-        self.val_mrr_tracker = MeanMetric(process_group=self.nccl).cuda()
-        self.test_mrr_tracker = MeanMetric(process_group=self.nccl).cuda()
+        # A single GPU worker has nothing to aggregate.  In that topology the
+        # only other process is the host rank, which is deliberately excluded
+        # from ``self.nccl``. TorchMetrics' sync path still issues a barrier
+        # for a one-rank NCCL group; that barrier is unnecessary and is not
+        # reliable on every supported runtime. Keep metrics local for one
+        # worker; multi-GPU runs continue to synchronize over the worker-only
+        # process group.
+        metric_kwargs = {
+            "process_group": self.nccl,
+            "sync_on_compute": self.env.n_gpu > 1,
+        }
+        self.train_loss_tracker = MeanMetric(**metric_kwargs).cuda()
+        self.val_mrr_tracker = MeanMetric(**metric_kwargs).cuda()
+        self.test_mrr_tracker = MeanMetric(**metric_kwargs).cuda()
 
         self.val_metrics = MetricCollection(
             {
                 # Use exact distributed metrics here. The binned approximation
                 # can shift the selected best epoch enough to materially change
                 # the reported JODIE parity numbers.
-                "val_auc": BinaryAUROC(thresholds=None, process_group=self.nccl),
+                "val_auc": BinaryAUROC(thresholds=None, **metric_kwargs),
                 "val_ap": BinaryAveragePrecision(
-                    thresholds=None, process_group=self.nccl
+                    thresholds=None, **metric_kwargs
                 ),
             }
         ).cuda()
 
         self.test_metrics = MetricCollection(
             {
-                "test_auc": BinaryAUROC(thresholds=None, process_group=self.nccl),
+                "test_auc": BinaryAUROC(thresholds=None, **metric_kwargs),
                 "test_ap": BinaryAveragePrecision(
-                    thresholds=None, process_group=self.nccl
+                    thresholds=None, **metric_kwargs
                 ),
             }
         ).cuda()
