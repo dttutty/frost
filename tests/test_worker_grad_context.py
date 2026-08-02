@@ -48,6 +48,11 @@ def test_worker_run_keeps_grad_enabled_for_training(monkeypatch) -> None:
             on_train_batch_start=lambda _events: None,
             on_train_batch_end=lambda: None,
         ),
+        split_benchmark_observer=SimpleNamespace(
+            on_batch_start=lambda **_kwargs: None,
+            on_batch_end=lambda: None,
+        ),
+        curr_epoch=0,
     )
 
     with torch.enable_grad():

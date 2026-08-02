@@ -32,6 +32,9 @@ from frost.runtime._thread_base import (
 )
 from frost.runtime._early_stopping import is_significant_improvement
 from frost.runtime.worker._benchmark_observer import WorkerBenchmarkObserver
+from frost.runtime.worker._split_benchmark_observer import (
+    WorkerSplitBenchmarkObserver,
+)
 from frost.runtime.worker._config import WorkerOptions, WorkerResources
 from frost.runtime.experimental.dynamic_state import (
     TransportMode,
@@ -182,6 +185,10 @@ class Worker(
             device=self.device,
             cpu_pid_list=options.cpu_benchmark_pid_list,
         )
+        self.split_benchmark_observer = WorkerSplitBenchmarkObserver(
+            env=resources.env,
+            device=self.device,
+        )
         self._shutdown_done = False
 
         # --- Synchronization primitives ---
@@ -258,6 +265,11 @@ class Worker(
             full = self.full_q.get()
             if isinstance(full, tuple):
                 meta, ready_event = full
+                self.split_benchmark_observer.on_batch_start(
+                    split=meta.split,
+                    epoch=self.curr_epoch + 1,
+                    events=meta.n_src,
+                )
                 torch.cuda.current_stream().wait_event(ready_event)
                 if meta.split == "train":
                     assert meta.labels is not None
@@ -266,7 +278,9 @@ class Worker(
                     self.benchmark_observer.on_train_batch_end()
                 else:
                     self.eval(meta)
+                self.split_benchmark_observer.on_batch_end()
             elif full == "end_of_epoch":
+                self.split_benchmark_observer.on_epoch_end()
                 self.benchmark_observer.on_epoch_end()
                 result = self.on_train_epoch_end()
                 self.result_q.put(result)
@@ -295,6 +309,7 @@ class Worker(
                         )
                     self.mem_box_store.reset()
             elif full is None:
+                self.split_benchmark_observer.finalize()
                 self.benchmark_observer.finalize()
                 if (
                     self.mem_box_store is not None
