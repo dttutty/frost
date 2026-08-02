@@ -26,8 +26,8 @@ from frost.data.paths import (
     resolve_tgb_raw_dataset_dir,
 )
 from frost.data.tgb import (
-    load_tgbl_wiki_edge_features,
-    load_tgbl_wiki_runtime_graph,
+    load_tgb_features,
+    load_tgb_runtime_graph,
 )
 from frost.datatypes.env import Env
 from frost.seq_sampler import TemporalGraph, TemporalGraphType
@@ -227,7 +227,7 @@ def load_graph(
     """
     if is_raw_tgb_dataset(d):
         raw_dir = resolve_tgb_raw_dataset_dir(d)
-        runtime_graph = load_tgbl_wiki_runtime_graph(raw_dir)
+        runtime_graph = load_tgb_runtime_graph(raw_dir, d)
         arrays = runtime_graph.arrays
         indptr_arr = np.ascontiguousarray(arrays["indptr"], dtype=index_dtype)
         indices_arr = np.ascontiguousarray(arrays["indices"], dtype=index_dtype)
@@ -490,18 +490,22 @@ class DatasetManager:
             return None, 0, None
 
         if is_raw_tgb_dataset(dataset):
-            if feat_type == "node":
+            raw_features = load_tgb_features(
+                resolve_tgb_raw_dataset_dir(dataset), dataset, feat_type
+            )
+            if raw_features is None:
                 logger.info(
-                    "Official tgbl-wiki provides no node features for dataset %s.",
+                    "Official TGB provides no %s features for dataset %s.",
+                    feat_type,
                     dataset,
                 )
                 return None, 0, None
-            if feat_type != "edge":
-                raise ValueError(f"Unsupported TGB feature type: {feat_type!r}")
-            return self._load_tgbl_wiki_edge_feature_to_shm(
+            return self._load_tgb_feature_to_shm(
                 dataset=dataset,
+                feat_type=feat_type,
                 shm_name=shm_name,
                 expected_rows=expected_rows,
+                raw_features=raw_features,
             )
 
         source = self._resolve_feature_source(dataset, feat_type)
@@ -536,21 +540,23 @@ class DatasetManager:
 
         raise ValueError(f"Unsupported feature source kind: {source_kind}")
 
-    def _load_tgbl_wiki_edge_feature_to_shm(
+    def _load_tgb_feature_to_shm(
         self,
         *,
         dataset: str,
+        feat_type: str,
         shm_name: str,
         expected_rows: int,
+        raw_features: np.ndarray,
     ) -> tuple[torch.Tensor, int, torch.dtype]:
         raw_dir = resolve_tgb_raw_dataset_dir(dataset)
-        raw_features = load_tgbl_wiki_edge_features(raw_dir)
         if raw_features.shape[0] != expected_rows:
             raise ValueError(
-                "Official tgbl-wiki edge-feature rows do not match the edge "
+                f"Official TGB {feat_type}-feature rows do not match the "
                 f"table: {raw_features.shape[0]} != {expected_rows}"
             )
-        output_shape = (expected_rows + 1, raw_features.shape[1])
+        output_offset = int(feat_type == "edge")
+        output_shape = (expected_rows + output_offset, raw_features.shape[1])
 
         final_dtype = self.feature_dtype
         feat_shm = csm(
@@ -559,7 +565,8 @@ class DatasetManager:
             dtype=final_dtype,
             numa_node=self.feature_numa_node,
         )
-        feat_shm[:1].zero_()
+        if output_offset:
+            feat_shm[:1].zero_()
         rows_per_chunk = _rows_per_chunk(
             raw_features.shape[1],
             final_dtype,
@@ -570,9 +577,10 @@ class DatasetManager:
             chunk = torch.from_numpy(np.array(raw_features[start:end], copy=True)).to(
                 dtype=final_dtype
             )
-            feat_shm[start + 1 : end + 1].copy_(chunk)
+            feat_shm[start + output_offset : end + output_offset].copy_(chunk)
         logger.info(
-            "Built edge features for %s in shared memory from %s",
+            "Built %s features for %s in shared memory from %s",
+            feat_type,
             dataset,
             raw_dir,
         )

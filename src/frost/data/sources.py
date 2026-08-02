@@ -11,7 +11,7 @@ from frost.data.paths import (
     resolve_artifact_dataset_dir,
     resolve_tgb_raw_dataset_dir,
 )
-from frost.data.tgb import load_tgbl_wiki_frame
+from frost.data.tgb import load_tgb_frame
 
 
 def load_runtime_edge_frame(
@@ -19,7 +19,7 @@ def load_runtime_edge_frame(
 ) -> pd.DataFrame:
     """Load or construct the canonical runtime edge frame for a dataset."""
     if is_raw_tgb_dataset(dataset):
-        return load_tgbl_wiki_frame(resolve_tgb_raw_dataset_dir(dataset))
+        return load_tgb_frame(resolve_tgb_raw_dataset_dir(dataset), dataset)
     dataset_dir = resolve_artifact_dataset_dir(dataset, data_root=artifact_data_root)
     path = dataset_dir / "edges.csv"
     if not path.is_file():

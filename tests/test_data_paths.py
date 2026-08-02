@@ -31,3 +31,17 @@ def test_static_feature_probe_knows_raw_tgbl_wiki_features() -> None:
     assert not static_features_present_on_disk(
         "TGBL_WIKI", ignore_edge_features=True
     )
+
+
+def test_static_feature_probe_knows_all_raw_tgb_features() -> None:
+    for dataset in ("TGBL_COIN", "TGBL_COMMENT", "TGBL_REVIEW"):
+        assert static_features_present_on_disk(dataset)
+        assert not static_features_present_on_disk(
+            dataset, ignore_edge_features=True
+        )
+    assert static_features_present_on_disk(
+        "TGBL_FLIGHT", ignore_edge_features=True
+    )
+    assert not static_features_present_on_disk(
+        "TGBL_FLIGHT", ignore_node_features=True, ignore_edge_features=True
+    )

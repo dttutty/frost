@@ -6,7 +6,12 @@ import pandas as pd
 import pytest
 import torch
 
-from frost.data.tgb import load_tgbl_wiki_edge_features, load_tgbl_wiki_frame
+from frost.data.tgb import (
+    load_tgb_features,
+    load_tgb_frame,
+    load_tgbl_wiki_edge_features,
+    load_tgbl_wiki_frame,
+)
 from frost.shm import dataset_mgr as dm
 
 
@@ -250,6 +255,35 @@ def _write_tgbl_wiki_raw_fixture(tgb_root: Path) -> Path:
     with (raw_dir / "ml_tgbl-wiki_edge.pkl").open("wb") as handle:
         pickle.dump(np.arange(8, dtype=np.float64).reshape(4, 2), handle)
     return raw_dir
+
+
+def test_generic_tgb_loader_reuses_official_processed_ids_and_features(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw" / "tgbl_comment"
+    raw_dir.mkdir(parents=True)
+    processed = pd.DataFrame(
+        {
+            "u": [4.0, 1.0, 4.0, 2.0],
+            "i": [2.0, 4.0, 3.0, 3.0],
+            "ts": [10.0, 20.0, 30.0, 40.0],
+            "idx": [1.0, 2.0, 3.0, 4.0],
+            "w": [5.0, 6.0, 7.0, 8.0],
+        }
+    )
+    processed.to_pickle(raw_dir / "ml_tgbl-comment.pkl")
+    with (raw_dir / "ml_tgbl-comment_edge.pkl").open("wb") as handle:
+        pickle.dump(np.arange(8, dtype=np.float64).reshape(4, 2), handle)
+
+    frame = load_tgb_frame(raw_dir, "TGBL_COMMENT")
+    features = load_tgb_features(raw_dir, "TGBL_COMMENT", "edge")
+
+    assert frame["src"].tolist() == [4, 1, 4, 2]
+    assert frame["dst"].tolist() == [2, 4, 3, 3]
+    assert frame["default_split"].tolist() == [0, 0, 0, 2]
+    assert features is not None
+    assert features.shape == (4, 3)
+    assert np.array_equal(features[:, -1], processed["w"].to_numpy())
 
 
 def test_load_graph_builds_tgbl_wiki_from_official_raw_files(

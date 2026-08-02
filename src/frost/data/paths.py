@@ -82,6 +82,18 @@ def resolve_artifact_dataset_dir(
 
 _TGB_RAW_DIRECTORY_NAMES = {
     "TGBL_WIKI": "tgbl_wiki",
+    "TGBL_COIN": "tgbl_coin",
+    "TGBL_COMMENT": "tgbl_comment",
+    "TGBL_FLIGHT": "tgbl_flight",
+    "TGBL_REVIEW": "tgbl_review",
+}
+
+_TGB_RAW_STATIC_FEATURES = {
+    "TGBL_WIKI": (False, True),
+    "TGBL_COIN": (False, True),
+    "TGBL_COMMENT": (False, True),
+    "TGBL_FLIGHT": (True, True),
+    "TGBL_REVIEW": (False, True),
 }
 
 
@@ -102,8 +114,12 @@ def static_features_present_on_disk(
     DatasetManager remains the authority for loading and validating the files.
     """
     if is_raw_tgb_dataset(dataset):
-        # Official tgbl-wiki has edge features and no node features.
-        return not ignore_edge_features
+        has_node_features, has_edge_features = _TGB_RAW_STATIC_FEATURES[
+            dataset.strip().upper()
+        ]
+        return (
+            has_node_features and not ignore_node_features
+        ) or (has_edge_features and not ignore_edge_features)
 
     dataset_dir = resolve_artifact_dataset_dir(dataset)
     if not ignore_node_features and any(
