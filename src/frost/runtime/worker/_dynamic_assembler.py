@@ -23,7 +23,11 @@ from frost.runtime.experimental.dynamic_state import (
     resolve_dynamic_state_policy,
 )
 from frost.runtime.protocols import CudaEvent
-from frost.runtime.worker._dynamic_state import DynamicStateAssemblerMixin, MemAndBox
+from frost.runtime.worker._dynamic_state import (
+    DynamicPrepareProfiler,
+    DynamicStateAssemblerMixin,
+    MemAndBox,
+)
 from frost.runtime.worker._h2d_credit import CreditGate
 from frost.runtime.worker.types import AssembledQ, DeltaQueue, H2DOutQ
 from frost.shm.mem_mgr import MemBoxStore
@@ -89,6 +93,7 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
         self._delta_queue_wait_s_curve: list[float] = []
         self._p2p_work_wait_s_curve: list[float] = []
         self._apply_delta_s_curve: list[float] = []
+        self._prepare_profiler = DynamicPrepareProfiler(enabled=self._timing_enabled)
 
     def logic(self) -> None:
         """Main assembly loop: merge shared + delta data and forward to full_q.
@@ -152,6 +157,7 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
                 box_plan=meta.plan_set.box_plan,
                 n_src=meta.n_src,
                 n_neg=meta.n_neg,
+                profiler=getattr(self, "_prepare_profiler", None),
             )
             prepare_end = time.perf_counter()
 
@@ -202,16 +208,10 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
                 delta_mem = MemEntry(
                     nid=mem.recv_nid, data=mem.data2recv, ts=mem.ts2recv
                 )
-                delta_box = BoxEntry(
-                    nid=box.recv_nid, data=box_data, ts=box.ts2recv
-                )
+                delta_box = BoxEntry(nid=box.recv_nid, data=box_data, ts=box.ts2recv)
                 delta = MemAndBox(mem=delta_mem, box=delta_box)
-                shared_dynamic_plan = (
-                    meta.plan_set.mem_plan is meta.plan_set.box_plan
-                )
-                delta = delta.sort_mem_and_box(
-                    shared_nid_order=shared_dynamic_plan
-                )
+                shared_dynamic_plan = meta.plan_set.mem_plan is meta.plan_set.box_plan
+                delta = delta.sort_mem_and_box(shared_nid_order=shared_dynamic_plan)
 
                 # ==========================================================
                 # Apply the received delta to the already partially-filled graph
@@ -272,5 +272,17 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
             }
             print(
                 "APPENDIX_DYNAMIC_ASSEMBLER_TIMING_CURVE "
+                f"{json.dumps(payload, sort_keys=True)}"
+            )
+        prepare_profiler = getattr(self, "_prepare_profiler", None)
+        if timing_enabled and prepare_profiler is not None:
+            torch.cuda.current_stream(self.device).synchronize()
+            payload = {
+                "system": "frost",
+                "rank": getattr(self.device, "index", -1),
+                **prepare_profiler.payload(),
+            }
+            print(
+                "APPENDIX_DYNAMIC_PREPARE_STAGE_TIMING_CURVE "
                 f"{json.dumps(payload, sort_keys=True)}"
             )

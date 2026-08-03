@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 from queue import Queue
-from typing import Literal
+import time
+from typing import Any, Literal
 
 import torch
 
@@ -93,6 +94,59 @@ class DynamicAssemblyLayout:
 
     mem: _AssemblyLookup
     box: _AssemblyLookup
+
+
+class DynamicPrepareProfiler:
+    """Collect non-synchronizing sub-stage timings for dynamic-state assembly."""
+
+    def __init__(self, *, enabled: bool) -> None:
+        self.enabled = enabled
+        self.cpu_s_curves: dict[str, list[float]] = {}
+        self.cuda_intervals: dict[str, list[tuple[Any, Any]]] = {}
+        self.row_count_curves: dict[str, list[int]] = {}
+
+    def start_cuda(self) -> Any | None:
+        if not self.enabled:
+            return None
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        return event
+
+    def end_cuda(self, name: str, start: Any | None) -> None:
+        if start is None:
+            return
+        end = torch.cuda.Event(enable_timing=True)
+        end.record()
+        self.cuda_intervals.setdefault(name, []).append((start, end))
+
+    def record_cpu(self, name: str, elapsed_s: float) -> None:
+        if self.enabled:
+            self.cpu_s_curves.setdefault(name, []).append(elapsed_s)
+
+    def record_rows(self, name: str, count: int) -> None:
+        if self.enabled:
+            self.row_count_curves.setdefault(name, []).append(count)
+
+    def payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {}
+        payload.update(
+            {
+                f"{name}_s_curve": [round(value, 6) for value in values]
+                for name, values in self.cpu_s_curves.items()
+            }
+        )
+        payload.update(
+            {
+                f"{name}_cuda_ms_curve": [
+                    round(start.elapsed_time(end), 4) for start, end in intervals
+                ]
+                for name, intervals in self.cuda_intervals.items()
+            }
+        )
+        payload.update(
+            {f"{name}_curve": values for name, values in self.row_count_curves.items()}
+        )
+        return payload
 
 
 class DynamicStateAssemblerMixin:
@@ -186,6 +240,9 @@ class DynamicStateAssemblerMixin:
         shared_ts: torch.Tensor,
         target_data: torch.Tensor,
         target_ts: torch.Tensor,
+        *,
+        kind: Literal["mem", "box"],
+        profiler: DynamicPrepareProfiler | None = None,
     ) -> None:
         """Fetch data from shared memory and scatter matched entries into target tensors.
 
@@ -205,7 +262,10 @@ class DynamicStateAssemblerMixin:
         )
         assert fetch_nids is not None, "plan.fetch.data must not be None"
 
-        if fetch_nids.numel() == 0:
+        fetch_count = int(fetch_nids.numel())
+        if profiler is not None:
+            profiler.record_rows(f"{kind}_fetch_rows", fetch_count)
+        if fetch_count == 0:
             return
 
         assert fetch_nids.dim() == 1, "plan.fetch.data must be a 1D tensor"
@@ -218,15 +278,33 @@ class DynamicStateAssemblerMixin:
             f"shared_data and shared_ts must have the same first dimension, "
             f"got {shared_data.shape[0]} and {shared_ts.shape[0]}"
         )
-        unique_data_gpu = shared_data[fetch_nids].to(self.device)
-        unique_ts_gpu = shared_ts[fetch_nids].to(self.device)
+        gather_start = time.perf_counter()
+        unique_data_cpu = shared_data[fetch_nids]
+        unique_ts_cpu = shared_ts[fetch_nids]
+        if profiler is not None:
+            profiler.record_cpu(
+                f"{kind}_cpu_gather", time.perf_counter() - gather_start
+            )
 
+        h2d_cuda_start = profiler.start_cuda() if profiler is not None else None
+        h2d_wall_start = time.perf_counter()
+        unique_data_gpu = unique_data_cpu.to(self.device)
+        unique_ts_gpu = unique_ts_cpu.to(self.device)
+        if profiler is not None:
+            profiler.record_cpu(
+                f"{kind}_h2d_wall", time.perf_counter() - h2d_wall_start
+            )
+            profiler.end_cuda(f"{kind}_h2d", h2d_cuda_start)
+
+        scatter_start = profiler.start_cuda() if profiler is not None else None
         target_data[lookup.shared_graph_positions] = unique_data_gpu[
             lookup.shared_source_positions
         ]
         target_ts[lookup.shared_graph_positions] = unique_ts_gpu[
             lookup.shared_source_positions
         ]
+        if profiler is not None:
+            profiler.end_cuda(f"{kind}_scatter", scatter_start)
 
     def _fill_from_shm(
         self,
@@ -309,11 +387,15 @@ class DynamicStateAssemblerMixin:
         box_plan: DynamicPlan | None,
         n_src: int,
         n_neg: int | None = None,
+        *,
+        profiler: DynamicPrepareProfiler | None = None,
     ) -> DynamicAssemblyLayout:
         """Step 1: Initialize tensors and fill local shared memory data."""
         num_nodes = graph.nid.shape[0]
+        total_start = profiler.start_cuda() if profiler is not None else None
 
         # Initialize attributes with zeros only once
+        zero_start = profiler.start_cuda() if profiler is not None else None
         if graph.mem is None:
             graph.mem = torch.zeros(
                 (num_nodes, self.shared.mem.shape[1]),
@@ -335,11 +417,16 @@ class DynamicStateAssemblerMixin:
                 dtype=self.shared.box_ts.dtype,
                 device=self.device,
             )
+        if profiler is not None:
+            profiler.end_cuda("zero_init", zero_start)
 
         batch_n_neg = self.n_neg if n_neg is None else n_neg
+        lookup_start = profiler.start_cuda() if profiler is not None else None
         layout = self._build_assembly_layout(
             graph, mem_plan, box_plan, n_src, batch_n_neg
         )
+        if profiler is not None:
+            profiler.end_cuda("lookup", lookup_start)
 
         # Fill local unique data immediately
         if mem_plan is not None:
@@ -352,6 +439,8 @@ class DynamicStateAssemblerMixin:
                 self.shared.mem_ts,
                 graph.mem,
                 graph.mem_ts,
+                kind="mem",
+                profiler=profiler,
             )
         if box_plan is not None:
             assert graph.box is not None
@@ -363,6 +452,8 @@ class DynamicStateAssemblerMixin:
                 self.shared.box_ts,
                 graph.box,
                 graph.box_ts,
+                kind="box",
+                profiler=profiler,
             )
 
             # Neighborhood-mail optimization: pre-fill box for delta nodes.
@@ -390,6 +481,8 @@ class DynamicStateAssemblerMixin:
                 else:
                     graph._box_pos_delta = None
                     graph._box_delta_positions = None
+        if profiler is not None:
+            profiler.end_cuda("total_prepare", total_start)
         return layout
 
     def _fill_all_required_from_shm(

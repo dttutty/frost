@@ -14,7 +14,7 @@ from frost.datatypes.meta import Meta
 from frost.datatypes.plan import DynamicPlan, PlanSet
 from frost.datatypes.tasks import P2PTask
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
-from frost.runtime.worker._dynamic_state import MemAndBox
+from frost.runtime.worker._dynamic_state import DynamicPrepareProfiler, MemAndBox
 from frost.runtime.worker.p2p_syncer._p2p_comm import P2PQHandler
 from frost.shm.mem_mgr import MemBoxStore
 from frost.utils.tensor_set import TensorSet
@@ -32,8 +32,14 @@ class FakeStream:
 
 
 class FakeCudaEvent:
+    def __init__(self, *_args, **_kwargs) -> None:
+        pass
+
     def record(self, *_args, **_kwargs) -> None:
         pass
+
+    def elapsed_time(self, _other) -> float:
+        return 1.25
 
 
 class FakeWork:
@@ -166,6 +172,34 @@ def _make_handler() -> P2PQHandler:
 
 
 class TestDynamicAssembler:
+    def test_dynamic_prepare_profiler_splits_fetch_and_assembly(self, monkeypatch):
+        store = _make_store(boxsize=1)
+        assembler = _make_assembler(store)
+        graph = _make_graph([1, 4, 2])
+        shared_plan = _make_plan([1, 2])
+        profiler = DynamicPrepareProfiler(enabled=True)
+        monkeypatch.setattr(torch.cuda, "Event", FakeCudaEvent)
+
+        assembler.prepare_shared_features(
+            graph,
+            shared_plan,
+            shared_plan,
+            n_src=1,
+            profiler=profiler,
+        )
+        payload = profiler.payload()
+
+        assert payload["mem_fetch_rows_curve"] == [2]
+        assert payload["box_fetch_rows_curve"] == [2]
+        assert len(payload["mem_cpu_gather_s_curve"]) == 1
+        assert len(payload["box_cpu_gather_s_curve"]) == 1
+        assert payload["mem_h2d_cuda_ms_curve"] == [1.25]
+        assert payload["box_h2d_cuda_ms_curve"] == [1.25]
+        assert payload["mem_scatter_cuda_ms_curve"] == [1.25]
+        assert payload["box_scatter_cuda_ms_curve"] == [1.25]
+        assert payload["zero_init_cuda_ms_curve"] == [1.25]
+        assert payload["lookup_cuda_ms_curve"] == [1.25]
+
     def test_shared_plan_reuses_layout_and_delta_order(self):
         store = _make_store(boxsize=1)
         assembler = _make_assembler(store)
