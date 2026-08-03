@@ -14,6 +14,7 @@ from typing import Literal, cast
 import torch
 
 from frost.datatypes.meta import Meta
+from frost.datatypes.n_feat_nid import NodeFeatureLookup
 from frost.models.contracts import NodeSet, RootExpansion
 from frost.runtime.protocols import CudaEvent
 from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
@@ -106,6 +107,7 @@ class H2D(StreamThreadBase):
                 raise TypeError(f"Unexpected H2D payload {meta!r}")
 
             assert meta.flat_graph is not None
+            pending_nfeat_cache: tuple[NodeFeatureLookup, torch.Tensor] | None = None
             try:
                 if meta.plan_set is not None:
                     meta.plan_set = meta.plan_set.to(self.device)
@@ -156,7 +158,7 @@ class H2D(StreamThreadBase):
                             meta.plan_set is not None
                             and meta.plan_set.nfeat_plan is not None
                         )
-                        nfeat = self.st_asm.prepare_nfeat_cache(
+                        nfeat = self.st_asm.prepare_nfeat_lookup(
                             nfeat_plan=meta.plan_set.nfeat_plan,
                             staged_nfeat=(
                                 staged.node_values if staged is not None else None
@@ -168,6 +170,10 @@ class H2D(StreamThreadBase):
                             nfeat_lookup=nfeat,
                             strict=self.node_feature_scope is NodeSet.ALL_SAMPLED,
                         )
+                        pending_nfeat_cache = (
+                            nfeat,
+                            meta.plan_set.nfeat_plan.to_cache.data,
+                        )
             finally:
                 if staged is not None:
                     if self.feature_ring is None:
@@ -178,4 +184,10 @@ class H2D(StreamThreadBase):
 
             ready_event = cast(CudaEvent, torch.cuda.Event())
             ready_event.record(torch.cuda.current_stream())
+            if pending_nfeat_cache is not None:
+                nfeat_lookup, to_cache = pending_nfeat_cache
+                self.st_asm.update_nfeat_cache(
+                    nfeat_lookup,
+                    to_cache,
+                )
             self.out_q.put((meta, ready_event), block=True)

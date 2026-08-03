@@ -183,6 +183,36 @@ def test_prepare_nfeat_cache_keeps_fetched_and_cached_sources_separate():
     assert torch.equal(result.nfeat[4], torch.zeros(2))
 
 
+def test_nfeat_cache_update_can_be_deferred_until_after_lookup_fill():
+    shared_nfeat = torch.arange(10, dtype=torch.float32).reshape(5, 2)
+    assembler = StaticAssembler(
+        shared_nfeat=shared_nfeat,
+        shared_efeat=None,
+        device=torch.device("cpu"),
+    )
+    plan = StaticPlan(
+        fetch=TensorSet(torch.tensor([0, 1, 2, 3])),
+        to_cache=TensorSet(torch.tensor([1, 3])),
+    )
+
+    lookup = assembler.prepare_nfeat_lookup(plan)
+    assert assembler.nfeat_delta is None
+
+    graph = FlatGraph(
+        nid=torch.tensor([3, 0, 2, 1]),
+        eid=torch.full((4,), -1),
+        ts=torch.zeros(4),
+    )
+    result = assembler.fill_nfeat(graph, lookup)
+    assert result.nfeat is not None
+    assert torch.equal(result.nfeat, shared_nfeat[[3, 0, 2, 1]])
+
+    assembler.update_nfeat_cache(lookup, plan.to_cache.data)
+    assert assembler.nfeat_delta is not None
+    assert assembler.nfeat_delta.nid.tolist() == [1, 3]
+    assert torch.equal(assembler.nfeat_delta.nfeat, shared_nfeat[[1, 3]])
+
+
 def test_fill_efeat_casts_compact_storage_to_float32():
     assembler = StaticAssembler(
         shared_nfeat=None,

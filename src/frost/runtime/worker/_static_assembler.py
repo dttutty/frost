@@ -57,8 +57,18 @@ class StaticAssembler:
             Separate sorted fetched and cached tables whose union contains all
             features needed for this batch.
         """
+        lookup = self.prepare_nfeat_lookup(nfeat_plan, staged_nfeat)
+        self.update_nfeat_cache(lookup, nfeat_plan.to_cache.data)
+        return lookup
+
+    def prepare_nfeat_lookup(
+        self,
+        nfeat_plan: "StaticPlan",
+        staged_nfeat: torch.Tensor | None = None,
+    ) -> "NodeFeatureLookup":
+        """Fetch current rows and pair them with the preceding batch's cache."""
         assert self.shared_nfeat is not None
-        to_cache, fetch = nfeat_plan.to_cache.data, nfeat_plan.fetch.data
+        fetch = nfeat_plan.fetch.data
         previous_cache = self.nfeat_delta
 
         # Fast path: All required features are already cached
@@ -94,13 +104,19 @@ class StaticAssembler:
             # device transfer preserves that order.
             fetched = NodeFeatNid(nid=gpu_nid, nfeat=gpu_data, is_sorted=True)
 
-        lookup = NodeFeatureLookup(fetched=fetched, cached=previous_cache)
+        return NodeFeatureLookup(fetched=fetched, cached=previous_cache)
+
+    def update_nfeat_cache(
+        self,
+        lookup: NodeFeatureLookup,
+        to_cache: torch.Tensor,
+    ) -> None:
+        """Assemble the next cache after the current batch becomes runnable."""
         self.nfeat_delta = (
             self._select_nfeat_rows(lookup, to_cache)
             if to_cache.numel() > 0
             else None
         )
-        return lookup
 
     def _select_nfeat_rows(
         self,
