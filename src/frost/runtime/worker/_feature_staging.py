@@ -23,6 +23,8 @@ from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 
 logger = logging.getLogger(__name__)
 
+_MISSING_FEATURE_ROW = torch.iinfo(torch.int64).min
+
 
 def _next_capacity(required: int) -> int:
     if required < 1:
@@ -45,12 +47,46 @@ def _allocate_staging_tensor(
         return torch.empty(shape, dtype=dtype)
 
 
+def _encode_feature_route(
+    requested_nids: torch.Tensor,
+    fetched_nids: torch.Tensor,
+    cached_nids: torch.Tensor | None,
+) -> torch.Tensor:
+    """Encode the feature source and row for every requested node on CPU.
+
+    Non-negative entries address ``fetched_nids``. Negative entries encode a
+    cache row as ``-row - 1``. ``_MISSING_FEATURE_ROW`` marks graph padding or
+    nodes outside the model contract's feature scope.
+    """
+    if requested_nids.device.type != "cpu":
+        raise ValueError("static feature routes must be built from CPU node IDs")
+
+    route = torch.full_like(requested_nids, _MISSING_FEATURE_ROW)
+    if fetched_nids.numel() > 0:
+        positions = torch.searchsorted(fetched_nids, requested_nids)
+        in_bounds = positions < fetched_nids.numel()
+        safe_positions = positions.clamp_max(fetched_nids.numel() - 1)
+        found = in_bounds & (fetched_nids[safe_positions] == requested_nids)
+        route[found] = safe_positions[found]
+
+    if cached_nids is not None and cached_nids.numel() > 0:
+        positions = torch.searchsorted(cached_nids, requested_nids)
+        in_bounds = positions < cached_nids.numel()
+        safe_positions = positions.clamp_max(cached_nids.numel() - 1)
+        found = in_bounds & (cached_nids[safe_positions] == requested_nids)
+        route[found] = -safe_positions[found] - 1
+
+    return route
+
+
 @dataclass
 class FeatureStageSlot:
     """Reusable buffers owned by one slot of a worker's feature ring."""
 
     index: int
     node_values: torch.Tensor | None = None
+    node_fill_route: torch.Tensor | None = None
+    node_cache_route: torch.Tensor | None = None
     edge_values: torch.Tensor | None = None
     edge_positions: torch.Tensor | None = None
 
@@ -88,6 +124,52 @@ class FeatureStageSlot:
         output = self.node_values[:rows]
         torch.index_select(table, 0, row_ids, out=output)
         return output
+
+    def _stage_route(
+        self,
+        current: torch.Tensor | None,
+        route: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        rows = int(route.numel())
+        if current is None or current.numel() < rows:
+            current = _allocate_staging_tensor(
+                _next_capacity(rows), 1, torch.int64
+            ).view(-1)
+        output = current[:rows]
+        output.copy_(route)
+        return current, output
+
+    def stage_node_routes(
+        self,
+        *,
+        graph_nids: torch.Tensor,
+        fetched_nids: torch.Tensor,
+        cached_nids: torch.Tensor | None,
+        to_cache_nids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Stage CPU-computed routes for graph fill and next-cache assembly."""
+        fill_route = _encode_feature_route(
+            graph_nids,
+            fetched_nids,
+            cached_nids,
+        )
+        cache_route = _encode_feature_route(
+            to_cache_nids,
+            fetched_nids,
+            cached_nids,
+        )
+        if torch.any(cache_route == _MISSING_FEATURE_ROW):
+            raise ValueError("cache plan contains unavailable node features")
+
+        self.node_fill_route, staged_fill = self._stage_route(
+            self.node_fill_route,
+            fill_route,
+        )
+        self.node_cache_route, staged_cache = self._stage_route(
+            self.node_cache_route,
+            cache_route,
+        )
+        return staged_fill, staged_cache
 
     def stage_edge_rows(
         self,
@@ -147,6 +229,8 @@ class StagedFeatureBatch:
     meta: Meta
     slot: FeatureStageSlot
     node_values: torch.Tensor | None
+    node_fill_route: torch.Tensor | None
+    node_cache_route: torch.Tensor | None
     edge_values: torch.Tensor | None
     edge_positions: torch.Tensor | None
 
@@ -175,6 +259,7 @@ class FeaturePrefetcher(ThreadBase):
         self.in_q = in_q
         self.out_q = out_q
         self.ring = ring
+        self._cached_nids: torch.Tensor | None = None
 
     @torch.no_grad()
     def logic(self) -> None:
@@ -184,6 +269,7 @@ class FeaturePrefetcher(ThreadBase):
                 put_shutdown_sentinel(self.out_q, None)
                 break
             if payload == "end_of_epoch":
+                self._cached_nids = None
                 self.out_q.put("end_of_epoch", block=True)
                 continue
 
@@ -193,13 +279,23 @@ class FeaturePrefetcher(ThreadBase):
             slot = self.ring.acquire()
             try:
                 node_values = None
+                node_fill_route = None
+                node_cache_route = None
                 if self.nfeat is not None:
                     if meta.plan_set is None or meta.plan_set.nfeat_plan is None:
                         raise ValueError(
                             "node features require a static access plan before staging"
                         )
-                    fetch = meta.plan_set.nfeat_plan.fetch.data
+                    nfeat_plan = meta.plan_set.nfeat_plan
+                    fetch = nfeat_plan.fetch.data
                     node_values = slot.stage_node_rows(self.nfeat, fetch)
+                    node_fill_route, node_cache_route = slot.stage_node_routes(
+                        graph_nids=meta.flat_graph.nid,
+                        fetched_nids=fetch,
+                        cached_nids=self._cached_nids,
+                        to_cache_nids=nfeat_plan.to_cache.data,
+                    )
+                    self._cached_nids = nfeat_plan.to_cache.data
 
                 edge_values = None
                 edge_positions = None
@@ -215,6 +311,8 @@ class FeaturePrefetcher(ThreadBase):
                         meta=meta,
                         slot=slot,
                         node_values=node_values,
+                        node_fill_route=node_fill_route,
+                        node_cache_route=node_cache_route,
                         edge_values=edge_values,
                         edge_positions=edge_positions,
                     ),

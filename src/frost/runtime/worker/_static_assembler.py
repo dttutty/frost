@@ -41,6 +41,7 @@ class StaticAssembler:
         self,
         nfeat_plan: "StaticPlan",
         staged_nfeat: torch.Tensor | None = None,
+        staged_cache_route: torch.Tensor | None = None,
     ) -> "NodeFeatureLookup":
         """Build sorted fetched/cache lookup sources for the current batch.
 
@@ -96,11 +97,71 @@ class StaticAssembler:
 
         lookup = NodeFeatureLookup(fetched=fetched, cached=previous_cache)
         self.nfeat_delta = (
-            self._select_nfeat_rows(lookup, to_cache)
+            self._select_nfeat_rows_from_route(
+                lookup,
+                to_cache,
+                staged_cache_route,
+            )
+            if staged_cache_route is not None
+            else self._select_nfeat_rows(lookup, to_cache)
             if to_cache.numel() > 0
             else None
         )
         return lookup
+
+    def _select_nfeat_rows_from_route(
+        self,
+        lookup: NodeFeatureLookup,
+        requested_nids: torch.Tensor,
+        route: torch.Tensor,
+    ) -> NodeFeatNid | None:
+        """Select next-cache rows from a precomputed source/row route."""
+        if requested_nids.numel() == 0:
+            return None
+        if route.shape != requested_nids.shape:
+            raise ValueError(
+                "node-feature cache route shape does not match requested IDs: "
+                f"{route.shape} != {requested_nids.shape}"
+            )
+
+        sources = lookup.sources
+        if not sources:
+            raise ValueError("Cannot select node features from an empty lookup")
+        selected = torch.empty(
+            (requested_nids.numel(), sources[0].nfeat.size(-1)),
+            device=self.device,
+            dtype=sources[0].nfeat.dtype,
+        )
+        self._fill_from_route(selected, route, lookup)
+
+        if route.device.type == "cpu":
+            missing = route == torch.iinfo(route.dtype).min
+            if torch.any(missing):
+                raise ValueError(
+                    "Cache plan requested "
+                    f"{int(missing.sum())} unavailable node features"
+                )
+        return NodeFeatNid(
+            nid=requested_nids,
+            nfeat=selected,
+            is_sorted=True,
+        )
+
+    @staticmethod
+    def _fill_from_route(
+        destination: torch.Tensor,
+        route: torch.Tensor,
+        lookup: NodeFeatureLookup,
+    ) -> None:
+        """Fill a feature matrix from an encoded fetched/cache row route."""
+        if lookup.fetched is not None:
+            fetched = route >= 0
+            destination[fetched] = lookup.fetched.nfeat[route[fetched]]
+        if lookup.cached is not None:
+            missing_value = torch.iinfo(route.dtype).min
+            cached = (route < 0) & (route != missing_value)
+            cache_rows = -route[cached] - 1
+            destination[cached] = lookup.cached.nfeat[cache_rows]
 
     def _select_nfeat_rows(
         self,
@@ -174,6 +235,7 @@ class StaticAssembler:
         nfeat_lookup: "NodeFeatureLookup",
         *,
         strict: bool = True,
+        staged_fill_route: torch.Tensor | None = None,
     ) -> FlatGraph:
         """Scatter node features into ``flat_graph.nfeat`` using binary search.
 
@@ -196,6 +258,14 @@ class StaticAssembler:
         sources = nfeat_lookup.sources
         if not sources:
             raise ValueError("Node feature lookup is empty")
+
+        if staged_fill_route is not None:
+            return self._fill_nfeat_from_route(
+                flat_graph,
+                nfeat_lookup,
+                staged_fill_route,
+                strict=strict,
+            )
 
         # TensorSet and NodeFeatNid establish this invariant before the lookup
         # reaches a worker.  Revalidate CPU callers for useful unit-test errors,
@@ -240,6 +310,43 @@ class StaticAssembler:
             # avoiding a blocking ``torch.all`` on every CUDA batch.
             if nodes.device.type == "cpu" and not torch.all(found_any):
                 missing_nids = torch.unique(valid_nodes[~found_any])
+                preview = missing_nids[:20].tolist()
+                raise ValueError(
+                    f"Found {missing_nids.numel()} NIDs in flat_graph that are missing in the node feature lookup. "
+                    f"First {len(preview)} missing NIDs: {preview}"
+                )
+
+        flat_graph.nfeat = node_feat
+        return flat_graph
+
+    def _fill_nfeat_from_route(
+        self,
+        flat_graph: FlatGraph,
+        lookup: NodeFeatureLookup,
+        route: torch.Tensor,
+        *,
+        strict: bool,
+    ) -> FlatGraph:
+        """Fill graph features directly from a CPU-precomputed lookup route."""
+        nodes = flat_graph.nid
+        if route.shape != nodes.shape:
+            raise ValueError(
+                "node-feature fill route shape does not match graph nodes: "
+                f"{route.shape} != {nodes.shape}"
+            )
+        sources = lookup.sources
+        node_feat = torch.zeros(
+            (*nodes.shape, sources[0].nfeat.size(-1)),
+            device=self.device,
+            dtype=sources[0].nfeat.dtype,
+        )
+        self._fill_from_route(node_feat, route, lookup)
+
+        if strict and route.device.type == "cpu":
+            missing_value = torch.iinfo(route.dtype).min
+            missing = (nodes != -1) & (route == missing_value)
+            if torch.any(missing):
+                missing_nids = torch.unique(nodes[missing])
                 preview = missing_nids[:20].tolist()
                 raise ValueError(
                     f"Found {missing_nids.numel()} NIDs in flat_graph that are missing in the node feature lookup. "

@@ -156,17 +156,37 @@ class H2D(StreamThreadBase):
                             meta.plan_set is not None
                             and meta.plan_set.nfeat_plan is not None
                         )
+                        staged_fill_route = (
+                            staged.node_fill_route.to(
+                                self.device,
+                                non_blocking=False,
+                            )
+                            if staged is not None
+                            and staged.node_fill_route is not None
+                            else None
+                        )
+                        staged_cache_route = (
+                            staged.node_cache_route.to(
+                                self.device,
+                                non_blocking=False,
+                            )
+                            if staged is not None
+                            and staged.node_cache_route is not None
+                            else None
+                        )
                         nfeat = self.st_asm.prepare_nfeat_cache(
                             nfeat_plan=meta.plan_set.nfeat_plan,
                             staged_nfeat=(
                                 staged.node_values if staged is not None else None
                             ),
+                            staged_cache_route=staged_cache_route,
                         )
 
                         meta.flat_graph = self.st_asm.fill_nfeat(
                             flat_graph=meta.flat_graph,
                             nfeat_lookup=nfeat,
                             strict=self.node_feature_scope is NodeSet.ALL_SAMPLED,
+                            staged_fill_route=staged_fill_route,
                         )
             finally:
                 if staged is not None:
