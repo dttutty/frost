@@ -13,7 +13,7 @@ from frost.datatypes.graph import FlatGraph
 from frost.datatypes.plan import StaticPlan
 from frost.models.contracts import NodeSet, RootExpansion
 
-from ...datatypes.n_feat_nid import NodeFeatNid
+from ...datatypes.n_feat_nid import NodeFeatNid, NodeFeatureLookup
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +41,8 @@ class StaticAssembler:
         self,
         nfeat_plan: "StaticPlan",
         staged_nfeat: torch.Tensor | None = None,
-    ) -> "NodeFeatNid":
-        """Build a sorted ``NodeFeatNid`` lookup table for the current batch.
+    ) -> "NodeFeatureLookup":
+        """Build sorted fetched/cache lookup sources for the current batch.
 
         Uses the ``StaticPlan`` produced by the host planner:
 
@@ -54,26 +54,19 @@ class StaticAssembler:
         Args:
             nfeat_plan: Plan specifying which NIDs to fetch vs. cache.
         Returns:
-            Sorted ``NodeFeatNid`` containing all features needed for this batch.
+            Separate sorted fetched and cached tables whose union contains all
+            features needed for this batch.
         """
         assert self.shared_nfeat is not None
         to_cache, fetch = nfeat_plan.to_cache.data, nfeat_plan.fetch.data
+        previous_cache = self.nfeat_delta
 
         # Fast path: All required features are already cached
         if fetch.numel() == 0:
-            nfeat_obj = self.nfeat_delta
-            assert nfeat_obj is not None, (
+            assert previous_cache is not None, (
                 "NFeat delta should not be None when fetch is empty"
             )
-
-            nfeat_obj = nfeat_obj.sort_by_nid()
-
-            # Update cache delta
-            if to_cache.numel() > 0:
-                self.nfeat_delta = nfeat_obj.filter_by_nid(to_cache)
-            else:
-                logger.info("⚠️ [DEBUG] No new NIDs to cache, clearing nfeat_delta")
-                self.nfeat_delta = None
+            fetched = None
 
         else:
             # Standard path: Gather missing features directly from shared memory
@@ -97,21 +90,55 @@ class StaticAssembler:
                     non_blocking=False,
                 )
 
-            nfeat_obj = NodeFeatNid(nid=gpu_nid, nfeat=gpu_data)
+            # StaticPlan.fetch is a TensorSet, hence ascending and unique; the
+            # device transfer preserves that order.
+            fetched = NodeFeatNid(nid=gpu_nid, nfeat=gpu_data, is_sorted=True)
 
-            # Merge with existing cached delta if available
-            if self.nfeat_delta is not None:
-                nfeat_obj = nfeat_obj.merge(self.nfeat_delta)
+        lookup = NodeFeatureLookup(fetched=fetched, cached=previous_cache)
+        self.nfeat_delta = (
+            self._select_nfeat_rows(lookup, to_cache)
+            if to_cache.numel() > 0
+            else None
+        )
+        return lookup
 
-            nfeat_obj = nfeat_obj.sort_by_nid()
+    def _select_nfeat_rows(
+        self,
+        lookup: NodeFeatureLookup,
+        requested_nids: torch.Tensor,
+    ) -> NodeFeatNid:
+        """Select sorted cache rows without merging wide feature matrices."""
+        sources = lookup.sources
+        if not sources:
+            raise ValueError("Cannot select node features from an empty lookup")
 
-            # Update cache delta for the next iteration
-            if to_cache.numel() > 0:
-                self.nfeat_delta = nfeat_obj.filter_by_nid(to_cache)
-            else:
-                self.nfeat_delta = None
+        feat_dim = sources[0].nfeat.size(-1)
+        selected = torch.empty(
+            (requested_nids.numel(), feat_dim),
+            device=self.device,
+            dtype=sources[0].nfeat.dtype,
+        )
+        found_any = torch.zeros_like(requested_nids, dtype=torch.bool)
 
-        return nfeat_obj
+        for source in sources:
+            positions = torch.searchsorted(source.nid, requested_nids)
+            in_bounds = positions < source.nid.numel()
+            safe_positions = positions.clamp_max(source.nid.numel() - 1)
+            found = in_bounds & (source.nid[safe_positions] == requested_nids)
+            selected[found] = source.nfeat[safe_positions[found]]
+            found_any |= found
+
+        if requested_nids.device.type == "cpu" and not torch.all(found_any):
+            missing = requested_nids[~found_any]
+            raise ValueError(
+                f"Cache plan requested {missing.numel()} unavailable node features"
+            )
+
+        return NodeFeatNid(
+            nid=requested_nids,
+            nfeat=selected,
+            is_sorted=True,
+        )
 
     def fill_staged_efeat(
         self,
@@ -144,19 +171,20 @@ class StaticAssembler:
     def fill_nfeat(
         self,
         flat_graph: FlatGraph,
-        nfeat_nid: "NodeFeatNid",
+        nfeat_lookup: "NodeFeatureLookup",
         *,
         strict: bool = True,
     ) -> FlatGraph:
         """Scatter node features into ``flat_graph.nfeat`` using binary search.
 
-        Assigns the feature vector from ``nfeat_nid`` to every valid (non-``-1``)
-        NID in ``flat_graph.nid``.  When ``strict`` is ``False``, only positions
-        present in the lookup table are filled and the rest stay zeroed.
+        Assigns feature vectors from the fetched/cache lookup sources to every
+        valid (non-``-1``) NID in ``flat_graph.nid``.  When ``strict`` is
+        ``False``, only positions present in either source are filled and the
+        rest stay zeroed.
 
         Args:
             flat_graph: The FlatGraph to annotate; modified in-place.
-            nfeat_nid: Sorted lookup table mapping NID → feature vector.
+            nfeat_lookup: Sorted fetched/cache tables mapping NID to features.
             strict: Whether every valid node in ``flat_graph`` must exist in the
                 lookup table. Root-scoped feature plans use ``False`` so only roots are
                 filled while neighbor rows remain zeroed.
@@ -165,18 +193,21 @@ class StaticAssembler:
             The same ``flat_graph`` with ``nfeat`` populated.
         """
         assert self.shared_nfeat is not None
-        assert nfeat_nid is not None
-        assert nfeat_nid.is_sorted
-        assert nfeat_nid.nid.numel() > 0, "nfeat_nid.nid is empty"
+        sources = nfeat_lookup.sources
+        if not sources:
+            raise ValueError("Node feature lookup is empty")
 
         # TensorSet and NodeFeatNid establish this invariant before the lookup
         # reaches a worker.  Revalidate CPU callers for useful unit-test errors,
         # but do not turn the assertion into a CUDA-to-host synchronization in
         # the per-batch hot path.
-        if nfeat_nid.nid.device.type == "cpu":
-            assert torch.all(nfeat_nid.nid[1:] > nfeat_nid.nid[:-1]), (
-                "nfeat_nid.nid must be strictly increasing (sorted and unique)"
-            )
+        for source in sources:
+            assert source.is_sorted
+            assert source.nid.numel() > 0, "node feature source is empty"
+            if source.nid.device.type == "cpu":
+                assert torch.all(source.nid[1:] > source.nid[:-1]), (
+                    "node feature source IDs must be strictly increasing"
+                )
 
         nodes = flat_graph.nid
         valid_mask = nodes != -1
@@ -185,41 +216,35 @@ class StaticAssembler:
         if valid_nodes.numel() == 0:
             raise ValueError("No valid nodes found in flat_graph; all NIDs are -1.")
 
-        feat_dim = nfeat_nid.nfeat.size(-1)
+        feat_dim = sources[0].nfeat.size(-1)
         node_feat = torch.zeros(
             (*nodes.shape, feat_dim),
             device=self.device,
-            dtype=nfeat_nid.nfeat.dtype,
+            dtype=sources[0].nfeat.dtype,
         )
 
-        # Binary search on sorted nfeat_nid.nid
-        permute_nidx = torch.searchsorted(nfeat_nid.nid, valid_nodes)
         valid_positions = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
+        found_any = torch.zeros_like(valid_nodes, dtype=torch.bool)
 
-        # Prevent out-of-bounds access before equality check
-        in_bounds = permute_nidx < nfeat_nid.nid.numel()
-        safe_idx = permute_nidx.clamp_max(nfeat_nid.nid.numel() - 1)
-
-        found_mask = in_bounds & (nfeat_nid.nid[safe_idx] == valid_nodes)
+        for source in sources:
+            positions = torch.searchsorted(source.nid, valid_nodes)
+            in_bounds = positions < source.nid.numel()
+            safe_positions = positions.clamp_max(source.nid.numel() - 1)
+            found = in_bounds & (source.nid[safe_positions] == valid_nodes)
+            node_feat[valid_positions[found]] = source.nfeat[safe_positions[found]]
+            found_any |= found
 
         if strict:
             # The host access planner guarantees complete coverage for
             # ALL_SAMPLED.  Preserve detailed validation for CPU callers while
             # avoiding a blocking ``torch.all`` on every CUDA batch.
-            if nodes.device.type == "cpu" and not torch.all(found_mask):
-                missing_nids = torch.unique(valid_nodes[~found_mask])
+            if nodes.device.type == "cpu" and not torch.all(found_any):
+                missing_nids = torch.unique(valid_nodes[~found_any])
                 preview = missing_nids[:20].tolist()
                 raise ValueError(
-                    f"Found {missing_nids.numel()} NIDs in flat_graph that are missing in nfeat_nid.nid. "
+                    f"Found {missing_nids.numel()} NIDs in flat_graph that are missing in the node feature lookup. "
                     f"First {len(preview)} missing NIDs: {preview}"
                 )
-            gathered_nfeat = nfeat_nid.nfeat[safe_idx]
-            node_feat[valid_positions] = gathered_nfeat
-        else:
-            # Empty advanced-index assignments are valid, so this remains
-            # entirely device-side even when no planned rows are present.
-            gathered_nfeat = nfeat_nid.nfeat[safe_idx[found_mask]]
-            node_feat[valid_positions[found_mask]] = gathered_nfeat
 
         flat_graph.nfeat = node_feat
         return flat_graph

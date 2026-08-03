@@ -69,3 +69,26 @@ class NodeFeatNid:
         nid = self.nid[mask]
         nfeat = self.nfeat[mask]
         return self.__class__(nid=nid, nfeat=nfeat)
+
+
+@dataclass(frozen=True, kw_only=True)
+class NodeFeatureLookup:
+    """One or two sorted feature tables that jointly cover a batch.
+
+    ``fetched`` contains rows transferred for the current batch, while
+    ``cached`` contains rows retained from the preceding batch.  Keeping the
+    tables separate avoids concatenating and reordering their wide feature
+    matrices merely to perform an ID lookup.
+    """
+
+    fetched: NodeFeatNid | None
+    cached: NodeFeatNid | None
+
+    @property
+    def sources(self) -> tuple[NodeFeatNid, ...]:
+        """Return the populated lookup tables in fresh-then-cached order."""
+        return tuple(
+            source
+            for source in (self.fetched, self.cached)
+            if source is not None
+        )

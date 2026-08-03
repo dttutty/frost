@@ -2,8 +2,10 @@ import pytest
 import torch
 
 from frost.datatypes.graph import FlatGraph
-from frost.datatypes.n_feat_nid import NodeFeatNid
+from frost.datatypes.n_feat_nid import NodeFeatNid, NodeFeatureLookup
+from frost.datatypes.plan import StaticPlan
 from frost.runtime.worker._static_assembler import StaticAssembler
+from frost.utils.tensor_set import TensorSet
 
 
 def _make_flat_graph() -> FlatGraph:
@@ -21,19 +23,22 @@ def test_fill_nfeat_strict_mode_rejects_missing_nodes():
         device=torch.device("cpu"),
     )
     flat_graph = _make_flat_graph()
-    nfeat_nid = NodeFeatNid(
-        nid=torch.tensor([0, 1, 2, 3], dtype=torch.long),
-        nfeat=torch.tensor(
-            [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0]],
-            dtype=torch.float32,
+    nfeat_lookup = NodeFeatureLookup(
+        fetched=NodeFeatNid(
+            nid=torch.tensor([0, 1, 2, 3], dtype=torch.long),
+            nfeat=torch.tensor(
+                [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0]],
+                dtype=torch.float32,
+            ),
+            is_sorted=True,
         ),
-        is_sorted=True,
+        cached=None,
     )
 
-    with pytest.raises(ValueError, match="missing in nfeat_nid.nid"):
+    with pytest.raises(ValueError, match="missing in the node feature lookup"):
         assembler.fill_nfeat(
             flat_graph=flat_graph,
-            nfeat_nid=nfeat_nid,
+            nfeat_lookup=nfeat_lookup,
             strict=True,
         )
 
@@ -45,23 +50,27 @@ def test_fill_nfeat_non_strict_keeps_unplanned_rows_zero():
         device=torch.device("cpu"),
     )
     flat_graph = _make_flat_graph()
-    nfeat_nid = NodeFeatNid(
-        nid=torch.tensor([0, 1, 2, 3], dtype=torch.long),
-        nfeat=torch.tensor(
-            [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0]],
-            dtype=torch.float32,
+    nfeat_lookup = NodeFeatureLookup(
+        fetched=NodeFeatNid(
+            nid=torch.tensor([0, 1, 2, 3], dtype=torch.long),
+            nfeat=torch.tensor(
+                [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0]],
+                dtype=torch.float32,
+            ),
+            is_sorted=True,
         ),
-        is_sorted=True,
+        cached=None,
     )
 
     out = assembler.fill_nfeat(
         flat_graph=flat_graph,
-        nfeat_nid=nfeat_nid,
+        nfeat_lookup=nfeat_lookup,
         strict=False,
     )
 
     assert out.nfeat is not None
-    assert torch.equal(out.nfeat[:4], nfeat_nid.nfeat)
+    assert nfeat_lookup.fetched is not None
+    assert torch.equal(out.nfeat[:4], nfeat_lookup.fetched.nfeat)
     assert torch.equal(out.nfeat[4:], torch.zeros((2, 2), dtype=torch.float32))
 
 
@@ -72,15 +81,18 @@ def test_fill_nfeat_non_strict_accepts_no_matching_rows():
         device=torch.device("cpu"),
     )
     flat_graph = _make_flat_graph()
-    nfeat_nid = NodeFeatNid(
-        nid=torch.tensor([6, 7], dtype=torch.long),
-        nfeat=torch.tensor([[7.0, 7.0], [8.0, 8.0]], dtype=torch.float32),
-        is_sorted=True,
+    nfeat_lookup = NodeFeatureLookup(
+        fetched=NodeFeatNid(
+            nid=torch.tensor([6, 7], dtype=torch.long),
+            nfeat=torch.tensor([[7.0, 7.0], [8.0, 8.0]], dtype=torch.float32),
+            is_sorted=True,
+        ),
+        cached=None,
     )
 
     out = assembler.fill_nfeat(
         flat_graph=flat_graph,
-        nfeat_nid=nfeat_nid,
+        nfeat_lookup=nfeat_lookup,
         strict=False,
     )
 
@@ -121,7 +133,54 @@ def test_prepare_nfeat_cache_casts_compact_storage_to_float32():
 
     result = assembler.prepare_nfeat_cache(plan)
 
-    assert result.nfeat.dtype == torch.float32
+    assert result.fetched is not None
+    assert result.fetched.nfeat.dtype == torch.float32
+
+
+def test_prepare_nfeat_cache_keeps_fetched_and_cached_sources_separate():
+    shared_nfeat = torch.tensor(
+        [[0.0, 10.0], [1.0, 11.0], [2.0, 12.0], [3.0, 13.0], [4.0, 14.0]]
+    )
+    assembler = StaticAssembler(
+        shared_nfeat=shared_nfeat,
+        shared_efeat=None,
+        device=torch.device("cpu"),
+    )
+
+    first = assembler.prepare_nfeat_cache(
+        StaticPlan(
+            fetch=TensorSet(torch.tensor([0, 1, 2, 3])),
+            to_cache=TensorSet(torch.tensor([1, 3])),
+        )
+    )
+    assert first.cached is None
+    assert assembler.nfeat_delta is not None
+    assert assembler.nfeat_delta.nid.tolist() == [1, 3]
+
+    second = assembler.prepare_nfeat_cache(
+        StaticPlan(
+            fetch=TensorSet(torch.tensor([2, 4])),
+            to_cache=TensorSet(torch.tensor([2, 3])),
+        )
+    )
+
+    assert second.fetched is not None
+    assert second.cached is not None
+    assert second.fetched.nid.tolist() == [2, 4]
+    assert second.cached.nid.tolist() == [1, 3]
+    assert assembler.nfeat_delta is not None
+    assert assembler.nfeat_delta.nid.tolist() == [2, 3]
+    assert torch.equal(assembler.nfeat_delta.nfeat, shared_nfeat[[2, 3]])
+
+    graph = FlatGraph(
+        nid=torch.tensor([4, 1, 3, 2, -1]),
+        eid=torch.full((5,), -1),
+        ts=torch.zeros(5),
+    )
+    result = assembler.fill_nfeat(graph, second, strict=True)
+    assert result.nfeat is not None
+    assert torch.equal(result.nfeat[:4], shared_nfeat[[4, 1, 3, 2]])
+    assert torch.equal(result.nfeat[4], torch.zeros(2))
 
 
 def test_fill_efeat_casts_compact_storage_to_float32():

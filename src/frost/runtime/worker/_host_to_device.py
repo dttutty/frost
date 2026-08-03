@@ -165,7 +165,7 @@ class H2D(StreamThreadBase):
 
                         meta.flat_graph = self.st_asm.fill_nfeat(
                             flat_graph=meta.flat_graph,
-                            nfeat_nid=nfeat,
+                            nfeat_lookup=nfeat,
                             strict=self.node_feature_scope is NodeSet.ALL_SAMPLED,
                         )
             finally:
