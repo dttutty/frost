@@ -191,3 +191,39 @@ class TestMemBoxStoreManagerInit:
         )
 
         assert mgr.d_mail == 2 * 32 + 8
+
+    def test_worker_prefaults_all_dynamic_state_mappings(self, monkeypatch):
+        from frost.shm import mem_mgr
+
+        mock_env = MagicMock()
+        mock_env.is_host = False
+        calls = []
+
+        def fake_get(name, shape, dtype, *, populate_read=False):
+            calls.append((name, tuple(shape), dtype, populate_read))
+            return torch.empty(shape, dtype=dtype)
+
+        monkeypatch.setattr(mem_mgr, "gsm", fake_get)
+        monkeypatch.setattr(mem_mgr.dist, "barrier", lambda: None)
+
+        mgr = mem_mgr.MemBoxStoreManager(
+            env=mock_env,
+            run_id="prefault",
+            n_nodes=10,
+            boxsize=1,
+            d_mem=4,
+            edim=0,
+            mdtype=torch.float32,
+            tdtype=torch.float32,
+        )
+        state = mgr.prepare()
+
+        assert state.mem.shape == (10, 4)
+        assert [call[0] for call in calls] == [
+            "prefault_mem",
+            "prefault_mem_ts",
+            "prefault_box",
+            "prefault_box_ts",
+            "prefault_box_pos",
+        ]
+        assert all(call[3] for call in calls)

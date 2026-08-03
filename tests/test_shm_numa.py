@@ -53,3 +53,30 @@ def test_region_bind_failure_falls_back_to_first_touch(monkeypatch) -> None:
 
     assert not applied
     assert 1 in _core._NUMA_BIND_WARNED_NODES
+
+
+def test_populate_shared_memory_for_read_uses_mapping_address(monkeypatch) -> None:
+    calls: list[tuple[int, int, int]] = []
+
+    class FakeMadvise:
+        def __call__(self, address, length, advice):
+            calls.append((address.value, length.value, advice))
+            return 0
+
+    class FakeLibc:
+        madvise = FakeMadvise()
+
+    class FakeShm:
+        buf = memoryview(bytearray(8192))
+
+    monkeypatch.setattr(_core, "_load_c_library", lambda: FakeLibc())
+
+    applied = _core._populate_shared_memory_for_read(
+        FakeShm(),  # type: ignore[arg-type]
+        length=8192,
+    )
+
+    assert applied
+    assert len(calls) == 1
+    assert calls[0][0] > 0
+    assert calls[0][1:] == (8192, _core._MADV_POPULATE_READ)

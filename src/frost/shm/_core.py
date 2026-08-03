@@ -80,8 +80,10 @@ _TRACKED_SHM_OBJECTS: dict[str, shared_memory.SharedMemory] = {}
 _IS_HOST_PROCESS = False
 _CLEANUP_DONE = False
 _NUMA_BIND_WARNED_NODES: set[int] = set()
+_POPULATE_READ_WARNING_EMITTED = False
 
 _MPOL_BIND = 2
+_MADV_POPULATE_READ = 22
 
 
 @functools.cache
@@ -98,6 +100,15 @@ def _load_numa_library() -> ctypes.CDLL:
     ]
     numa.mbind.restype = ctypes.c_long
     return numa
+
+
+@functools.cache
+def _load_c_library() -> ctypes.CDLL:
+    """Return libc configured for memory-advice calls."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    libc.madvise.restype = ctypes.c_int
+    return libc
 
 
 def _mbind_address_to_node(address: int, length: int, node: int) -> None:
@@ -150,6 +161,47 @@ def _bind_shared_memory_before_touch(
                 exc,
             )
             _NUMA_BIND_WARNED_NODES.add(node)
+        return False
+    return True
+
+
+def _populate_shared_memory_for_read(
+    shm: shared_memory.SharedMemory, *, length: int
+) -> bool:
+    """Populate page tables for an existing SHM mapping when the kernel permits.
+
+    ``MADV_POPULATE_READ`` faults readable pages into the calling process's page
+    tables without copying the backing data.  Dynamic-state workers otherwise
+    pay these minor faults gradually inside random indexed gathers.  Unsupported
+    kernels and resource limits are a safe performance fallback, not a launch
+    failure.
+    """
+    global _POPULATE_READ_WARNING_EMITTED
+    try:
+        if length <= 0:
+            raise ValueError(f"length must be positive, got {length}")
+        buffer = cast(memoryview, shm.buf)
+        address = ctypes.addressof(ctypes.c_char.from_buffer(buffer))
+        libc = _load_c_library()
+        ctypes.set_errno(0)
+        result = libc.madvise(
+            ctypes.c_void_p(address),
+            ctypes.c_size_t(length),
+            _MADV_POPULATE_READ,
+        )
+        if result != 0:
+            error = ctypes.get_errno()
+            if error:
+                raise OSError(error, os.strerror(error))
+            raise OSError("madvise(MADV_POPULATE_READ) failed without errno")
+    except (OSError, ValueError, AttributeError) as exc:
+        if not _POPULATE_READ_WARNING_EMITTED:
+            logger.warning(
+                "Could not pre-populate shared-memory page tables; "
+                "falling back to demand paging: %s",
+                exc,
+            )
+            _POPULATE_READ_WARNING_EMITTED = True
         return False
     return True
 
@@ -306,7 +358,11 @@ def create_shared_mem_array(
 
 
 def get_shared_mem_array(
-    name: str, shape: list | tuple, dtype: torch.dtype
+    name: str,
+    shape: list | tuple,
+    dtype: torch.dtype,
+    *,
+    populate_read: bool = False,
 ) -> torch.Tensor:
     """Attach to an existing POSIX shared-memory segment and return it as a tensor.
 
@@ -318,18 +374,24 @@ def get_shared_mem_array(
         name: Logical name of the segment (normalised automatically).
         shape: Expected shape of the tensor view.
         dtype: PyTorch dtype matching the data written by the creator.
+        populate_read: Whether to eagerly populate page tables for this process's
+            mapping. Intended for large, randomly indexed shared-state tables.
 
     Returns:
         A CPU tensor backed by the existing shared-memory segment.
     """
     name = _normalize_shm_name(name)
     np_dtype = _TORCH_TO_NP[dtype]
+    num_bytes = int(np.prod(shape)) * np.dtype(np_dtype).itemsize
 
     shm = shared_memory.SharedMemory(name=name)
     _unregister_shm(shm.name)
 
     # Keep a reference to the shm object to prevent GC from unmapping the memory
     _TRACKED_SHM_OBJECTS[shm.name] = shm
+
+    if populate_read:
+        _populate_shared_memory_for_read(shm, length=num_bytes)
 
     np_arr = np.ndarray(shape, dtype=np_dtype, buffer=shm.buf)
     tensor = torch.from_numpy(np_arr)

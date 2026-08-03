@@ -8,6 +8,8 @@ handshake.  All tensors are zero-initialised and reset between epochs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import time
 from typing import TYPE_CHECKING, Optional
 
 import torch
@@ -18,6 +20,9 @@ from frost.shm._core import get_shared_mem_array as gsm
 
 if TYPE_CHECKING:
     from frost.datatypes.mem_mail_box.mail import MailEntry
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True)
@@ -181,11 +186,41 @@ class MemBoxStoreManager:
         dist.barrier()
 
         if not self.env.is_host:
-            mem = gsm(f"{self.run_id}_mem", [n_nodes, d_mem], self.mdtype)
-            mem_ts = gsm(f"{self.run_id}_mem_ts", [n_nodes], self.tdtype)
-            box = gsm(f"{self.run_id}_box", mail_shape, self.mdtype)
-            box_ts = gsm(f"{self.run_id}_box_ts", [n_nodes, boxsize], self.tdtype)
-            box_pos = gsm(f"{self.run_id}_box_pos", [n_nodes], torch.int64)
+            populate_start = time.perf_counter()
+            mem = gsm(
+                f"{self.run_id}_mem",
+                [n_nodes, d_mem],
+                self.mdtype,
+                populate_read=True,
+            )
+            mem_ts = gsm(
+                f"{self.run_id}_mem_ts",
+                [n_nodes],
+                self.tdtype,
+                populate_read=True,
+            )
+            box = gsm(
+                f"{self.run_id}_box",
+                mail_shape,
+                self.mdtype,
+                populate_read=True,
+            )
+            box_ts = gsm(
+                f"{self.run_id}_box_ts",
+                [n_nodes, boxsize],
+                self.tdtype,
+                populate_read=True,
+            )
+            box_pos = gsm(
+                f"{self.run_id}_box_pos",
+                [n_nodes],
+                torch.int64,
+                populate_read=True,
+            )
+            logger.info(
+                "Dynamic shared-state page-table population completed in %.3fs",
+                time.perf_counter() - populate_start,
+            )
 
         # Store the dataclass as an instance attribute
         assert mem is not None
