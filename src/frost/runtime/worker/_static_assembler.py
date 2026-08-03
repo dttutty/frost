@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 class StaticAssembler:
     """
-    Assembles static features (nfeat/efeat) for each batch from CPU-fetched
-    data and the cached delta from the previous iteration.
+    Assembles static features (nfeat/efeat) for each batch by merging
+    CPU-fetched data with the cached delta from the previous iteration.
     """
 
     nfeat_delta: NodeFeatNid | None = None
@@ -118,33 +118,21 @@ class StaticAssembler:
             device=self.device,
             dtype=sources[0].nfeat.dtype,
         )
-        remaining_nids = requested_nids
-        remaining_positions = torch.arange(
-            requested_nids.numel(),
-            device=requested_nids.device,
-        )
+        found_any = torch.zeros_like(requested_nids, dtype=torch.bool)
 
-        for source_index, source in enumerate(sources):
-            positions = torch.searchsorted(source.nid, remaining_nids)
+        for source in sources:
+            positions = torch.searchsorted(source.nid, requested_nids)
             in_bounds = positions < source.nid.numel()
             safe_positions = positions.clamp_max(source.nid.numel() - 1)
-            found = in_bounds & (
-                source.nid[safe_positions] == remaining_nids
-            )
-            selected[remaining_positions[found]] = source.nfeat[
-                safe_positions[found]
-            ]
+            found = in_bounds & (source.nid[safe_positions] == requested_nids)
+            selected[found] = source.nfeat[safe_positions[found]]
+            found_any |= found
 
-            if source_index + 1 < len(sources):
-                missing = ~found
-                remaining_nids = remaining_nids[missing]
-                remaining_positions = remaining_positions[missing]
-            elif requested_nids.device.type == "cpu" and not torch.all(found):
-                missing_nids = remaining_nids[~found]
-                raise ValueError(
-                    "Cache plan requested "
-                    f"{missing_nids.numel()} unavailable node features"
-                )
+        if requested_nids.device.type == "cpu" and not torch.all(found_any):
+            missing = requested_nids[~found_any]
+            raise ValueError(
+                f"Cache plan requested {missing.numel()} unavailable node features"
+            )
 
         return NodeFeatNid(
             nid=requested_nids,
@@ -229,48 +217,29 @@ class StaticAssembler:
             raise ValueError("No valid nodes found in flat_graph; all NIDs are -1.")
 
         feat_dim = sources[0].nfeat.size(-1)
-        if strict:
-            # Every valid row is guaranteed to be overwritten below.  Avoid
-            # zeroing the full wide matrix just to initialize padded rows.
-            node_feat = torch.empty(
-                (*nodes.shape, feat_dim),
-                device=self.device,
-                dtype=sources[0].nfeat.dtype,
-            )
-            node_feat[~valid_mask] = 0
-        else:
-            node_feat = torch.zeros(
-                (*nodes.shape, feat_dim),
-                device=self.device,
-                dtype=sources[0].nfeat.dtype,
-            )
+        node_feat = torch.zeros(
+            (*nodes.shape, feat_dim),
+            device=self.device,
+            dtype=sources[0].nfeat.dtype,
+        )
 
         valid_positions = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
-        remaining_nodes = valid_nodes
-        remaining_positions = valid_positions
+        found_any = torch.zeros_like(valid_nodes, dtype=torch.bool)
 
-        for source_index, source in enumerate(sources):
-            positions = torch.searchsorted(source.nid, remaining_nodes)
+        for source in sources:
+            positions = torch.searchsorted(source.nid, valid_nodes)
             in_bounds = positions < source.nid.numel()
             safe_positions = positions.clamp_max(source.nid.numel() - 1)
-            found = in_bounds & (source.nid[safe_positions] == remaining_nodes)
-            node_feat[remaining_positions[found]] = source.nfeat[
-                safe_positions[found]
-            ]
+            found = in_bounds & (source.nid[safe_positions] == valid_nodes)
+            node_feat[valid_positions[found]] = source.nfeat[safe_positions[found]]
+            found_any |= found
 
-            if source_index + 1 < len(sources):
-                missing = ~found
-                remaining_nodes = remaining_nodes[missing]
-                remaining_positions = remaining_positions[missing]
-            elif (
-                strict
-                and nodes.device.type == "cpu"
-                and not torch.all(found)
-            ):
-                # The host access planner guarantees complete coverage for
-                # ALL_SAMPLED. Preserve detailed validation for CPU callers
-                # without blocking the CUDA hot path.
-                missing_nids = torch.unique(remaining_nodes[~found])
+        if strict:
+            # The host access planner guarantees complete coverage for
+            # ALL_SAMPLED.  Preserve detailed validation for CPU callers while
+            # avoiding a blocking ``torch.all`` on every CUDA batch.
+            if nodes.device.type == "cpu" and not torch.all(found_any):
+                missing_nids = torch.unique(valid_nodes[~found_any])
                 preview = missing_nids[:20].tolist()
                 raise ValueError(
                     f"Found {missing_nids.numel()} NIDs in flat_graph that are missing in the node feature lookup. "
