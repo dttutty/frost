@@ -232,9 +232,11 @@ def generate_precomputed_negative_file(
     interrupted.
 
     Args:
-        edges_path:  Path to the edges CSV file.  Must contain ``eid``, ``src``,
-                     and ``dst`` columns; ``eid`` values must be contiguous
-                     integers starting at 1 (i.e. row 1 → eid=1).
+        edges_path:  Path to the edges CSV file.  Must contain ``src`` and
+                     ``dst`` columns.  If ``eid`` is present, its values must
+                     be contiguous integers starting at 1 (i.e. row 1 →
+                     eid=1).  Otherwise eid is synthesized from that canonical
+                     row order, matching the runtime edge-table normalizer.
         output_path: Destination path for the generated file.  Defaults to
                      ``<edges_path.parent>/neg_pre_sampling_1_result.csv``.
         seed:        Integer seed for the RNG. The artifact depends only on this
@@ -262,20 +264,22 @@ def generate_precomputed_negative_file(
     num_rows = 0
     with edges_path.open(newline="") as f:
         reader = csv.DictReader(f)
-        required_columns = {"eid", "src", "dst"}
+        required_columns = {"src", "dst"}
         missing_columns = required_columns.difference(reader.fieldnames or [])
         if missing_columns:
             raise ValueError(
                 f"{edges_path} is missing required columns: {sorted(missing_columns)}"
             )
 
+        has_eid = "eid" in (reader.fieldnames or [])
         for row_idx, row in enumerate(reader, start=1):
-            eid = int(row["eid"])
-            # Enforce contiguous eid ordering so that the output file's line
-            # number always matches the edge's eid.
-            if eid != row_idx:
+            # Enforce contiguous eid ordering when it is materialized.  Legacy
+            # TGL tables omit this column; the runtime synthesizes the same
+            # 1-based identifier from row order.
+            if has_eid and int(row["eid"]) != row_idx:
                 raise ValueError(
-                    f"{edges_path} has non-contiguous eid values: expected {row_idx}, got {eid}"
+                    f"{edges_path} has non-contiguous eid values: expected "
+                    f"{row_idx}, got {row['eid']}"
                 )
             dst = int(row["dst"])
             destination_nodes.add(dst)
@@ -290,13 +294,14 @@ def generate_precomputed_negative_file(
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     with edges_path.open(newline="") as src_f, tmp_path.open("w", newline="") as out_f:
         reader = csv.DictReader(src_f)
+        has_eid = "eid" in (reader.fieldnames or [])
         writer = csv.writer(out_f)
         writer.writerow(["eid", "neg_dst"])
         for row_idx, row in enumerate(reader, start=1):
-            eid = int(row["eid"])
-            if eid != row_idx:
+            if has_eid and int(row["eid"]) != row_idx:
                 raise ValueError(
-                    f"{edges_path} has non-contiguous eid values: expected {row_idx}, got {eid}"
+                    f"{edges_path} has non-contiguous eid values: expected "
+                    f"{row_idx}, got {row['eid']}"
                 )
 
             dst = int(row["dst"])
@@ -305,7 +310,7 @@ def generate_precomputed_negative_file(
                 current_dst=dst,
                 rng=rng,
             )
-            writer.writerow([eid, neg_dst])
+            writer.writerow([row_idx, neg_dst])
 
     # Atomic rename: minimises the window where a partial file is observable.
     tmp_path.replace(output_path)

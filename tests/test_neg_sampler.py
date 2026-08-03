@@ -67,6 +67,30 @@ class TestPrecomputedNegSampler:
         for neg, (src, dst) in zip(negatives, rows):
             assert neg != dst
 
+    def test_generate_precomputed_negative_file_synthesizes_missing_eid(
+        self, tmp_path: Path
+    ):
+        with_eid_dir = tmp_path / "WITH_EID"
+        without_eid_dir = tmp_path / "WITHOUT_EID"
+        with_eid_dir.mkdir()
+        without_eid_dir.mkdir()
+        rows = [(0, 10, 0), (0, 11, 1), (1, 12, 2), (2, 10, 3)]
+        with_eid_path = with_eid_dir / "edges.csv"
+        without_eid_path = without_eid_dir / "edges.csv"
+        _write_edges_csv(with_eid_path, rows)
+        pd.read_csv(with_eid_path).drop(columns="eid").to_csv(
+            without_eid_path, index=False
+        )
+
+        with_eid = pd.read_csv(
+            generate_precomputed_negative_file(with_eid_path, seed=7)
+        )
+        synthesized = pd.read_csv(
+            generate_precomputed_negative_file(without_eid_path, seed=7)
+        )
+
+        pd.testing.assert_frame_equal(synthesized, with_eid)
+
     def test_sample_reads_precomputed_negatives_by_eid(self, tmp_path: Path):
         dataset_dir = tmp_path / "MOCK"
         dataset_dir.mkdir()
