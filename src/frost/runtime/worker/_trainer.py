@@ -18,6 +18,7 @@ from frost.datatypes.result import Result
 from frost.models.temporal_link_model import TemporalLinkModel
 from frost.models.protocols import MemoryUpdaterProto
 from frost.shm.ring_buf import RingBuf
+from frost.runtime.worker._batch_convergence import BatchConvergenceRecorder
 from frost.runtime.worker._state_coordinator import DynamicStateCoordinator
 from frost.runtime.experimental.dynamic_state import TransportMode, WritebackTiming
 
@@ -159,6 +160,10 @@ class WorkerTrainerMixin:
 
     def _init_metrics(self) -> None:
         """Create torchmetrics trackers for training and evaluation."""
+        self.batch_convergence = BatchConvergenceRecorder.from_environment(
+            system="frost",
+            rank=getattr(self.env, "local_rank", 0),
+        )
         # A single GPU worker has nothing to aggregate.  In that topology the
         # only other process is the host rank, which is deliberately excluded
         # from ``self.nccl``. TorchMetrics' sync path still issues a barrier
@@ -303,6 +308,9 @@ class WorkerTrainerMixin:
         Returns:
             Result dataclass containing the aggregated scalar metrics for this epoch.
         """
+        batch_convergence = getattr(self, "batch_convergence", None)
+        if batch_convergence is not None:
+            batch_convergence.flush_epoch(getattr(self, "curr_epoch", 0) + 1)
         avg_loss = self.train_loss_tracker.compute()
         if self.train_only:
             val_auc = val_ap = test_auc = test_ap = 0.0
@@ -383,7 +391,9 @@ class WorkerTrainerMixin:
         ):
             self._flush_deferred_direct_dynamic_state(meta, release_h2d_credits=True)
 
-        self.train_loss_tracker.update(loss.detach().float())
+        detached_loss = loss.detach().float()
+        self.train_loss_tracker.update(detached_loss)
+        self.batch_convergence.record(events=meta.n_src, loss=detached_loss)
         self._release_meta_tensors(meta)
 
     @torch.no_grad()
