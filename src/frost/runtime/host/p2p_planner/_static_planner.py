@@ -51,6 +51,10 @@ class StaticPlanner(ThreadBase):
         self._timing_enabled = _timing_enabled()
         self._plan_s_curve: list[float] = []
         self._out_q_put_s_curve: list[float] = []
+        self._need_counts_curve: list[list[int]] = []
+        self._fetch_counts_curve: list[list[int]] = []
+        self._cache_hit_counts_curve: list[list[int]] = []
+        self._next_cache_counts_curve: list[list[int]] = []
 
     def _put_plan(self, plan: list[StaticPlan]) -> None:
         start = time.perf_counter()
@@ -120,6 +124,10 @@ class StaticPlanner(ThreadBase):
                 "batch_count": len(self._plan_s_curve),
                 "plan_s_curve": self._plan_s_curve,
                 "out_q_put_s_curve": self._out_q_put_s_curve,
+                "need_counts_curve": self._need_counts_curve,
+                "fetch_counts_curve": self._fetch_counts_curve,
+                "cache_hit_counts_curve": self._cache_hit_counts_curve,
+                "next_cache_counts_curve": self._next_cache_counts_curve,
             }
             print(
                 "APPENDIX_STATIC_PLANNER_TIMING_CURVE "
@@ -144,6 +152,10 @@ class StaticPlanner(ThreadBase):
 
         total_to_cache = 0
         total_to_fetch = 0
+        need_counts: list[int] = []
+        fetch_counts: list[int] = []
+        cache_hit_counts: list[int] = []
+        next_cache_counts: list[int] = []
 
         for n in range(n_gpus):
             to_cache_of_1 = avails_of_1[n] & needs_of_2[n]
@@ -156,6 +168,19 @@ class StaticPlanner(ThreadBase):
 
             total_to_cache += len(to_cache_of_1)
             total_to_fetch += len(self.fetchs[n])
+            if self._timing_enabled:
+                need_count = len(avails_of_1[n])
+                fetch_count = len(self.fetchs[n])
+                need_counts.append(need_count)
+                fetch_counts.append(fetch_count)
+                cache_hit_counts.append(need_count - fetch_count)
+                next_cache_counts.append(len(to_cache_of_1))
+
+        if self._timing_enabled:
+            self._need_counts_curve.append(need_counts)
+            self._fetch_counts_curve.append(fetch_counts)
+            self._cache_hit_counts_curve.append(cache_hit_counts)
+            self._next_cache_counts_curve.append(next_cache_counts)
 
         # if __debug__:
         #     # print self.fetchs[0].data.shape[0] and self.fetchs[1].data.shape[0]
