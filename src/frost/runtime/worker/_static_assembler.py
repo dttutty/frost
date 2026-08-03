@@ -169,11 +169,14 @@ class StaticAssembler:
         assert nfeat_nid.is_sorted
         assert nfeat_nid.nid.numel() > 0, "nfeat_nid.nid is empty"
 
-        # Optional but recommended for strictness:
-        # disallow duplicate NIDs in the lookup table.
-        assert torch.all(nfeat_nid.nid[1:] > nfeat_nid.nid[:-1]), (
-            "nfeat_nid.nid must be strictly increasing (sorted and unique)"
-        )
+        # TensorSet and NodeFeatNid establish this invariant before the lookup
+        # reaches a worker.  Revalidate CPU callers for useful unit-test errors,
+        # but do not turn the assertion into a CUDA-to-host synchronization in
+        # the per-batch hot path.
+        if nfeat_nid.nid.device.type == "cpu":
+            assert torch.all(nfeat_nid.nid[1:] > nfeat_nid.nid[:-1]), (
+                "nfeat_nid.nid must be strictly increasing (sorted and unique)"
+            )
 
         nodes = flat_graph.nid
         valid_mask = nodes != -1
@@ -199,17 +202,24 @@ class StaticAssembler:
 
         found_mask = in_bounds & (nfeat_nid.nid[safe_idx] == valid_nodes)
 
-        if strict and not torch.all(found_mask):
-            missing_nids = torch.unique(valid_nodes[~found_mask])
-            preview = missing_nids[:20].tolist()
-            raise ValueError(
-                f"Found {missing_nids.numel()} NIDs in flat_graph that are missing in nfeat_nid.nid. "
-                f"First {len(preview)} missing NIDs: {preview}"
-            )
-
-        if torch.any(found_mask):
+        if strict:
+            # The host access planner guarantees complete coverage for
+            # ALL_SAMPLED.  Preserve detailed validation for CPU callers while
+            # avoiding a blocking ``torch.all`` on every CUDA batch.
+            if nodes.device.type == "cpu" and not torch.all(found_mask):
+                missing_nids = torch.unique(valid_nodes[~found_mask])
+                preview = missing_nids[:20].tolist()
+                raise ValueError(
+                    f"Found {missing_nids.numel()} NIDs in flat_graph that are missing in nfeat_nid.nid. "
+                    f"First {len(preview)} missing NIDs: {preview}"
+                )
+            gathered_nfeat = nfeat_nid.nfeat[safe_idx]
+            node_feat[valid_positions] = gathered_nfeat
+        else:
+            # Empty advanced-index assignments are valid, so this remains
+            # entirely device-side even when no planned rows are present.
             gathered_nfeat = nfeat_nid.nfeat[safe_idx[found_mask]]
-            node_feat[valid_positions[found_mask]] = gathered_nfeat.to(self.device)
+            node_feat[valid_positions[found_mask]] = gathered_nfeat
 
         flat_graph.nfeat = node_feat
         return flat_graph

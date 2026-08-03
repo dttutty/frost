@@ -41,7 +41,15 @@ class NodeFeatNid:
 
     def merge(self, other: NodeFeatNid) -> NodeFeatNid:
         """Append a non-overlapping feature lookup table in place."""
-        if torch.isin(self.nid, other.nid).any():
+        # StaticPlanner constructs ``fetch`` as current needs minus the
+        # previous batch's available IDs, so production CUDA lookups are
+        # disjoint by construction.  Keep the defensive validation for CPU
+        # callers and tests without forcing a device-to-host synchronization
+        # in every worker batch.
+        if (
+            self.nid.device.type == "cpu"
+            and torch.isin(self.nid, other.nid).any()
+        ):
             raise ValueError("NodeFeatNid instances must not overlap.")
         self.nid = torch.cat((self.nid, other.nid), dim=0)
         self.nfeat = torch.cat((self.nfeat, other.nfeat), dim=0)

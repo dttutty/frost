@@ -150,8 +150,9 @@ class TemporalGraphAttentionLayer(nn.Module):
         agg_h = torch.sum(V_weighted, dim=1)
         # Zero out nodes that have no neighbors at all
         all_pad = ~mask.any(dim=1)  # [N]
-        if all_pad.any():
-            agg_h[all_pad] = 0.0
+        # Keep this operation on the device.  Branching on ``all_pad.any()``
+        # synchronizes the CUDA stream with Python once per forward pass.
+        agg_h = agg_h.masked_fill(all_pad[:, None, None], 0.0)
 
         agg_h = agg_h.view(N, self.dim_out)  # [N, dim_out]
 

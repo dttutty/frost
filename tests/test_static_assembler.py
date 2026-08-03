@@ -65,6 +65,45 @@ def test_fill_nfeat_non_strict_keeps_unplanned_rows_zero():
     assert torch.equal(out.nfeat[4:], torch.zeros((2, 2), dtype=torch.float32))
 
 
+def test_fill_nfeat_non_strict_accepts_no_matching_rows():
+    assembler = StaticAssembler(
+        shared_nfeat=torch.zeros((8, 2), dtype=torch.float32),
+        shared_efeat=None,
+        device=torch.device("cpu"),
+    )
+    flat_graph = _make_flat_graph()
+    nfeat_nid = NodeFeatNid(
+        nid=torch.tensor([6, 7], dtype=torch.long),
+        nfeat=torch.tensor([[7.0, 7.0], [8.0, 8.0]], dtype=torch.float32),
+        is_sorted=True,
+    )
+
+    out = assembler.fill_nfeat(
+        flat_graph=flat_graph,
+        nfeat_nid=nfeat_nid,
+        strict=False,
+    )
+
+    assert out.nfeat is not None
+    assert torch.equal(out.nfeat, torch.zeros((6, 2), dtype=torch.float32))
+
+
+def test_node_feat_merge_still_rejects_overlap_on_cpu():
+    left = NodeFeatNid(
+        nid=torch.tensor([1, 2]),
+        nfeat=torch.ones((2, 2)),
+        is_sorted=True,
+    )
+    right = NodeFeatNid(
+        nid=torch.tensor([2, 3]),
+        nfeat=torch.ones((2, 2)),
+        is_sorted=True,
+    )
+
+    with pytest.raises(ValueError, match="must not overlap"):
+        left.merge(right)
+
+
 def test_prepare_nfeat_cache_casts_compact_storage_to_float32():
     assembler = StaticAssembler(
         shared_nfeat=torch.ones((4, 2), dtype=torch.float16),
