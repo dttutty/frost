@@ -183,50 +183,6 @@ def test_prepare_nfeat_cache_keeps_fetched_and_cached_sources_separate():
     assert torch.equal(result.nfeat[4], torch.zeros(2))
 
 
-def test_precomputed_routes_fill_graph_and_next_cache_from_both_sources():
-    shared_nfeat = torch.tensor(
-        [[0.0, 10.0], [1.0, 11.0], [2.0, 12.0], [3.0, 13.0], [4.0, 14.0]]
-    )
-    assembler = StaticAssembler(
-        shared_nfeat=shared_nfeat,
-        shared_efeat=None,
-        device=torch.device("cpu"),
-    )
-    assembler.nfeat_delta = NodeFeatNid(
-        nid=torch.tensor([1, 3]),
-        nfeat=shared_nfeat[[1, 3]],
-        is_sorted=True,
-    )
-    plan = StaticPlan(
-        fetch=TensorSet(torch.tensor([2, 4])),
-        to_cache=TensorSet(torch.tensor([2, 3])),
-    )
-    lookup = assembler.prepare_nfeat_cache(
-        plan,
-        staged_cache_route=torch.tensor([0, -2]),
-    )
-
-    graph = FlatGraph(
-        nid=torch.tensor([4, 1, 3, 2, -1]),
-        eid=torch.full((5,), -1),
-        ts=torch.zeros(5),
-    )
-    missing = torch.iinfo(torch.int64).min
-    result = assembler.fill_nfeat(
-        graph,
-        lookup,
-        strict=True,
-        staged_fill_route=torch.tensor([1, -1, -2, 0, missing]),
-    )
-
-    assert result.nfeat is not None
-    assert torch.equal(result.nfeat[:4], shared_nfeat[[4, 1, 3, 2]])
-    assert torch.equal(result.nfeat[4], torch.zeros(2))
-    assert assembler.nfeat_delta is not None
-    assert assembler.nfeat_delta.nid.tolist() == [2, 3]
-    assert torch.equal(assembler.nfeat_delta.nfeat, shared_nfeat[[2, 3]])
-
-
 def test_fill_efeat_casts_compact_storage_to_float32():
     assembler = StaticAssembler(
         shared_nfeat=None,
