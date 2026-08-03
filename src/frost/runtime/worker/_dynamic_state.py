@@ -96,6 +96,18 @@ class DynamicAssemblyLayout:
     box: _AssemblyLookup
 
 
+@dataclass
+class _SharedGatherBuffer:
+    """Reusable CPU output buffers for indexed shared-state reads."""
+
+    data: torch.Tensor
+    ts: torch.Tensor
+
+    @property
+    def capacity(self) -> int:
+        return int(self.data.shape[0])
+
+
 class DynamicPrepareProfiler:
     """Collect non-synchronizing sub-stage timings for dynamic-state assembly."""
 
@@ -162,6 +174,51 @@ class DynamicStateAssemblerMixin:
     box_task_q: Queue | None
     mem_wr_q: Queue | None
     box_wr_q: Queue | None
+    _shared_gather_buffers: dict[Literal["mem", "box"], _SharedGatherBuffer]
+
+    def _get_shared_gather_buffer(
+        self,
+        *,
+        kind: Literal["mem", "box"],
+        row_count: int,
+        shared_data: torch.Tensor,
+        shared_ts: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return reusable output views sized for one indexed CPU gather."""
+        buffers = getattr(self, "_shared_gather_buffers", None)
+        if buffers is None:
+            buffers = {}
+            self._shared_gather_buffers = buffers
+
+        current = buffers.get(kind)
+        compatible = (
+            current is not None
+            and current.data.shape[1:] == shared_data.shape[1:]
+            and current.ts.shape[1:] == shared_ts.shape[1:]
+            and current.data.dtype == shared_data.dtype
+            and current.ts.dtype == shared_ts.dtype
+            and current.data.device == shared_data.device
+            and current.ts.device == shared_ts.device
+        )
+        if not compatible or current is None or current.capacity < row_count:
+            # Reserve at least twice the next power-of-two working set. Real
+            # temporal batches often grow gradually near the start of an epoch;
+            # slack avoids reallocating and faulting new output pages mid-window.
+            capacity = 1 << max(0, (max(1, row_count) - 1).bit_length() + 1)
+            current = _SharedGatherBuffer(
+                data=torch.empty(
+                    (capacity, *shared_data.shape[1:]),
+                    dtype=shared_data.dtype,
+                    device=shared_data.device,
+                ),
+                ts=torch.empty(
+                    (capacity, *shared_ts.shape[1:]),
+                    dtype=shared_ts.dtype,
+                    device=shared_ts.device,
+                ),
+            )
+            buffers[kind] = current
+        return current.data[:row_count], current.ts[:row_count]
 
     def _strict_assembly_mask(
         self, graph: FlatGraph, n_src: int, n_neg: int
@@ -279,8 +336,14 @@ class DynamicStateAssemblerMixin:
             f"got {shared_data.shape[0]} and {shared_ts.shape[0]}"
         )
         gather_start = time.perf_counter()
-        unique_data_cpu = shared_data[fetch_nids]
-        unique_ts_cpu = shared_ts[fetch_nids]
+        unique_data_cpu, unique_ts_cpu = self._get_shared_gather_buffer(
+            kind=kind,
+            row_count=fetch_count,
+            shared_data=shared_data,
+            shared_ts=shared_ts,
+        )
+        torch.index_select(shared_data, 0, fetch_nids, out=unique_data_cpu)
+        torch.index_select(shared_ts, 0, fetch_nids, out=unique_ts_cpu)
         if profiler is not None:
             profiler.record_cpu(
                 f"{kind}_cpu_gather", time.perf_counter() - gather_start

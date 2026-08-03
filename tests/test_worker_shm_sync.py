@@ -200,6 +200,41 @@ class TestDynamicAssembler:
         assert payload["zero_init_cuda_ms_curve"] == [1.25]
         assert payload["lookup_cuda_ms_curve"] == [1.25]
 
+    def test_dynamic_prepare_reuses_cpu_gather_buffers(self):
+        store = _make_store(boxsize=1)
+        assembler = _make_assembler(store)
+        first_graph = _make_graph([1, 4, 2])
+        first_plan = _make_plan([1, 2])
+
+        assembler.prepare_shared_features(
+            first_graph,
+            first_plan,
+            first_plan,
+            n_src=1,
+        )
+        mem_buffer = assembler._shared_gather_buffers["mem"]
+        box_buffer = assembler._shared_gather_buffers["box"]
+        mem_data_ptr = mem_buffer.data.data_ptr()
+        box_data_ptr = box_buffer.data.data_ptr()
+
+        store.mem[1] = torch.tensor([101.0, 102.0])
+        store.box[1, 0] = torch.tensor([103.0, 104.0, 105.0])
+        second_graph = _make_graph([1, 2])
+        second_plan = _make_plan([1, 2])
+        assembler.prepare_shared_features(
+            second_graph,
+            second_plan,
+            second_plan,
+            n_src=1,
+        )
+
+        assert assembler._shared_gather_buffers["mem"].data.data_ptr() == mem_data_ptr
+        assert assembler._shared_gather_buffers["box"].data.data_ptr() == box_data_ptr
+        assert second_graph.mem is not None
+        assert second_graph.box is not None
+        assert second_graph.mem[0].tolist() == [101.0, 102.0]
+        assert second_graph.box[0, 0].tolist() == [103.0, 104.0, 105.0]
+
     def test_shared_plan_reuses_layout_and_delta_order(self):
         store = _make_store(boxsize=1)
         assembler = _make_assembler(store)

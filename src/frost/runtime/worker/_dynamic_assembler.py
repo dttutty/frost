@@ -94,6 +94,7 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
         self._p2p_work_wait_s_curve: list[float] = []
         self._apply_delta_s_curve: list[float] = []
         self._prepare_profiler = DynamicPrepareProfiler(enabled=self._timing_enabled)
+        self._shared_gather_buffers = {}
 
     def logic(self) -> None:
         """Main assembly loop: merge shared + delta data and forward to full_q.
