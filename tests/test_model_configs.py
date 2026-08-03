@@ -45,6 +45,7 @@ def test_compute_policy_is_recorded_without_a_precision_config_group() -> None:
     assert cfg.compute.amp is False
     assert "precision" not in cfg
     assert cfg.cpu_threads == "auto"
+    assert cfg.runtime.single_gpu_resident == "off"
 
 
 @pytest.mark.parametrize(
