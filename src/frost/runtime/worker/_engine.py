@@ -163,6 +163,7 @@ class Worker(
             else resolve_dynamic_state_policy("baseline")
         )
         self.compile_model = options.compile_model
+        self.compile_mode = options.compile_mode
         self.amp = options.amp
         self.lr = options.learning_rate
         if options.eval_metric not in {"ap", "mrr"}:
@@ -226,6 +227,7 @@ class Worker(
             options.optimizer,
             resources.ring_buffer,
             compile_model=self.compile_model,
+            compile_mode=self.compile_mode,
             use_ddp=not self.single_gpu_resident,
         )
         self._init_metrics()

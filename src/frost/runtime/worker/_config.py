@@ -44,6 +44,7 @@ class WorkerOptions:
     execution_plan: ExecutionPlan
     dynamic_state_policy: DynamicStatePolicy | None = None
     compile_model: bool = True
+    compile_mode: str | None = None
     amp: bool = False
     no_memory_queue_size: int = 4
     cpu_benchmark_pid_list: list[int] | None = None
