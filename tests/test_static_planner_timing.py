@@ -75,19 +75,19 @@ def test_static_planner_default_horizon_keeps_longer_lived_rows():
         very_large_batch_need_rows=100,
     )
     in_q.put([_ts([1, 2])])
-    for value in range(3, 18):
+    for value in range(3, 10):
         in_q.put([_ts([value])])
-    in_q.put([_ts([1, 18])])
+    in_q.put([_ts([1, 10])])
     in_q.put("end_of_epoch")
     in_q.put(None)
 
     planner.logic()
 
-    plans = [out_q.get_nowait()[0] for _ in range(17)]
+    plans = [out_q.get_nowait()[0] for _ in range(9)]
     assert out_q.get_nowait() is None
     assert plans[0].to_cache.data.tolist() == [1]
-    assert plans[-1].fetch.data.tolist() == [18]
-    assert planner._active_cache_horizon == 16
+    assert plans[-1].fetch.data.tolist() == [10]
+    assert planner._active_cache_horizon == 8
 
 
 def test_static_planner_limits_reuse_for_very_large_batches():

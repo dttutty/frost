@@ -12,7 +12,7 @@ import torch
 from frost.runtime.host.types import MetasStNeed
 from frost.datatypes.plan import StaticPlan
 from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
-from frost.utils.tensor_set import TensorSet
+from frost.utils.tensor_set import TensorSet, isin_sorted
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class StaticPlanner(ThreadBase):
         in_q: Queue[MetasStNeed | None | Literal["end_of_epoch"]],
         out_q: Queue[list[StaticPlan] | None],
         stop_ev: threading.Event,
-        cache_horizon: int = 16,
+        cache_horizon: int = 8,
         large_batch_need_rows: int = 40_000,
         very_large_batch_need_rows: int = 120_000,
     ) -> None:
@@ -184,24 +184,28 @@ class StaticPlanner(ThreadBase):
         next_cache_counts: list[int] = []
 
         for n in range(n_gpus):
-            future_union = (
-                TensorSet(
-                    torch.cat([future[n].data for future in future_needs]),
-                    sort_now=True,
-                    ensure_unique=True,
-                )
-                if future_needs
-                else TensorSet.empty_like(current_needs[n].data)
-            )
-
             available = self.cached[n] | current_needs[n]
-            to_cache = available & future_union
+            reused = torch.zeros_like(available.data, dtype=torch.bool)
+            for future in future_needs:
+                reused |= isin_sorted(available.data, future[n].data)
+            to_cache = TensorSet(
+                available.data[reused],
+                sort_now=False,
+                ensure_unique=False,
+            )
             plan = StaticPlan(
                 to_cache=to_cache,
                 fetch=self.fetchs[n],
             )
             if future_needs:
-                next_fetch = future_needs[0][n] - to_cache
+                first_future = future_needs[0][n]
+                next_fetch = TensorSet(
+                    first_future.data[
+                        ~isin_sorted(first_future.data, to_cache.data)
+                    ],
+                    sort_now=False,
+                    ensure_unique=False,
+                )
             else:
                 next_fetch = TensorSet.empty_like(current_needs[n].data)
             next_fetchs.append(next_fetch)
