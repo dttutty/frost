@@ -10,7 +10,14 @@ from frost.runtime.experimental.dynamic_state import (
 
 
 @pytest.mark.parametrize(
-    ("name", "planner", "transport", "writeback", "filter_by_plan"),
+    (
+        "name",
+        "planner",
+        "transport",
+        "writeback",
+        "filter_by_plan",
+        "pin_gather_buffers",
+    ),
     [
         (
             "baseline",
@@ -18,12 +25,22 @@ from frost.runtime.experimental.dynamic_state import (
             TransportMode.ASYNC_P2P,
             WritebackTiming.AFTER_MEMORY_UPDATE,
             False,
+            False,
+        ),
+        (
+            "baseline_pinned_gather",
+            PlannerMode.PIPELINED,
+            TransportMode.ASYNC_P2P,
+            WritebackTiming.AFTER_MEMORY_UPDATE,
+            False,
+            True,
         ),
         (
             "no_plan_no_delta_post_step_raw",
             PlannerMode.NONE,
             TransportMode.DIRECT_CPU,
             WritebackTiming.AFTER_OPTIMIZER_STEP,
+            False,
             False,
         ),
         (
@@ -32,6 +49,7 @@ from frost.runtime.experimental.dynamic_state import (
             TransportMode.DIRECT_CPU,
             WritebackTiming.AFTER_MEMORY_UPDATE,
             False,
+            False,
         ),
         (
             "plan_no_delta_dedup_post_mem_update_raw",
@@ -39,6 +57,7 @@ from frost.runtime.experimental.dynamic_state import (
             TransportMode.DIRECT_CPU,
             WritebackTiming.AFTER_MEMORY_UPDATE,
             True,
+            False,
         ),
     ],
 )
@@ -48,6 +67,7 @@ def test_resolve_dynamic_state_policy(
     transport,
     writeback,
     filter_by_plan,
+    pin_gather_buffers,
 ) -> None:
     policy = resolve_dynamic_state_policy(name)
 
@@ -56,6 +76,7 @@ def test_resolve_dynamic_state_policy(
     assert policy.transport is transport
     assert policy.writeback is writeback
     assert policy.filter_writeback_by_plan is filter_by_plan
+    assert policy.pin_gather_buffers is pin_gather_buffers
 
 
 def test_resolve_dynamic_state_policy_rejects_unknown_name() -> None:

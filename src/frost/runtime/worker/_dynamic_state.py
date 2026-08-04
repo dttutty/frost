@@ -183,6 +183,7 @@ class DynamicStateAssemblerMixin:
         row_count: int,
         shared_data: torch.Tensor,
         shared_ts: torch.Tensor,
+        pin_memory: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return reusable output views sized for one indexed CPU gather."""
         buffers = getattr(self, "_shared_gather_buffers", None)
@@ -199,6 +200,8 @@ class DynamicStateAssemblerMixin:
             and current.ts.dtype == shared_ts.dtype
             and current.data.device == shared_data.device
             and current.ts.device == shared_ts.device
+            and current.data.is_pinned() == pin_memory
+            and current.ts.is_pinned() == pin_memory
         )
         if not compatible or current is None or current.capacity < row_count:
             # Reserve at least twice the next power-of-two working set. Real
@@ -210,11 +213,13 @@ class DynamicStateAssemblerMixin:
                     (capacity, *shared_data.shape[1:]),
                     dtype=shared_data.dtype,
                     device=shared_data.device,
+                    pin_memory=pin_memory,
                 ),
                 ts=torch.empty(
                     (capacity, *shared_ts.shape[1:]),
                     dtype=shared_ts.dtype,
                     device=shared_ts.device,
+                    pin_memory=pin_memory,
                 ),
             )
             buffers[kind] = current
@@ -299,6 +304,7 @@ class DynamicStateAssemblerMixin:
         target_ts: torch.Tensor,
         *,
         kind: Literal["mem", "box"],
+        pin_memory: bool = False,
         profiler: DynamicPrepareProfiler | None = None,
     ) -> None:
         """Fetch data from shared memory and scatter matched entries into target tensors.
@@ -341,6 +347,7 @@ class DynamicStateAssemblerMixin:
             row_count=fetch_count,
             shared_data=shared_data,
             shared_ts=shared_ts,
+            pin_memory=pin_memory,
         )
         torch.index_select(shared_data, 0, fetch_nids, out=unique_data_cpu)
         torch.index_select(shared_ts, 0, fetch_nids, out=unique_ts_cpu)
@@ -351,8 +358,10 @@ class DynamicStateAssemblerMixin:
 
         h2d_cuda_start = profiler.start_cuda() if profiler is not None else None
         h2d_wall_start = time.perf_counter()
-        unique_data_gpu = unique_data_cpu.to(self.device)
-        unique_ts_gpu = unique_ts_cpu.to(self.device)
+        unique_data_gpu = unique_data_cpu.to(
+            self.device, non_blocking=pin_memory
+        )
+        unique_ts_gpu = unique_ts_cpu.to(self.device, non_blocking=pin_memory)
         if profiler is not None:
             profiler.record_cpu(
                 f"{kind}_h2d_wall", time.perf_counter() - h2d_wall_start
@@ -451,6 +460,7 @@ class DynamicStateAssemblerMixin:
         n_src: int,
         n_neg: int | None = None,
         *,
+        pin_memory: bool = False,
         profiler: DynamicPrepareProfiler | None = None,
     ) -> DynamicAssemblyLayout:
         """Step 1: Initialize tensors and fill local shared memory data."""
@@ -503,6 +513,7 @@ class DynamicStateAssemblerMixin:
                 graph.mem,
                 graph.mem_ts,
                 kind="mem",
+                pin_memory=pin_memory,
                 profiler=profiler,
             )
         if box_plan is not None:
@@ -516,6 +527,7 @@ class DynamicStateAssemblerMixin:
                 graph.box,
                 graph.box_ts,
                 kind="box",
+                pin_memory=pin_memory,
                 profiler=profiler,
             )
 
