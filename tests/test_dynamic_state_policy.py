@@ -17,7 +17,6 @@ from frost.runtime.experimental.dynamic_state import (
         "writeback",
         "filter_by_plan",
         "pin_gather_buffers",
-        "async_pinned_gather",
     ),
     [
         (
@@ -25,7 +24,6 @@ from frost.runtime.experimental.dynamic_state import (
             PlannerMode.PIPELINED,
             TransportMode.ASYNC_P2P,
             WritebackTiming.AFTER_MEMORY_UPDATE,
-            False,
             False,
             False,
         ),
@@ -36,23 +34,12 @@ from frost.runtime.experimental.dynamic_state import (
             WritebackTiming.AFTER_MEMORY_UPDATE,
             False,
             True,
-            False,
-        ),
-        (
-            "baseline_async_pinned_gather",
-            PlannerMode.PIPELINED,
-            TransportMode.ASYNC_P2P,
-            WritebackTiming.AFTER_MEMORY_UPDATE,
-            False,
-            True,
-            True,
         ),
         (
             "no_plan_no_delta_post_step_raw",
             PlannerMode.NONE,
             TransportMode.DIRECT_CPU,
             WritebackTiming.AFTER_OPTIMIZER_STEP,
-            False,
             False,
             False,
         ),
@@ -63,7 +50,6 @@ from frost.runtime.experimental.dynamic_state import (
             WritebackTiming.AFTER_MEMORY_UPDATE,
             False,
             False,
-            False,
         ),
         (
             "plan_no_delta_dedup_post_mem_update_raw",
@@ -71,7 +57,6 @@ from frost.runtime.experimental.dynamic_state import (
             TransportMode.DIRECT_CPU,
             WritebackTiming.AFTER_MEMORY_UPDATE,
             True,
-            False,
             False,
         ),
     ],
@@ -83,7 +68,6 @@ def test_resolve_dynamic_state_policy(
     writeback,
     filter_by_plan,
     pin_gather_buffers,
-    async_pinned_gather,
 ) -> None:
     policy = resolve_dynamic_state_policy(name)
 
@@ -93,7 +77,6 @@ def test_resolve_dynamic_state_policy(
     assert policy.writeback is writeback
     assert policy.filter_writeback_by_plan is filter_by_plan
     assert policy.pin_gather_buffers is pin_gather_buffers
-    assert policy.async_pinned_gather is async_pinned_gather
 
 
 def test_resolve_dynamic_state_policy_rejects_unknown_name() -> None:

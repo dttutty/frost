@@ -159,7 +159,6 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
                 n_src=meta.n_src,
                 n_neg=meta.n_neg,
                 pin_memory=dynamic_state_policy.pin_gather_buffers,
-                async_pinned=dynamic_state_policy.async_pinned_gather,
                 profiler=getattr(self, "_prepare_profiler", None),
             )
             prepare_end = time.perf_counter()
