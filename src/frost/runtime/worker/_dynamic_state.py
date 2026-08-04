@@ -108,6 +108,29 @@ class _SharedGatherBuffer:
         return int(self.data.shape[0])
 
 
+@dataclass
+class _AsyncSharedGatherSlot:
+    """Fenced pinned/accelerator staging buffers for one in-flight batch."""
+
+    cpu_data: torch.Tensor
+    cpu_ts: torch.Tensor
+    gpu_data: torch.Tensor
+    gpu_ts: torch.Tensor
+    ready_event: Any | None = None
+
+    @property
+    def capacity(self) -> int:
+        return int(self.cpu_data.shape[0])
+
+
+@dataclass
+class _AsyncSharedGatherRing:
+    """Two slots match the baseline pipeline's two in-flight batches."""
+
+    slots: tuple[_AsyncSharedGatherSlot, _AsyncSharedGatherSlot]
+    next_slot: int = 0
+
+
 class DynamicPrepareProfiler:
     """Collect non-synchronizing sub-stage timings for dynamic-state assembly."""
 
@@ -175,6 +198,9 @@ class DynamicStateAssemblerMixin:
     mem_wr_q: Queue | None
     box_wr_q: Queue | None
     _shared_gather_buffers: dict[Literal["mem", "box"], _SharedGatherBuffer]
+    _async_shared_gather_rings: dict[
+        Literal["mem", "box"], _AsyncSharedGatherRing
+    ]
 
     def _get_shared_gather_buffer(
         self,
@@ -224,6 +250,94 @@ class DynamicStateAssemblerMixin:
             )
             buffers[kind] = current
         return current.data[:row_count], current.ts[:row_count]
+
+    def _get_async_shared_gather_slot(
+        self,
+        *,
+        kind: Literal["mem", "box"],
+        row_count: int,
+        shared_data: torch.Tensor,
+        shared_ts: torch.Tensor,
+    ) -> tuple[
+        _AsyncSharedGatherSlot,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        """Return one safely reusable pinned/GPU staging slot.
+
+        A slot is not exposed to another CPU gather until the CUDA event
+        recorded after its scatter has completed. Two slots are sufficient
+        because the baseline credit manager admits at most two local batches.
+        """
+        rings = getattr(self, "_async_shared_gather_rings", None)
+        if rings is None:
+            rings = {}
+            self._async_shared_gather_rings = rings
+
+        ring = rings.get(kind)
+        compatible = ring is not None and all(
+            slot.cpu_data.shape[1:] == shared_data.shape[1:]
+            and slot.cpu_ts.shape[1:] == shared_ts.shape[1:]
+            and slot.cpu_data.dtype == shared_data.dtype
+            and slot.cpu_ts.dtype == shared_ts.dtype
+            and slot.gpu_data.dtype == shared_data.dtype
+            and slot.gpu_ts.dtype == shared_ts.dtype
+            and slot.gpu_data.device == self.device
+            and slot.gpu_ts.device == self.device
+            for slot in ring.slots
+        )
+        needs_growth = ring is not None and any(
+            slot.capacity < row_count for slot in ring.slots
+        )
+        if not compatible or ring is None or needs_growth:
+            if ring is not None:
+                for slot in ring.slots:
+                    if slot.ready_event is not None:
+                        slot.ready_event.synchronize()
+            capacity = 1 << max(0, (max(1, row_count) - 1).bit_length())
+
+            def allocate_slot() -> _AsyncSharedGatherSlot:
+                data_shape = (capacity, *shared_data.shape[1:])
+                ts_shape = (capacity, *shared_ts.shape[1:])
+                return _AsyncSharedGatherSlot(
+                    cpu_data=torch.empty(
+                        data_shape,
+                        dtype=shared_data.dtype,
+                        device=shared_data.device,
+                        pin_memory=True,
+                    ),
+                    cpu_ts=torch.empty(
+                        ts_shape,
+                        dtype=shared_ts.dtype,
+                        device=shared_ts.device,
+                        pin_memory=True,
+                    ),
+                    gpu_data=torch.empty(
+                        data_shape, dtype=shared_data.dtype, device=self.device
+                    ),
+                    gpu_ts=torch.empty(
+                        ts_shape, dtype=shared_ts.dtype, device=self.device
+                    ),
+                )
+
+            ring = _AsyncSharedGatherRing(
+                slots=(allocate_slot(), allocate_slot())
+            )
+            rings[kind] = ring
+
+        slot = ring.slots[ring.next_slot]
+        ring.next_slot = (ring.next_slot + 1) % len(ring.slots)
+        if slot.ready_event is not None:
+            slot.ready_event.synchronize()
+        return (
+            slot,
+            slot.cpu_data[:row_count],
+            slot.cpu_ts[:row_count],
+            slot.gpu_data[:row_count],
+            slot.gpu_ts[:row_count],
+        )
 
     def _strict_assembly_mask(
         self, graph: FlatGraph, n_src: int, n_neg: int
@@ -305,6 +419,7 @@ class DynamicStateAssemblerMixin:
         *,
         kind: Literal["mem", "box"],
         pin_memory: bool = False,
+        async_pinned: bool = False,
         profiler: DynamicPrepareProfiler | None = None,
     ) -> None:
         """Fetch data from shared memory and scatter matched entries into target tensors.
@@ -342,13 +457,32 @@ class DynamicStateAssemblerMixin:
             f"got {shared_data.shape[0]} and {shared_ts.shape[0]}"
         )
         gather_start = time.perf_counter()
-        unique_data_cpu, unique_ts_cpu = self._get_shared_gather_buffer(
-            kind=kind,
-            row_count=fetch_count,
-            shared_data=shared_data,
-            shared_ts=shared_ts,
-            pin_memory=pin_memory,
-        )
+        async_slot = None
+        unique_data_gpu = None
+        unique_ts_gpu = None
+        if async_pinned:
+            if not pin_memory:
+                raise ValueError("async_pinned requires pin_memory=True")
+            (
+                async_slot,
+                unique_data_cpu,
+                unique_ts_cpu,
+                unique_data_gpu,
+                unique_ts_gpu,
+            ) = self._get_async_shared_gather_slot(
+                kind=kind,
+                row_count=fetch_count,
+                shared_data=shared_data,
+                shared_ts=shared_ts,
+            )
+        else:
+            unique_data_cpu, unique_ts_cpu = self._get_shared_gather_buffer(
+                kind=kind,
+                row_count=fetch_count,
+                shared_data=shared_data,
+                shared_ts=shared_ts,
+                pin_memory=pin_memory,
+            )
         torch.index_select(shared_data, 0, fetch_nids, out=unique_data_cpu)
         torch.index_select(shared_ts, 0, fetch_nids, out=unique_ts_cpu)
         if profiler is not None:
@@ -358,11 +492,15 @@ class DynamicStateAssemblerMixin:
 
         h2d_cuda_start = profiler.start_cuda() if profiler is not None else None
         h2d_wall_start = time.perf_counter()
-        # Keep the transfer host-synchronous while reusing one pinned buffer.
-        # An asynchronous copy would require a fenced buffer ring so the next
-        # CPU gather cannot overwrite pages still consumed by DMA.
-        unique_data_gpu = unique_data_cpu.to(self.device)
-        unique_ts_gpu = unique_ts_cpu.to(self.device)
+        if async_pinned:
+            assert unique_data_gpu is not None
+            assert unique_ts_gpu is not None
+            unique_data_gpu.copy_(unique_data_cpu, non_blocking=True)
+            unique_ts_gpu.copy_(unique_ts_cpu, non_blocking=True)
+        else:
+            # Keep the transfer host-synchronous while reusing one CPU buffer.
+            unique_data_gpu = unique_data_cpu.to(self.device)
+            unique_ts_gpu = unique_ts_cpu.to(self.device)
         if profiler is not None:
             profiler.record_cpu(
                 f"{kind}_h2d_wall", time.perf_counter() - h2d_wall_start
@@ -378,6 +516,10 @@ class DynamicStateAssemblerMixin:
         ]
         if profiler is not None:
             profiler.end_cuda(f"{kind}_scatter", scatter_start)
+        if async_slot is not None:
+            if async_slot.ready_event is None:
+                async_slot.ready_event = torch.cuda.Event()
+            async_slot.ready_event.record(torch.cuda.current_stream(self.device))
 
     def _fill_from_shm(
         self,
@@ -462,6 +604,7 @@ class DynamicStateAssemblerMixin:
         n_neg: int | None = None,
         *,
         pin_memory: bool = False,
+        async_pinned: bool = False,
         profiler: DynamicPrepareProfiler | None = None,
     ) -> DynamicAssemblyLayout:
         """Step 1: Initialize tensors and fill local shared memory data."""
@@ -515,6 +658,7 @@ class DynamicStateAssemblerMixin:
                 graph.mem_ts,
                 kind="mem",
                 pin_memory=pin_memory,
+                async_pinned=async_pinned,
                 profiler=profiler,
             )
         if box_plan is not None:
@@ -529,6 +673,7 @@ class DynamicStateAssemblerMixin:
                 graph.box_ts,
                 kind="box",
                 pin_memory=pin_memory,
+                async_pinned=async_pinned,
                 profiler=profiler,
             )
 
