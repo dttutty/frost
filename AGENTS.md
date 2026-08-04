@@ -24,6 +24,8 @@ Two GPU workers require one additional host rank:
 uv run torchrun --nproc_per_node=3 run.py model=tgn dataset=LASTFM
 ```
 
+## GPU experiment preflight
+
 ## Design boundary
 
 Read [docs/model_runtime_boundary.md](docs/model_runtime_boundary.md) before
