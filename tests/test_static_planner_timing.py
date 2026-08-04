@@ -60,6 +60,7 @@ def test_static_planner_keeps_rows_reused_after_one_batch_gap():
         [1, 3],
         [],
     ]
+    assert planner._active_cache_horizon == 2
 
 
 def test_static_planner_default_horizon_keeps_longer_lived_rows():
@@ -70,6 +71,7 @@ def test_static_planner_default_horizon_keeps_longer_lived_rows():
         in_q=in_q,
         out_q=out_q,
         stop_ev=threading.Event(),
+        large_batch_need_rows=1,
     )
     in_q.put([_ts([1, 2])])
     for value in range(3, 10):
@@ -84,3 +86,4 @@ def test_static_planner_default_horizon_keeps_longer_lived_rows():
     assert out_q.get_nowait() is None
     assert plans[0].to_cache.data.tolist() == [1]
     assert plans[-1].fetch.data.tolist() == [10]
+    assert planner._active_cache_horizon == 8

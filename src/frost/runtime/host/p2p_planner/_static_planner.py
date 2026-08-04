@@ -39,14 +39,19 @@ class StaticPlanner(ThreadBase):
         out_q: Queue[list[StaticPlan] | None],
         stop_ev: threading.Event,
         cache_horizon: int = 8,
+        large_batch_need_rows: int = 40_000,
     ) -> None:
         super().__init__(name="static_planner", stop_ev=stop_ev)
         if cache_horizon < 1:
             raise ValueError("static feature cache horizon must be >= 1")
+        if large_batch_need_rows < 1:
+            raise ValueError("large-batch feature need threshold must be >= 1")
         # Store configuration
         self.gpus_distance = gpus_distance
         self.n_gpus = len(self.gpus_distance)
         self.cache_horizon = cache_horizon
+        self.large_batch_need_rows = large_batch_need_rows
+        self._active_cache_horizon = cache_horizon
 
         self.in_q = in_q
         self.out_q = out_q
@@ -95,14 +100,20 @@ class StaticPlanner(ThreadBase):
             if not self.pending:
                 self.cached = [TensorSet.empty_like(item.data) for item in need]
                 self.fetchs = need
+                self._active_cache_horizon = (
+                    self.cache_horizon
+                    if max(len(item) for item in need) >= self.large_batch_need_rows
+                    else min(2, self.cache_horizon)
+                )
             self.pending.append(need)
-            if len(self.pending) > self.cache_horizon:
+            if len(self.pending) > self._active_cache_horizon:
                 self._emit_oldest_pending()
         if self._timing_enabled and self._plan_s_curve:
             payload = {
                 "system": "frost",
                 "plan_kind": "nfeat",
                 "cache_horizon": self.cache_horizon,
+                "active_cache_horizon": self._active_cache_horizon,
                 "batch_count": len(self._plan_s_curve),
                 "plan_s_curve": self._plan_s_curve,
                 "out_q_put_s_curve": self._out_q_put_s_curve,
@@ -122,7 +133,7 @@ class StaticPlanner(ThreadBase):
 
     def _emit_oldest_pending(self) -> None:
         current = self.pending[0]
-        future = self.pending[1 : self.cache_horizon + 1]
+        future = self.pending[1 : self._active_cache_horizon + 1]
         start = time.perf_counter()
         plan = self._plan_horizon(current, future)
         if self._timing_enabled:
