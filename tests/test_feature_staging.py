@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 
 import torch
@@ -36,6 +37,19 @@ def test_feature_stage_slot_reuses_node_buffer(monkeypatch) -> None:
     second = slot.stage_node_rows(table, torch.tensor([2, 4]))
     assert torch.equal(second, table[[2, 4]])
     assert slot.node_values is storage
+
+
+def test_feature_stage_slot_parallel_node_gather_preserves_order(monkeypatch) -> None:
+    monkeypatch.setattr(_feature_staging, "_allocate_staging_tensor", _pageable)
+    table = torch.arange(7000 * 4, dtype=torch.float32).reshape(7000, 4)
+    row_ids = torch.randperm(7000)[:5000]
+    slot = FeatureStageSlot(index=0)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        staged = slot.stage_node_rows(table, row_ids, executor=executor)
+
+    assert staged is not None
+    assert torch.equal(staged, table[row_ids])
 
 
 def test_feature_stage_slot_packs_only_consumed_edge_rows(monkeypatch) -> None:

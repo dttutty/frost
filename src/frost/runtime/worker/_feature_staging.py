@@ -15,6 +15,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import Executor, ThreadPoolExecutor
 from dataclasses import dataclass
 from queue import Queue
 from typing import Literal, TypeAlias
@@ -25,6 +26,9 @@ from frost.datatypes.meta import Meta
 from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 
 logger = logging.getLogger(__name__)
+
+_NODE_GATHER_WORKERS = 8
+_MIN_NODE_ROWS_PER_TASK = 2048
 
 
 def _timing_enabled() -> bool:
@@ -84,7 +88,11 @@ class FeatureStageSlot:
         return current
 
     def stage_node_rows(
-        self, table: torch.Tensor, row_ids: torch.Tensor
+        self,
+        table: torch.Tensor,
+        row_ids: torch.Tensor,
+        *,
+        executor: Executor | None = None,
     ) -> torch.Tensor | None:
         rows = int(row_ids.numel())
         if rows == 0:
@@ -96,7 +104,26 @@ class FeatureStageSlot:
             dtype=table.dtype,
         )
         output = self.node_values[:rows]
-        torch.index_select(table, 0, row_ids, out=output)
+        task_count = min(
+            _NODE_GATHER_WORKERS,
+            max(1, rows // _MIN_NODE_ROWS_PER_TASK),
+        )
+        if executor is None or task_count == 1:
+            torch.index_select(table, 0, row_ids, out=output)
+        else:
+            boundaries = [rows * index // task_count for index in range(task_count + 1)]
+            futures = [
+                executor.submit(
+                    torch.index_select,
+                    table,
+                    0,
+                    row_ids[start:end],
+                    out=output[start:end],
+                )
+                for start, end in zip(boundaries, boundaries[1:])
+            ]
+            for future in futures:
+                future.result()
         return output
 
     def stage_edge_rows(
@@ -185,6 +212,10 @@ class FeaturePrefetcher(ThreadBase):
         self.in_q = in_q
         self.out_q = out_q
         self.ring = ring
+        self._node_gather_executor = ThreadPoolExecutor(
+            max_workers=_NODE_GATHER_WORKERS,
+            thread_name_prefix="feature_gather",
+        )
         self._timing_enabled = _timing_enabled()
         self._ring_wait_s_curve: list[float] = []
         self._node_stage_s_curve: list[float] = []
@@ -194,6 +225,12 @@ class FeaturePrefetcher(ThreadBase):
         self._valid_node_rows_curve: list[int] = []
         self._node_fetch_rows_curve: list[int] = []
         self._next_cache_rows_curve: list[int] = []
+
+    def run(self) -> None:
+        try:
+            super().run()
+        finally:
+            self._node_gather_executor.shutdown(wait=True, cancel_futures=True)
 
     @torch.no_grad()
     def logic(self) -> None:
@@ -221,7 +258,11 @@ class FeaturePrefetcher(ThreadBase):
                             "node features require a static access plan before staging"
                         )
                     fetch = meta.plan_set.nfeat_plan.fetch.data
-                    node_values = slot.stage_node_rows(self.nfeat, fetch)
+                    node_values = slot.stage_node_rows(
+                        self.nfeat,
+                        fetch,
+                        executor=self._node_gather_executor,
+                    )
                 node_stage_end = time.perf_counter()
 
                 edge_values = None
