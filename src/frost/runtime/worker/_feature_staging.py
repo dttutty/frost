@@ -10,8 +10,11 @@ head/tail contention.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
+import time
 from dataclasses import dataclass
 from queue import Queue
 from typing import Literal, TypeAlias
@@ -22,6 +25,15 @@ from frost.datatypes.meta import Meta
 from frost.runtime._thread_base import ThreadBase, put_shutdown_sentinel
 
 logger = logging.getLogger(__name__)
+
+
+def _timing_enabled() -> bool:
+    return os.environ.get("FROST_PIPELINE_TIMING_BENCH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _next_capacity(required: int) -> int:
@@ -68,9 +80,7 @@ class FeatureStageSlot:
             or current.shape[0] < rows
             or current.shape[1] != columns
         ):
-            current = _allocate_staging_tensor(
-                _next_capacity(rows), columns, dtype
-            )
+            current = _allocate_staging_tensor(_next_capacity(rows), columns, dtype)
         return current
 
     def stage_node_rows(
@@ -175,6 +185,15 @@ class FeaturePrefetcher(ThreadBase):
         self.in_q = in_q
         self.out_q = out_q
         self.ring = ring
+        self._timing_enabled = _timing_enabled()
+        self._ring_wait_s_curve: list[float] = []
+        self._node_stage_s_curve: list[float] = []
+        self._edge_stage_s_curve: list[float] = []
+        self._out_q_put_s_curve: list[float] = []
+        self._flat_node_rows_curve: list[int] = []
+        self._valid_node_rows_curve: list[int] = []
+        self._node_fetch_rows_curve: list[int] = []
+        self._next_cache_rows_curve: list[int] = []
 
     @torch.no_grad()
     def logic(self) -> None:
@@ -190,9 +209,12 @@ class FeaturePrefetcher(ThreadBase):
             meta = payload
             if meta.flat_graph is None:
                 raise ValueError("feature prefetch requires a sampled flat graph")
+            ring_start = time.perf_counter()
             slot = self.ring.acquire()
+            ring_end = time.perf_counter()
             try:
                 node_values = None
+                node_stage_start = time.perf_counter()
                 if self.nfeat is not None:
                     if meta.plan_set is None or meta.plan_set.nfeat_plan is None:
                         raise ValueError(
@@ -200,16 +222,34 @@ class FeaturePrefetcher(ThreadBase):
                         )
                     fetch = meta.plan_set.nfeat_plan.fetch.data
                     node_values = slot.stage_node_rows(self.nfeat, fetch)
+                node_stage_end = time.perf_counter()
 
                 edge_values = None
                 edge_positions = None
+                edge_stage_start = time.perf_counter()
                 if self.efeat is not None:
                     edge_values, edge_positions = slot.stage_edge_rows(
                         self.efeat,
                         meta.flat_graph.eid,
                         n_src=meta.n_src,
                     )
+                edge_stage_end = time.perf_counter()
 
+                flat_node_rows = int(meta.flat_graph.nid.numel())
+                valid_node_rows = (
+                    int((meta.flat_graph.nid != -1).sum().item())
+                    if self._timing_enabled
+                    else 0
+                )
+                nfeat_plan = None if meta.plan_set is None else meta.plan_set.nfeat_plan
+                node_fetch_rows = (
+                    0 if nfeat_plan is None else int(nfeat_plan.fetch.data.numel())
+                )
+                next_cache_rows = (
+                    0 if nfeat_plan is None else int(nfeat_plan.to_cache.data.numel())
+                )
+
+                put_start = time.perf_counter()
                 self.out_q.put(
                     StagedFeatureBatch(
                         meta=meta,
@@ -220,6 +260,42 @@ class FeaturePrefetcher(ThreadBase):
                     ),
                     block=True,
                 )
+                put_end = time.perf_counter()
+                if self._timing_enabled:
+                    self._ring_wait_s_curve.append(ring_end - ring_start)
+                    self._node_stage_s_curve.append(node_stage_end - node_stage_start)
+                    self._edge_stage_s_curve.append(edge_stage_end - edge_stage_start)
+                    self._out_q_put_s_curve.append(put_end - put_start)
+                    self._flat_node_rows_curve.append(flat_node_rows)
+                    self._valid_node_rows_curve.append(valid_node_rows)
+                    self._node_fetch_rows_curve.append(node_fetch_rows)
+                    self._next_cache_rows_curve.append(next_cache_rows)
             except Exception:
                 self.ring.release(slot)
                 raise
+
+        if self._timing_enabled and self._node_stage_s_curve:
+            timing_payload = {
+                "system": "frost",
+                "batch_count": len(self._node_stage_s_curve),
+                "ring_wait_s_curve": [
+                    round(value, 6) for value in self._ring_wait_s_curve
+                ],
+                "node_stage_s_curve": [
+                    round(value, 6) for value in self._node_stage_s_curve
+                ],
+                "edge_stage_s_curve": [
+                    round(value, 6) for value in self._edge_stage_s_curve
+                ],
+                "out_q_put_s_curve": [
+                    round(value, 6) for value in self._out_q_put_s_curve
+                ],
+                "flat_node_rows_curve": self._flat_node_rows_curve,
+                "valid_node_rows_curve": self._valid_node_rows_curve,
+                "node_fetch_rows_curve": self._node_fetch_rows_curve,
+                "next_cache_rows_curve": self._next_cache_rows_curve,
+            }
+            print(
+                "APPENDIX_FEATURE_PREFETCH_TIMING_CURVE "
+                f"{json.dumps(timing_payload, sort_keys=True)}"
+            )
