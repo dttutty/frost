@@ -153,6 +153,19 @@ class TestTGN:
 
         assert out.embeddings.shape == (n_root, d_mem)
         assert projected_rows == [n_root, int((neighbor_nid != -1).sum())]
+        dense_target = graph.root_mem + model.n_feat_mapper(graph.root_nfeat)
+        neighbor = graph.neighbors[0]
+        assert neighbor.nfeat is not None
+        assert neighbor.mem is not None
+        dense_neighbor = neighbor.mem + model.n_feat_mapper(neighbor.nfeat)
+        dense_reference = model.encoder(
+            target_feat=dense_target,
+            neighbor_feat=dense_neighbor.view(n_root, fanout[0], -1),
+            edge_feat=None,
+            dt=(graph.root_ts.unsqueeze(1) - neighbor.ts.view(n_root, fanout[0])),
+            mask=neighbor_nid.view(n_root, fanout[0]) != -1,
+        )
+        torch.testing.assert_close(out.embeddings, dense_reference)
 
 
 class TestTGAT:
