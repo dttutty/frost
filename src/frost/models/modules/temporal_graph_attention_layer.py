@@ -182,6 +182,7 @@ class TemporalGraphAttentionLayer(nn.Module):
         """
         n_root, _ = dt.shape
         root_index, slot_index = mask.nonzero(as_tuple=True)
+        segment_lengths = mask.sum(dim=1)
 
         if self.time_enc is not None:
             time_feat = self.time_enc(dt[root_index, slot_index])
@@ -211,30 +212,27 @@ class TemporalGraphAttentionLayer(nn.Module):
         score = F.leaky_relu(
             torch.sum(query[root_index] * key, dim=-1), negative_slope=0.2
         )
-        segment_index = root_index[:, None].expand(-1, self.num_head)
-        segment_max = torch.full(
-            (n_root, self.num_head),
-            -torch.inf,
-            dtype=score.dtype,
-            device=score.device,
-        ).scatter_reduce(
-            0,
-            segment_index,
+        # mask.nonzero() preserves row-major root order, so valid rows form
+        # contiguous segments. Segment reductions avoid expanding a large
+        # [valid_rows, heads] index and avoid atomic scatter contention.
+        segment_max = torch.segment_reduce(
             score,
-            reduce="amax",
-            include_self=True,
+            "max",
+            lengths=segment_lengths,
         )
         exp_score = torch.exp(score - segment_max[root_index])
-        denominator = torch.zeros_like(segment_max).scatter_add(
-            0, segment_index, exp_score
+        denominator = torch.segment_reduce(
+            exp_score,
+            "sum",
+            lengths=segment_lengths,
         )
         attention = self.dropout(exp_score / denominator[root_index])
         weighted_value = value * attention.unsqueeze(-1)
-        aggregate = torch.zeros(
-            (n_root, self.num_head, self.head_dim),
-            dtype=value.dtype,
-            device=value.device,
-        ).index_add(0, root_index, weighted_value)
+        aggregate = torch.segment_reduce(
+            weighted_value,
+            "sum",
+            lengths=segment_lengths,
+        )
         # Preserve zero-valued autograd edges for an entirely empty temporal
         # batch so DDP does not classify K/V parameters as unused.
         aggregate = aggregate + 0.0 * (
