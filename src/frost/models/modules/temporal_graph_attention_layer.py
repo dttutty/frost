@@ -164,3 +164,84 @@ class TemporalGraphAttentionLayer(nn.Module):
         out = self.layer_norm(out)
 
         return out
+
+    def forward_packed(
+        self,
+        target_feat: torch.Tensor,
+        neighbor_feat: torch.Tensor,
+        edge_feat: torch.Tensor | None,
+        dt: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute attention only for semantic neighbor rows.
+
+        The sampler emits a fixed ``[N, S]`` fanout layout.  Sparse datasets can
+        leave many of those rows padded; this path packs valid rows before the
+        time encoding and K/V projections, then performs a segmented softmax
+        and scatter-add back to the root layout.
+        """
+        n_root, _ = dt.shape
+        root_index, slot_index = mask.nonzero(as_tuple=True)
+
+        if self.time_enc is not None:
+            time_feat = self.time_enc(dt[root_index, slot_index])
+            zero_time_feat = self.time_enc(
+                torch.zeros(n_root, device=dt.device, dtype=dt.dtype)
+            )
+        else:
+            time_feat = None
+            zero_time_feat = None
+
+        q_inputs = [target_feat]
+        if zero_time_feat is not None:
+            q_inputs.append(zero_time_feat)
+        query = self.w_q(torch.cat(q_inputs, dim=-1)).view(
+            n_root, self.num_head, self.head_dim
+        )
+
+        kv_inputs = [neighbor_feat[root_index, slot_index]]
+        if edge_feat is not None:
+            kv_inputs.append(edge_feat[root_index, slot_index])
+        if time_feat is not None:
+            kv_inputs.append(time_feat)
+        kv_input = torch.cat(kv_inputs, dim=-1)
+        key = self.w_k(kv_input).view(-1, self.num_head, self.head_dim)
+        value = self.w_v(kv_input).view(-1, self.num_head, self.head_dim)
+
+        score = F.leaky_relu(
+            torch.sum(query[root_index] * key, dim=-1), negative_slope=0.2
+        )
+        segment_index = root_index[:, None].expand(-1, self.num_head)
+        segment_max = torch.full(
+            (n_root, self.num_head),
+            -torch.inf,
+            dtype=score.dtype,
+            device=score.device,
+        ).scatter_reduce(
+            0,
+            segment_index,
+            score,
+            reduce="amax",
+            include_self=True,
+        )
+        exp_score = torch.exp(score - segment_max[root_index])
+        denominator = torch.zeros_like(segment_max).scatter_add(
+            0, segment_index, exp_score
+        )
+        attention = self.dropout(exp_score / denominator[root_index])
+        weighted_value = value * attention.unsqueeze(-1)
+        aggregate = torch.zeros(
+            (n_root, self.num_head, self.head_dim),
+            dtype=value.dtype,
+            device=value.device,
+        ).index_add(0, root_index, weighted_value)
+        # Preserve zero-valued autograd edges for an entirely empty temporal
+        # batch so DDP does not classify K/V parameters as unused.
+        aggregate = aggregate + 0.0 * (
+            self.w_k.weight.reshape(-1)[0] + self.w_v.weight.reshape(-1)[0]
+        )
+        aggregate = aggregate.view(n_root, self.dim_out)
+
+        out = self.w_out(torch.cat([aggregate, target_feat], dim=1))
+        out = F.relu(self.dropout(out))
+        return self.layer_norm(out)

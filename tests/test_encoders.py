@@ -1,5 +1,6 @@
 """Tests for TGN and TGAT encoder modules."""
 
+import pytest
 import torch
 
 from frost.datatypes.graph import HierGraph, NeighborOnHop
@@ -8,6 +9,19 @@ from frost.models.encoder.tgat import TGAT
 
 
 class TestTGN:
+    def test_rejects_unknown_attention_layout(self):
+        with pytest.raises(ValueError, match="attention_layout"):
+            TGN(
+                ndim=0,
+                edim=0,
+                d_mem=16,
+                d_time=8,
+                d_hid=16,
+                heads=2,
+                dropout=0.0,
+                attention_layout="unknown",
+            )
+
     def test_forward_output_shape(self):
         ndim, edim, d_mem, d_time, d_hid, heads = 32, 16, 64, 32, 64, 2
         model = TGN(

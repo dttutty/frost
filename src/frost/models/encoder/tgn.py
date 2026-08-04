@@ -41,11 +41,18 @@ class TGN(torch.nn.Module):
         d_hid: int,  # from hydra config
         heads: int,  # from hydra config
         dropout: float,  # from hydra config
+        attention_layout: str = "dense",
     ) -> None:
         super().__init__()
         self.dim_node = ndim
         self.dim_edge = edim
         self.dim_memory = d_mem
+        if attention_layout not in {"dense", "packed"}:
+            raise ValueError(
+                "attention_layout must be 'dense' or 'packed', got "
+                f"{attention_layout!r}"
+            )
+        self.attention_layout = attention_layout
 
         self.n_feat_mapper: torch.nn.Linear | None = None
         if ndim > 0 and ndim != d_mem:
@@ -132,7 +139,12 @@ class TGN(torch.nn.Module):
         mask = neighbor_nid != -1
 
         # 6. Pass into the attention layer
-        out = self.encoder(
+        attention = (
+            self.encoder.forward_packed
+            if self.attention_layout == "packed"
+            else self.encoder
+        )
+        out = attention(
             target_feat=target_feat,
             neighbor_feat=neighbor_feat,
             edge_feat=edge_feat,

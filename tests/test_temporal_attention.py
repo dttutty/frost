@@ -9,6 +9,54 @@ from frost.models.modules.temporal_graph_attention_layer import (
 
 
 class TestTemporalGraphAttentionLayer:
+    def test_packed_matches_dense_with_padding(self):
+        torch.manual_seed(7)
+        layer = TemporalGraphAttentionLayer(
+            dim_node=8,
+            dim_edge=3,
+            dim_time=4,
+            dim_out=8,
+            num_head=2,
+            dropout=0.0,
+        )
+        target = torch.randn(5, 8)
+        neighbor = torch.randn(5, 4, 8)
+        edge = torch.randn(5, 4, 3)
+        dt = torch.rand(5, 4)
+        mask = torch.tensor(
+            [
+                [True, True, False, False],
+                [False, False, False, False],
+                [True, False, True, False],
+                [True, True, True, True],
+                [False, True, False, False],
+            ]
+        )
+
+        dense = layer(target, neighbor, edge, dt, mask)
+        packed = layer.forward_packed(target, neighbor, edge, dt, mask)
+
+        torch.testing.assert_close(packed, dense, atol=1e-5, rtol=1e-5)
+
+    def test_packed_empty_batch_preserves_kv_gradients(self):
+        layer = TemporalGraphAttentionLayer(
+            dim_node=4,
+            dim_edge=0,
+            dim_time=2,
+            dim_out=4,
+            num_head=2,
+            dropout=0.0,
+        )
+        target = torch.randn(3, 4, requires_grad=True)
+        neighbor = torch.randn(3, 2, 4, requires_grad=True)
+        dt = torch.zeros(3, 2)
+        mask = torch.zeros(3, 2, dtype=torch.bool)
+
+        layer.forward_packed(target, neighbor, None, dt, mask).sum().backward()
+
+        assert layer.w_k.weight.grad is not None
+        assert layer.w_v.weight.grad is not None
+
     def test_output_projection_concatenates_aggregate_before_target(self):
         layer = TemporalGraphAttentionLayer(
             dim_node=1,

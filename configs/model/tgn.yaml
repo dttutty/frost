@@ -11,6 +11,7 @@ encoder:
   d_hid: ${model.embedding_dim}
   heads: 2
   dropout: ${dropout}
+  attention_layout: dense
 state:
   boxsize: 1
   mail_combine: last
