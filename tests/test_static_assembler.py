@@ -137,6 +137,25 @@ def test_prepare_nfeat_cache_casts_compact_storage_to_float32():
     assert result.fetched.nfeat.dtype == torch.float32
 
 
+def test_prepare_nfeat_lookup_casts_staged_rows_after_same_dtype_copy():
+    assembler = StaticAssembler(
+        shared_nfeat=torch.ones((4, 2), dtype=torch.float16),
+        shared_efeat=None,
+        device=torch.device("cpu"),
+    )
+    plan = StaticPlan(
+        fetch=TensorSet(torch.tensor([1, 3])),
+        to_cache=TensorSet(torch.tensor([], dtype=torch.long)),
+    )
+    staged = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float16)
+
+    result = assembler.prepare_nfeat_lookup(plan, staged_nfeat=staged)
+
+    assert result.fetched is not None
+    assert result.fetched.nfeat.dtype == torch.float32
+    torch.testing.assert_close(result.fetched.nfeat, staged.float())
+
+
 def test_prepare_nfeat_cache_keeps_fetched_and_cached_sources_separate():
     shared_nfeat = torch.tensor(
         [[0.0, 10.0], [1.0, 11.0], [2.0, 12.0], [3.0, 13.0], [4.0, 14.0]]
@@ -208,6 +227,39 @@ def test_nfeat_cache_update_can_be_deferred_until_after_lookup_fill():
     assert torch.equal(result.nfeat, shared_nfeat[[3, 0, 2, 1]])
 
     assembler.update_nfeat_cache(lookup, plan.to_cache.data)
+    assert assembler.nfeat_delta is not None
+    assert assembler.nfeat_delta.nid.tolist() == [1, 3]
+    assert torch.equal(assembler.nfeat_delta.nfeat, shared_nfeat[[1, 3]])
+
+
+def test_nfeat_cache_can_retain_a_row_unused_by_the_current_batch():
+    shared_nfeat = torch.arange(10, dtype=torch.float32).reshape(5, 2)
+    assembler = StaticAssembler(
+        shared_nfeat=shared_nfeat,
+        shared_efeat=None,
+        device=torch.device("cpu"),
+    )
+    first = assembler.prepare_nfeat_cache(
+        StaticPlan(
+            fetch=TensorSet(torch.tensor([1, 2])),
+            to_cache=TensorSet(torch.tensor([1, 2])),
+        )
+    )
+    assert first.fetched is not None
+
+    second_plan = StaticPlan(
+        fetch=TensorSet(torch.tensor([3])),
+        to_cache=TensorSet(torch.tensor([1, 3])),
+    )
+    second = assembler.prepare_nfeat_lookup(second_plan)
+    current = FlatGraph(
+        nid=torch.tensor([2, 3]),
+        eid=torch.full((2,), -1),
+        ts=torch.zeros(2),
+    )
+    assembler.fill_nfeat(current, second)
+    assembler.update_nfeat_cache(second, second_plan.to_cache.data)
+
     assert assembler.nfeat_delta is not None
     assert assembler.nfeat_delta.nid.tolist() == [1, 3]
     assert torch.equal(assembler.nfeat_delta.nfeat, shared_nfeat[[1, 3]])
