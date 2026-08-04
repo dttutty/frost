@@ -112,6 +112,48 @@ class TestTGN:
         out.embeddings.sum().backward()
         assert root_mem.grad is not None
 
+    def test_feature_projection_skips_padded_neighbors(self):
+        ndim, d_mem = 8, 16
+        model = TGN(
+            ndim=ndim,
+            edim=0,
+            d_mem=d_mem,
+            d_time=8,
+            d_hid=d_mem,
+            heads=2,
+            dropout=0.0,
+        )
+        assert model.n_feat_mapper is not None
+        projected_rows: list[int] = []
+        handle = model.n_feat_mapper.register_forward_hook(
+            lambda _module, inputs, _output: projected_rows.append(inputs[0].shape[0])
+        )
+        n_root, fanout = 3, [4]
+        neighbor_nid = torch.tensor([1, -1, 2, -1] * n_root)
+        graph = HierGraph(
+            root_nid=torch.arange(n_root),
+            root_ts=torch.arange(n_root, dtype=torch.float32),
+            root_mem=torch.randn(n_root, d_mem),
+            root_nfeat=torch.randn(n_root, ndim),
+            neighbors=[
+                NeighborOnHop(
+                    nid=neighbor_nid,
+                    eid=torch.full_like(neighbor_nid, -1),
+                    ts=torch.zeros(n_root * fanout[0]),
+                    nfeat=torch.randn(n_root * fanout[0], ndim),
+                    efeat=None,
+                    mem=torch.randn(n_root * fanout[0], d_mem),
+                )
+            ],
+            fanout=fanout,
+        )
+
+        out = model(graph)
+        handle.remove()
+
+        assert out.embeddings.shape == (n_root, d_mem)
+        assert projected_rows == [n_root, int((neighbor_nid != -1).sum())]
+
 
 class TestTGAT:
     def test_single_layer_output_shape(self):

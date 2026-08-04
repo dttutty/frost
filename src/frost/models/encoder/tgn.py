@@ -96,11 +96,20 @@ class TGN(torch.nn.Module):
         assert nbr_data.mem is not None, "TGN requires neighbor memory"
         nbr_mem = nbr_data.mem
         if self.dim_node > 0 and nbr_data.nfeat is not None:
-            nbr_nfeat_emb = (
-                self.n_feat_mapper(nbr_data.nfeat)
-                if self.n_feat_mapper
-                else nbr_data.nfeat
-            )
+            if self.n_feat_mapper is not None:
+                # The sampled layout is fanout-padded.  MAG has very sparse
+                # historical neighborhoods, so applying the wide feature
+                # projection to every padding row wastes most of this GEMM.
+                # Keep the differentiable projection in the model, but run it
+                # only for semantic neighbor rows and scatter the compact
+                # result back to the dense attention layout.
+                valid_neighbors = nbr_data.nid != -1
+                nbr_nfeat_emb = torch.zeros_like(nbr_mem)
+                nbr_nfeat_emb[valid_neighbors] = self.n_feat_mapper(
+                    nbr_data.nfeat[valid_neighbors]
+                )
+            else:
+                nbr_nfeat_emb = nbr_data.nfeat
             neighbor_combined_feat = nbr_mem + nbr_nfeat_emb
         else:
             neighbor_combined_feat = nbr_mem
