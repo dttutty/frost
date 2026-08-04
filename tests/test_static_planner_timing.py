@@ -12,6 +12,14 @@ def _ts(values: list[int]) -> TensorSet:
     return TensorSet(torch.tensor(values, dtype=torch.long))
 
 
+def _unsorted_ts(values: list[int]) -> TensorSet:
+    return TensorSet(
+        torch.tensor(values, dtype=torch.long),
+        sort_now=False,
+        ensure_unique=False,
+    )
+
+
 def test_static_planner_records_feature_cache_counts(monkeypatch):
     monkeypatch.setenv("FROST_HOST_TIMING_BENCH", "1")
     planner = StaticPlanner(
@@ -106,3 +114,23 @@ def test_static_planner_limits_reuse_for_very_large_batches():
     planner.logic()
 
     assert planner._active_cache_horizon == 2
+
+
+def test_static_planner_handles_unsorted_native_need_sets():
+    planner = StaticPlanner(
+        gpus_distance=np.array([[0]], dtype=np.int32),
+        in_q=Queue(),
+        out_q=Queue(),
+        stop_ev=threading.Event(),
+        cache_horizon=2,
+    )
+    planner.cached = [_ts([2, 8])]
+    planner.fetchs = [_unsorted_ts([9, 1, 4])]
+
+    plans = planner._plan_horizon(
+        [_unsorted_ts([9, 1, 4])],
+        [[_unsorted_ts([8, 4, 3])], [_unsorted_ts([2, 9, 5])]],
+    )
+
+    assert plans[0].to_cache.data.tolist() == [2, 4, 8, 9]
+    assert planner.fetchs[0].data.tolist() == [3]
