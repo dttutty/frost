@@ -7,7 +7,6 @@ from queue import Queue
 from typing import Literal
 
 import numpy as np
-import torch
 
 from frost.runtime.host.types import MetasStNeed
 from frost.datatypes.plan import StaticPlan
@@ -38,16 +37,22 @@ class StaticPlanner(ThreadBase):
         in_q: Queue[MetasStNeed | None | Literal["end_of_epoch"]],
         out_q: Queue[list[StaticPlan] | None],
         stop_ev: threading.Event,
+        cache_horizon: int = 2,
     ) -> None:
         super().__init__(name="static_planner", stop_ev=stop_ev)
+        if cache_horizon < 1:
+            raise ValueError("static feature cache horizon must be >= 1")
         # Store configuration
         self.gpus_distance = gpus_distance
         self.n_gpus = len(self.gpus_distance)
+        self.cache_horizon = cache_horizon
 
         self.in_q = in_q
         self.out_q = out_q
         self.stop_ev = stop_ev
-        self.pending: list[TensorSet] | None = None
+        self.pending: list[MetasStNeed] = []
+        self.cached: list[TensorSet] | None = None
+        self.fetchs: list[TensorSet] | None = None
         self._timing_enabled = _timing_enabled()
         self._plan_s_curve: list[float] = []
         self._out_q_put_s_curve: list[float] = []
@@ -65,16 +70,14 @@ class StaticPlanner(ThreadBase):
     def logic(self) -> None:
         """Main planning loop for static node features.
 
-        Uses a one-batch lookahead: each incoming per-GPU nfeat need set is held as
-        ``pending`` until the next batch arrives so that the planner can decide which
-        features from the current batch to keep in cache (``to_cache``) versus which
-        new features the next batch must fetch from CPU (``fetch``).  Sentinel handling:
+        Uses a bounded lookahead: incoming per-GPU need sets are held until the
+        planner can retain features that will be reused within ``cache_horizon``
+        future batches. This preserves hot rows across a one-batch gap without
+        turning the worker cache into an unbounded feature store. Sentinel handling:
 
         - ``None``: forward ``None`` to the output queue and exit.
-        - ``"end_of_epoch"``: plan the pending batch with empty next-batch need sets.
+        - ``"end_of_epoch"``: flush every pending plan and reset the cache.
         """
-        batch_count = 0
-
         while not self.stop_ev.is_set():
             need = self.in_q.get(block=True)
 
@@ -82,45 +85,23 @@ class StaticPlanner(ThreadBase):
                 put_shutdown_sentinel(self.out_q, None)
                 break
 
-            if need == "end_of_epoch":  # None
-                assert self.pending is not None
-                avails = self.pending
-                # Last batch of the epoch: next_needs is empty
-                next_needs: list[TensorSet] = [
-                    TensorSet(
-                        torch.tensor([], dtype=torch.long, device=torch.device("cpu"))
-                    )
-                    for _ in range(self.n_gpus)
-                ]
-
-                start = time.perf_counter()
-                plan = self._plan(avails, next_needs)
-                if self._timing_enabled:
-                    self._plan_s_curve.append(time.perf_counter() - start)
-                self._put_plan(plan)
-                self.pending = None
+            if need == "end_of_epoch":
+                self._flush_pending()
+                self.cached = None
+                self.fetchs = None
                 continue
 
-            batch_count += 1
-
-            if self.pending is None:  # first batch
-                self.pending = need
+            if not self.pending:
+                self.cached = [TensorSet.empty_like(item.data) for item in need]
                 self.fetchs = need
-                # we still need to wait because we need to know what to cache
-            else:  # not first batch
-                avails = self.pending
-
-                start = time.perf_counter()
-                plan = self._plan(avails, need)
-                if self._timing_enabled:
-                    self._plan_s_curve.append(time.perf_counter() - start)
-
-                self._put_plan(plan)
-                self.pending = need
+            self.pending.append(need)
+            if len(self.pending) > self.cache_horizon:
+                self._emit_oldest_pending()
         if self._timing_enabled and self._plan_s_curve:
             payload = {
                 "system": "frost",
                 "plan_kind": "nfeat",
+                "cache_horizon": self.cache_horizon,
                 "batch_count": len(self._plan_s_curve),
                 "plan_s_curve": self._plan_s_curve,
                 "out_q_put_s_curve": self._out_q_put_s_curve,
@@ -134,21 +115,45 @@ class StaticPlanner(ThreadBase):
                 f"{json.dumps(payload, sort_keys=True)}"
             )
 
+    def _flush_pending(self) -> None:
+        while self.pending:
+            self._emit_oldest_pending()
+
+    def _emit_oldest_pending(self) -> None:
+        current = self.pending[0]
+        future = self.pending[1 : self.cache_horizon + 1]
+        start = time.perf_counter()
+        plan = self._plan_horizon(current, future)
+        if self._timing_enabled:
+            self._plan_s_curve.append(time.perf_counter() - start)
+        self._put_plan(plan)
+        self.pending.pop(0)
+
     def _plan(
         self,
         avails_of_1: list[TensorSet],
         needs_of_2: list[TensorSet],
     ) -> list[StaticPlan]:
-        """Compute per-GPU StaticPlan: what to cache from batch 1 and what to fetch for batch 2."""
+        """Compatibility helper for a one-batch-lookahead plan."""
+        if self.cached is None:
+            self.cached = [TensorSet.empty_like(item.data) for item in avails_of_1]
+        if self.fetchs is None:
+            self.fetchs = avails_of_1
+        return self._plan_horizon(avails_of_1, [needs_of_2])
+
+    def _plan_horizon(
+        self,
+        current_needs: MetasStNeed,
+        future_needs: list[MetasStNeed],
+    ) -> list[StaticPlan]:
+        """Plan current fetches and retain rows reused within the horizon."""
+        assert self.cached is not None
+        assert self.fetchs is not None
 
         n_gpus = self.n_gpus
-        device = torch.device("cpu")
-
-        fetchs_of_2: list[TensorSet] = [
-            TensorSet(torch.tensor([], dtype=torch.long, device=device))
-            for _ in range(n_gpus)
-        ]
-        plans_of_1 = []
+        next_fetchs: list[TensorSet] = []
+        next_cached: list[TensorSet] = []
+        plans: list[StaticPlan] = []
 
         total_to_cache = 0
         total_to_fetch = 0
@@ -158,23 +163,33 @@ class StaticPlanner(ThreadBase):
         next_cache_counts: list[int] = []
 
         for n in range(n_gpus):
-            to_cache_of_1 = avails_of_1[n] & needs_of_2[n]
-            plan_of_1 = StaticPlan(
-                to_cache=to_cache_of_1,
+            future_union = TensorSet.empty_like(current_needs[n].data)
+            for future in future_needs:
+                future_union = future_union | future[n]
+
+            available = self.cached[n] | current_needs[n]
+            to_cache = available & future_union
+            plan = StaticPlan(
+                to_cache=to_cache,
                 fetch=self.fetchs[n],
             )
-            fetchs_of_2[n] = needs_of_2[n] - avails_of_1[n]
-            plans_of_1.append(plan_of_1)
+            if future_needs:
+                next_fetch = future_needs[0][n] - to_cache
+            else:
+                next_fetch = TensorSet.empty_like(current_needs[n].data)
+            next_fetchs.append(next_fetch)
+            next_cached.append(to_cache)
+            plans.append(plan)
 
-            total_to_cache += len(to_cache_of_1)
+            total_to_cache += len(to_cache)
             total_to_fetch += len(self.fetchs[n])
             if self._timing_enabled:
-                need_count = len(avails_of_1[n])
+                need_count = len(current_needs[n])
                 fetch_count = len(self.fetchs[n])
                 need_counts.append(need_count)
                 fetch_counts.append(fetch_count)
                 cache_hit_counts.append(need_count - fetch_count)
-                next_cache_counts.append(len(to_cache_of_1))
+                next_cache_counts.append(len(to_cache))
 
         if self._timing_enabled:
             self._need_counts_curve.append(need_counts)
@@ -189,6 +204,7 @@ class StaticPlanner(ThreadBase):
         #         raise ValueError("Warning: Some fetchs are empty!")
         #     logger.debug(f"Cache shapes: {[f.to_cache.data.shape[0] for f in plans_of_1]}")
 
-        self.fetchs = fetchs_of_2
-        assert len(plans_of_1) == n_gpus
-        return plans_of_1
+        self.cached = next_cached
+        self.fetchs = next_fetchs
+        assert len(plans) == n_gpus
+        return plans
