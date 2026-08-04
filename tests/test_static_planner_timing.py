@@ -60,3 +60,27 @@ def test_static_planner_keeps_rows_reused_after_one_batch_gap():
         [1, 3],
         [],
     ]
+
+
+def test_static_planner_default_horizon_keeps_longer_lived_rows():
+    in_q: Queue = Queue()
+    out_q: Queue = Queue()
+    planner = StaticPlanner(
+        gpus_distance=np.array([[0]], dtype=np.int32),
+        in_q=in_q,
+        out_q=out_q,
+        stop_ev=threading.Event(),
+    )
+    in_q.put([_ts([1, 2])])
+    for value in range(3, 10):
+        in_q.put([_ts([value])])
+    in_q.put([_ts([1, 10])])
+    in_q.put("end_of_epoch")
+    in_q.put(None)
+
+    planner.logic()
+
+    plans = [out_q.get_nowait()[0] for _ in range(9)]
+    assert out_q.get_nowait() is None
+    assert plans[0].to_cache.data.tolist() == [1]
+    assert plans[-1].fetch.data.tolist() == [10]

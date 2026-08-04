@@ -7,6 +7,7 @@ from queue import Queue
 from typing import Literal
 
 import numpy as np
+import torch
 
 from frost.runtime.host.types import MetasStNeed
 from frost.datatypes.plan import StaticPlan
@@ -37,7 +38,7 @@ class StaticPlanner(ThreadBase):
         in_q: Queue[MetasStNeed | None | Literal["end_of_epoch"]],
         out_q: Queue[list[StaticPlan] | None],
         stop_ev: threading.Event,
-        cache_horizon: int = 2,
+        cache_horizon: int = 8,
     ) -> None:
         super().__init__(name="static_planner", stop_ev=stop_ev)
         if cache_horizon < 1:
@@ -163,9 +164,15 @@ class StaticPlanner(ThreadBase):
         next_cache_counts: list[int] = []
 
         for n in range(n_gpus):
-            future_union = TensorSet.empty_like(current_needs[n].data)
-            for future in future_needs:
-                future_union = future_union | future[n]
+            future_union = (
+                TensorSet(
+                    torch.cat([future[n].data for future in future_needs]),
+                    sort_now=True,
+                    ensure_unique=True,
+                )
+                if future_needs
+                else TensorSet.empty_like(current_needs[n].data)
+            )
 
             available = self.cached[n] | current_needs[n]
             to_cache = available & future_union
