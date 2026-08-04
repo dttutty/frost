@@ -38,7 +38,7 @@ class StaticPlanner(ThreadBase):
         in_q: Queue[MetasStNeed | None | Literal["end_of_epoch"]],
         out_q: Queue[list[StaticPlan] | None],
         stop_ev: threading.Event,
-        cache_horizon: int = 8,
+        cache_horizon: int = 16,
         large_batch_need_rows: int = 40_000,
     ) -> None:
         super().__init__(name="static_planner", stop_ev=stop_ev)
