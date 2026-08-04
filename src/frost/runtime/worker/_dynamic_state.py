@@ -358,10 +358,11 @@ class DynamicStateAssemblerMixin:
 
         h2d_cuda_start = profiler.start_cuda() if profiler is not None else None
         h2d_wall_start = time.perf_counter()
-        unique_data_gpu = unique_data_cpu.to(
-            self.device, non_blocking=pin_memory
-        )
-        unique_ts_gpu = unique_ts_cpu.to(self.device, non_blocking=pin_memory)
+        # Keep the transfer host-synchronous while reusing one pinned buffer.
+        # An asynchronous copy would require a fenced buffer ring so the next
+        # CPU gather cannot overwrite pages still consumed by DMA.
+        unique_data_gpu = unique_data_cpu.to(self.device)
+        unique_ts_gpu = unique_ts_cpu.to(self.device)
         if profiler is not None:
             profiler.record_cpu(
                 f"{kind}_h2d_wall", time.perf_counter() - h2d_wall_start
