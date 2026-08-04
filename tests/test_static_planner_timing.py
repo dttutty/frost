@@ -72,6 +72,7 @@ def test_static_planner_default_horizon_keeps_longer_lived_rows():
         out_q=out_q,
         stop_ev=threading.Event(),
         large_batch_need_rows=1,
+        very_large_batch_need_rows=100,
     )
     in_q.put([_ts([1, 2])])
     for value in range(3, 18):
@@ -87,3 +88,21 @@ def test_static_planner_default_horizon_keeps_longer_lived_rows():
     assert plans[0].to_cache.data.tolist() == [1]
     assert plans[-1].fetch.data.tolist() == [18]
     assert planner._active_cache_horizon == 16
+
+
+def test_static_planner_limits_reuse_for_very_large_batches():
+    planner = StaticPlanner(
+        gpus_distance=np.array([[0]], dtype=np.int32),
+        in_q=Queue(),
+        out_q=Queue(),
+        stop_ev=threading.Event(),
+        large_batch_need_rows=2,
+        very_large_batch_need_rows=4,
+    )
+    planner.in_q.put([_ts([1, 2, 3, 4])])
+    planner.in_q.put("end_of_epoch")
+    planner.in_q.put(None)
+
+    planner.logic()
+
+    assert planner._active_cache_horizon == 2

@@ -40,17 +40,23 @@ class StaticPlanner(ThreadBase):
         stop_ev: threading.Event,
         cache_horizon: int = 16,
         large_batch_need_rows: int = 40_000,
+        very_large_batch_need_rows: int = 120_000,
     ) -> None:
         super().__init__(name="static_planner", stop_ev=stop_ev)
         if cache_horizon < 1:
             raise ValueError("static feature cache horizon must be >= 1")
         if large_batch_need_rows < 1:
             raise ValueError("large-batch feature need threshold must be >= 1")
+        if very_large_batch_need_rows <= large_batch_need_rows:
+            raise ValueError(
+                "very-large feature need threshold must exceed large threshold"
+            )
         # Store configuration
         self.gpus_distance = gpus_distance
         self.n_gpus = len(self.gpus_distance)
         self.cache_horizon = cache_horizon
         self.large_batch_need_rows = large_batch_need_rows
+        self.very_large_batch_need_rows = very_large_batch_need_rows
         self._active_cache_horizon = cache_horizon
 
         self.in_q = in_q
@@ -100,9 +106,12 @@ class StaticPlanner(ThreadBase):
             if not self.pending:
                 self.cached = [TensorSet.empty_like(item.data) for item in need]
                 self.fetchs = need
+                max_need_rows = max(len(item) for item in need)
                 self._active_cache_horizon = (
                     self.cache_horizon
-                    if max(len(item) for item in need) >= self.large_batch_need_rows
+                    if self.large_batch_need_rows
+                    <= max_need_rows
+                    < self.very_large_batch_need_rows
                     else min(2, self.cache_horizon)
                 )
             self.pending.append(need)
