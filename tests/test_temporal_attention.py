@@ -38,6 +38,42 @@ class TestTemporalGraphAttentionLayer:
 
         torch.testing.assert_close(packed, dense, atol=1e-5, rtol=1e-5)
 
+    def test_packed_gradients_match_dense_with_padding(self):
+        torch.manual_seed(11)
+        layer = TemporalGraphAttentionLayer(
+            dim_node=6,
+            dim_edge=2,
+            dim_time=4,
+            dim_out=6,
+            num_head=2,
+            dropout=0.0,
+        )
+        target = torch.randn(4, 6, requires_grad=True)
+        neighbor = torch.randn(4, 5, 6, requires_grad=True)
+        edge = torch.randn(4, 5, 2, requires_grad=True)
+        dt = torch.rand(4, 5)
+        mask = torch.tensor(
+            [
+                [True, False, True, False, False],
+                [False, False, False, False, False],
+                [True, True, True, False, False],
+                [False, True, False, True, True],
+            ]
+        )
+        differentiable = (target, neighbor, edge, *layer.parameters())
+
+        dense_grad = torch.autograd.grad(
+            layer(target, neighbor, edge, dt, mask).sum(),
+            differentiable,
+        )
+        packed_grad = torch.autograd.grad(
+            layer.forward_packed(target, neighbor, edge, dt, mask).sum(),
+            differentiable,
+        )
+
+        for actual, expected in zip(packed_grad, dense_grad, strict=True):
+            torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
+
     def test_packed_empty_batch_preserves_kv_gradients(self):
         layer = TemporalGraphAttentionLayer(
             dim_node=4,
