@@ -2,8 +2,9 @@
 
 import torch
 
+from frost.datatypes.sampled_layout import SampledLayoutView
 from frost.models.contracts import RootExpansion
-from frost.runtime.host._engine import _prepare_sampler_inputs
+from frost.runtime.host._engine import _layout_work_counts, _prepare_sampler_inputs
 
 
 def test_prepare_sampler_inputs_full_sampling_keeps_all_roots():
@@ -49,3 +50,29 @@ def test_prepare_sampler_inputs_multi_neg_uses_per_edge_negative_order():
     )
 
     assert sample_ts.tolist() == [10.0, 20.0, 10.0, 20.0, 10.0, 10.0, 20.0, 20.0]
+
+
+def test_layout_work_counts_distinguishes_padding_and_duplicate_nodes():
+    layouts = [
+        SampledLayoutView(
+            # 3 roots, then 2 fixed slots per root; -1 rows are padding.
+            nid=torch.tensor([1, 2, 1, 7, -1, 7, 8, -1, -1]),
+            n_src=1,
+            n_neg=1,
+            fanout=[2],
+        ),
+        SampledLayoutView(
+            nid=torch.tensor([3, 4, 5, 9, 9, 10, -1, 10, 11]),
+            n_src=1,
+            n_neg=1,
+            fanout=[2],
+        ),
+    ]
+
+    assert _layout_work_counts(layouts) == {
+        "root_rows": 6,
+        "unique_root_rows": 5,
+        "neighbor_slots": 12,
+        "valid_neighbor_rows": 8,
+        "unique_valid_neighbor_rows": 5,
+    }

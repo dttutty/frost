@@ -88,6 +88,37 @@ def _prepare_sampler_inputs(
     return roots[: n_src * 2], ts.repeat(2)
 
 
+def _layout_work_counts(layouts: LayoutBundle) -> dict[str, int]:
+    """Count dense slots and semantic rows in one distributed macro-batch."""
+    root_rows = 0
+    unique_root_rows = 0
+    neighbor_slots = 0
+    valid_neighbor_rows = 0
+    unique_valid_neighbor_rows = 0
+    for layout in layouts:
+        roots = layout.filter_valid(layout.roots)
+        root_rows += int(roots.numel())
+        unique_root_rows += int(torch.unique(roots).numel())
+        if not layout.fanout:
+            continue
+        hop = layout.valid_hop(0)
+        first_hop_slots = (
+            layout.n_root
+            if layout.root_expansion is RootExpansion.ALL_ROOTS
+            else 2 * layout.n_src
+        ) * layout.fanout[0]
+        neighbor_slots += first_hop_slots
+        valid_neighbor_rows += int(hop.numel())
+        unique_valid_neighbor_rows += int(torch.unique(hop).numel())
+    return {
+        "root_rows": root_rows,
+        "unique_root_rows": unique_root_rows,
+        "neighbor_slots": neighbor_slots,
+        "valid_neighbor_rows": valid_neighbor_rows,
+        "unique_valid_neighbor_rows": unique_valid_neighbor_rows,
+    }
+
+
 class Host:
     """Orchestrates the host-side pipeline for distributed Temporal GNN training.
 
@@ -183,6 +214,7 @@ class Host:
         self._negative_sample_s_curve: list[float] = []
         self._neighborhood_sample_s_curve: list[float] = []
         self._metadata_s_curve: list[float] = []
+        self._layout_work_curve: list[dict[str, int]] = []
 
         self._init_pipeline(
             resources.env,
@@ -543,6 +575,7 @@ class Host:
             prepare_end = time.perf_counter()
             if timing_enabled and split == "train":
                 self._macro_prepare_s_curve.append(prepare_end - macro_start)
+                self._layout_work_curve.append(_layout_work_counts(layout_bundle))
             if self.plan_router is not None:
                 dispatch_start = time.perf_counter()
                 self.plan_router.dispatch(meta_bundle, layout_bundle)
@@ -582,6 +615,7 @@ class Host:
                 "scatter_q_put_s_curve": [
                     round(v, 6) for v in self._scatter_q_put_s_curve
                 ],
+                "layout_work_curve": self._layout_work_curve,
             }
             print(
                 "APPENDIX_HOST_ENGINE_TIMING_CURVE "
