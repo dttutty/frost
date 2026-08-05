@@ -11,7 +11,10 @@ encoder:
   d_hid: ${model.embedding_dim}
   heads: 2
   dropout: ${dropout}
-  attention_layout: dense
+  # Auto keeps the low-overhead dense kernel for small batches and packs large
+  # padded layouts once the theoretical K/V projection work is large enough.
+  attention_layout: auto
+  auto_pack_min_projected_elements: 50000000
 state:
   boxsize: 1
   mail_combine: last

@@ -22,6 +22,56 @@ class TestTGN:
                 attention_layout="unknown",
             )
 
+    def test_rejects_non_positive_auto_pack_threshold(self):
+        with pytest.raises(ValueError, match="auto_pack_min_projected_elements"):
+            TGN(
+                ndim=0,
+                edim=0,
+                d_mem=16,
+                d_time=8,
+                d_hid=16,
+                heads=2,
+                dropout=0.0,
+                attention_layout="auto",
+                auto_pack_min_projected_elements=0,
+            )
+
+    def test_auto_attention_layout_uses_projected_work_threshold(self):
+        model = TGN(
+            ndim=0,
+            edim=8,
+            d_mem=16,
+            d_time=8,
+            d_hid=16,
+            heads=2,
+            dropout=0.0,
+            attention_layout="auto",
+            auto_pack_min_projected_elements=320,
+        )
+
+        # Projected width is 16 memory + 8 edge + 8 time = 32.
+        assert not model._use_packed_attention(9)
+        assert model._use_packed_attention(10)
+
+    @pytest.mark.parametrize(
+        ("layout", "expected"), (("dense", False), ("packed", True))
+    )
+    def test_explicit_attention_layout_bypasses_auto_threshold(
+        self, layout: str, expected: bool
+    ):
+        model = TGN(
+            ndim=0,
+            edim=0,
+            d_mem=16,
+            d_time=8,
+            d_hid=16,
+            heads=2,
+            dropout=0.0,
+            attention_layout=layout,
+        )
+
+        assert model._use_packed_attention(1) is expected
+
     def test_forward_output_shape(self):
         ndim, edim, d_mem, d_time, d_hid, heads = 32, 16, 64, 32, 64, 2
         model = TGN(
