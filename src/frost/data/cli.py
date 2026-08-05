@@ -83,11 +83,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     negatives = subparsers.add_parser(
         "negatives",
-        help="generate eid-keyed fixed evaluation negatives from the dst partition",
+        help="generate eid-keyed fixed evaluation negatives",
     )
     negatives.add_argument("edges", type=Path)
     negatives.add_argument("--output", type=Path)
     negatives.add_argument("--seed", type=int, default=0)
+    negatives.add_argument(
+        "--candidate-mode",
+        choices=["all", "dst_partition"],
+        default="dst_partition",
+    )
     negatives.add_argument("--force", action="store_true")
 
     dgb = subparsers.add_parser(
@@ -204,8 +209,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_path=output,
             seed=args.seed,
             force=args.force,
+            candidate_mode=args.candidate_mode,
         )
-        result = {"output": str(path.resolve()), "seed": args.seed}
+        result = {
+            "output": str(path.resolve()),
+            "seed": args.seed,
+            "candidate_mode": args.candidate_mode,
+        }
     elif args.command == "import-dgb":
         result = import_dgb_snapshot(
             args.source_dir,

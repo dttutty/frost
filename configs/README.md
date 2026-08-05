@@ -65,6 +65,10 @@ The canonical definitions and cross-framework comparison rules live in
 
 - `n_neg` flows from root config into negative and neighborhood sampling; scoring receives already structured edge representations.
 - `neg_sampler=rnd_dst_then_fixed` uses fresh destination-partition random negatives for training and reads one fixed `eid,neg_dst` evaluation negative per edge from `$FROST_DATA_ROOT/<dataset>/neg_pre_sampling_1_result.csv`; it currently requires `n_neg=1`.
+- `neg_sampler=rnd_dst_then_fixed_all` keeps the same destination-partition
+  training sampler but evaluates with the fixed
+  `neg_pre_sampling_1_all_nodes_seed0.csv` artifact. Its candidates span the
+  complete contiguous node range, and the positive destination is excluded.
 - `neg_sampler=rnd_dst_then_hist` uses destination-partition random negatives during training and per-source historical destination corruption during eval. It is not DyGLib's full-pair historical protocol, which may replace both endpoints.
 - `neg_sampler=rnd_dst_then_post_train` uses destination-partition random negatives during training and per-source post-training destination corruption during eval. It is likewise a destination-only protocol.
 - `neg_sampler=rnd_dst_then_tgb` uses one random training negative and official TGB validation/test pickle files. Run with `eval_metric=mrr`; set `neg_sampler.eval.n_neg=100` for `tgbl-review`, or `20` for `tgbl-coin`, `tgbl-comment`, and `tgbl-flight`.

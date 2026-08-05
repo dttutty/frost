@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
@@ -24,13 +24,21 @@ class PrecomputedNegSampler:
         data_root: str | Path | None = None,
         neg_file: str = PRECOMPUTED_NEGATIVE_FILENAME,
         seed: int | None = None,
+        candidate_mode: Literal["all", "dst_partition"] = "dst_partition",
     ) -> None:
         self.n_nodes = n_nodes  # from hydra config
         self.n_neg = n_neg
         self.dataset = dataset
         self.data_root = None if data_root is None else Path(data_root)
         self.seed = seed
+        self.candidate_mode = candidate_mode
         self._validated = False
+
+        if candidate_mode not in {"all", "dst_partition"}:
+            raise ValueError(
+                "candidate_mode must be 'all' or 'dst_partition', got "
+                f"{candidate_mode!r}"
+            )
 
         if self.n_neg != 1:
             raise ValueError(
@@ -70,18 +78,25 @@ class PrecomputedNegSampler:
             raise ValueError("edges.csv must use contiguous eid values 1..N.")
 
         positive_dst = torch.as_tensor(df["dst"].to_numpy(copy=True), dtype=torch.long)
-        candidates = torch.unique(positive_dst, sorted=True)
-        positions = torch.searchsorted(candidates, self.precomputed_negatives)
-        in_range = positions < candidates.numel()
-        valid_domain = torch.zeros_like(in_range)
-        valid_domain[in_range] = (
-            candidates[positions[in_range]] == self.precomputed_negatives[in_range]
-        )
+        if self.candidate_mode == "all":
+            valid_domain = (self.precomputed_negatives >= 0) & (
+                self.precomputed_negatives < self.n_nodes
+            )
+            domain_description = f"the full node range [0, {self.n_nodes})"
+        else:
+            candidates = torch.unique(positive_dst, sorted=True)
+            positions = torch.searchsorted(candidates, self.precomputed_negatives)
+            in_range = positions < candidates.numel()
+            valid_domain = torch.zeros_like(in_range)
+            valid_domain[in_range] = (
+                candidates[positions[in_range]] == self.precomputed_negatives[in_range]
+            )
+            domain_description = "the observed dst partition"
         if not bool(valid_domain.all()):
             invalid = self.precomputed_negatives[~valid_domain][:5].tolist()
             raise ValueError(
                 f"{self.precomputed_path} contains negative destinations outside "
-                f"the observed dst partition; examples: {invalid}"
+                f"{domain_description}; examples: {invalid}"
             )
         collisions = self.precomputed_negatives == positive_dst
         if bool(collisions.any()):

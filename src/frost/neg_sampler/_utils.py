@@ -7,6 +7,7 @@ import itertools
 import logging
 import random
 from pathlib import Path
+from typing import Literal
 
 import torch
 
@@ -210,6 +211,7 @@ def generate_precomputed_negative_file(
     output_path: str | Path | None = None,
     seed: int = 0,
     force: bool = False,
+    candidate_mode: Literal["all", "dst_partition"] = "dst_partition",
 ) -> Path:
     """Pre-generate one fixed random-negative destination per edge.
 
@@ -259,8 +261,15 @@ def generate_precomputed_negative_file(
     if output_path.exists() and not force:
         raise FileExistsError(f"refusing to overwrite existing output: {output_path}")
 
-    # --- Pass 1: validate the file and determine the destination partition ---
+    if candidate_mode not in {"all", "dst_partition"}:
+        raise ValueError(
+            "candidate_mode must be 'all' or 'dst_partition', got "
+            f"{candidate_mode!r}"
+        )
+
+    # --- Pass 1: validate the file and determine the candidate population ---
     destination_nodes: set[int] = set()
+    max_node_id = -1
     num_rows = 0
     with edges_path.open(newline="") as f:
         reader = csv.DictReader(f)
@@ -281,14 +290,22 @@ def generate_precomputed_negative_file(
                     f"{edges_path} has non-contiguous eid values: expected "
                     f"{row_idx}, got {row['eid']}"
                 )
+            src = int(row["src"])
             dst = int(row["dst"])
+            if src < 0 or dst < 0:
+                raise ValueError("src and dst node IDs must be non-negative")
             destination_nodes.add(dst)
+            max_node_id = max(max_node_id, src, dst)
             num_rows = row_idx
 
     if num_rows == 0:
         raise ValueError(f"{edges_path} does not contain any rows.")
 
-    candidate_nodes = tuple(sorted(destination_nodes))
+    candidate_nodes = (
+        tuple(range(max_node_id + 1))
+        if candidate_mode == "all"
+        else tuple(sorted(destination_nodes))
+    )
     rng = random.Random(seed)
     # --- Pass 2: sample negatives and write to a temporary file atomically ---
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")

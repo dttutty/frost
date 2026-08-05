@@ -67,6 +67,41 @@ class TestPrecomputedNegSampler:
         for neg, (src, dst) in zip(negatives, rows):
             assert neg != dst
 
+    def test_generate_precomputed_negative_file_uses_all_nodes(self, tmp_path: Path):
+        dataset_dir = tmp_path / "MOCK"
+        dataset_dir.mkdir()
+        edges_path = dataset_dir / "edges.csv"
+        _write_edges_csv(
+            edges_path,
+            [(0, 4, 0), (1, 4, 1), (2, 4, 2), (3, 4, 3)],
+        )
+        output_path = dataset_dir / "neg_all.csv"
+
+        generate_precomputed_negative_file(
+            edges_path,
+            output_path=output_path,
+            seed=7,
+            candidate_mode="all",
+        )
+
+        negatives = pd.read_csv(output_path)["neg_dst"]
+        assert set(negatives).issubset(set(range(5)))
+        assert any(negative != 4 for negative in negatives)
+
+        sampler = PrecomputedNegSampler(
+            n_nodes=5,
+            n_neg=1,
+            dataset="MOCK",
+            data_root=tmp_path,
+            neg_file="neg_all.csv",
+            candidate_mode="all",
+        )
+        sampler.init_from_df(pd.read_csv(edges_path))
+        assert torch.equal(
+            sampler.sample(torch.tensor([0]), torch.tensor([1])),
+            torch.tensor([negatives.iloc[0]]),
+        )
+
     def test_generate_precomputed_negative_file_synthesizes_missing_eid(
         self, tmp_path: Path
     ):
