@@ -540,6 +540,7 @@ def launch(cfg: DictConfig):
                     execution_plan=execution_plan,
                     dynamic_state_policy=dynamic_state_policy,
                     compile_model=cfg.get("compile", True),
+                    compile_mode=cfg.get("compile_mode"),
                     amp=bool(cfg.compute.amp),
                     no_memory_queue_size=no_memory_queue_size,
                     cpu_benchmark_pid_list=cpu_benchmark_pid_list,

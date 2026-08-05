@@ -28,6 +28,7 @@ ignore_nfeat_on_disk: false
 ignore_efeat_on_disk: false
 no_memory_queue_size: 4
 compile: false
+compile_mode: null
 compute:
   tf32: false
   amp: false

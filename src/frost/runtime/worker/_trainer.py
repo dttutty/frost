@@ -23,6 +23,14 @@ from frost.runtime.worker._state_coordinator import DynamicStateCoordinator
 from frost.runtime.experimental.dynamic_state import TransportMode, WritebackTiming
 
 
+_COMPILE_MODES = {
+    "default",
+    "reduce-overhead",
+    "max-autotune",
+    "max-autotune-no-cudagraphs",
+}
+
+
 def _tgb_reciprocal_ranks(
     positive_scores: torch.Tensor,
     negative_scores: torch.Tensor,
@@ -100,6 +108,7 @@ class WorkerTrainerMixin:
         optimizer: Literal["adam", "sgd"],
         ring_buf: RingBuf,
         compile_model: bool = True,
+        compile_mode: str | None = None,
         use_ddp: bool = True,
     ) -> None:
         """Create model, optimizer, and wrap with DDP."""
@@ -135,14 +144,28 @@ class WorkerTrainerMixin:
         else:
             self.model = model
         if compile_model:
+            resolved_compile_mode = compile_mode or "default"
+            if resolved_compile_mode not in _COMPILE_MODES:
+                raise ValueError(
+                    f"Unsupported compile_mode={resolved_compile_mode!r}; "
+                    f"expected one of {sorted(_COMPILE_MODES)}"
+                )
+            compile_mode_arg = (
+                None if resolved_compile_mode == "default" else resolved_compile_mode
+            )
             # Compile only tensor-heavy submodules; Meta graph assembly remains eager.
             bare = model
-            bare.encoder = cast(nn.Module, torch.compile(bare.encoder))
+            bare.encoder = cast(
+                nn.Module, torch.compile(bare.encoder, mode=compile_mode_arg)
+            )
             if bare.mem_updater is not None:
                 bare.mem_updater = cast(
-                    MemoryUpdaterProto, torch.compile(bare.mem_updater)
+                    MemoryUpdaterProto,
+                    torch.compile(bare.mem_updater, mode=compile_mode_arg),
                 )
-            bare.head = cast(nn.Module, torch.compile(bare.head))
+            bare.head = cast(
+                nn.Module, torch.compile(bare.head, mode=compile_mode_arg)
+            )
         self.state_coordinator = DynamicStateCoordinator(
             plan=self.execution_plan,
             dynamic_state_policy=self.dynamic_state_policy,

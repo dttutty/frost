@@ -92,13 +92,18 @@ class StaticAssembler:
                         "staged node-feature rows do not match the access plan: "
                         f"{staged_nfeat.shape[0]} != {fetch.numel()}"
                     )
-                # This copy is deliberately synchronous: the reusable staging
-                # slot can be returned as soon as H2D finishes this batch.
+                # Keep H2D as a bulk same-dtype DMA, then cast on the GPU.
+                # Combining the device and dtype conversion makes CUDA read
+                # scattered host elements through a conversion kernel and is
+                # substantially slower for MAG's wide float16 rows. The copy
+                # remains synchronous so the reusable staging slot is safe to
+                # return immediately after this method completes.
                 gpu_data = staged_nfeat.to(
                     device=self.device,
-                    dtype=torch.float32,
                     non_blocking=False,
                 )
+                if gpu_data.dtype != torch.float32:
+                    gpu_data = gpu_data.to(dtype=torch.float32)
 
             # StaticPlan.fetch is a TensorSet, hence ascending and unique; the
             # device transfer preserves that order.

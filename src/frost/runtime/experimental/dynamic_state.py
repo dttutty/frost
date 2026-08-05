@@ -32,6 +32,7 @@ class DynamicStatePolicy:
     transport: TransportMode
     writeback: WritebackTiming
     filter_writeback_by_plan: bool = False
+    pin_gather_buffers: bool = False
 
     @property
     def max_in_flight_batches(self) -> int | None:
@@ -44,6 +45,13 @@ _POLICIES = {
         planner=PlannerMode.PIPELINED,
         transport=TransportMode.ASYNC_P2P,
         writeback=WritebackTiming.AFTER_MEMORY_UPDATE,
+    ),
+    "baseline_pinned_gather": DynamicStatePolicy(
+        name="baseline_pinned_gather",
+        planner=PlannerMode.PIPELINED,
+        transport=TransportMode.ASYNC_P2P,
+        writeback=WritebackTiming.AFTER_MEMORY_UPDATE,
+        pin_gather_buffers=True,
     ),
     "no_plan_no_delta_post_step_raw": DynamicStatePolicy(
         name="no_plan_no_delta_post_step_raw",

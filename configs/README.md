@@ -74,6 +74,12 @@ The canonical definitions and cross-framework comparison rules live in
 - `model=<name>` selects the encoder, optional state updater, link head, and a semantic contract. The launcher compiles that contract into sampling, layout, feature-access, and dynamic-state plans.
 - `model.embedding_dim` is the single embedding/memory/head width. Recipe interpolation maps it to each concrete constructor.
 - `model.neighborhood.fanout` is the single fanout source for every model, including APAN. An empty list selects 0-hop, a one-element list selects 1-hop, and a longer list selects multi-hop.
+- TGN's `model.encoder.attention_layout=auto` keeps dense attention for small
+  layouts and switches to packed attention when `dense fanout slots × projected
+  neighbor width` reaches `auto_pack_min_projected_elements`. Explicit `dense`
+  and `packed` values remain available for ablations. The heuristic uses tensor
+  shapes and model dimensions only, so it does not synchronize a CUDA mask back
+  to the host on every batch.
 - `model.state` is `null` for stateless models. Memory recipes declare their updater, mailbox size, combine rule, and routing semantics under this node.
 - `macro_batch_size`, `n_neg`, `model.neighborhood.fanout`, the model layout contract, and `ring_buf_size` determine ring-buffer capacity and pipeline depth.
 - The runtime neighborhood sampler is configured under `ngh_sampler`. In particular, `ngh_sampler.strategy` selects `uniform`, `recent`, or `time_interval_aware`, and `ngh_sampler.time_scaling_factor` is consumed by the `time_interval_aware` sampler.

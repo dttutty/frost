@@ -1,5 +1,6 @@
 """Tests for TGN and TGAT encoder modules."""
 
+import pytest
 import torch
 
 from frost.datatypes.graph import HierGraph, NeighborOnHop
@@ -8,6 +9,69 @@ from frost.models.encoder.tgat import TGAT
 
 
 class TestTGN:
+    def test_rejects_unknown_attention_layout(self):
+        with pytest.raises(ValueError, match="attention_layout"):
+            TGN(
+                ndim=0,
+                edim=0,
+                d_mem=16,
+                d_time=8,
+                d_hid=16,
+                heads=2,
+                dropout=0.0,
+                attention_layout="unknown",
+            )
+
+    def test_rejects_non_positive_auto_pack_threshold(self):
+        with pytest.raises(ValueError, match="auto_pack_min_projected_elements"):
+            TGN(
+                ndim=0,
+                edim=0,
+                d_mem=16,
+                d_time=8,
+                d_hid=16,
+                heads=2,
+                dropout=0.0,
+                attention_layout="auto",
+                auto_pack_min_projected_elements=0,
+            )
+
+    def test_auto_attention_layout_uses_projected_work_threshold(self):
+        model = TGN(
+            ndim=0,
+            edim=8,
+            d_mem=16,
+            d_time=8,
+            d_hid=16,
+            heads=2,
+            dropout=0.0,
+            attention_layout="auto",
+            auto_pack_min_projected_elements=320,
+        )
+
+        # Projected width is 16 memory + 8 edge + 8 time = 32.
+        assert not model._use_packed_attention(9)
+        assert model._use_packed_attention(10)
+
+    @pytest.mark.parametrize(
+        ("layout", "expected"), (("dense", False), ("packed", True))
+    )
+    def test_explicit_attention_layout_bypasses_auto_threshold(
+        self, layout: str, expected: bool
+    ):
+        model = TGN(
+            ndim=0,
+            edim=0,
+            d_mem=16,
+            d_time=8,
+            d_hid=16,
+            heads=2,
+            dropout=0.0,
+            attention_layout=layout,
+        )
+
+        assert model._use_packed_attention(1) is expected
+
     def test_forward_output_shape(self):
         ndim, edim, d_mem, d_time, d_hid, heads = 32, 16, 64, 32, 64, 2
         model = TGN(
@@ -111,6 +175,61 @@ class TestTGN:
         out = model(graph)
         out.embeddings.sum().backward()
         assert root_mem.grad is not None
+
+    def test_feature_projection_skips_padded_neighbors(self):
+        ndim, d_mem = 8, 16
+        model = TGN(
+            ndim=ndim,
+            edim=0,
+            d_mem=d_mem,
+            d_time=8,
+            d_hid=d_mem,
+            heads=2,
+            dropout=0.0,
+        )
+        assert model.n_feat_mapper is not None
+        projected_rows: list[int] = []
+        handle = model.n_feat_mapper.register_forward_hook(
+            lambda _module, inputs, _output: projected_rows.append(inputs[0].shape[0])
+        )
+        n_root, fanout = 3, [4]
+        neighbor_nid = torch.tensor([1, -1, 2, -1] * n_root)
+        graph = HierGraph(
+            root_nid=torch.arange(n_root),
+            root_ts=torch.arange(n_root, dtype=torch.float32),
+            root_mem=torch.randn(n_root, d_mem),
+            root_nfeat=torch.randn(n_root, ndim),
+            neighbors=[
+                NeighborOnHop(
+                    nid=neighbor_nid,
+                    eid=torch.full_like(neighbor_nid, -1),
+                    ts=torch.zeros(n_root * fanout[0]),
+                    nfeat=torch.randn(n_root * fanout[0], ndim),
+                    efeat=None,
+                    mem=torch.randn(n_root * fanout[0], d_mem),
+                )
+            ],
+            fanout=fanout,
+        )
+
+        out = model(graph)
+        handle.remove()
+
+        assert out.embeddings.shape == (n_root, d_mem)
+        assert projected_rows == [n_root, int((neighbor_nid != -1).sum())]
+        dense_target = graph.root_mem + model.n_feat_mapper(graph.root_nfeat)
+        neighbor = graph.neighbors[0]
+        assert neighbor.nfeat is not None
+        assert neighbor.mem is not None
+        dense_neighbor = neighbor.mem + model.n_feat_mapper(neighbor.nfeat)
+        dense_reference = model.encoder(
+            target_feat=dense_target,
+            neighbor_feat=dense_neighbor.view(n_root, fanout[0], -1),
+            edge_feat=None,
+            dt=(graph.root_ts.unsqueeze(1) - neighbor.ts.view(n_root, fanout[0])),
+            mask=neighbor_nid.view(n_root, fanout[0]) != -1,
+        )
+        torch.testing.assert_close(out.embeddings, dense_reference)
 
 
 class TestTGAT:
