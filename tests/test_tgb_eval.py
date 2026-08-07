@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from frost.neg_sampler import TGBEvalNegSampler
-from frost.runtime.worker._trainer import _tgb_reciprocal_ranks
+from frost.metrics import tgb_reciprocal_ranks
 
 
 def _write_negative_file(
@@ -189,7 +189,7 @@ def test_tgb_reciprocal_ranks_use_average_tie_rank() -> None:
         ]
     )
 
-    reciprocal_ranks = _tgb_reciprocal_ranks(positives, negatives)
+    reciprocal_ranks = tgb_reciprocal_ranks(positives, negatives)
 
     assert torch.allclose(reciprocal_ranks, torch.tensor([0.4, 0.5]))
 
@@ -199,6 +199,6 @@ def test_tgb_reciprocal_ranks_ignore_padded_candidates() -> None:
     negatives = torch.tensor([[0.6, 0.4, 100.0]])
     valid_mask = torch.tensor([[True, True, False]])
 
-    reciprocal_ranks = _tgb_reciprocal_ranks(positives, negatives, valid_mask)
+    reciprocal_ranks = tgb_reciprocal_ranks(positives, negatives, valid_mask)
 
     assert torch.allclose(reciprocal_ranks, torch.tensor([0.5]))

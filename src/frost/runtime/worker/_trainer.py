@@ -15,6 +15,7 @@ from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
 
 from frost.datatypes.meta import Meta
 from frost.datatypes.result import Result
+from frost.metrics import tgb_reciprocal_ranks as _tgb_reciprocal_ranks
 from frost.models.temporal_link_model import TemporalLinkModel
 from frost.models.protocols import MemoryUpdaterProto
 from frost.shm.ring_buf import RingBuf
@@ -29,49 +30,6 @@ _COMPILE_MODES = {
     "max-autotune",
     "max-autotune-no-cudagraphs",
 }
-
-
-def _tgb_reciprocal_ranks(
-    positive_scores: torch.Tensor,
-    negative_scores: torch.Tensor,
-    negative_valid_mask: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Return TGB tie-aware reciprocal ranks for fixed-width candidates."""
-    if positive_scores.dim() != 1:
-        raise ValueError(
-            f"positive_scores must be 1D, got shape {tuple(positive_scores.shape)}"
-        )
-    if negative_scores.dim() != 2:
-        raise ValueError(
-            f"negative_scores must be 2D, got shape {tuple(negative_scores.shape)}"
-        )
-    if positive_scores.shape[0] != negative_scores.shape[0]:
-        raise ValueError(
-            "positive_scores and negative_scores must contain the same number "
-            f"of queries, got {positive_scores.shape[0]} and {negative_scores.shape[0]}"
-        )
-    if negative_valid_mask is not None:
-        if negative_valid_mask.shape != negative_scores.shape:
-            raise ValueError(
-                "negative_valid_mask must match negative_scores, got "
-                f"{tuple(negative_valid_mask.shape)} and "
-                f"{tuple(negative_scores.shape)}"
-            )
-        negative_valid_mask = negative_valid_mask.to(
-            device=negative_scores.device, dtype=torch.bool
-        )
-
-    positive_scores = positive_scores.unsqueeze(1)
-    if negative_valid_mask is None:
-        negative_valid_mask = torch.ones_like(negative_scores, dtype=torch.bool)
-    optimistic_rank = ((negative_scores > positive_scores) & negative_valid_mask).sum(
-        dim=1
-    )
-    pessimistic_rank = ((negative_scores >= positive_scores) & negative_valid_mask).sum(
-        dim=1
-    )
-    rank = 0.5 * (optimistic_rank + pessimistic_rank).float() + 1.0
-    return rank.reciprocal()
 
 
 class P2PGuardCommHook:
@@ -163,9 +121,7 @@ class WorkerTrainerMixin:
                     MemoryUpdaterProto,
                     torch.compile(bare.mem_updater, mode=compile_mode_arg),
                 )
-            bare.head = cast(
-                nn.Module, torch.compile(bare.head, mode=compile_mode_arg)
-            )
+            bare.head = cast(nn.Module, torch.compile(bare.head, mode=compile_mode_arg))
         self.state_coordinator = DynamicStateCoordinator(
             plan=self.execution_plan,
             dynamic_state_policy=self.dynamic_state_policy,
@@ -208,18 +164,14 @@ class WorkerTrainerMixin:
                 # can shift the selected best epoch enough to materially change
                 # the reported JODIE parity numbers.
                 "val_auc": BinaryAUROC(thresholds=None, **metric_kwargs),
-                "val_ap": BinaryAveragePrecision(
-                    thresholds=None, **metric_kwargs
-                ),
+                "val_ap": BinaryAveragePrecision(thresholds=None, **metric_kwargs),
             }
         ).cuda()
 
         self.test_metrics = MetricCollection(
             {
                 "test_auc": BinaryAUROC(thresholds=None, **metric_kwargs),
-                "test_ap": BinaryAveragePrecision(
-                    thresholds=None, **metric_kwargs
-                ),
+                "test_ap": BinaryAveragePrecision(thresholds=None, **metric_kwargs),
             }
         ).cuda()
 
@@ -408,10 +360,7 @@ class WorkerTrainerMixin:
         self.grad_scaler.scale(loss).backward()
         self.grad_scaler.step(self.optimizer)
         self.grad_scaler.update()
-        if (
-            self.dynamic_state_policy.writeback
-            is WritebackTiming.AFTER_OPTIMIZER_STEP
-        ):
+        if self.dynamic_state_policy.writeback is WritebackTiming.AFTER_OPTIMIZER_STEP:
             self._flush_deferred_direct_dynamic_state(meta, release_h2d_credits=True)
 
         detached_loss = loss.detach().float()
@@ -437,10 +386,7 @@ class WorkerTrainerMixin:
         with torch.amp.autocast("cuda", enabled=self.amp):
             with self.state_coordinator.batch(meta):
                 logits = self.model(meta)
-        if (
-            self.dynamic_state_policy.writeback
-            is WritebackTiming.AFTER_OPTIMIZER_STEP
-        ):
+        if self.dynamic_state_policy.writeback is WritebackTiming.AFTER_OPTIMIZER_STEP:
             self._flush_deferred_direct_dynamic_state(meta, release_h2d_credits=True)
         if (
             self.mem_box_store is not None
