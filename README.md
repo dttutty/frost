@@ -111,5 +111,3 @@ import, and catalog commands. Negative-sampling semantics are documented in
 - GDELT and MAG use directed temporal graphs; maintained interaction datasets
   use reverse adjacency. `frost-data build-graph` requires an explicit choice.
 - If two GPUs are visible, `torchrun` needs three processes.
-- Unexpectedly low throughput often comes from `CUDA_LAUNCH_BLOCKING`, verbose
-  debug logging, or mismatched CPU thread settings.
