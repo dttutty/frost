@@ -2,9 +2,7 @@
 
 This branch is the double-anonymous evaluation artifact for the paper
 submission. It contains the FROST implementation, tests, experiment
-specifications, and public-data preparation tools. Author metadata, private
-infrastructure notes, paper sources, and external baseline source trees are not
-part of this branch.
+specifications, and public-data preparation tools.
 
 Reviewers should start with the step-by-step
 [artifact evaluation guide](docs/artifact_evaluation.md).
@@ -24,7 +22,7 @@ uv sync --locked --python 3.12
 cp .env.example .env.local
 ```
 
-Configure machine-local dataset roots in the ignored `.env.local`:
+Configure machine-local dataset roots in `.env.local`:
 
 ```dotenv
 FROST_DATA_ROOT=/absolute/path/to/frost_dataset

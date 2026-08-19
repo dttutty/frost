@@ -64,7 +64,7 @@ The relevant implementations are:
   [`inductive.py`](../src/frost/neg_sampler/inductive.py), and
   [`random.py`](../src/frost/neg_sampler/random.py)
 The FROST-aligned comparison protocol uses the fixed evaluation artifact and
-global AP. External baseline source is not included in this anonymous branch.
+global AP.
 
 ## Reporting and comparison
 
