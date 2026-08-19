@@ -49,6 +49,7 @@ ENV/
 outputs/
 logs/
 artifacts/
+/results/
 *.log
 
 # Experiment
