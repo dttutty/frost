@@ -59,9 +59,7 @@ object store.
 For a verified LASTFM example, including archive checksum, extraction,
 conversion, validation, and training commands, follow
 [Dataset setup](docs/artifact_evaluation.md#dataset-setup). The same guide lists
-the official archives used for WIKIPEDIA, MOOC, and REDDIT. Importing these
-bipartite datasets creates `node_role.npy` and exposes its source/item mask as
-the default `node_features.npy` input.
+the official archives used for WIKIPEDIA, MOOC, and REDDIT.
 
 Download the complete official TGB link-prediction catalog with `aria2c`:
 
@@ -90,7 +88,7 @@ uv run frost-data catalog "$FROST_DATA_ROOT"
 ```
 
 Generated files are not overwritten without `--force`. Run
-`uv run frost-data --help` for graph, node-role, split, negative-sampling, DGB
+`uv run frost-data --help` for graph, split, negative-sampling, DGB
 import, and catalog commands. Negative-sampling semantics are documented in
 [docs/negative_sampling.md](docs/negative_sampling.md).
 
