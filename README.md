@@ -103,11 +103,3 @@ import, and catalog commands. Negative-sampling semantics are documented in
 | `src/frost/` | Runtime, models, samplers, and data tooling |
 | `tests/` | Test suite |
 | `docs/artifact_evaluation.md` | Reviewer setup and evaluation procedure |
-
-## Common pitfalls
-
-- `macro_batch_size` is global across workers.
-- `ring_buf_size` is pipeline depth, not dataset size.
-- GDELT and MAG use directed temporal graphs; maintained interaction datasets
-  use reverse adjacency. `frost-data build-graph` requires an explicit choice.
-- If two GPUs are visible, `torchrun` needs three processes.
