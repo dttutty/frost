@@ -1,4 +1,13 @@
-# FROST
+# FROST: anonymous revision artifact
+
+This branch is the double-anonymous evaluation artifact for the paper
+submission. It contains the FROST implementation, tests, experiment
+specifications, and public-data preparation tools. Author metadata, private
+infrastructure notes, paper sources, and external baseline source trees are not
+part of this branch.
+
+Reviewers should start with the step-by-step
+[artifact evaluation guide](docs/artifact_evaluation.md).
 
 FROST is a distributed temporal graph neural network training system with exact
 memory semantics. A dedicated host rank performs sampling and access planning;
@@ -11,7 +20,7 @@ The runtime does not depend on DGL, PyG, `pytorch_scatter`, or
 
 ```bash
 uv python install 3.12
-uv sync --python 3.12
+uv sync --locked --python 3.12
 cp .env.example .env.local
 ```
 
@@ -42,6 +51,16 @@ memory; `on` reports an error instead of silently falling back.
 
 ## Datasets
 
+This artifact does not use or link to an author-owned dataset mirror. The
+datasets used by the maintained examples can be reconstructed from the public
+DGB Zenodo release, while TGB datasets are fetched from the official TGB
+object store.
+
+For a verified LASTFM example, including archive checksum, extraction,
+conversion, validation, and training commands, follow
+[Dataset setup](docs/artifact_evaluation.md#dataset-setup). The same guide lists
+the official archives used for WIKIPEDIA, MOOC, and REDDIT.
+
 Download the complete official TGB link-prediction catalog with `aria2c`:
 
 ```bash
@@ -58,14 +77,6 @@ frame, temporal CSR, and padded edge features are created in memory; the
 official dataset provides no node features. No exported `TGBL_WIKI/` artifact
 directory is needed. The other four datasets are downloadable but still need
 runtime adapters.
-
-Materialized FROST datasets can be downloaded from a configured Hugging Face
-dataset repository:
-
-```bash
-uvx --from huggingface_hub hf download "$HF_DATASET_REPO" \
-  --repo-type dataset --local-dir "$FROST_DATA_ROOT"
-```
 
 `frost-data` also builds and validates the common artifact format:
 
@@ -91,6 +102,7 @@ catalog commands. Negative-sampling semantics are documented in
 | `configs/` | Model and runtime configuration |
 | `src/frost/` | Runtime, models, samplers, and data tooling |
 | `tests/` | Test suite |
+| `docs/artifact_evaluation.md` | Reviewer setup and evaluation procedure |
 
 ## Common pitfalls
 
