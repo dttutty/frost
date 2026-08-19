@@ -10,6 +10,7 @@ from frost.data.preparation import (
     assign_temporal_splits,
     build_temporal_csr,
     convert_tensor_to_numpy,
+    generate_node_roles,
     validate_dataset,
     write_temporal_csr,
 )
@@ -59,6 +60,34 @@ def test_build_temporal_csr_accepts_legacy_columns_without_reverse() -> None:
     np.testing.assert_array_equal(graph["eid"], [7])
 
 
+def test_generate_node_roles_defaults_to_node_features(tmp_path: Path) -> None:
+    edges_path = tmp_path / "edges.csv"
+    role_path = tmp_path / "node_role.npy"
+    _canonical_edges().to_csv(edges_path, index=False)
+
+    summary = generate_node_roles(edges_path, role_path)
+
+    node_features_path = tmp_path / "node_features.npy"
+    roles = np.load(role_path)
+    assert summary["used_as_default_node_features"] is True
+    assert node_features_path.is_symlink()
+    assert node_features_path.readlink() == Path("node_role.npy")
+    assert roles.dtype == np.bool_
+    assert roles.shape == (4, 1)
+    np.testing.assert_array_equal(roles[:, 0], [False, False, True, True])
+    np.testing.assert_array_equal(np.load(node_features_path), roles)
+
+
+def test_generate_node_roles_rejects_overlapping_partitions(tmp_path: Path) -> None:
+    edges = _canonical_edges()
+    edges.loc[1, "dst"] = 1
+    edges_path = tmp_path / "edges.csv"
+    edges.to_csv(edges_path, index=False)
+
+    with pytest.raises(ValueError, match="disjoint"):
+        generate_node_roles(edges_path, tmp_path / "node_role.npy")
+
+
 def test_convert_tensor_to_numpy_uses_explicit_paths(tmp_path: Path) -> None:
     source = tmp_path / "features.pt"
     output = tmp_path / "features.npy"
@@ -103,6 +132,7 @@ def test_validate_dataset_checks_graph_and_optional_row_contracts(
         add_reverse=True,
     )
     np.save(dataset_dir / "edge_features.npy", np.zeros((7, 2), dtype=np.float32))
+    generate_node_roles(edges_path, dataset_dir / "node_role.npy")
     summary = validate_dataset(dataset_dir)
 
     assert summary["dataset"] == "EXAMPLE"
@@ -112,6 +142,8 @@ def test_validate_dataset_checks_graph_and_optional_row_contracts(
     assert summary["graph_direction"] == "bidirectional"
     assert summary["graph_artifact"] == "full_graph_with_reverse_edges.npz"
     assert summary["optional_artifacts"]["edge_features.npy"] == [7, 2]
+    assert summary["optional_artifacts"]["node_role.npy"] == [4, 1]
+    assert summary["optional_artifacts"]["node_features.npy"] == [4, 1]
 
 
 def test_validate_dataset_accepts_tgl_directed_policy_for_gdelt(
@@ -199,8 +231,19 @@ def test_import_dgb_snapshot_materializes_reproducible_release(tmp_path: Path) -
 
     assert manifest["split"]["strategy"] == "timestamp"
     assert manifest["negative_sampling"]["candidate_set"] == "observed_dst_nodes"
-    assert not (output_dir / "node_features.npy").exists()
+    assert manifest["node_role"] == {
+        "available": True,
+        "used_as_default_node_features": True,
+    }
+    role_path = output_dir / "node_role.npy"
+    node_features_path = output_dir / "node_features.npy"
+    assert role_path.is_file()
+    assert node_features_path.is_symlink()
+    assert node_features_path.readlink() == Path("node_role.npy")
+    np.testing.assert_array_equal(np.load(node_features_path), np.load(role_path))
     assert not (output_dir / "state_labels.csv").exists()
     negatives = pd.read_csv(output_dir / "neg_pre_sampling_1_result.csv")
     assert set(negatives["neg_dst"]).issubset({10, 11})
-    validate_dataset(output_dir)
+    summary = validate_dataset(output_dir)
+    assert summary["optional_artifacts"]["node_role.npy"] == [12, 1]
+    assert summary["optional_artifacts"]["node_features.npy"] == [12, 1]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -224,7 +225,7 @@ def build_temporal_csr(
 
 def _require_writable_target(path: Path, *, force: bool) -> Path:
     path = path.expanduser()
-    if path.exists() and not force:
+    if (path.exists() or path.is_symlink()) and not force:
         raise FileExistsError(f"refusing to overwrite existing output: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
@@ -258,6 +259,58 @@ def write_temporal_csr(
     }
 
 
+def generate_node_roles(
+    edges_path: Path,
+    output_path: Path,
+    *,
+    force: bool = False,
+) -> dict[str, int | str | bool]:
+    """Generate a bipartite node-role feature and make it the default nfeat."""
+    frame = load_edges(edges_path)
+    src, dst, _, _ = _edge_arrays(frame)
+    src_nodes = np.unique(src)
+    dst_nodes = np.unique(dst)
+    overlap = np.intersect1d(src_nodes, dst_nodes, assume_unique=True)
+    if overlap.size:
+        preview = overlap[:5].tolist()
+        raise ValueError(
+            "node-role generation requires disjoint source/destination partitions; "
+            f"overlap starts with {preview}"
+        )
+
+    output_path = output_path.expanduser()
+    if output_path.suffix != ".npy":
+        raise ValueError(f"node-role output must use the .npy extension: {output_path}")
+    node_features_path = output_path.with_name("node_features.npy")
+    if output_path == node_features_path:
+        raise ValueError("node-role output must not be named node_features.npy")
+
+    # Check both public paths before writing either one so a non-forced call
+    # cannot leave a half-materialized feature pair.
+    _require_writable_target(output_path, force=force)
+    _require_writable_target(node_features_path, force=force)
+
+    num_nodes = int(max(src.max(), dst.max())) + 1
+    roles = np.zeros((num_nodes, 1), dtype=np.bool_)
+    roles[dst_nodes, 0] = True
+    np.save(output_path, roles)
+
+    temporary_link = node_features_path.with_name(node_features_path.name + ".tmp")
+    if temporary_link.exists() or temporary_link.is_symlink():
+        temporary_link.unlink()
+    temporary_link.symlink_to(output_path.name)
+    temporary_link.replace(node_features_path)
+
+    return {
+        "output": str(output_path.resolve()),
+        "node_features": str(node_features_path),
+        "num_nodes": num_nodes,
+        "source_nodes": len(src_nodes),
+        "destination_nodes": len(dst_nodes),
+        "used_as_default_node_features": True,
+    }
+
+
 def convert_tensor_to_numpy(
     source_path: Path,
     output_path: Path,
@@ -285,8 +338,54 @@ def convert_tensor_to_numpy(
     }
 
 
+def _resolve_npy_alias_path(path: Path) -> Path:
+    """Resolve a real/symlinked NumPy file or a relative text alias."""
+    seen_paths: set[Path] = set()
+    current = path
+    while True:
+        canonical = current.resolve()
+        if canonical in seen_paths:
+            raise ValueError(f"cyclic .npy alias involving {current}")
+        seen_paths.add(canonical)
+
+        with current.open("rb") as handle:
+            if handle.read(6) == b"\x93NUMPY":
+                return canonical
+        try:
+            alias = current.read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"{current} is neither a NumPy file nor a UTF-8 alias"
+            ) from exc
+        if not alias:
+            raise ValueError(f"NumPy alias is empty: {current}")
+        current = current.parent / alias
+        if not current.exists():
+            raise FileNotFoundError(f"NumPy alias points to a missing target: {current}")
+
+
+def _load_array(path: Path) -> np.ndarray:
+    return np.load(_resolve_npy_alias_path(path), mmap_mode="r", allow_pickle=False)
+
+
+def _array_metadata(path: Path) -> dict[str, Any]:
+    array = _load_array(path)
+    metadata: dict[str, Any] = {
+        "shape": list(array.shape),
+        "dtype": str(array.dtype),
+    }
+    resolved = _resolve_npy_alias_path(path)
+    if resolved != path.resolve(strict=False):
+        metadata["alias_target"] = Path(
+            os.path.relpath(resolved, start=path.parent.resolve())
+        ).as_posix()
+    elif path.is_symlink():
+        metadata["alias_target"] = path.readlink().as_posix()
+    return metadata
+
+
 def _validate_array_rows(path: Path, expected_rows: int) -> None:
-    array = np.load(path, mmap_mode="r", allow_pickle=False)
+    array = _load_array(path)
     if array.ndim == 0:
         raise ValueError(f"expected an array with a row dimension: {path}")
     if array.shape[0] != expected_rows:
@@ -400,14 +499,15 @@ def write_dataset_manifest(
         )
 
     artifacts: dict[str, Any] = {}
-    for filename in ("edge_features.npy",):
+    for filename in ("edge_features.npy", "node_role.npy", "node_features.npy"):
         path = dataset_dir / filename
         if path.is_file():
-            array = np.load(path, mmap_mode="r", allow_pickle=False)
-            artifacts[filename] = {
-                "shape": list(array.shape),
-                "dtype": str(array.dtype),
-            }
+            artifacts[filename] = _array_metadata(path)
+    role_path = dataset_dir / "node_role.npy"
+    node_features_path = dataset_dir / "node_features.npy"
+    role_is_default = role_path.is_file() and node_features_path.is_file() and (
+        np.array_equal(_load_array(role_path), _load_array(node_features_path))
+    )
     manifest = {
         "schema_version": 1,
         "dataset": dataset_dir.name,
@@ -437,6 +537,10 @@ def write_dataset_manifest(
             "generator": "python_random_v1",
             "seed": negative_seed,
             "artifact": "neg_pre_sampling_1_result.csv",
+        },
+        "node_role": {
+            "available": role_path.is_file(),
+            "used_as_default_node_features": role_is_default,
         },
         "artifacts": artifacts,
     }
@@ -496,14 +600,39 @@ def validate_dataset(
     row_contracts = {
         "edge_features.npy": num_edges + 1,
         "node_features.npy": num_nodes,
+        "node_role.npy": num_nodes,
     }
     for filename, expected_rows in row_contracts.items():
         path = dataset_dir / filename
         if path.is_file():
             _validate_array_rows(path, expected_rows)
-            optional_shapes[filename] = list(
-                np.load(path, mmap_mode="r", allow_pickle=False).shape
+            optional_shapes[filename] = list(_load_array(path).shape)
+
+    role_path = dataset_dir / "node_role.npy"
+    node_features_path = dataset_dir / "node_features.npy"
+    role_is_default = False
+    if role_path.is_file():
+        roles = _load_array(role_path)
+        if roles.dtype != np.bool_ or roles.ndim != 2 or roles.shape[1] != 1:
+            raise ValueError(
+                "node_role.npy must have shape [num_nodes, 1] and bool dtype"
             )
+        src = frame["src"].to_numpy(dtype=np.int64)
+        dst = frame["dst"].to_numpy(dtype=np.int64)
+        overlap = np.intersect1d(np.unique(src), np.unique(dst))
+        if overlap.size:
+            raise ValueError("node_role.npy requires disjoint bipartite roles")
+        if bool(roles[src, 0].any()) or not bool(roles[dst, 0].all()):
+            raise ValueError(
+                "node_role.npy must encode source=False and destination=True"
+            )
+        if not node_features_path.is_file():
+            raise ValueError(
+                "node_role.npy must be exposed as the default node_features.npy"
+            )
+        role_is_default = np.array_equal(roles, _load_array(node_features_path))
+        if not role_is_default:
+            raise ValueError("node_features.npy must resolve to node_role.npy")
 
     negative_shape = _validate_precomputed_negatives(dataset_dir, frame)
     if negative_shape is not None:
@@ -541,6 +670,12 @@ def validate_dataset(
                 )
             if negative_policy.get("use") != "evaluation_only":
                 raise ValueError("fixed negative artifact must be evaluation_only")
+        manifest_role = manifest.get("node_role", {})
+        if manifest_role:
+            if manifest_role.get("available") != role_path.is_file():
+                raise ValueError("manifest node-role availability does not match files")
+            if manifest_role.get("used_as_default_node_features") != role_is_default:
+                raise ValueError("manifest node-role feature policy does not match files")
 
     return {
         "dataset": dataset_dir.name,

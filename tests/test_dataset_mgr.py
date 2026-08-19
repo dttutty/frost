@@ -155,6 +155,40 @@ def test_pt_features_keep_compact_storage_dtype(tmp_path: Path, monkeypatch) -> 
     assert feature.dtype == torch.bool
 
 
+def test_node_role_symlink_loads_as_default_node_features(
+    tmp_path: Path, monkeypatch
+) -> None:
+    role_path = tmp_path / "node_role.npy"
+    roles = np.array([[False], [False], [True], [True]], dtype=np.bool_)
+    np.save(role_path, roles)
+    node_features_path = tmp_path / "node_features.npy"
+    node_features_path.symlink_to(role_path.name)
+    monkeypatch.setattr(
+        dm,
+        "csm",
+        lambda _name, shape, dtype, **_kwargs: torch.empty(shape, dtype=dtype),
+    )
+    manager = dm.DatasetManager(
+        env=None,  # type: ignore[arg-type]
+        run_id="test",
+        dataset="MOCK",
+        index_dtype=np.int64,
+        time_dtype=np.int64,
+        feature_dtype=torch.float32,
+    )
+
+    feature, dim, dtype = manager._load_npy_feature_to_shm(
+        node_features_path,
+        "node",
+        "nfeat",
+        expected_rows=4,
+    )
+
+    assert dim == 1
+    assert dtype == torch.bool
+    assert torch.equal(feature, torch.from_numpy(roles))
+
+
 def test_pt_node_features_stay_file_backed(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "node_features.pt"
     expected = torch.arange(12, dtype=torch.float16).reshape(3, 4)

@@ -35,6 +35,7 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | `n_neg` | `1` | Number of negative samples per positive edge. Propagates into the negative sampler and related components. |
 | `eval_metric` | `ap` | Evaluation, checkpoint-selection, logging, and early-stopping metric. Supported values are `ap` and `mrr`; AP remains the default. |
 | `ring_buf_size` | `64` | Number of shared-memory ring-buffer slots per worker GPU. |
+| `ignore_nfeat_on_disk` | `false` | Load `node_features.npy` by default. Set to `true` to ignore the generated node-role feature for a no-node-feature parity run. |
 | `numa_policy` | `auto` | Topology-aware CPU and shared-memory placement. Use `off` to disable it or a NUMA node ID to bind every local rank there. |
 | `cpu_threads` | `auto` | OMP/MKL thread policy. Automatic workers receive at most 32 threads from their GPU-local physical-core budget; the host is resolved separately. Use `inherit` or a positive integer to override. |
 | `if_carry_over_route` | `false` | Allows planner fallback to stale leftovers when next-batch needs cannot be fully satisfied. |
