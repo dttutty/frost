@@ -6,10 +6,6 @@ specifications, and public-data preparation tools. Author metadata, private
 infrastructure notes, paper sources, and external baseline source trees are not
 part of this branch.
 
-No measured experimental result values are included. Numeric values in
-configuration files are reproducibility parameters; numeric metric values in
-unit tests are synthetic parser fixtures rather than recorded runs.
-
 Reviewers should start with the step-by-step
 [artifact evaluation guide](docs/artifact_evaluation.md).
 
