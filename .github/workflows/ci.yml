@@ -30,8 +30,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
-      - name: Check anonymous artifact hygiene
-        run: uv run python scripts/check_anonymous_artifact.py
+      - name: Check repository hygiene
+        run: uv run python scripts/check_repository_hygiene.py
 
       - name: Lint
         run: uv run ruff check .

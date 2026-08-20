@@ -1,15 +1,12 @@
-# FROST: anonymous revision artifact
-
-This branch is the double-anonymous evaluation artifact for the paper
-submission. It contains the FROST implementation, tests, experiment
-specifications, and public-data preparation tools.
-
-Reviewers should start with the step-by-step
-[artifact evaluation guide](docs/artifact_evaluation.md).
+# FROST
 
 FROST is a distributed temporal graph neural network training system with exact
 memory semantics. A dedicated host rank performs sampling and access planning;
 GPU worker ranks train the model with PyTorch Distributed.
+
+This repository contains the FROST implementation, tests, experiment
+specifications, public-data preparation tools, and reproducible training and
+benchmark workflows.
 
 The runtime does not depend on DGL, PyG, `pytorch_scatter`, or
 `pytorch_sparse`.
@@ -99,4 +96,4 @@ import, and catalog commands. Negative-sampling semantics are documented in
 | `configs/` | Model and runtime configuration |
 | `src/frost/` | Runtime, models, samplers, and data tooling |
 | `tests/` | Test suite |
-| `docs/artifact_evaluation.md` | Reviewer setup and evaluation procedure |
+| `docs/artifact_evaluation.md` | Installation, dataset setup, and evaluation workflows |
