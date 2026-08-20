@@ -49,9 +49,8 @@ memory; `on` reports an error instead of silently falling back.
 
 ## Datasets
 
-This artifact does not use or link to an author-owned dataset mirror. The
-datasets used by the maintained examples can be reconstructed from the public
-DGB Zenodo release, while TGB datasets are fetched from the official TGB
+The datasets used by the maintained examples can be reconstructed from the
+public DGB Zenodo release, while TGB datasets are fetched from the official TGB
 object store.
 
 For a verified LASTFM example, including archive checksum, extraction,

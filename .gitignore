@@ -72,10 +72,6 @@ slurm/
 .ipynb_checkpoints/
 *.ipynb
 
-# Paper repositories are maintained outside the code repository.
-/overleaf/
-/revision/
-
 # Misc
 .env.local
 .trash/
