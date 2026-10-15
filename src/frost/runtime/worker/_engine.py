@@ -41,6 +41,7 @@ from frost.runtime.experimental.dynamic_state import (
     resolve_dynamic_state_policy,
 )
 from frost.runtime.worker._direct_writeback import DirectDynamicStateWriter
+from frost.runtime.worker._tensor_lifetime import record_batch_stream
 from frost.runtime.worker._gpu_resident_writeback import (
     GpuResidentDynamicStateWriter,
 )
@@ -279,6 +280,7 @@ class Worker(
                     scored_pairs=meta.n_src * (1 + meta.n_neg),
                 )
                 torch.cuda.current_stream().wait_event(ready_event)
+                record_batch_stream(meta, torch.cuda.current_stream())
                 if meta.split == "train":
                     assert meta.labels is not None
                     self.benchmark_observer.on_train_batch_start(meta.n_src)
