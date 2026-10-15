@@ -50,12 +50,14 @@ class DynamicStateCoordinator:
         *,
         plan: ExecutionPlan,
         dynamic_state_policy: DynamicStatePolicy,
+        carry_over_route: bool,
         mem_task_q: Queue | None,
         box_task_q: Queue | None,
         direct_writeback: Callable[[DirectWritebackRequest], None],
     ) -> None:
         self.plan = plan
         self.dynamic_state_policy = dynamic_state_policy
+        self.carry_over_route = carry_over_route
         self.mem_task_q = mem_task_q
         self.box_task_q = box_task_q
         self.direct_writeback = direct_writeback
@@ -88,7 +90,10 @@ class DynamicStateCoordinator:
     def _capture_stale_state(
         self, meta: Meta
     ) -> tuple[MemEntry | None, BoxEntry | None]:
-        if self.dynamic_state_policy.transport is not TransportMode.ASYNC_P2P:
+        if (
+            self.dynamic_state_policy.transport is not TransportMode.ASYNC_P2P
+            or not self.carry_over_route
+        ):
             return None, None
         plan_set = meta.plan_set
         if plan_set is None or plan_set.mem_plan is None or plan_set.box_plan is None:
@@ -253,14 +258,31 @@ class DynamicStateCoordinator:
                 raise RuntimeError("Dynamic plans are missing writeback node sets.")
             mem_filter = plan_set.mem_plan.writeback.data
             box_filter = plan_set.box_plan.writeback.data
+        # Mail generation needs the original paired [src | dst] rows. Only
+        # deduplicate after constructing mail, independently for each payload.
+        mem_entry = root_new_mem.clone()
+        mail_entry = generate_interaction_mails(root_new_mem.clone(), box_pos_efeat)
+        if self.dynamic_state_policy.deduplicate_writeback:
+            mem_entry = keep_last(mem_entry)
+            mail_entry = keep_last(mail_entry)
+        box_entry = mail_to_box(mail_entry)
+        # Filter on the producing device so unowned rows never cross D2H.
+        if mem_filter is not None:
+            keep = isin_sorted(mem_entry.nid, mem_filter.to(mem_entry.nid.device))
+            mem_entry.nid = mem_entry.nid[keep]
+            mem_entry.data = mem_entry.data[keep]
+            mem_entry.ts = mem_entry.ts[keep]
+        if box_filter is not None:
+            keep = isin_sorted(box_entry.nid, box_filter.to(box_entry.nid.device))
+            box_entry.nid = box_entry.nid[keep]
+            box_entry.data = box_entry.data[keep]
+            box_entry.ts = box_entry.ts[keep]
         request = DirectWritebackRequest(
             mini_batch_idx=meta.mini_batch_idx,
-            mem_entry=root_new_mem.clone(),
-            box_entry=mail_to_box(
-                generate_interaction_mails(root_new_mem.clone(), box_pos_efeat)
-            ),
-            mem_filter_nids=mem_filter,
-            box_filter_nids=box_filter,
+            mem_entry=mem_entry,
+            box_entry=box_entry,
+            mem_filter_nids=None,
+            box_filter_nids=None,
         )
         if (
             self.dynamic_state_policy.writeback

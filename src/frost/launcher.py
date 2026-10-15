@@ -25,6 +25,7 @@ from frost.launch.affinity import (
 from frost.launch.distributed import (
     configure_torch_backends,
     create_worker_process_groups,
+    create_direct_writeback_group,
     gather_cpu_benchmark_pids,
     initialize_process_group,
 )
@@ -366,6 +367,9 @@ def launch(cfg: DictConfig):
         )
 
     nccl_ddp, nccl_p2p = create_worker_process_groups(env)
+    direct_writeback_group = create_direct_writeback_group(
+        env, enabled=dynamic_state_policy.transport is TransportMode.DIRECT_CPU
+    )
 
     # Determine maximum n_neg between train and eval for shared memory sizing
     neg_sampler_cfg = cfg.neg_sampler
@@ -380,6 +384,7 @@ def launch(cfg: DictConfig):
             f"got {eval_n_neg}. Use eval_metric=mrr for one-vs-many evaluation."
         )
     max_n_neg = max(train_n_neg, eval_n_neg)
+    if_carry_over_route: bool = bool(cfg.get("if_carry_over_route", False))
     ring_buf = prepare_ring_buffer(
         env=env,
         run_id=run_id,
@@ -464,7 +469,6 @@ def launch(cfg: DictConfig):
         planner = AccessPlanAnalyzer(execution_plan)
         has_nfeat = ndim > 0 and not single_gpu_resident
 
-        if_carry_over_route: bool = bool(cfg.get("if_carry_over_route", False))
         dispatch_host(
             lambda: Host(
                 resources=HostResources(
@@ -535,6 +539,7 @@ def launch(cfg: DictConfig):
                     env=env,
                     ddp_group=nccl_ddp,
                     p2p_group=nccl_p2p,
+                    direct_writeback_group=direct_writeback_group,
                     memory_updater=mem_updater,
                     encoder=encoder,
                     predictor=predictor,
@@ -551,6 +556,7 @@ def launch(cfg: DictConfig):
                     mail_combine=mail_combine,
                     execution_plan=execution_plan,
                     dynamic_state_policy=dynamic_state_policy,
+                    carry_over_route=if_carry_over_route,
                     compile_model=cfg.get("compile", True),
                     compile_mode=cfg.get("compile_mode"),
                     amp=bool(cfg.compute.amp),

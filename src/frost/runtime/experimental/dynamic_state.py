@@ -32,6 +32,7 @@ class DynamicStatePolicy:
     transport: TransportMode
     writeback: WritebackTiming
     filter_writeback_by_plan: bool = False
+    deduplicate_writeback: bool = False
     pin_gather_buffers: bool = False
 
     @property
@@ -71,6 +72,7 @@ _POLICIES = {
         transport=TransportMode.DIRECT_CPU,
         writeback=WritebackTiming.AFTER_MEMORY_UPDATE,
         filter_writeback_by_plan=True,
+        deduplicate_writeback=True,
     ),
 }
 

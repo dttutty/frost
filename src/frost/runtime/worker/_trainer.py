@@ -125,6 +125,7 @@ class WorkerTrainerMixin:
         self.state_coordinator = DynamicStateCoordinator(
             plan=self.execution_plan,
             dynamic_state_policy=self.dynamic_state_policy,
+            carry_over_route=self.carry_over_route,
             mem_task_q=self.mem_task_q,
             box_task_q=self.box_task_q,
             direct_writeback=self._write_direct_dynamic_state_request,

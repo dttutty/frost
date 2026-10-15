@@ -79,7 +79,8 @@ class BoxTask:
 class DirectWritebackRequest:
     """Synchronous CPU writeback payload for ablation modes.
 
-    The entries preserve raw row order and may contain duplicate node IDs.
+    Raw modes preserve row order and duplicate node IDs. Deduplicated modes
+    select the latest row per node on the producing device before transfer.
     Optional filter tensors restrict which node IDs are allowed to be
     persisted, but they must not change row order among retained items.
     """

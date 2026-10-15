@@ -77,6 +77,7 @@ def test_resolve_dynamic_state_policy(
     assert policy.writeback is writeback
     assert policy.filter_writeback_by_plan is filter_by_plan
     assert policy.pin_gather_buffers is pin_gather_buffers
+    assert policy.deduplicate_writeback is filter_by_plan
 
 
 def test_resolve_dynamic_state_policy_rejects_unknown_name() -> None:

@@ -59,3 +59,12 @@ def create_worker_process_groups(
     ddp = dist.new_group(ranks=worker_ranks, backend="nccl")
     p2p = dist.new_group(ranks=worker_ranks, backend="nccl")
     return ddp, p2p
+
+
+def create_direct_writeback_group(
+    env: Env, *, enabled: bool
+) -> dist.ProcessGroup | None:
+    """Isolate synchronous CPU publication from DDP/P2P collectives."""
+    if not enabled or env.n_gpu <= 1:
+        return None
+    return dist.new_group(ranks=list(range(env.host_rank)), backend="gloo")

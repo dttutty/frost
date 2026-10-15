@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+from typing import TYPE_CHECKING
+
 import torch
 
 from frost.datatypes.mem_mail_box.box import BoxEntry
@@ -7,6 +10,9 @@ from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.tasks import DirectWritebackRequest
 from frost.runtime.worker._h2d_credit import CreditGate
 from frost.shm.mem_mgr import MemBoxStore
+
+if TYPE_CHECKING:
+    from frost.runtime.worker._direct_writeback_sync import DirectWritebackSynchronizer
 
 
 def _writer_done(h2d_sem: CreditGate, *, batch_idx: int, kind: str) -> None:
@@ -25,9 +31,13 @@ class DirectDynamicStateWriter:
         *,
         mem_box_store: MemBoxStore,
         h2d_sem: CreditGate,
+        synchronizer: DirectWritebackSynchronizer | None = None,
+        serialize_writes: bool = True,
     ) -> None:
         self.mem_box_store = mem_box_store
         self.h2d_sem = h2d_sem
+        self.synchronizer = synchronizer
+        self.serialize_writes = serialize_writes
 
     @staticmethod
     def _sync_cuda_entry(entry: MemEntry | BoxEntry | None) -> None:
@@ -84,15 +94,27 @@ class DirectDynamicStateWriter:
             ts_cpu = ts_cpu[keep]
         return nid_cpu, data_cpu, ts_cpu
 
-    def _write_mem(
+    def _prepare_mem(
         self,
         entry: MemEntry | None,
         filter_nids: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        return self._normalize_mem(entry, filter_nids)
+
+    def _prepare_box(
+        self,
+        entry: BoxEntry | None,
+        filter_nids: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        return self._normalize_box(entry, filter_nids)
+
+    def _apply_mem(
+        self,
+        prepared: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
     ) -> None:
-        normalized = self._normalize_mem(entry, filter_nids)
-        if normalized is None:
+        if prepared is None:
             return
-        nid_cpu, data_cpu, ts_cpu = normalized
+        nid_cpu, data_cpu, ts_cpu = prepared
         for row_idx in range(nid_cpu.numel()):
             nid = int(nid_cpu[row_idx])
             ts = ts_cpu[row_idx]
@@ -100,15 +122,13 @@ class DirectDynamicStateWriter:
                 self.mem_box_store.mem[nid] = data_cpu[row_idx]
                 self.mem_box_store.mem_ts[nid] = ts
 
-    def _write_box(
+    def _apply_box(
         self,
-        entry: BoxEntry | None,
-        filter_nids: torch.Tensor | None,
+        prepared: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
     ) -> None:
-        normalized = self._normalize_box(entry, filter_nids)
-        if normalized is None:
+        if prepared is None:
             return
-        nid_cpu, data_cpu, ts_cpu = normalized
+        nid_cpu, data_cpu, ts_cpu = prepared
         for row_idx in range(nid_cpu.numel()):
             nid = int(nid_cpu[row_idx])
             ts = ts_cpu[row_idx, 0]
@@ -123,8 +143,16 @@ class DirectDynamicStateWriter:
         *,
         release_h2d_credits: bool,
     ) -> None:
-        self._write_mem(request.mem_entry, request.mem_filter_nids)
-        self._write_box(request.box_entry, request.box_filter_nids)
+        mem = self._prepare_mem(request.mem_entry, request.mem_filter_nids)
+        box = self._prepare_box(request.box_entry, request.box_filter_nids)
+        transaction = (
+            self.synchronizer.transaction(serialize_writes=self.serialize_writes)
+            if self.synchronizer is not None
+            else nullcontext()
+        )
+        with transaction:
+            self._apply_mem(mem)
+            self._apply_box(box)
         if release_h2d_credits:
             _writer_done(self.h2d_sem, batch_idx=request.mini_batch_idx, kind="mem")
             _writer_done(self.h2d_sem, batch_idx=request.mini_batch_idx, kind="box")

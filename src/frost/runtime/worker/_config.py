@@ -34,6 +34,7 @@ class WorkerResources:
     control_plane: SharedControlPlane
     mailbox_router: MailboxRouterProto | None
     state_sync: SharedDynamicStateSync | None = None
+    direct_writeback_group: dist.ProcessGroup | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,7 @@ class WorkerOptions:
     learning_rate: float
     mail_combine: Literal["last", "mean"] | None
     execution_plan: ExecutionPlan
+    carry_over_route: bool
     dynamic_state_policy: DynamicStatePolicy | None = None
     compile_model: bool = True
     compile_mode: str | None = None

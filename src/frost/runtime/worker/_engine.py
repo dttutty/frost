@@ -42,6 +42,7 @@ from frost.runtime.experimental.dynamic_state import (
 )
 from frost.runtime.worker._direct_writeback import DirectDynamicStateWriter
 from frost.runtime.worker._tensor_lifetime import record_batch_stream
+from frost.runtime.worker._direct_writeback_sync import DirectWritebackSynchronizer
 from frost.runtime.worker._gpu_resident_writeback import (
     GpuResidentDynamicStateWriter,
 )
@@ -134,6 +135,7 @@ class Worker(
         # --- Basic config ---
         self.ring_buf = resources.ring_buffer
         self.execution_plan = options.execution_plan
+        self.carry_over_route = options.carry_over_route
         self.n_neg = options.max_negative_samples
         self.save_to = options.checkpoint_dir
         self.env = resources.env
@@ -206,9 +208,16 @@ class Worker(
             self.mem_box_store is not None
             and self.dynamic_state_policy.transport is TransportMode.DIRECT_CPU
         ):
+            if self.env.n_gpu > 1 and resources.direct_writeback_group is None:
+                raise ValueError("Multi-worker direct writeback requires its CPU group.")
             self.direct_state_writer = DirectDynamicStateWriter(
                 mem_box_store=self.mem_box_store,
                 h2d_sem=self.h2d_sem,
+                synchronizer=(
+                    DirectWritebackSynchronizer(resources.direct_writeback_group)
+                    if resources.direct_writeback_group is not None else None
+                ),
+                serialize_writes=not self.dynamic_state_policy.filter_writeback_by_plan,
             )
         if (
             self.mem_box_store is not None
