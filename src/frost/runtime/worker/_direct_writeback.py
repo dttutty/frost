@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from frost.datatypes.mem_mail_box._data_ops import compute_last_indices
 from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.datatypes.tasks import DirectWritebackRequest
@@ -94,19 +95,46 @@ class DirectDynamicStateWriter:
             ts_cpu = ts_cpu[keep]
         return nid_cpu, data_cpu, ts_cpu
 
+    @staticmethod
+    def _latest_rows(
+        nid: torch.Tensor,
+        ts: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Choose each node's latest timestamp, breaking ties by input row order."""
+        rows = torch.arange(nid.numel(), dtype=torch.long)
+        if ts.is_floating_point():
+            # The original per-row comparison rejects NaN timestamps.
+            valid = ~torch.isnan(ts)
+            nid, ts, rows = nid[valid], ts[valid], rows[valid]
+        if nid.numel() == 0:
+            return nid, rows
+
+        winners = compute_last_indices(nid, ts)
+        return nid[winners], rows[winners]
+
     def _prepare_mem(
         self,
         entry: MemEntry | None,
         filter_nids: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        return self._normalize_mem(entry, filter_nids)
+        normalized = self._normalize_mem(entry, filter_nids)
+        if normalized is None:
+            return None
+        nid_cpu, data_cpu, ts_cpu = normalized
+        nids, rows = self._latest_rows(nid_cpu, ts_cpu)
+        return nids, data_cpu[rows], ts_cpu[rows]
 
     def _prepare_box(
         self,
         entry: BoxEntry | None,
         filter_nids: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        return self._normalize_box(entry, filter_nids)
+        normalized = self._normalize_box(entry, filter_nids)
+        if normalized is None:
+            return None
+        nid_cpu, data_cpu, ts_cpu = normalized
+        nids, rows = self._latest_rows(nid_cpu, ts_cpu[:, 0])
+        return nids, data_cpu[rows, 0], ts_cpu[rows, 0]
 
     def _apply_mem(
         self,
@@ -114,13 +142,11 @@ class DirectDynamicStateWriter:
     ) -> None:
         if prepared is None:
             return
-        nid_cpu, data_cpu, ts_cpu = prepared
-        for row_idx in range(nid_cpu.numel()):
-            nid = int(nid_cpu[row_idx])
-            ts = ts_cpu[row_idx]
-            if ts >= self.mem_box_store.mem_ts[nid]:
-                self.mem_box_store.mem[nid] = data_cpu[row_idx]
-                self.mem_box_store.mem_ts[nid] = ts
+        nids, data, ts = prepared
+        writable = ts >= self.mem_box_store.mem_ts[nids]
+        nids = nids[writable]
+        self.mem_box_store.mem[nids] = data[writable]
+        self.mem_box_store.mem_ts[nids] = ts[writable]
 
     def _apply_box(
         self,
@@ -128,14 +154,12 @@ class DirectDynamicStateWriter:
     ) -> None:
         if prepared is None:
             return
-        nid_cpu, data_cpu, ts_cpu = prepared
-        for row_idx in range(nid_cpu.numel()):
-            nid = int(nid_cpu[row_idx])
-            ts = ts_cpu[row_idx, 0]
-            if ts >= self.mem_box_store.box_ts[nid, 0]:
-                self.mem_box_store.box[nid, 0] = data_cpu[row_idx, 0]
-                self.mem_box_store.box_ts[nid, 0] = ts
-                self.mem_box_store.box_pos[nid] = 0
+        nids, data, ts = prepared
+        writable = ts >= self.mem_box_store.box_ts[nids, 0]
+        nids = nids[writable]
+        self.mem_box_store.box[nids, 0] = data[writable]
+        self.mem_box_store.box_ts[nids, 0] = ts[writable]
+        self.mem_box_store.box_pos[nids] = 0
 
     def write(
         self,
