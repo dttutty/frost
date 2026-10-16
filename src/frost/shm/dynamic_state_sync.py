@@ -359,7 +359,11 @@ class SharedDynamicStateSync:
                 if shm is not None:
                     try:
                         if self.env.is_host:
-                            shm.unlink()
+                            try:
+                                shm.unlink()
+                            except FileNotFoundError:
+                                # Global SHM cleanup may already have unlinked it.
+                                pass
                     finally:
                         shm.close()
                 if self.env.is_host:

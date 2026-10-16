@@ -356,3 +356,18 @@ def test_close_requires_final_snapshot_and_register_requires_contiguous_macro(wo
         worker.close_epoch(0)
     finally:
         worker.close()
+
+
+def test_host_close_is_idempotent_after_global_shared_memory_cleanup(world):
+    owner = world.owner
+    normalized = _core._normalize_shm_name(owner._name)
+    shm = _core._TRACKED_SHM_OBJECTS.pop(normalized)
+    # Reproduce cleanup_all_shm's ordering without mutating its global flag.
+    shm.close()
+    shm.unlink()
+
+    owner.close()
+    assert owner._closed
+    assert owner._shm is None
+    assert not owner.lock_path.exists()
+    owner.close()
