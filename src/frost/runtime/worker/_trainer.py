@@ -223,6 +223,10 @@ class WorkerTrainerMixin:
         That approximates TGL's step-local memory/mailbox update semantics
         without disabling P2P transport itself.
         """
+        if getattr(self, "state_sync", None) is not None:
+            raise RuntimeError(
+                "Per-step writer drain is incompatible with the next-batch CPU snapshot fence"
+            )
         if self.mem_box_store is None:
             return
 

@@ -161,6 +161,7 @@ class WorkerPipelineMixin:
                     if getattr(self, "gpu_resident_state_writer", None) is not None
                     else None
                 ),
+                state_sync=getattr(self, "state_sync", None),
             )
             h2d_dest_q = self.h2d_out_q
         else:
@@ -211,6 +212,7 @@ class WorkerPipelineMixin:
             wr_q=self.mem_wr_q,
             device=self.device,
             name="mem_wr",
+            state_sync=getattr(self, "state_sync", None),
         )
         self.box_handler = MessageHandler(
             h2d_sem=self.h2d_sem,
@@ -231,6 +233,7 @@ class WorkerPipelineMixin:
             device=self.device,
             name="box_wr",
             fanout=self.ring_buf.fanout,
+            state_sync=getattr(self, "state_sync", None),
         )
         self.p2p_q_handler = P2PQHandler(
             env=self.env,

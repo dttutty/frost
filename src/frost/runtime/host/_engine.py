@@ -184,6 +184,7 @@ class Host:
 
         self.stop_ev = threading.Event()
         self.mini_batch_idx = 0
+        self.macro_batch_idx = 0
         self.curr_epoch = 0
         self.best_metric_epoch: int = -1
         self.best_metric_score = float("-inf")
@@ -555,6 +556,10 @@ class Host:
             if cur_macro_of_split >= n_macro_of_split:
                 break
             macro_start = time.perf_counter()
+            macro_batch_idx = getattr(self, "macro_batch_idx", 0)
+            is_last_macro_of_split = (
+                cur_macro_of_split + 1 == n_macro_of_split
+            )
             meta_bundle: MetaBundle = []
             layout_bundle: LayoutBundle = []
             for gpu, edges in step_df.groupby("gpu_id", sort=False):
@@ -564,14 +569,21 @@ class Host:
                     split,
                     self.mini_batch_idx,
                     gpu,
+                    macro_batch_idx=macro_batch_idx,
+                    epoch_idx=cur_epoch,
+                    is_last_macro_of_split=is_last_macro_of_split,
                     is_last_macro_of_epoch=(
-                        split == "test"
-                        and cur_macro_of_split + 1 == n_macro_of_split
+                        is_last_macro_of_split
+                        and (
+                            split == "test"
+                            or (split == "train" and getattr(self, "train_only", False))
+                        )
                     ),
                 )
                 meta_bundle.append(meta)
                 layout_bundle.append(layout)
                 self.mini_batch_idx += 1
+            self.macro_batch_idx = macro_batch_idx + 1
             prepare_end = time.perf_counter()
             if timing_enabled and split == "train":
                 self._macro_prepare_s_curve.append(prepare_end - macro_start)
@@ -640,6 +652,10 @@ class Host:
         mini_batch_idx: int,
         gpu_id: int,
         is_last_macro_of_epoch: bool,
+        *,
+        macro_batch_idx: int = -1,
+        epoch_idx: int = 0,
+        is_last_macro_of_split: bool = False,
     ) -> tuple[Meta, SampledLayoutView]:
         """Build a Meta descriptor and sampled-layout sidecar for one micro-batch.
 
@@ -653,6 +669,9 @@ class Host:
             split: String label of the current split.
             mini_batch_idx: Global batch index across all splits and epochs.
             gpu_id: Target GPU rank for this micro-batch.
+            macro_batch_idx: Global counter shared by all workers in the step.
+            epoch_idx: Zero-based epoch index.
+            is_last_macro_of_split: Whether the step ends its split.
 
         Returns:
             A ``(Meta, SampledLayoutView)`` tuple.
@@ -736,10 +755,13 @@ class Host:
             flat_graph=None,
             n_src=src.shape[0],
             mini_batch_idx=mini_batch_idx,
+            macro_batch_idx=macro_batch_idx,
+            epoch_idx=epoch_idx,
             plan_set=None,
             buf_len=len,
             n_neg=neg_sampler.n_neg,
             is_last_macro_of_epoch=is_last_macro_of_epoch,
+            is_last_macro_of_split=is_last_macro_of_split,
             neg_valid_mask=neg_valid_mask,
         )
         if timing_enabled:

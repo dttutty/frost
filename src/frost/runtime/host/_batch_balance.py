@@ -1,5 +1,3 @@
-import math
-
 import pandas as pd
 
 
@@ -44,8 +42,8 @@ def make_balance_plan(
 
     # Build row->gpu assignment per "step":
     # within each step, GPU 0 gets first chunk, GPU 1 next chunk, ...
-    # chunk size per GPU = ceil(step_len / n_gpu), where step_len is either
-    # full macro-batch (org_batch_size*n_gpu) or the last leftover (>= n_gpu after padding)
+    # Tail chunks differ by at most one row, and each GPU receives at least one
+    # row. Ceil-sized chunks followed by truncation can omit the last GPU.
     step_id: list[int] = []
     gpu_id: list[int] = []
 
@@ -59,15 +57,12 @@ def make_balance_plan(
     last_len = length_of_df - done_df
     if last_len > 0:
         s = normal_macro_batch_number  # last step index
-        per_gpu = int(math.ceil(last_len / n_gpu))
+        per_gpu, extra = divmod(last_len, n_gpu)
 
         for g in range(n_gpu):
-            step_id.extend([s] * per_gpu)
-            gpu_id.extend([g] * per_gpu)
-
-        # truncate to exact length
-        step_id = step_id[:length_of_df]
-        gpu_id = gpu_id[:length_of_df]
+            chunk_size = per_gpu + int(g < extra)
+            step_id.extend([s] * chunk_size)
+            gpu_id.extend([g] * chunk_size)
 
     assert len(step_id) == length_of_df, (len(step_id), length_of_df)
     assert len(gpu_id) == length_of_df, (len(gpu_id), length_of_df)

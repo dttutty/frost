@@ -21,7 +21,7 @@ class ControlMessageKind(IntEnum):
 
 
 CONTROL_HEADER_SIZE = 2
-CONTROL_CODEC_VERSION = 2
+CONTROL_CODEC_VERSION = 3
 _SPLIT_TO_CODE = {"train": 0, "val": 1, "test": 2}
 _CODE_TO_SPLIT = {value: key for key, value in _SPLIT_TO_CODE.items()}
 
@@ -172,9 +172,12 @@ def encode_meta(meta: Meta, *, n_gpus: int) -> torch.Tensor:
     encoder.scalar(_SPLIT_TO_CODE[meta.split])
     encoder.scalar(meta.n_src)
     encoder.scalar(meta.mini_batch_idx)
+    encoder.scalar(meta.macro_batch_idx)
+    encoder.scalar(meta.epoch_idx)
     encoder.scalar(meta.buf_len)
     encoder.scalar(meta.n_neg)
     encoder.scalar(int(meta.is_last_macro_of_epoch))
+    encoder.scalar(int(meta.is_last_macro_of_split))
     if meta.neg_valid_mask is None:
         encoder.scalar(-1)
     else:
@@ -206,9 +209,12 @@ def decode_meta(payload: torch.Tensor, *, n_gpus: int) -> Meta:
         raise ValueError(f"Invalid split code {split_code}.") from exc
     n_src = decoder.scalar()
     mini_batch_idx = decoder.scalar()
+    macro_batch_idx = decoder.scalar()
+    epoch_idx = decoder.scalar()
     buf_len = decoder.scalar()
     n_neg = decoder.scalar()
     is_last_macro_of_epoch = bool(decoder.scalar())
+    is_last_macro_of_split = bool(decoder.scalar())
     mask_length = decoder.scalar()
     neg_valid_mask = (
         None if mask_length < 0 else decoder.tensor(mask_length).to(torch.bool)
@@ -235,10 +241,13 @@ def decode_meta(payload: torch.Tensor, *, n_gpus: int) -> Meta:
         split=split,
         n_src=n_src,
         mini_batch_idx=mini_batch_idx,
+        macro_batch_idx=macro_batch_idx,
+        epoch_idx=epoch_idx,
         flat_graph=None,
         buf_len=buf_len,
         n_neg=n_neg,
         is_last_macro_of_epoch=is_last_macro_of_epoch,
+        is_last_macro_of_split=is_last_macro_of_split,
         plan_set=plan_set,
         neg_valid_mask=neg_valid_mask,
     )

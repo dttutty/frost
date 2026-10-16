@@ -31,6 +31,7 @@ from frost.runtime.worker._dynamic_state import (
 from frost.runtime.worker._h2d_credit import CreditGate
 from frost.runtime.worker.types import AssembledQ, DeltaQueue, H2DOutQ
 from frost.shm.mem_mgr import MemBoxStore
+from frost.shm.dynamic_state_sync import SharedDynamicStateSync
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
         box_wr_q: Queue | None = None,
         dynamic_state_policy: DynamicStatePolicy | None = None,
         wait_for_resident_write: Callable[[torch.cuda.Stream], None] | None = None,
+        state_sync: SharedDynamicStateSync | None = None,
     ) -> None:
         super().__init__(name="dy_assembler", stop_ev=stop_ev)
         self.in_q = h2d_out_q
@@ -87,6 +89,7 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
             else resolve_dynamic_state_policy("baseline")
         )
         self.wait_for_resident_write = wait_for_resident_write
+        self.state_sync = state_sync
         self._timing_enabled = _timing_enabled()
         self._h2d_credit_wait_s_curve: list[float] = []
         self._prepare_shared_s_curve: list[float] = []
@@ -116,6 +119,9 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
             resolve_dynamic_state_policy("baseline"),
         )
         timing_enabled = getattr(self, "_timing_enabled", False)
+        state_sync = getattr(self, "state_sync", None)
+        last_macro = None
+        epoch_idx = None
 
         while not self.stop_ev.is_set():
             in_data = self.in_q.get(block=True)
@@ -124,7 +130,13 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
                 put_shutdown_sentinel(self.full_q, None)
                 break
             elif in_data == "end_of_epoch":
+                if state_sync is not None:
+                    if last_macro is None:
+                        raise RuntimeError("Shared-state epoch contains no batches")
+                    state_sync.close_epoch(last_macro, epoch_id=epoch_idx)
                 self.full_q.put("end_of_epoch", block=True)
+                last_macro = None
+                epoch_idx = None
                 continue
 
             meta, meta_ready_event = in_data
@@ -136,7 +148,14 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
             # ==========================================================
             assert meta.flat_graph is not None
             assert meta.plan_set is not None
-            self._drain_prior_eval_writebacks(split=meta.split)
+            if state_sync is not None:
+                state_sync.register_batch(
+                    meta.mini_batch_idx, meta.macro_batch_idx, meta.epoch_idx
+                )
+                last_macro = meta.macro_batch_idx
+                epoch_idx = meta.epoch_idx
+            else:
+                self._drain_prior_eval_writebacks(split=meta.split)
             wait_for_batch = getattr(self.h2d_sem, "wait_for_batch", None)
             h2d_wait_start = time.perf_counter()
             if callable(wait_for_batch):
@@ -144,6 +163,8 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
             else:
                 self.h2d_sem.acquire()
                 self.h2d_sem.acquire()
+            if state_sync is not None:
+                state_sync.wait_before_snapshot(meta.macro_batch_idx)
             h2d_wait_end = time.perf_counter()
 
             if wait_for_resident_write := getattr(
@@ -162,6 +183,14 @@ class DynamicAssembler(DynamicStateAssemblerMixin, StreamThreadBase):
                 profiler=getattr(self, "_prepare_profiler", None),
             )
             prepare_end = time.perf_counter()
+            if state_sync is not None:
+                # prepare_shared_features copies all shared rows and APAN ring
+                # metadata into private storage before publishing this fence.
+                state_sync.snapshot_done(meta.macro_batch_idx)
+                if meta.is_last_macro_of_epoch:
+                    state_sync.close_epoch(
+                        meta.macro_batch_idx, epoch_id=meta.epoch_idx
+                    )
 
             if dynamic_state_policy.transport in {
                 TransportMode.DIRECT_CPU,

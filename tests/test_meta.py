@@ -33,6 +33,9 @@ def test_meta_carries_batch_execution_inputs() -> None:
     assert meta.labels is labels
     assert meta.plan_set is None
     assert meta.is_last_macro_of_epoch is False
+    assert meta.is_last_macro_of_split is False
+    assert meta.macro_batch_idx == -1
+    assert meta.epoch_idx == 0
 
 
 def test_last_macro_of_epoch_is_explicit_host_input() -> None:

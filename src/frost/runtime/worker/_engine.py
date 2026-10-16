@@ -59,6 +59,7 @@ from frost.runtime.worker.p2p_syncer._task_handlers import (
     MessageHandler,
 )
 from frost.runtime.worker.p2p_syncer._writer import BoxMailWriter, SharedMemWriter
+from frost.shm.dynamic_state_sync import SharedDynamicStateSync
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,7 @@ class Worker(
     p2p_q_handler: P2PQHandler | None = None
     direct_state_writer: DirectDynamicStateWriter | None = None
     gpu_resident_state_writer: GpuResidentDynamicStateWriter | None = None
+    state_sync: SharedDynamicStateSync | None = None
 
     model: TemporalLinkModel | DDP
     optimizer: torch.optim.Optimizer
@@ -194,6 +196,9 @@ class Worker(
 
         # --- Synchronization primitives ---
         self.stop_ev = threading.Event()
+        self.state_sync = resources.state_sync
+        if self.state_sync is not None:
+            self.state_sync.stop_ev = self.stop_ev
         self.h2d_sem = BatchAwareCreditManager()
         self.p2p_sem = threading.Semaphore(0)
         if (
@@ -286,7 +291,6 @@ class Worker(
                 self.split_benchmark_observer.on_epoch_end()
                 self.benchmark_observer.on_epoch_end()
                 result = self.on_train_epoch_end()
-                self.result_q.put(result)
                 selection_metric = (
                     result.val_ap if self.eval_metric == "ap" else result.val_mrr
                 )
@@ -310,7 +314,13 @@ class Worker(
                             self.env.local_rank,
                             stale_p2p_tokens,
                         )
-                    self.mem_box_store.reset()
+                    if self.state_sync is not None:
+                        self.state_sync.finish_epoch(self.mem_box_store.reset)
+                    else:
+                        self.mem_box_store.reset()
+                # Receiver may release the host to dispatch the next epoch only
+                # after every shared-state writer and the reset have completed.
+                self.result_q.put(result)
             elif full is None:
                 self.split_benchmark_observer.finalize()
                 self.benchmark_observer.finalize()
@@ -332,6 +342,8 @@ class Worker(
             return
         self._shutdown_done = True
         self.stop_ev.set()
+        if self.state_sync is not None and not graceful:
+            self.state_sync.abort()
         self._request_thread_shutdown()
 
         # Reset dynamo/triton compiled state before distributed teardown to avoid
@@ -370,6 +382,9 @@ class Worker(
 
         if not pg_destroyed:
             destroy_process_group(sync=graceful, logger_=logger)
+
+        if self.state_sync is not None:
+            self.state_sync.close()
 
         # If non-daemon threads are still stuck on blocking collective ops
         # (scatter, NCCL), Python's normal exit will hang waiting for them.

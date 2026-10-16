@@ -15,6 +15,7 @@ from frost.models.protocols import MailboxRouterProto, MemoryUpdaterProto
 from frost.runtime.experimental.dynamic_state import DynamicStatePolicy
 from frost.shm.mem_mgr import MemBoxStore
 from frost.shm.control_plane import SharedControlPlane
+from frost.shm.dynamic_state_sync import SharedDynamicStateSync
 from frost.shm.ring_buf import RingBuf
 
 
@@ -32,6 +33,7 @@ class WorkerResources:
     ring_buffer: RingBuf
     control_plane: SharedControlPlane
     mailbox_router: MailboxRouterProto | None
+    state_sync: SharedDynamicStateSync | None = None
 
 
 @dataclass(frozen=True)

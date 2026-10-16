@@ -41,10 +41,13 @@ def test_meta_tensor_codec_round_trip() -> None:
         split="test",
         n_src=3,
         mini_batch_idx=17,
+        macro_batch_idx=8,
+        epoch_idx=3,
         flat_graph=None,
         buf_len=27,
         n_neg=2,
         is_last_macro_of_epoch=True,
+        is_last_macro_of_split=True,
         neg_valid_mask=torch.tensor([True, False, True, True, False, False]),
         plan_set=PlanSet(
             mem_plan=_dynamic(0),
@@ -61,9 +64,12 @@ def test_meta_tensor_codec_round_trip() -> None:
     assert decoded.split == original.split
     assert decoded.n_src == original.n_src
     assert decoded.mini_batch_idx == original.mini_batch_idx
+    assert decoded.macro_batch_idx == original.macro_batch_idx
+    assert decoded.epoch_idx == original.epoch_idx
     assert decoded.buf_len == original.buf_len
     assert decoded.n_neg == original.n_neg
     assert decoded.is_last_macro_of_epoch
+    assert decoded.is_last_macro_of_split
     assert torch.equal(decoded.neg_valid_mask, original.neg_valid_mask)
     assert decoded.plan_set is not None
     for decoded_plan, original_plan in (
@@ -102,6 +108,9 @@ def test_meta_tensor_codec_handles_absent_plans_and_mask() -> None:
 
     assert decoded.neg_valid_mask is None
     assert decoded.plan_set == PlanSet()
+    assert decoded.macro_batch_idx == -1
+    assert decoded.epoch_idx == 0
+    assert decoded.is_last_macro_of_split is False
 
 
 def test_meta_tensor_codec_preserves_shared_dynamic_plan() -> None:
@@ -153,4 +162,4 @@ def test_sentinel_header_rejects_payload() -> None:
 def test_shared_control_capacity_covers_plans_and_mask() -> None:
     assert control_payload_capacity(
         n_gpus=4, node_capacity=100, mask_capacity=300
-    ) == 1742
+    ) == 1745

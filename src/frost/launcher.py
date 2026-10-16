@@ -1,3 +1,4 @@
+import atexit
 import faulthandler
 import logging
 import os
@@ -38,6 +39,7 @@ from frost.launch.storage import (
     prepare_ring_buffer,
     resolve_batch_layout,
 )
+from frost.shm.dynamic_state_sync import SharedDynamicStateSync
 from frost.launch.single_gpu_resident import (
     SingleGpuResidentDecision,
     SingleGpuResidentMode,
@@ -411,6 +413,15 @@ def launch(cfg: DictConfig):
         gpu_resident=single_gpu_resident,
     )
 
+    state_sync = None
+    if (
+        has_mem
+        and env.n_gpu > 1
+        and dynamic_state_policy.transport is TransportMode.ASYNC_P2P
+    ):
+        state_sync = SharedDynamicStateSync(env, run_id)
+        atexit.register(state_sync.close)
+
     if env.is_host:
         # Launch host process
         from frost.runtime.host._engine import Host
@@ -530,6 +541,7 @@ def launch(cfg: DictConfig):
                     ring_buffer=ring_buf,
                     control_plane=control_plane,
                     mailbox_router=mailbox_router,
+                    state_sync=state_sync,
                 ),
                 options=WorkerOptions(
                     max_negative_samples=max_n_neg,

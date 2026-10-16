@@ -11,6 +11,7 @@ from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.runtime._thread_base import ThreadBase
 from frost.runtime.worker._h2d_credit import CreditGate
 from frost.shm.mem_mgr import MemBoxStore
+from frost.shm.dynamic_state_sync import SharedDynamicStateSync
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class SharedMemWriter(ThreadBase):
         wr_q: Queue,
         device: torch.device,
         name: str,
+        state_sync: SharedDynamicStateSync | None = None,
     ) -> None:
         super().__init__(name=name, stop_ev=stop_ev)
         self.device = device
@@ -48,6 +50,7 @@ class SharedMemWriter(ThreadBase):
         self.h2d_sem = h2d_sem
         self.wr_q = wr_q
         self.stop_ev = stop_ev
+        self.state_sync = state_sync
         self.writer_stream = cast(
             torch.cuda.Stream, torch.cuda.Stream(device=self.device)
         )
@@ -95,6 +98,9 @@ class SharedMemWriter(ThreadBase):
                     break
 
                 data, batch_idx, entry, ready_event = task
+                state_sync = getattr(self, "state_sync", None)
+                if state_sync is not None:
+                    state_sync.wait_before_write(batch_idx)
                 if isinstance(data, torch.Tensor) and data.numel() > 0:
                     with torch.cuda.stream(self.writer_stream):
                         self.writer_stream.wait_event(ready_event)
@@ -102,6 +108,8 @@ class SharedMemWriter(ThreadBase):
                     self.writer_stream.synchronize()
                 else:
                     self.write_back(data, entry)
+                if state_sync is not None:
+                    state_sync.writer_done(batch_idx=batch_idx, kind="mem")
                 _release_h2d_credit(self.h2d_sem, batch_idx=batch_idx, kind="mem")
             finally:
                 self.wr_q.task_done()
@@ -128,6 +136,7 @@ class BoxMailWriter(ThreadBase):
         device: torch.device,
         name: str,
         fanout: list[int] | None = None,
+        state_sync: SharedDynamicStateSync | None = None,
     ) -> None:
         super().__init__(name=name, stop_ev=stop_ev)
         self.device = device
@@ -136,6 +145,7 @@ class BoxMailWriter(ThreadBase):
         self.wr_q = wr_q
         self.stop_ev = stop_ev
         self.fanout = fanout[0] if fanout and len(fanout) > 0 else 0
+        self.state_sync = state_sync
         self.writer_stream = cast(
             torch.cuda.Stream, torch.cuda.Stream(device=self.device)
         )
@@ -297,6 +307,9 @@ class BoxMailWriter(ThreadBase):
                     break
 
                 data, batch_idx, entry, ready_event = task
+                state_sync = getattr(self, "state_sync", None)
+                if state_sync is not None:
+                    state_sync.wait_before_write(batch_idx)
                 if (
                     isinstance(data, torch.Tensor)
                     and data.numel() > 0
@@ -315,6 +328,8 @@ class BoxMailWriter(ThreadBase):
                         )
                     else:
                         self.write_back(data, entry)
+                if state_sync is not None:
+                    state_sync.writer_done(batch_idx=batch_idx, kind="box")
                 _release_h2d_credit(self.h2d_sem, batch_idx=batch_idx, kind="box")
             finally:
                 self.wr_q.task_done()
