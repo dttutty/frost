@@ -1,0 +1,129 @@
+# Canonical benchmark matrices. The runner translates these values into the
+# corresponding experiment CLI, so matrix changes no longer require Python edits.
+suites:
+  memory_models_2gpu:
+    description: FROST vs TGL memory-model throughput matrix
+    profile: memory_models
+    arguments:
+      gpu_ids: "0,1"
+      models: [tgn, jodie, apan]
+      datasets: [LASTFM, WIKIPEDIA, REDDIT, MOOC]
+      warmup_batches: 5
+      measure_batches: 100
+      omp_threads: 8
+      mkl_threads: 8
+
+  tgn_memdim_2gpu:
+    description: FROST vs TGL LASTFM TGN memory-dimension sweep
+    profile: tgn_memdim
+    arguments:
+      gpu_ids: "0,1"
+      mem_dims: [128, 256, 512, 1024]
+      macro_batch_size: 4000
+      warmup_batches: 5
+      measure_batches: 100
+
+  tgn_nodefeatdim_2gpu:
+    description: FROST vs TGL LASTFM TGN node-feature-dimension sweep
+    profile: tgn_nodefeatdim
+    arguments:
+      gpu_ids: "0,1"
+      node_feat_dims: [128, 256, 512, 1024]
+      macro_batch_size: 4000
+      warmup_batches: 5
+      measure_batches: 100
+
+  tgn_mem_mail_ablation_2gpu:
+    description: FROST LASTFM TGN memory/mailbox ablation
+    profile: tgn_mem_mail_ablation
+    arguments:
+      gpu_ids: "0,1"
+      macro_batch_sizes: [600, 1200, 2000, 4000]
+      warmup_batches: 5
+      measure_batches: 100
+      ablation_cases:
+        - "no_plan_no_delta_post_step_raw:false"
+        - "no_plan_no_delta_post_mem_update_raw:false"
+        - "plan_no_delta_dedup_post_mem_update_raw:false"
+        - "baseline:false"
+        - "baseline:true"
+
+  tgn_worker_queue_2gpu:
+    description: FROST LASTFM TGN worker-queue and memory-dimension sweep
+    profile: tgn_worker_queue
+    arguments:
+      gpu_ids: "0,1"
+      worker_queue_sizes: [1, 2, 4]
+      mem_dims: [128, 256, 512, 1024]
+      macro_batch_size: 4000
+      warmup_batches: 5
+      measure_batches: 100
+
+  tgn_carry_over_route_2gpu:
+    description: FROST TGN route carry-over ablation across datasets
+    profile: tgn_carry_over_route
+    arguments:
+      gpu_ids: "0,1"
+      datasets: [LASTFM, WIKIPEDIA, REDDIT, MOOC]
+      macro_batch_size: 4000
+      warmup_batches: 5
+      measure_batches: 100
+      carry_over_route: [false, true]
+
+  large_tgn_batch_sweep:
+    description: FROST vs TGL TGN batch-size sweep on MAG and GDELT
+    profile: large_tgn
+    arguments:
+      gpu_ids: "0,1"
+      datasets: [MAG, GDELT]
+      batch_sizes: [16000, 32000, 64000]
+      disable_features: false
+      full_epoch: false
+      stable_mode: false
+      warmup_batches: 5
+      measure_batches: 50
+      omp_threads: auto
+      mkl_threads: auto
+
+  large_tgn_epoch:
+    description: One train-only epoch of FROST and TGL TGN on a large dataset
+    profile: large_tgn
+    arguments:
+      gpu_ids: "0,1"
+      datasets: [MAG, GDELT]
+      batch_sizes: [32000]
+      disable_features: false
+      full_epoch: true
+      stable_mode: false
+      warmup_batches: 5
+      measure_batches: 0
+      omp_threads: auto
+      mkl_threads: auto
+
+  large_dygformer_batch_sweep:
+    description: FROST vs DyGLib DyGFormer batch-size sweep on MAG and GDELT
+    profile: large_dygformer
+    arguments:
+      gpu_ids: "0,1"
+      datasets: [MAG, GDELT]
+      batch_sizes: [2000, 4000, 8000]
+      full_epoch: false
+      stable_mode: false
+      warmup_batches: 5
+      measure_batches: 50
+      omp_threads: auto
+      mkl_threads: auto
+
+  large_dygformer_epoch:
+    description: One train-only epoch of FROST and DyGLib DyGFormer on a large dataset
+    profile: large_dygformer
+    arguments:
+      gpu_ids: "0,1"
+      datasets: [MAG, GDELT]
+      batch_sizes: [4000]
+      full_epoch: true
+      stable_mode: false
+      warmup_batches: 5
+      measure_batches: 0
+      omp_threads: auto
+      mkl_threads: auto

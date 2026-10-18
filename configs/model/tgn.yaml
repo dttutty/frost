@@ -1,0 +1,28 @@
+_target_: frost.models.recipes.TGNRecipe
+embedding_dim: 128
+neighborhood:
+  fanout: [10]
+encoder:
+  _target_: frost.models.encoder.tgn.TGN
+  ndim: ${ndim}
+  edim: ${edim}
+  d_mem: ${model.embedding_dim}
+  d_time: ${d_time}
+  d_hid: ${model.embedding_dim}
+  heads: 2
+  dropout: ${dropout}
+  # Auto keeps the low-overhead dense kernel for small batches and packs large
+  # padded layouts once the theoretical K/V projection work is large enough.
+  attention_layout: auto
+  auto_pack_min_projected_elements: 50000000
+state:
+  boxsize: 1
+  mail_combine: last
+  updater:
+    _target_: frost.models.mem_updater.MemoryUpdater
+    d_time: ${d_time}
+    cell: gru
+    d_mem: ${model.embedding_dim}
+head:
+  _target_: frost.models.header.AdditiveLinkHead
+  d_in: ${model.embedding_dim}

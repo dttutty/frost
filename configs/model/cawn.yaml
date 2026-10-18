@@ -1,0 +1,19 @@
+_target_: frost.models.recipes.CAWNRecipe
+embedding_dim: 172
+neighborhood:
+  fanout: [20, 20]
+encoder:
+  _target_: frost.models.encoder.cawn.CAWN
+  ndim: ${ndim}
+  edim: ${edim}
+  d_time: ${d_time}
+  d_out: ${model.embedding_dim}
+  position_feat_dim: 50
+  walk_length: 2
+  num_walk_heads: 8
+  n_neg: ${n_neg}
+  dropout: ${dropout}
+state: null
+head:
+  _target_: frost.models.header.ConcatLinkHead
+  d_in: ${model.embedding_dim}

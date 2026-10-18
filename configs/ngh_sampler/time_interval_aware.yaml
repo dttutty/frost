@@ -1,0 +1,3 @@
+strategy: time_interval_aware
+tgl_sampler_parity: false
+time_scaling_factor: 1.0e-6

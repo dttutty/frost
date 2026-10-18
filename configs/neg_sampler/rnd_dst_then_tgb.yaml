@@ -1,0 +1,14 @@
+# TGB uses one random destination per training edge and a fixed official
+# candidate set per validation/test query. Override eval.n_neg per dataset:
+#   tgbl-review: 100
+#   tgbl-coin, tgbl-comment, tgbl-flight: 20
+# Official tgbl-wiki candidate sets are variable-width; use
+# rnd_dst_then_tgb_wiki for its padded fixed-capacity runtime layout.
+seed: ${seed}
+train:
+  _target_: frost.neg_sampler.RandomNegLinkSampler
+  n_neg: 1
+  candidate_mode: dst_partition
+eval:
+  _target_: frost.neg_sampler.TGBEvalNegSampler
+  n_neg: 20

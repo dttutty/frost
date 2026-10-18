@@ -1,0 +1,102 @@
+# FROST-side settings corresponding to DyGLib's link-prediction best configs.
+# Source snapshot audited against third_party/DyGLib commit
+# fe4cce97ce05f39c52836cadc4b0837ebaec9971. Dataset keys use FROST's
+# canonical spelling; update the commit and this file together.
+models:
+  tgat:
+    defaults:
+      num_neighbors: 20
+      num_layers: 2
+      num_heads: 2
+      time_feat_dim: 100
+      dropout: 0.1
+      sample_neighbor_strategy: recent
+    datasets:
+      ENRON: {dropout: 0.2}
+      CANPARL: {dropout: 0.2, sample_neighbor_strategy: uniform}
+      UNVOTE: {dropout: 0.2}
+      REDDIT: {sample_neighbor_strategy: uniform}
+      UNTRADE: {sample_neighbor_strategy: uniform}
+
+  cawn:
+    defaults:
+      num_neighbors: 32
+      walk_length: 1
+      position_feat_dim: 172
+      num_walk_heads: 8
+      time_feat_dim: 100
+      time_scaling_factor: 1.0e-6
+      dropout: 0.1
+      sample_neighbor_strategy: time_interval_aware
+    datasets:
+      MOOC: {num_neighbors: 64}
+      SOCIALEVO: {num_neighbors: 64}
+      UCI: {num_neighbors: 64}
+      FLIGHTS: {num_neighbors: 64}
+      UNTRADE: {num_neighbors: 64}
+      UNVOTE: {num_neighbors: 64}
+      CONTACTS: {num_neighbors: 64}
+      LASTFM: {num_neighbors: 128}
+      CANPARL: {num_neighbors: 128, dropout: 0.0}
+
+  tcl:
+    defaults:
+      num_neighbors: 20
+      num_layers: 2
+      num_heads: 2
+      model_dim: 172
+      time_feat_dim: 100
+      dropout: 0.1
+      sample_neighbor_strategy: recent
+    datasets:
+      SOCIALEVO: {dropout: 0.0}
+      UCI: {dropout: 0.0}
+      UNTRADE: {dropout: 0.0, sample_neighbor_strategy: uniform}
+      UNVOTE: {dropout: 0.0, sample_neighbor_strategy: uniform}
+      CONTACTS: {dropout: 0.0}
+      CANPARL: {dropout: 0.2, sample_neighbor_strategy: uniform}
+      USLEGIS: {dropout: 0.3, sample_neighbor_strategy: uniform}
+      REDDIT: {sample_neighbor_strategy: uniform}
+
+  graph_mixer:
+    defaults:
+      num_neighbors: 20
+      num_layers: 2
+      time_gap: 2000
+      time_feat_dim: 100
+      dropout: 0.1
+      sample_neighbor_strategy: recent
+    datasets:
+      WIKIPEDIA: {num_neighbors: 30, dropout: 0.5}
+      REDDIT: {num_neighbors: 10, dropout: 0.5}
+      LASTFM: {num_neighbors: 10, dropout: 0.0}
+      ENRON: {dropout: 0.5}
+      MOOC: {dropout: 0.4}
+      UCI: {dropout: 0.4}
+      USLEGIS: {dropout: 0.4}
+      UNVOTE: {dropout: 0.0, sample_neighbor_strategy: uniform}
+      SOCIALEVO: {dropout: 0.3}
+      FLIGHTS: {dropout: 0.2}
+      CANPARL: {dropout: 0.2, sample_neighbor_strategy: uniform}
+      UNTRADE: {sample_neighbor_strategy: uniform}
+
+  dygformer:
+    defaults:
+      max_input_sequence_length: 32
+      patch_size: 1
+      channel_embedding_dim: 50
+      num_layers: 2
+      num_heads: 2
+      time_feat_dim: 100
+      dropout: 0.1
+    datasets:
+      REDDIT: {max_input_sequence_length: 64, patch_size: 2, dropout: 0.2}
+      MOOC: {max_input_sequence_length: 256, patch_size: 8}
+      ENRON: {max_input_sequence_length: 256, patch_size: 8, dropout: 0.0}
+      FLIGHTS: {max_input_sequence_length: 256, patch_size: 8}
+      USLEGIS: {max_input_sequence_length: 256, patch_size: 8, dropout: 0.0}
+      UNTRADE: {max_input_sequence_length: 256, patch_size: 8, dropout: 0.0}
+      LASTFM: {max_input_sequence_length: 512, patch_size: 16}
+      CANPARL: {max_input_sequence_length: 2048, patch_size: 64}
+      UNVOTE: {max_input_sequence_length: 128, patch_size: 4, dropout: 0.2}
+      CONTACTS: {dropout: 0.0}

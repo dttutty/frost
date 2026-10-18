@@ -1,0 +1,20 @@
+_target_: frost.models.recipes.APANRecipe
+embedding_dim: 128
+neighborhood:
+  fanout: [10]
+encoder:
+  _target_: frost.models.encoder.apan.APAN
+  d_mem: ${model.embedding_dim}
+state:
+  boxsize: 10
+  mail_combine: last
+  updater:
+    _target_: frost.models.mem_updater.TransformerMemoryUpdater
+    d_time: ${d_time}
+    d_mem: ${model.embedding_dim}
+    boxsize: ${model.state.boxsize}
+    heads: 2
+    dropout: ${dropout}
+head:
+  _target_: frost.models.header.AdditiveLinkHead
+  d_in: ${model.embedding_dim}

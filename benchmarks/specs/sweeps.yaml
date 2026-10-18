@@ -1,0 +1,16 @@
+sweeps:
+  memory_seeds:
+    description: Five-seed sweep for the memory-based FROST presets
+    models: [tgn, jodie, apan]
+    datasets: [LASTFM]
+    seeds: [0, 1, 2, 3, 4]
+    epoch: 100
+    stable_mode: true
+
+  dyglib_grid:
+    description: DyGLib-aligned model and dataset grid
+    models: [cawn, tcl, dygformer, graph_mixer, tgat]
+    datasets: [LASTFM, MOOC, REDDIT, WIKIPEDIA]
+    seeds: [0, 1, 2, 3, 4]
+    epoch: 100
+    stable_mode: false

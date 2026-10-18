@@ -1,0 +1,23 @@
+_target_: frost.models.recipes.GraphMixerRecipe
+embedding_dim: 172
+neighborhood:
+  fanout: [2000]
+encoder:
+  _target_: frost.models.encoder.graph_mixer.GraphMixer
+  ndim: ${ndim}
+  edim: ${edim}
+  d_time: ${d_time}
+  d_out: ${model.embedding_dim}
+  num_tokens: 20
+  num_channels: ${model.embedding_dim}
+  num_layers: 2
+  token_dim_expansion_factor: 0.5
+  channel_dim_expansion_factor: 4.0
+  dropout: ${dropout}
+  freeze_time_encoder: true
+  align_dyglib_zero_features: false
+  dyglib_feature_dim: null
+state: null
+head:
+  _target_: frost.models.header.ConcatLinkHead
+  d_in: ${model.embedding_dim}

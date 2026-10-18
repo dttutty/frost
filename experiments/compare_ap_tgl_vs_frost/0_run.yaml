@@ -1,0 +1,46 @@
+experiments:
+  - name: TGN
+    dataset:
+      - CANPARL
+      - CONTACTS
+      - ENRON
+      - FLIGHTS
+      - LASTFM
+      - MOOC
+      - REDDIT
+      - SOCIALEVO
+      - UCI
+      - UNTRADE
+      - UNVOTE
+      - USLEGIS
+      - WIKIPEDIA
+    overrides:
+      - model=tgn
+      - compile=false
+      - compute.tf32=false
+      - tqdm=false
+
+mem_dims:
+  - 128
+  # - 256
+  # - 512
+
+seeds:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+
+
+
+
+nproc_per_node: 3
+target_epoch: 100
+batch_sizes:
+  - 2000

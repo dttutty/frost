@@ -1,0 +1,9 @@
+n_neg: ${n_neg}
+seed: ${seed}
+train:
+  _target_: frost.neg_sampler.RandomNegLinkSampler
+  candidate_mode: dst_partition
+eval:
+  _target_: frost.neg_sampler.PrecomputedNegSampler
+  neg_file: neg_pre_sampling_1_all_nodes_seed0.csv
+  candidate_mode: all

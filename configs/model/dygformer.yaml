@@ -1,0 +1,25 @@
+_target_: frost.models.recipes.DyGFormerRecipe
+embedding_dim: 172
+neighborhood:
+  fanout: [32]
+encoder:
+  _target_: frost.models.encoder.dygformer.DyGFormer
+  ndim: ${ndim}
+  edim: ${edim}
+  d_time: ${d_time}
+  d_out: ${model.embedding_dim}
+  channel_embedding_dim: 32
+  enable_dummy_node_features: false
+  dummy_node_dim: null
+  enable_dummy_edge_features: true
+  dummy_edge_dim: null
+  patch_size: 1
+  transformer_layers: 2
+  num_heads: 2
+  dropout: ${dropout}
+  max_input_sequence_length: 32
+  n_neg: ${n_neg}
+state: null
+head:
+  _target_: frost.models.header.AdditiveLinkHead
+  d_in: ${model.embedding_dim}

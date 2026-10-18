@@ -1,0 +1,58 @@
+defaults:
+  - model: tgn
+  # rnd_dst_then_fixed | rnd_dst_then_random | rnd_dst_then_hist |
+  # rnd_dst_then_post_train | rnd_dst_then_tgb | rnd_dst_then_tgb_wiki
+  - neg_sampler: rnd_dst_then_random
+  - ngh_sampler: recent
+  - _self_
+
+epoch: 100
+macro_batch_size: 4000 # total batch size across all GPUs
+eval_macro_batch_size: null # defaults to macro_batch_size; reduce for TGB one-vs-many evaluation
+patience: 100
+early_stop_tolerance: 0.0
+dropout: 0.2
+seed: 42
+d_time: 128
+dataset: "LASTFM"
+# auto enforces TGL's official topology for its datasets: GDELT/MAG are
+# directed; WIKI/REDDIT/MOOC/LASTFM include reverse adjacencies.
+graph_direction: auto # auto | directed | bidirectional
+optimizer: "adam"
+lr: 0.0001
+n_neg: 1
+eval_metric: "ap" # ap | mrr; AP remains the default
+ring_buf_size: 64
+if_carry_over_route: false
+ignore_nfeat_on_disk: false
+ignore_efeat_on_disk: false
+no_memory_queue_size: 4
+compile: false
+compile_mode: null
+compute:
+  tf32: false
+  amp: false
+tqdm: true
+stable_mode: false
+# In auto mode, keep the host sampler on the full CPU cpuset. Static-feature
+# workloads bind each worker and its graph/feature staging memory to that GPU's
+# NUMA node; same-node featureless workloads keep broad worker CPU and
+# first-touch storage placement. GPUs spanning NUMA nodes are always localized.
+# Use "off" to disable placement or a node ID to bind every local rank there.
+numa_policy: auto # auto | off | NUMA node ID
+# auto assigns each worker at most 32 threads from its GPU-local physical-core
+# budget; the host is resolved separately. Use "inherit" to leave OMP/MKL
+# untouched, or a positive integer for a fixed default. Explicit environment
+# values always win.
+cpu_threads: auto # auto | inherit | positive integer
+reset_eval_neg_sampler_each_epoch: false
+share_neg_sampler_across_splits: false
+normalize_event_time: false
+persist_all_updates_to_cpu: false
+dynamic_state_ablation: baseline
+runtime:
+  # Keep static features plus memory/mailbox on the sole worker GPU. This is a
+  # separate internal backend selected through the normal frost-train entry.
+  single_gpu_resident: "off" # off | auto | on
+  # Leave the rest of device memory available for model weights and activations.
+  single_gpu_resident_memory_fraction: 0.7

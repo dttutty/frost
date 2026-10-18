@@ -1,0 +1,10 @@
+n_neg: ${n_neg}
+seed: ${seed}
+train:
+  _target_: frost.neg_sampler.RandomNegLinkSampler
+  candidate_mode: all
+  n_neg: 1
+eval:
+  _target_: frost.neg_sampler.RandomNegLinkSampler
+  candidate_mode: all
+  n_neg: 1

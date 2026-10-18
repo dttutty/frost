@@ -1,0 +1,139 @@
+presets:
+  tgn:
+    description: 1-hop TGN with the single-run memory sweep defaults
+    master_port: 29805
+    family: memory
+    overrides:
+      - dataset=LASTFM
+      - model=tgn
+      - stable_mode=true
+      - lr=0.0001
+      - d_time=128
+      - dropout=0.2
+      - ngh_sampler.tgl_sampler_parity=true
+      - neg_sampler=rnd_dst_then_random
+      - neg_sampler.train.candidate_mode=all
+
+  jodie:
+    description: 0-hop JODIE with the single-run memory sweep defaults
+    master_port: 29505
+    family: memory
+    overrides:
+      - dataset=LASTFM
+      - model=jodie
+      - stable_mode=true
+      - lr=0.0001
+      - d_time=128
+      - dropout=0.1
+      - neg_sampler=rnd_dst_then_random
+      - neg_sampler.train.candidate_mode=all
+      - neg_sampler.seed=null
+      - normalize_event_time=false
+      - persist_all_updates_to_cpu=true
+
+  apan:
+    description: 1-hop APAN with the single-run memory sweep defaults
+    master_port: 29505
+    family: memory
+    overrides:
+      - dataset=LASTFM
+      - model=apan
+      - stable_mode=true
+      - lr=0.0001
+      - d_time=128
+      - dropout=0.1
+      - neg_sampler=rnd_dst_then_random
+      - neg_sampler.train.candidate_mode=all
+      - neg_sampler.seed=null
+
+  tgat:
+    description: 2-hop TGAT with DyGLib-style non-memory parity defaults
+    master_port: 29505
+    family: dyglib
+    overrides:
+      - dataset=LASTFM
+      - model=tgat
+      - neg_sampler=rnd_dst_then_random
+      - neg_sampler.train.candidate_mode=all
+      - neg_sampler.seed=0
+      - patience=20
+
+  graph_mixer:
+    description: GraphMixer with DyGLib best-config hyperparameters
+    master_port: 29505
+    family: dyglib
+    overrides:
+      - dataset=LASTFM
+      - model=graph_mixer
+      - neg_sampler=rnd_dst_then_random
+      - neg_sampler.train.candidate_mode=all
+      - neg_sampler.seed=0
+      - model.encoder.num_tokens=10
+      - d_time=100
+      - dropout=0.0
+      - patience=20
+
+  tcl:
+    description: 1-hop TCL with DyGLib best-config hyperparameters
+    master_port: 29505
+    family: dyglib
+    overrides:
+      - dataset=LASTFM
+      - model=tcl
+      - neg_sampler=rnd_dst_then_random
+      - neg_sampler.train.candidate_mode=all
+      - neg_sampler.seed=0
+      - d_time=100
+      - dropout=0.1
+      - patience=20
+
+  dygformer:
+    description: DyGFormer with DyGLib best-config hyperparameters
+    master_port: 29505
+    family: dyglib
+    overrides:
+      - dataset=LASTFM
+      - model=dygformer
+      - model.encoder.enable_dummy_edge_features=false
+      - neg_sampler=rnd_dst_then_random
+      - neg_sampler.train.candidate_mode=all
+      - neg_sampler.seed=0
+      - model.neighborhood.fanout=[511]
+      - model.encoder.max_input_sequence_length=512
+      - model.encoder.patch_size=16
+      - model.encoder.channel_embedding_dim=50
+      - model.embedding_dim=172
+      - d_time=100
+      - dropout=0.1
+      - patience=20
+
+  cawn:
+    description: CAWN with DyGLib-style transductive parity defaults
+    master_port: 29505
+    family: dyglib
+    overrides:
+      - dataset=LASTFM
+      - model=cawn
+      - neg_sampler=rnd_dst_then_random
+      - neg_sampler.train.candidate_mode=all
+      - neg_sampler.seed=0
+      - ngh_sampler=time_interval_aware
+
+  tpnet:
+    description: External TPNet trainer with synchronized random-projection state
+    master_port: 29525
+    family: tpnet
+    overrides: []
+
+dataset_defaults:
+  stateless:
+    default: 600
+  memory:
+    default: 600
+    datasets:
+      WIKIPEDIA: 600
+      MOOC: 1200
+      LASTFM: 4000
+      REDDIT: 2000
+    model_divisors:
+      jodie: 5

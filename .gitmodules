@@ -1,0 +1,64 @@
+[submodule "third_party/tgl"]
+	path = third_party/tgl
+	url = https://github.com/dttutty/tgl.git
+	branch = main
+
+[submodule "third_party/DyGLib"]
+	path = third_party/DyGLib
+	url = https://github.com/dttutty/DyGLib.git
+	branch = main
+
+[submodule "third_party/PipeTGL"]
+	path = third_party/PipeTGL
+	url = https://github.com/dttutty/PipeTGL.git
+	branch = main
+
+[submodule "third_party_papers/tgl_paper"]
+	path = third_party_papers/tgl_paper
+	url = https://github.com/dttutty/tgl_paper.git
+
+[submodule "third_party_papers/mspipe_paper"]
+	path = third_party_papers/mspipe_paper
+	url = https://github.com/dttutty/mspipe_paper.git
+
+[submodule "third_party/MSPipe"]
+	path = third_party/MSPipe
+	url = https://github.com/dttutty/MSPipe.git
+	
+[submodule "third_party_papers/TAMI_paper"]
+	path = third_party_papers/TAMI_paper
+	url = https://github.com/dttutty/TAMI_paper.git
+[submodule "third_party_papers/dyglib_paper"]
+	path = third_party_papers/dyglib_paper
+	url = https://github.com/dttutty/dyglib_paper.git
+[submodule "third_party/tgn"]
+	path = third_party/tgn
+	url = https://github.com/dttutty/tgn.git
+[submodule "third_party/DGB"]
+	path = third_party/DGB
+	url = https://github.com/dttutty/DGB.git
+
+[submodule "third_party/TGB"]
+	path = third_party/TGB
+	url = https://github.com/dttutty/TGB.git
+[submodule "third_party/jodie"]
+	path = third_party/jodie
+	url = https://github.com/dttutty/jodie.git
+[submodule "third_party/APAN"]
+	path = third_party/APAN
+	url = https://github.com/dttutty/APAN.git
+[submodule "third_party/LDG"]
+	path = third_party/LDG
+	url = https://github.com/dttutty/LDG.git
+[submodule "third_party_papers/DistTGL_paper"]
+	path = third_party_papers/DistTGL_paper
+	url = https://github.com/dttutty/DistTGL_paper.git
+[submodule "third_party/TPNet"]
+	path = third_party/TPNet
+	url = https://github.com/dttutty/TPNet.git
+[submodule "third_party_papers/TPNet_paper"]
+	path = third_party_papers/TPNet_paper
+	url = https://github.com/dttutty/TPNet_paper.git
+[submodule "third_party/TGB_TPNet"]
+	path = third_party/TGB_TPNet
+	url = https://github.com/dttutty/TGB_TPNet.git
