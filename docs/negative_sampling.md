@@ -24,6 +24,7 @@ layout, encoders, predictors, and analyzers—not just another sampler class.
 
 | Config | Training | Evaluation | Interpretation |
 | --- | --- | --- | --- |
+| `rnd_dst_then_random` (default) | Uniform random destination from all node IDs in `[0, num_nodes)` | Runtime random sampling from the same full node range | Sampling with replacement; no positive-destination collision filtering |
 | `rnd_dst_then_fixed` | Random destination from the observed destination partition | Fixed `eid,neg_dst` artifact | Reproducible fixed random destination corruption; currently `n_neg=1` |
 | `rnd_dst_then_hist` | Random destination from the observed destination partition | Prefer destinations previously connected to the current source, strictly before the batch; exclude that source's current positive destinations; otherwise fall back to the observed destination partition | Per-source historical destination corruption |
 | `rnd_dst_then_post_train` | Random destination from the observed destination partition | Prefer destinations connected to the current source after the training cutoff and strictly before the batch; exclude current positives; otherwise fall back to the observed destination partition | Per-source post-training destination corruption |

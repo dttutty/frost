@@ -2,7 +2,7 @@ defaults:
   - model: tgn
   # rnd_dst_then_fixed | rnd_dst_then_random | rnd_dst_then_hist |
   # rnd_dst_then_post_train | rnd_dst_then_tgb | rnd_dst_then_tgb_wiki
-  - neg_sampler: rnd_dst_then_fixed
+  - neg_sampler: rnd_dst_then_random
   - ngh_sampler: recent
   - _self_
 

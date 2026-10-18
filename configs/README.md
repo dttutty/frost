@@ -48,7 +48,7 @@ FROST uses Hydra config groups to compose datasets, models, memory components, a
 | Group | Role | Common Choices | User-Facing? |
 | --- | --- | --- | --- |
 | `model` | Complete model recipe and semantic contract | `tgn`, `jodie`, `apan`, `tgat`, `dygformer`, `graph_mixer`, `tcl`, `cawn` | Yes |
-| `neg_sampler` | Negative destination sampling | `rnd_dst_then_fixed`, `rnd_dst_then_hist`, `rnd_dst_then_post_train`, `rnd_dst_then_tgb`, `rnd_dst_then_tgb_wiki` | Yes |
+| `neg_sampler` | Negative destination sampling | `rnd_dst_then_random` (default), `rnd_dst_then_fixed`, `rnd_dst_then_hist`, `rnd_dst_then_post_train`, `rnd_dst_then_tgb`, `rnd_dst_then_tgb_wiki` | Yes |
 | `ngh_sampler` | Runtime neighborhood-sampling implementation | `recent`, `uniform`, `time_interval_aware` | Yes |
 
 Storage and transport dtypes are fixed runtime invariants: IDs and timestamps
@@ -75,7 +75,7 @@ The canonical definitions and cross-framework comparison rules live in
 - `neg_sampler=rnd_dst_then_tgb` uses one random training negative and official TGB validation/test pickle files. Run with `eval_metric=mrr`; set `neg_sampler.eval.n_neg=100` for `tgbl-review`, or `20` for `tgbl-coin`, `tgbl-comment`, and `tgbl-flight`.
 - The runtime keeps a fixed negative capacity. Generic `neg_sampler=rnd_dst_then_tgb` requires every query to have exactly that width. `neg_sampler=rnd_dst_then_tgb_wiki` uses capacity 999 and masks the four official wiki-v2 queries that contain 998 negatives; it does not introduce ragged tensors or random replacements.
 - AP mode remains the default and currently requires one evaluation negative per positive edge. MRR is opt-in and uses TGB's optimistic/pessimistic average tie rank for checkpoint selection, logging, and early stopping.
-- `neg_sampler=rnd_dst_then_random` provides seeded destination-partition random negatives for both training and evaluation; override `neg_sampler.eval.n_neg` for matched one-vs-many MRR comparisons.
+- `neg_sampler=rnd_dst_then_random` samples uniformly from the full node range `[0, num_nodes)` at runtime for training, validation, and testing. Evaluation draws fresh samples as its RNG advances; override `neg_sampler.eval.n_neg` for matched one-vs-many MRR comparisons.
 - `model=<name>` selects the encoder, optional state updater, link head, and a semantic contract. The launcher compiles that contract into sampling, layout, feature-access, and dynamic-state plans.
 - `model.embedding_dim` is the single embedding/memory/head width. Recipe interpolation maps it to each concrete constructor.
 - `model.neighborhood.fanout` is the single fanout source for every model, including APAN. An empty list selects 0-hop, a one-element list selects 1-hop, and a longer list selects multi-hop.

@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import pandas as pd
+import torch
 from hydra import compose, initialize_config_dir
 from hydra.errors import ConfigCompositionException
 from omegaconf import open_dict
@@ -10,9 +12,37 @@ from omegaconf import open_dict
 from frost.launch.factory import build_worker_modules
 from frost.launch.plan import compile_execution_plan
 from frost.models.recipes import RECIPE_TYPES, instantiate_model_recipe
+from frost.launcher import _instantiate_negative_samplers
 
 
 CONFIG_DIR = str((Path(__file__).parents[1] / "configs").resolve())
+
+
+@pytest.mark.parametrize("preset", [None, *sorted(RECIPE_TYPES)])
+def test_default_negative_sampling_needs_no_artifact_and_draws_all_nodes(preset) -> None:
+    overrides = [] if preset is None else [f"model={preset}"]
+    with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
+        cfg = compose(config_name="config", overrides=overrides)
+    frame = pd.DataFrame({"src": [0] * 128, "dst": [7] * 128})
+    train, evaluation = _instantiate_negative_samplers(
+        sampler_cfg=cfg.neg_sampler,
+        dataframe=frame,
+        n_nodes=8,
+        dataset="MISSING_DATASET",
+        train_n_neg=1,
+        eval_n_neg=1,
+        train_only=False,
+    )
+
+    for sampler in (train, evaluation):
+        assert torch.equal(sampler.candidates, torch.arange(8))
+        src = torch.zeros(128, dtype=torch.long)
+        eid = torch.arange(1, 129)
+        first = sampler.sample(src, eid)
+        second = sampler.sample(src, eid)
+        assert first.shape == (128,)
+        assert bool(((first >= 0) & (first < 8)).all())
+        assert not torch.equal(first, second)
 
 
 @pytest.mark.parametrize("name", sorted(RECIPE_TYPES))
