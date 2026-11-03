@@ -92,23 +92,7 @@ tmp/
 # Generated experiment artifacts
 seed_sweeps/**
 seed_sweeps_old/**
-experiments/**/latest_*
-experiments/**/latest
-experiments/**/launcher.meta
-experiments/**/configs/
-experiments/**/logs/
-experiments/**/progress*.md
-experiments/**/report*.md
-experiments/**/combined_summary.md
-experiments/**/*.pdf
-experiments/**/*.png
-experiments/**/*.svg
-experiments/**/*.csv
-experiments/**/*.tsv
-experiments/**/*.txt
-experiments/**/*.json
-experiments/**/*.pid
-experiments/**/*.stdout
+/experiments/
 
 download_data.sh
 *.txt
