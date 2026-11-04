@@ -6,6 +6,13 @@ defaults:
   - ngh_sampler: recent
   - _self_
 
+hydra:
+  run:
+    dir: ${oc.env:FROST_ARTIFACT_ROOT,artifacts}/runs/accuracy/training/${hydra:runtime.choices.model}/${dataset}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${oc.env:FROST_ARTIFACT_ROOT,artifacts}/runs/accuracy/training/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+
 epoch: 100
 macro_batch_size: 4000 # total batch size across all GPUs
 eval_macro_batch_size: null # defaults to macro_batch_size; reduce for TGB one-vs-many evaluation
