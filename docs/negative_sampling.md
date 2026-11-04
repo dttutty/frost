@@ -36,7 +36,7 @@ when `n_neg > 1`.
 
 ## Historical difference from upstream DyGLib
 
-The reviewed upstream DyGLib implementation gave `historical` and `inductive`
+The original DyGLib snapshot (`3aacc36b`) gave `historical` and `inductive`
 different semantics:
 
 - **Historical:** form the global set of historical `(src, dst)` edges, remove
@@ -60,12 +60,6 @@ sample sequence can still differ because DyGLib and FROST use different RNG
 implementations.
 
 The relevant implementations are:
-
-- FROST: [`historical.py`](../src/frost/neg_sampler/historical.py),
-  [`inductive.py`](../src/frost/neg_sampler/inductive.py), and
-  [`random.py`](../src/frost/neg_sampler/random.py)
-The FROST-aligned comparison protocol uses the fixed evaluation artifact and
-global AP.
 
 ## Reporting and comparison
 

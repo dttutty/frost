@@ -1,0 +1,77 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "FROST Debug",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "frost_bench.cli.train",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "0,1",
+        "HYDRA_FULL_ERROR": "1",
+        "CUDA_LAUNCH_BLOCKING": "1"
+      },
+      "args": [
+        "${input:frostModelPreset}",
+        "dataset=${input:frostDataset}",
+        "tqdm=true",
+        "compile=false",
+        "macro_batch_size=20"
+      ]
+    },
+    {
+      "name": "FROST Bench",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "frost_bench.cli.train",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "0,1",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1"
+      },
+      "args": [
+        "${input:frostModelPreset}",
+        "dataset=${input:frostDataset}"
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "frostModelPreset",
+      "type": "pickString",
+      "description": "Choose the training preset",
+      "default": "tgn",
+      "options": [
+        "tgn",
+        "apan",
+        "jodie",
+        "tgat",
+        "graph_mixer",
+        "tcl",
+        "dygformer"
+      ]
+    },
+    {
+      "id": "frostDataset",
+      "type": "pickString",
+      "description": "Choose the dataset",
+      "default": "LASTFM",
+      "options": [
+        "LASTFM",
+        "MOOC",
+        "REDDIT",
+        "WIKI",
+        "GDELT",
+        "MAG"
+      ]
+    }
+  ]
+}

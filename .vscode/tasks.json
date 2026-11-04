@@ -1,0 +1,95 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "watch latest rank 0",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "${workspaceFolder}/scripts/tail_rank_log.py",
+        "0",
+        "--newer-than-start"
+      ],
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "frost-ranks"
+      },
+      "problemMatcher": {
+        "owner": "frost-rank-0",
+        "pattern": {
+          "regexp": "^(?!)$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^READY rank watchers started: 0$",
+          "endsPattern": "^READY rank watchers started: 0$"
+        }
+      }
+    },
+    {
+      "label": "watch latest rank 1",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "${workspaceFolder}/scripts/tail_rank_log.py",
+        "1",
+        "--newer-than-start"
+      ],
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "frost-ranks"
+      },
+      "problemMatcher": {
+        "owner": "frost-rank-1",
+        "pattern": {
+          "regexp": "^(?!)$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^READY rank watchers started: 1$",
+          "endsPattern": "^READY rank watchers started: 1$"
+        }
+      }
+    },
+    {
+      "label": "watch latest rank 2",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "${workspaceFolder}/scripts/tail_rank_log.py",
+        "2",
+        "--newer-than-start"
+      ],
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "frost-ranks"
+      },
+      "problemMatcher": {
+        "owner": "frost-rank-2",
+        "pattern": {
+          "regexp": "^(?!)$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^READY rank watchers started: 2$",
+          "endsPattern": "^READY rank watchers started: 2$"
+        }
+      }
+    },
+    {
+      "label": "watch latest ranks logs",
+      "dependsOn": [
+        "watch latest rank 0",
+        "watch latest rank 1",
+        "watch latest rank 2"
+      ],
+      "dependsOrder": "parallel"
+    }
+  ]
+}
