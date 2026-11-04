@@ -1,9 +1,5 @@
 # FROST
 
-FROST is a distributed temporal graph neural network training system with exact
-memory semantics. A dedicated host rank performs sampling and access planning;
-GPU worker ranks train the model with PyTorch Distributed.
-
 This repository contains the FROST implementation, tests, experiment
 specifications, public-data preparation tools, and reproducible training and
 benchmark workflows.
