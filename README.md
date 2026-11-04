@@ -1,8 +1,5 @@
 # FROST
 
-The runtime does not depend on DGL, PyG, `pytorch_scatter`, or
-`pytorch_sparse`.
-
 ## Quick start
 
 ```bash
