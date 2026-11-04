@@ -42,15 +42,6 @@ OUTPUT_FILENAMES = {
     "status.json",
     "summary.json",
 }
-# Published reference papers are source material, not generated experiment output.
-REFERENCE_PAPERS = {
-    Path("third_party_papers/DyREP.pdf"),
-    Path("third_party_papers/PipeTGL.pdf"),
-    Path(
-        "third_party_papers/"
-        "Redundancy-Free_and_Load-Balanced_TGNN_Training_With_Hierarchical_Pipeline_Parallelism (4).pdf"
-    ),
-}
 TEXT_SUFFIXES = {
     ".cpp",
     ".h",
@@ -97,8 +88,6 @@ def tracked_paths() -> list[Path]:
 
 
 def generated_output_reason(path: Path) -> str | None:
-    if path in REFERENCE_PAPERS:
-        return None
     lowered_parts = {part.lower() for part in path.parts}
     if lowered_parts & OUTPUT_DIRECTORIES:
         return "generated-output directory"
