@@ -46,45 +46,28 @@ memory; `on` reports an error instead of silently falling back.
 
 ## Datasets
 
-The datasets used by the maintained examples can be reconstructed from the
-public DGB Zenodo release, while TGB datasets are fetched from the official TGB
-object store.
-
-For a verified LASTFM example, including archive checksum, extraction,
-conversion, validation, and training commands, follow
-[Dataset setup](docs/artifact_evaluation.md#dataset-setup). The same guide lists
-the official archives used for WIKIPEDIA, MOOC, and REDDIT.
-
-Download the complete official TGB link-prediction catalog with `aria2c`:
+Download the prepared datasets from
+[`dttutty/frost_dataset`](https://huggingface.co/datasets/dttutty/frost_dataset).
+Set the download directory to the same `FROST_DATA_ROOT` configured in `.env.local`:
 
 ```bash
-uv run frost-data fetch-tgb --list
-uv run frost-data fetch-tgb --all
+export FROST_DATA_ROOT=/absolute/path/to/frost_dataset
+uvx --from huggingface_hub hf download dttutty/frost_dataset \
+  --repo-type dataset --local-dir "$FROST_DATA_ROOT"
 ```
 
-The pinned catalog contains `tgbl-wiki-v2`, `tgbl-review-v2`, `tgbl-coin`,
-`tgbl-comment`, and `tgbl-flight`. Downloads resume and verified, complete
-datasets are skipped. `--download-only` retains archives without extracting.
+To download only LASTFM, add `--include "LASTFM/*"`. The bundle contains the
+prepared edge tables and graph caches; no raw-data conversion is needed.
+Dataset contents and any dataset-specific extra downloads are documented in
+the [dataset repository](https://huggingface.co/datasets/dttutty/frost_dataset).
 
-FROST currently runs `TGBL_WIKI` directly from the official CSV files. Its edge
-frame, temporal CSR, and padded edge features are created in memory; the
-official dataset provides no node features. No exported `TGBL_WIKI/` artifact
-directory is needed. The other four datasets are downloadable but still need
-runtime adapters.
+The default `neg_sampler=rnd_dst_then_random` samples from all nodes at runtime
+for training, validation, and testing. It does not use the bundle's fixed
+negative-sample files. See [negative-sampling protocols](docs/negative_sampling.md)
+for explicit alternatives.
 
-`frost-data` also builds and validates the common artifact format:
-
-```bash
-uv run frost-data build-graph "$FROST_DATA_ROOT/LASTFM/edges.csv" \
-  --bidirectional --output artifacts/data/LASTFM/full_graph_with_reverse_edges.npz
-uv run frost-data validate "$FROST_DATA_ROOT/LASTFM"
-uv run frost-data catalog "$FROST_DATA_ROOT"
-```
-
-Generated files are not overwritten without `--force`. Run
-`uv run frost-data --help` for graph, split, negative-sampling, DGB
-import, and catalog commands. Negative-sampling semantics are documented in
-[docs/negative_sampling.md](docs/negative_sampling.md).
+Official TGB benchmarks use separate downloads under `TGB_DATA_ROOT/raw/`;
+see [dataset setup](docs/artifact_evaluation.md#dataset-setup).
 
 ## Documentation
 
