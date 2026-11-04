@@ -45,8 +45,8 @@ uvx --from huggingface_hub hf download dttutty/frost_dataset \
   --repo-type dataset --local-dir "$FROST_DATA_ROOT"
 ```
 
-To download only LASTFM, add `--include "LASTFM/*"`. The bundle contains the
-prepared edge tables and graph caches; no raw-data conversion is needed.
+The bundle contains the prepared edge tables and graph caches; no raw-data
+conversion is needed.
 Dataset contents and any dataset-specific extra downloads are documented in
 the [dataset repository](https://huggingface.co/datasets/dttutty/frost_dataset).
 
