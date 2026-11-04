@@ -1,9 +1,5 @@
 # FROST
 
-This repository contains the FROST implementation, tests, experiment
-specifications, public-data preparation tools, and reproducible training and
-benchmark workflows.
-
 The runtime does not depend on DGL, PyG, `pytorch_scatter`, or
 `pytorch_sparse`.
 
