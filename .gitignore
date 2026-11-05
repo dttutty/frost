@@ -4,6 +4,8 @@ checkpoints/
 data/
 !src/frost/data/
 !src/frost/data/*.py
+!scripts/data/
+!scripts/data/*.py
 datasets/
 *.pt
 *.pth
@@ -96,7 +98,6 @@ tmp/
 # Generated experiment artifacts
 seed_sweeps/**
 seed_sweeps_old/**
-/experiments/
 
 download_data.sh
 *.txt
