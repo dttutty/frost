@@ -6,7 +6,7 @@
       "type": "process",
       "command": "${workspaceFolder}/.venv/bin/python",
       "args": [
-        "${workspaceFolder}/scripts/maintenance/tail_rank_log.py",
+        "${workspaceFolder}/artifacts/runs/shared/experiment_tools/monitoring/tail_rank_log.py",
         "0",
         "--newer-than-start"
       ],
@@ -33,7 +33,7 @@
       "type": "process",
       "command": "${workspaceFolder}/.venv/bin/python",
       "args": [
-        "${workspaceFolder}/scripts/maintenance/tail_rank_log.py",
+        "${workspaceFolder}/artifacts/runs/shared/experiment_tools/monitoring/tail_rank_log.py",
         "1",
         "--newer-than-start"
       ],
@@ -60,7 +60,7 @@
       "type": "process",
       "command": "${workspaceFolder}/.venv/bin/python",
       "args": [
-        "${workspaceFolder}/scripts/maintenance/tail_rank_log.py",
+        "${workspaceFolder}/artifacts/runs/shared/experiment_tools/monitoring/tail_rank_log.py",
         "2",
         "--newer-than-start"
       ],

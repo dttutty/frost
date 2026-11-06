@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 OUTPUT_DIRECTORIES = {
@@ -77,11 +81,12 @@ RECORDED_VALUE_PATTERNS = {
 def tracked_paths() -> list[Path]:
     completed = subprocess.run(
         ["git", "ls-files", "-z"],
+        cwd=REPO_ROOT,
         check=True,
         stdout=subprocess.PIPE,
     )
     return [
-        Path(raw.decode())
+        Path(os.fsdecode(raw))
         for raw in completed.stdout.split(b"\0")
         if raw
     ]
@@ -101,7 +106,7 @@ def generated_output_reason(path: Path) -> str | None:
 def recorded_value_reasons(path: Path) -> list[str]:
     if path.parts[0] == "tests" or path.suffix.lower() not in TEXT_SUFFIXES:
         return []
-    text = path.read_text(encoding="utf-8", errors="replace")
+    text = (REPO_ROOT / path).read_text(encoding="utf-8", errors="replace")
     return [
         label
         for label, pattern in RECORDED_VALUE_PATTERNS.items()
@@ -109,26 +114,22 @@ def recorded_value_reasons(path: Path) -> list[str]:
     ]
 
 
-def main() -> None:
+def test_repository_hygiene() -> None:
     problems: list[str] = []
     for path in tracked_paths():
+        # Git also lists submodule directories and unstaged deletions.
+        if not (REPO_ROOT / path).is_file():
+            continue
         output_reason = generated_output_reason(path)
         if output_reason is not None:
             problems.append(f"{path}: {output_reason}")
         for value_reason in recorded_value_reasons(path):
             problems.append(f"{path}: recorded {value_reason} value")
 
-    if problems:
-        details = "\n".join(f"- {problem}" for problem in problems)
-        raise SystemExit(
-            "Repository hygiene check failed:\n"
-            f"{details}\n"
-            "Keep reproducibility parameters and synthetic test fixtures, but "
-            "remove generated outputs and recorded result values."
-        )
-
-    print("Repository hygiene check passed.")
-
-
-if __name__ == "__main__":
-    main()
+    details = "\n".join(f"- {problem}" for problem in problems)
+    assert not problems, (
+        "Repository hygiene check failed:\n"
+        f"{details}\n"
+        "Keep reproducibility parameters and synthetic test fixtures, but "
+        "remove generated outputs and recorded result values."
+    )
