@@ -74,6 +74,7 @@ candidate sets, evaluation widths and comparison rules.
   and `packed` values remain available for ablations. The heuristic uses tensor
   shapes and model dimensions only, so it does not synchronize a CUDA mask back
   to the host on every batch.
+- Memory models support at most one hop; stateless models may use multiple hops.
 - `model.state` is `null` for stateless models. Memory recipes declare their updater, mailbox size, combine rule, and routing semantics under this node.
 - `macro_batch_size`, `n_neg`, `model.neighborhood.fanout`, the model layout contract, and `ring_buf_size` determine ring-buffer capacity and pipeline depth.
 - The runtime neighborhood sampler is configured under `ngh_sampler`. In particular, `ngh_sampler.strategy` selects `uniform`, `recent`, or `time_interval_aware`, and `ngh_sampler.time_scaling_factor` is consumed by the `time_interval_aware` sampler.
@@ -81,6 +82,13 @@ candidate sets, evaluation widths and comparison rules.
 - `cpu_threads=auto` divides each NUMA node's physical cores among the GPU workers attached to that node, caps each worker at 32 threads, and resolves the host independently. Explicit `OMP_NUM_THREADS` or `MKL_NUM_THREADS` values take precedence per variable.
 - `edim` is inferred from the materialized edge-feature file or the registered raw dataset source and combines with `d_mem` / `boxsize` to determine mailbox dimensionality: `d_mail = 2 * d_mem + edim`.
 - `model.state.mail_combine` controls mailbox aggregation for memory models. Supported values are `last` and `mean`.
+
+Neighborhood sampling uses `NoSampler` or `NeighborhoodSampler` through one
+protocol; negative samplers implement `NegSamplerProto`. Reuse TGB negative
+sampling and the separate benchmark matrices rather than duplicating them.
+The public `dynamic_state_ablation` compatibility key is resolved by the launcher;
+runtime consumes only `runtime.dynamic_state_policy` enums. Do not add hidden
+debug branches to baseline execution. See [architecture](../README.md#architecture-and-extension).
 
 ## Configuration and Overrides
 
@@ -95,13 +103,39 @@ Configuration has one owner per concern:
 Use `uv run python run.py --cfg job model=<name>` to inspect the configuration.
 Launch with `uv run torchrun --nproc_per_node=3 run.py model=<name> key=value`
 for two GPU workers and one host rank. Model defaults are library examples;
-paper-specific presets and baseline parity settings live in local experiment tools.
+paper-specific presets and baseline parity settings live in the separate `frost_bench` repository.
 
 When tuning manually, keep coupled fields aligned: GraphMixer's `num_tokens`
 cannot exceed its sampled history; TCL's `num_depths` follows `fanout[0] + 1`;
 CAWN cost grows with the product of its fanouts; DyGFormer's sampled sequence
 must remain compatible with its maximum length and patch size. Current values
 remain in configuration rather than prose.
+
+For one GPU worker, use two processes. The optional resident backend keeps
+static features and dynamic state on that worker's GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run torchrun --nproc_per_node=2 run.py \
+  model=tgn dataset=WIKIPEDIA runtime.single_gpu_resident=on
+```
+
+## GPU experiment preflight
+
+1. Follow the [compute-resource-ops procedures](/home/sqp17/Projects/compute-resource-ops/README.md)
+   and its agent rules, resource pool and target runbook. Run `uv run resource-status --json`
+   there, then recheck the selected GPU's processes, ownership, memory, utilization
+   and health immediately before launch. A momentarily idle GPU is not unowned.
+   Follow host restrictions, including `NCCL_P2P_DISABLE=1` on Sun.
+2. Verify code and recursive submodule commits and require
+   `uv sync --locked --check` to report no changes. Use the FROST environment
+   for FROST; baselines keep separate environments. For staged snapshots, rebuild
+   or attach verified ABI-compatible native products and smoke-import
+   `frost.seq_sampler._core` (TGL also needs `dgl` and `sampler_core`). Use a
+   user-owned uv cache; set `UV_NO_SYNC=1` only after these checks pass.
+3. Start a new remote matrix with one smoke case. On distributed failures, inspect
+   the earliest rank traceback before secondary Gloo/NCCL or elastic errors.
+   Long jobs must record commits, data roots, GPU mapping, full command, output/log
+   directory, metrics and exit status.
 
 ## TGB Link Prediction
 
@@ -207,6 +241,10 @@ The relevant implementations are:
 - FROST: [`historical.py`](../src/frost/neg_sampler/historical.py),
   [`inductive.py`](../src/frost/neg_sampler/inductive.py), and
   [`random.py`](../src/frost/neg_sampler/random.py)
+
+The vendored DyGLib fork no longer carries those unused protocols. Its sole
+FROST-aligned entrypoint uses the fixed evaluation artifact and global AP; see
+[`PROTOCOL.md`](https://github.com/dttutty/DyGLib/blob/74cbefd0babd9de9a61a7f1c10eedc32bfc82ff8/PROTOCOL.md).
 
 ### Reporting and comparison
 
