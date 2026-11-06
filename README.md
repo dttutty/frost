@@ -33,7 +33,7 @@ into an `ExecutionPlan`. See the [model/runtime boundary](docs/model_runtime_bou
 for component ownership and how to extend the library.
 
 `run.py` and `configs/` provide a native training example. Set the prepared
-dataset root in `.env.local`:
+dataset roots in the ignored `.env.local`:
 
 ```dotenv
 FROST_DATA_ROOT=/absolute/path/to/frost_dataset
@@ -42,10 +42,11 @@ TGB_DATA_ROOT=/absolute/path/to/tgb
 
 Prepared datasets are available in the
 [FROST dataset bundle](https://huggingface.co/datasets/dttutty/frost_dataset).
-Shell exports take precedence over `.env.local`. A repository-local `DATA`
-symlink is not used.
+Shell exports take precedence over `.env.local`. Do not restore a generic
+`DATA` symlink; use the configured dataset roots.
 
-Run two GPU workers plus one host rank:
+After [GPU resource checks](#gpu-experiment-preflight), run two GPU workers
+plus one host rank:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --nproc_per_node=3 run.py \
@@ -72,6 +73,12 @@ negative-sampling protocols, runtime settings, and official TGB data/MRR support
 
 ## Development
 
+Prefer the repository's uv-managed environment: `uv run ...` for commands and
+`uv sync --locked` for dependency synchronization. Preserve unrelated user
+changes and existing Git submodules unless explicitly asked to change them.
+Commit coherent changes after their relevant checks pass, then push to the
+current branch's upstream. Use HTTPS for Git remotes and cloning.
+
 ```bash
 uv run ruff check .
 uv run mypy
@@ -85,4 +92,44 @@ uv run pytest tests/ -q
 | `run.py` | Native distributed-training example |
 | `tests/` | Library and runtime regression tests |
 | [docs/model_runtime_boundary.md](docs/model_runtime_boundary.md) | Architecture and extension rules |
+
+## Design boundary
+
+Read [docs/model_runtime_boundary.md](docs/model_runtime_boundary.md) before
+changing model/runtime interfaces.
+
+- `models/` owns differentiable computation.
+- A `ModelRecipe` declares components and a semantic `ModelContract`.
+- Launch compiles the contract into an `ExecutionPlan`.
+- Host runtime owns sampling, access planning, batching, and scatter.
+- Worker runtime owns transfer, dynamic-state publication, optimization,
+  metrics, checkpoints, and telemetry.
+- Runtime code must not branch on concrete model names.
+
+Encoders return `EncoderResult`; representation adapters produce explicit
+`EdgeRepresentations`; heads score those pairs. Dynamic-state publication stays
+in `DynamicStateCoordinator`, and updaters cache state on `flat_graph.detached_*`.
+
+## Important invariants
+
+- `model.embedding_dim` is the shared embedding/memory/head width.
+- `model.neighborhood.fanout` is the only fanout source.
+- `d_mail = 2 * d_mem + edim`.
+- Memory models support at most one hop; stateless models may use multiple hops.
+- Use `SampledLayoutView` and contract node sets instead of re-deriving flat
+  graph offsets.
+- Neighborhood sampling uses `NoSampler` or `NeighborhoodSampler` through one
+  protocol; negative samplers implement `NegSamplerProto`.
+- Do not duplicate TGB negative sampling or benchmark matrices.
+
+The public `dynamic_state_ablation` key is compatibility surface. Resolve it in
+the launcher; runtime components consume only the policy enums under
+`runtime.dynamic_state_policy`. Do not add hidden debug branches to the
+baseline path.
+
+When adding a model, add its encoder, recipe/contract, `configs/model` entry,
+and contract tests. Do not add model-specific analyzers, predictor switches,
+or pipeline branches.
+
+## GPU experiment preflight
 
