@@ -19,7 +19,7 @@ from frost.datatypes.meta import Meta
 from frost.datatypes.plan import DynamicPlan, PlanSet
 from frost.datatypes.result import Result
 from frost.models.contracts import RootExpansion
-from frost.runtime.experimental.dynamic_state import resolve_dynamic_state_policy
+from frost.runtime.dynamic_state_policy import resolve_dynamic_state_policy
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
 from frost.runtime.worker._engine import Worker
 from frost.runtime.worker.p2p_syncer._writer import BoxMailWriter, SharedMemWriter

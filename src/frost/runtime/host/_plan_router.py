@@ -8,7 +8,7 @@ from typing import Generic, TypeVar
 
 import numpy as np
 
-from frost.runtime.experimental.dynamic_state import (
+from frost.runtime.dynamic_state_policy import (
     DynamicStatePolicy,
     PlannerMode,
     resolve_dynamic_state_policy,

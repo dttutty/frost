@@ -1,6 +1,6 @@
 import pytest
 
-from frost.runtime.experimental.dynamic_state import (
+from frost.runtime.dynamic_state_policy import (
     PlannerMode,
     TransportMode,
     WritebackTiming,

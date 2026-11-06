@@ -31,7 +31,7 @@ from frost.runtime._early_stopping import is_significant_improvement
 from frost.runtime.host import PlanRouter, Scatter
 from frost.runtime.host._batch_balance import make_balance_plan
 from frost.runtime.host._config import HostOptions, HostResources
-from frost.runtime.experimental.dynamic_state import (
+from frost.runtime.dynamic_state_policy import (
     PlannerMode,
     resolve_dynamic_state_policy,
 )

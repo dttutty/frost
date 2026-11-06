@@ -14,7 +14,7 @@ from frost.models.contracts import RepresentationKind, RootExpansion
 from frost.models.outputs import EdgeRepresentations, EncoderResult
 from frost.models.recipes import TGNRecipe
 from frost.models.temporal_link_model import TemporalLinkModel
-from frost.runtime.experimental.dynamic_state import resolve_dynamic_state_policy
+from frost.runtime.dynamic_state_policy import resolve_dynamic_state_policy
 from frost.runtime.worker._state_coordinator import DynamicStateCoordinator
 from frost.utils.tensor_set import TensorSet
 

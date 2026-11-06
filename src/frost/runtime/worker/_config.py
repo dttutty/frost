@@ -12,7 +12,7 @@ import torch.nn as nn
 from frost.datatypes.env import Env
 from frost.launch.plan import ExecutionPlan
 from frost.models.protocols import MailboxRouterProto, MemoryUpdaterProto
-from frost.runtime.experimental.dynamic_state import DynamicStatePolicy
+from frost.runtime.dynamic_state_policy import DynamicStatePolicy
 from frost.shm.mem_mgr import MemBoxStore
 from frost.shm.control_plane import SharedControlPlane
 from frost.shm.dynamic_state_sync import SharedDynamicStateSync

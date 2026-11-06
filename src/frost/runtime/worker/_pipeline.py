@@ -18,7 +18,7 @@ from frost.runtime.worker.types import (
 from frost.runtime.worker.types import AssembledQ, DeltaQueue, H2DOutQ, ReceivedQ
 from frost.datatypes.result import Result
 from frost.runtime._thread_base import join_thread, put_shutdown_sentinel
-from frost.runtime.experimental.dynamic_state import TransportMode
+from frost.runtime.dynamic_state_policy import TransportMode
 from frost.runtime.worker._dynamic_assembler import DynamicAssembler
 from frost.runtime.worker._host_to_device import H2D
 from frost.runtime.worker._feature_staging import (

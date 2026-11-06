@@ -16,7 +16,7 @@ from frost.datatypes.mem_mail_box.box import BoxEntry
 from frost.datatypes.mem_mail_box.mem import MemEntry
 from frost.models.contracts import RootExpansion
 from frost.runtime._thread_base import StreamThreadBase, put_shutdown_sentinel
-from frost.runtime.experimental.dynamic_state import (
+from frost.runtime.dynamic_state_policy import (
     DynamicStatePolicy,
     PlannerMode,
     TransportMode,

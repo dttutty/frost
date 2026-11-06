@@ -21,7 +21,7 @@ from frost.models.protocols import MemoryUpdaterProto
 from frost.shm.ring_buf import RingBuf
 from frost.runtime.worker._batch_convergence import BatchConvergenceRecorder
 from frost.runtime.worker._state_coordinator import DynamicStateCoordinator
-from frost.runtime.experimental.dynamic_state import TransportMode, WritebackTiming
+from frost.runtime.dynamic_state_policy import TransportMode, WritebackTiming
 
 
 _COMPILE_MODES = {

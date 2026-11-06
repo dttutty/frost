@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import torch
 
 from frost.models.contracts import NodeSet, RootExpansion
-from frost.runtime.experimental.dynamic_state import resolve_dynamic_state_policy
+from frost.runtime.dynamic_state_policy import resolve_dynamic_state_policy
 from frost.runtime.worker import _pipeline
 from frost.runtime.worker._pipeline import WorkerPipelineMixin
 

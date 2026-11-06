@@ -36,7 +36,7 @@ from frost.runtime.worker._split_benchmark_observer import (
     WorkerSplitBenchmarkObserver,
 )
 from frost.runtime.worker._config import WorkerOptions, WorkerResources
-from frost.runtime.experimental.dynamic_state import (
+from frost.runtime.dynamic_state_policy import (
     TransportMode,
     resolve_dynamic_state_policy,
 )

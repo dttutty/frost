@@ -10,7 +10,7 @@ import torch
 
 from frost.datatypes.env import Env
 from frost.neg_sampler.protocols import NegSamplerProto
-from frost.runtime.experimental.dynamic_state import DynamicStatePolicy
+from frost.runtime.dynamic_state_policy import DynamicStatePolicy
 from frost.runtime.host.protocols import AnalyzerProto
 from frost.sampling.protocols import NeighborhoodSamplerProto
 from frost.shm.control_plane import SharedControlPlane

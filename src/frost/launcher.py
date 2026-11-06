@@ -49,7 +49,7 @@ from frost.launch.single_gpu_resident import (
     resolve_single_gpu_resident,
 )
 from frost.sampling.protocols import NeighborhoodSamplerProto
-from frost.runtime.experimental.dynamic_state import (
+from frost.runtime.dynamic_state_policy import (
     TransportMode,
     resolve_dynamic_state_policy,
     single_gpu_resident_dynamic_state_policy,

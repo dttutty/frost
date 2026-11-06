@@ -15,7 +15,7 @@ from frost.models.contracts import (
     RepresentationKind,
     RootExpansion,
 )
-from frost.runtime.experimental.dynamic_state import resolve_dynamic_state_policy
+from frost.runtime.dynamic_state_policy import resolve_dynamic_state_policy
 from frost.runtime.host import PlanRouter
 from frost.runtime.host.analyzer import AccessPlanAnalyzer
 

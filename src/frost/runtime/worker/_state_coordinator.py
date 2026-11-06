@@ -19,7 +19,7 @@ from frost.datatypes.tasks import BoxTask, DirectWritebackRequest, MemTask
 from frost.launch.plan import ExecutionPlan
 from frost.models.contracts import MemoryState, NeighborhoodMailbox
 from frost.runtime.protocols import CudaEvent
-from frost.runtime.experimental.dynamic_state import (
+from frost.runtime.dynamic_state_policy import (
     DynamicStatePolicy,
     TransportMode,
     WritebackTiming,

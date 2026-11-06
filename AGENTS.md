@@ -57,5 +57,6 @@ in `DynamicStateCoordinator`, and updaters cache state on `flat_graph.detached_*
 
 The public `dynamic_state_ablation` key is compatibility surface. Resolve it in
 the launcher; runtime components consume only the policy enums under
-`runtime.experimental`. Do not add hidden debug branches to the baseline path.
+`runtime.dynamic_state_policy`. Do not add hidden debug branches to the
+baseline path.
 

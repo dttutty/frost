@@ -1,4 +1,4 @@
-"""Policy presets for dynamic-state ablation experiments."""
+"""Runtime policies for baseline, GPU-resident, and ablation dynamic-state execution."""
 
 from __future__ import annotations
 
