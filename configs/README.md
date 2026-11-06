@@ -61,21 +61,10 @@ not a different `torch.nn` module target.
 
 ## Parameter Flow and Coupling
 
-The canonical definitions and cross-framework comparison rules live in
-[`docs/negative_sampling.md`](../docs/negative_sampling.md).
+`n_neg` flows through negative and neighborhood sampling into structured edge
+representations. See [negative sampling](#negative-sampling) for protocols,
+candidate sets, evaluation widths and comparison rules.
 
-- `n_neg` flows from root config into negative and neighborhood sampling; scoring receives already structured edge representations.
-- `neg_sampler=rnd_dst_then_fixed` uses fresh destination-partition random negatives for training and reads one fixed `eid,neg_dst` evaluation negative per edge from `$FROST_DATA_ROOT/<dataset>/neg_pre_sampling_1_result.csv`; it currently requires `n_neg=1`.
-- `neg_sampler=rnd_dst_then_fixed_all` keeps the same destination-partition
-  training sampler but evaluates with the fixed
-  `neg_pre_sampling_1_all_nodes_seed0.csv` artifact. Its candidates span the
-  complete contiguous node range, and the positive destination is excluded.
-- `neg_sampler=rnd_dst_then_hist` uses destination-partition random negatives during training and per-source historical destination corruption during eval. It is not DyGLib's full-pair historical protocol, which may replace both endpoints.
-- `neg_sampler=rnd_dst_then_post_train` uses destination-partition random negatives during training and per-source post-training destination corruption during eval. It is likewise a destination-only protocol.
-- `neg_sampler=rnd_dst_then_tgb` uses one random training negative and official TGB validation/test pickle files. Run with `eval_metric=mrr`; set `neg_sampler.eval.n_neg=100` for `tgbl-review`, or `20` for `tgbl-coin`, `tgbl-comment`, and `tgbl-flight`.
-- The runtime keeps a fixed negative capacity. Generic `neg_sampler=rnd_dst_then_tgb` requires every query to have exactly that width. `neg_sampler=rnd_dst_then_tgb_wiki` uses capacity 999 and masks the four official wiki-v2 queries that contain 998 negatives; it does not introduce ragged tensors or random replacements.
-- AP mode remains the default and currently requires one evaluation negative per positive edge. MRR is opt-in and uses TGB's optimistic/pessimistic average tie rank for checkpoint selection, logging, and early stopping.
-- `neg_sampler=rnd_dst_then_random` samples uniformly from the full node range `[0, num_nodes)` at runtime for training, validation, and testing. Evaluation draws fresh samples as its RNG advances; override `neg_sampler.eval.n_neg` for matched one-vs-many MRR comparisons.
 - `model=<name>` selects the encoder, optional state updater, link head, and a semantic contract. The launcher compiles that contract into sampling, layout, feature-access, and dynamic-state plans.
 - `model.embedding_dim` is the single embedding/memory/head width. Recipe interpolation maps it to each concrete constructor.
 - `model.neighborhood.fanout` is the single fanout source for every model, including APAN. An empty list selects 0-hop, a one-element list selects 1-hop, and a longer list selects multi-hop.
@@ -121,3 +110,108 @@ uv run frost-data fetch-tgb tgbl-wiki
 Training still uses one random negative per positive. Only validation and test
 use the official 998/999-candidate sets. The smaller evaluation batch is
 independent of the training batch and bounds ring-buffer and GPU memory use.
+
+## Negative sampling
+
+Negative-sampling results are comparable only when the split, candidate set,
+corruption rule, number of negatives, replacement rule, random seed, and metric
+are the same. FROST therefore names its protocols by their actual behavior
+rather than treating `historical` or `inductive` as universal definitions.
+
+### FROST's destination-corruption layout
+
+For a positive event `(src, dst, time)`, FROST's common link-prediction layout
+is:
+
+```text
+[src | positive dst | negative dst x n_neg]
+```
+
+The predictor repeats the positive source and scores `(src, negative dst)`.
+Consequently, the current runtime can express destination corruption but cannot
+represent an independently sampled `negative src`. Supporting full-pair
+negative edges would require coordinated changes to the sampling buffer, graph
+layout, encoders, predictors, and analyzers—not just another sampler class.
+
+### Shipped protocols
+
+| Config | Training | Evaluation | Interpretation |
+| --- | --- | --- | --- |
+| `rnd_dst_then_random` (default) | Uniform random destination from all node IDs in `[0, num_nodes)` | Runtime random sampling from the same full node range | Sampling with replacement; no positive-destination collision filtering |
+| `rnd_dst_then_fixed` | Random destination from the observed destination partition | Fixed `eid,neg_dst` artifact | Reproducible fixed random destination corruption; currently `n_neg=1` |
+| `rnd_dst_then_fixed_all` | Random destination from the observed destination partition | Fixed artifact covering the complete contiguous node range, excluding the positive destination | Fixed all-node destination corruption |
+| `rnd_dst_then_hist` | Random destination from the observed destination partition | Prefer destinations previously connected to the current source, strictly before the batch; exclude that source's current positive destinations; otherwise fall back to the observed destination partition | Per-source historical destination corruption |
+| `rnd_dst_then_post_train` | Random destination from the observed destination partition | Prefer destinations connected to the current source after the training cutoff and strictly before the batch; exclude current positives; otherwise fall back to the observed destination partition | Per-source post-training destination corruption |
+| `rnd_dst_then_tgb` / `rnd_dst_then_tgb_wiki` | Random destination | Official TGB validation/test candidates | TGB protocol; use its required metric and candidate width |
+
+Historical and post-training destination candidates are sampled with replacement,
+so a positive edge may receive the same negative destination more than once
+when `n_neg > 1`.
+
+### Evaluation files and widths
+
+`rnd_dst_then_fixed` reads `$FROST_DATA_ROOT/<dataset>/neg_pre_sampling_1_result.csv`
+with one `eid,neg_dst` negative per edge and requires `n_neg=1`.
+`rnd_dst_then_fixed_all` reads `neg_pre_sampling_1_all_nodes_seed0.csv` instead.
+AP requires one evaluation negative per positive. Runtime-random evaluation
+draws fresh samples as its RNG advances. For matched one-vs-many MRR
+comparisons, override `neg_sampler.eval.n_neg`.
+
+Generic TGB uses one random training negative and official evaluation pickles;
+set `eval_metric=mrr` and `neg_sampler.eval.n_neg=100` for `tgbl-review`, or 20
+for `tgbl-coin`, `tgbl-comment` and `tgbl-flight`. Its runtime capacity is fixed,
+so every query must match that width. Wiki uses capacity 999 and masks the four
+wiki-v2 queries with 998 negatives; it introduces neither ragged tensors nor
+random replacements. MRR averages optimistic/pessimistic tie ranks and drives
+checkpoint selection, logging and early stopping.
+
+### Historical difference from upstream DyGLib
+
+The original DyGLib snapshot (`3aacc36b`) gave `historical` and `inductive`
+different semantics:
+
+- **Historical:** form the global set of historical `(src, dst)` edges, remove
+  edges in the current batch, and sample complete negative pairs. If that set
+  is too small, fill the remainder with collision-checked random pairs.
+- **Inductive:** form the global historical edge set, remove edges observed by
+  the training cutoff and edges in the current batch, and sample complete
+  negative pairs, again with random-pair fallback when needed.
+
+These are full-pair edge-classification protocols: both `negative src` and
+`negative dst` may differ from the positive event. FROST's corresponding
+protocols condition on the current source and rank alternative destinations.
+Neither task definition is inherently correct or incorrect, but their metrics
+must not be compared as if they used the same negatives.
+
+DyGLib's random link-prediction path is the close case: its training and
+evaluation call sites discard the random sampler's source output and combine
+the current batch source with a sampled destination. With FROST configured for
+the observed destination partition, the task semantics match. The concrete
+sample sequence can still differ because DyGLib and FROST use different RNG
+implementations.
+
+The relevant implementations are:
+
+- FROST: [`historical.py`](../src/frost/neg_sampler/historical.py),
+  [`inductive.py`](../src/frost/neg_sampler/inductive.py), and
+  [`random.py`](../src/frost/neg_sampler/random.py)
+
+### Reporting and comparison
+
+For a result intended for comparison, report at least:
+
+1. The temporal split policy, including how tied timestamps are handled.
+2. The exact protocol name from the table above—not merely `historical` or
+   `inductive`.
+3. The candidate node/edge set and whether current positives are excluded.
+4. Whether sampling uses replacement and the number of negatives per positive.
+5. The seed, or the fixed-negative artifact and its checksum.
+6. The metric and its reduction/tie policy.
+
+All models within one experiment should consume the same split and negative
+queries. FROST historical/inductive results should be labeled with their
+per-source destination-corruption names and should not be presented as direct
+DyGLib historical/inductive comparisons.
+
+Published `frost_dataset` manifests describe the fixed negative artifact only.
+Runtime sampler selection and the definitions above are owned by FROST.
