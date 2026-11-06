@@ -1,5 +1,10 @@
 # FROST
 
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![PyTorch 2.9.0](https://img.shields.io/badge/PyTorch-2.9.0-EE4C2C?logo=pytorch&logoColor=white)](pyproject.toml)
+[![CUDA 12.8](https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white)](uv.lock)
+[![Linux x86-64](https://img.shields.io/badge/Linux-x86--64-FCC624?logo=linux&logoColor=black)](#install)
+
 A Python library for temporal graph neural networks: models, graph data,
 neighborhood sampling and distributed training. Experiment orchestration and
 paper reproduction belong in [frost_bench](https://github.com/dttutty/frost_bench),
@@ -7,8 +12,8 @@ not in the library package or its dependencies.
 
 ## Install
 
-Linux x86-64, Python 3.12; the lockfile uses CUDA 12.8 PyTorch. GPU training needs
-an NVIDIA GPU and compatible driver; CPU tests do not require a GPU.
+GPU training requires an NVIDIA GPU with a compatible driver.
+CPU tests do not require a GPU.
 
 ```bash
 uv sync --locked --python 3.12
