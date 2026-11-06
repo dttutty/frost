@@ -25,7 +25,6 @@ dependencies = [
     "python-dotenv>=1.0",
     "tqdm>=4.60",
     "PyYAML>=6.0",
-    "scikit-learn>=1.0",
 ]
 
 [project.scripts]
@@ -78,3 +77,5 @@ warn_unused_configs = true
 cmake.build-type = "RelWithDebInfo"
 # Important: tell scikit-build to package the Python namespace under src into the wheel.
 wheel.packages = ["src/frost"]
+sdist.include = ["CMakeLists.txt"]
+sdist.exclude = ["artifacts/**", "benchmarks/**", "docs/artifact_organization.md", "docs/camera_ready_sources.md", "third_party/**"]

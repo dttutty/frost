@@ -100,3 +100,10 @@ seed_sweeps_old/**
 download_data.sh
 *.txt
 *.tsv
+
+# Local reproduction tools and compatibility navigation (not part of the library).
+/benchmarks
+/docs/artifact_organization.md
+/docs/camera_ready_sources.md
+/.vscode/launch.json
+/.vscode/tasks.json

@@ -1,10 +1,15 @@
 # FROST
 
-## Quick start
+FROST is a Python library for temporal graph neural networks, with distributed
+training, sequence-based neighborhood sampling, and explicit model/runtime
+contracts. The package provides models, samplers, graph data structures, data
+preparation, and host/worker runtime components under `frost`.
 
-FROST runs on Linux x86-64 with Python 3.12. Training requires an NVIDIA GPU
-and a compatible driver; the locked environment uses the CUDA 12.8 PyTorch
-wheel. CPU tests and command inspection do not require a GPU.
+## Install
+
+FROST targets Linux x86-64 and Python 3.12. GPU training requires an NVIDIA
+GPU and a compatible driver. The locked environment uses CUDA 12.8 PyTorch;
+CPU tests do not require a GPU.
 
 ```bash
 uv python install 3.12
@@ -12,59 +17,72 @@ uv sync --locked --python 3.12
 cp .env.example .env.local
 ```
 
-Set machine-local data roots in `.env.local` (shell exports take precedence):
+The build compiles the native sequence sampler. After changing its C++ source,
+rebuild the editable package with `uv pip install -e .`.
+
+## Use the library
+
+```python
+from frost.models.recipes import RECIPE_TYPES
+from frost.sampling.ngh_sampler import NeighborhoodSampler
+from frost.datatypes.sampled_layout import SampledLayoutView
+```
+
+Models declare a `ModelRecipe` and `ModelContract`; the launcher compiles them
+into an `ExecutionPlan`. See the [model/runtime boundary](docs/model_runtime_boundary.md)
+for component ownership and how to extend the library.
+
+`run.py` and `configs/` provide a native training example. Set the prepared
+dataset root in `.env.local`:
 
 ```dotenv
 FROST_DATA_ROOT=/absolute/path/to/frost_dataset
 TGB_DATA_ROOT=/absolute/path/to/tgb
 ```
 
-After downloading a dataset below, run TGN with two GPU workers and one host:
+Prepared datasets are available in the
+[FROST dataset bundle](https://huggingface.co/datasets/dttutty/frost_dataset).
+Shell exports take precedence over `.env.local`. A repository-local `DATA`
+symlink is not used.
 
-For native FROST, `nproc_per_node = GPU workers + 1`. With one worker, the
-resident backend keeps static features and dynamic state on its GPU while
-retaining the host sampler and skipping DDP, feature staging and P2P transport:
-
-The resident backend defaults to `off`. `auto` enables it only for one worker
-when persistent tensors fit `runtime.single_gpu_resident_memory_fraction`
-(default 0.7) of device memory; `on` reports an error if it cannot be enabled.
-
-## Datasets
-
-Download the prepared [dataset bundle](https://huggingface.co/datasets/dttutty/frost_dataset)
-to the same root configured in `.env.local`:
+Run two GPU workers plus one host rank:
 
 ```bash
-export FROST_DATA_ROOT=/absolute/path/to/frost_dataset
-uvx --from huggingface_hub hf download dttutty/frost_dataset \
-  --repo-type dataset --include "LASTFM/*" --local-dir "$FROST_DATA_ROOT"
+CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --nproc_per_node=3 run.py \
+  model=tgn dataset=LASTFM
 ```
 
-Remove `--include "LASTFM/*"` for the full bundle. Prepared edge tables and
-graph caches need no raw-data conversion. The dataset repository documents
-its catalog and any extra downloads. A repository-local `DATA` path is not used.
-The default sampler generates negatives at runtime; protocol choices and
-comparison rules are in the [configuration guide](configs/README.md#negative-sampling).
-
-Official TGB downloads require `aria2c` and use a separate raw-data root:
+For one GPU worker, use two processes. The optional resident backend keeps
+static features and dynamic state on that worker's GPU:
 
 ```bash
-export TGB_DATA_ROOT=/absolute/path/to/tgb
-uv run frost-data fetch-tgb tgbl-wiki
+CUDA_VISIBLE_DEVICES=0 uv run torchrun --nproc_per_node=2 run.py \
+  model=tgn dataset=WIKIPEDIA runtime.single_gpu_resident=on
 ```
 
-## Training and checks
+Inspect configuration without starting training:
 
-## Documentation and repository layout
+```bash
+uv run python run.py --cfg job model=tgn
+uv run frost-data --help
+```
+
+The [configuration guide](configs/README.md) describes model parameters,
+negative-sampling protocols, runtime settings, and official TGB data/MRR support.
+
+## Development
+
+```bash
+uv run ruff check .
+uv run mypy
+uv run pytest tests/ -q
+```
 
 | Path | Purpose |
 | --- | --- |
-| [configs/](configs/README.md) | Model/runtime parameters, negative-sampling protocols and TGB configuration |
-| [Model/runtime boundary](docs/model_runtime_boundary.md) | Model contracts and runtime responsibilities |
-| `run.py` | Hydra distributed-training entry point |
-| `src/frost/` | Runtime, models, samplers and data tooling |
-| `tests/` | Test suite |
+| `src/frost/` | Library implementation and native sequence sampler |
+| [configs/](configs/README.md) | Model and runtime configuration examples |
+| `run.py` | Native distributed-training example |
+| `tests/` | Library and runtime regression tests |
+| [docs/model_runtime_boundary.md](docs/model_runtime_boundary.md) | Architecture and extension rules |
 
-Model components live in `configs/model/`; capabilities are declared in
-`src/frost/models/recipes.py`. See [AGENTS.md](AGENTS.md) for contributor workflow
-and GPU resource rules.

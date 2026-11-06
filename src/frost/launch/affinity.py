@@ -100,8 +100,8 @@ def mark_auto_thread_environment(
 
     ``torch.distributed.run`` otherwise injects ``OMP_NUM_THREADS=1`` before
     the child executes :mod:`run`, which makes that launcher default
-    indistinguishable from a user override.  The maintained ``frost-train``
-    entry point calls this helper in the parent.  A temporary value suppresses
+    indistinguishable from a user override. Custom launchers can call this
+    helper in the parent before starting torchrun. A temporary value suppresses
     torchrun's warning; each child replaces marked variables with its
     role-aware value before importing Torch.
     """

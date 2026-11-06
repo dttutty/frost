@@ -82,7 +82,7 @@ candidate sets, evaluation widths and comparison rules.
 - `edim` is inferred from the materialized edge-feature file or the registered raw dataset source and combines with `d_mem` / `boxsize` to determine mailbox dimensionality: `d_mail = 2 * d_mem + edim`.
 - `model.state.mail_combine` controls mailbox aggregation for memory models. Supported values are `last` and `mean`.
 
-## Presets and Manual Overrides
+## Configuration and Overrides
 
 Configuration has one owner per concern:
 
@@ -90,7 +90,12 @@ Configuration has one owner per concern:
 | --- | --- |
 | `configs/model/` | Model component constructor defaults |
 | `src/frost/models/recipes.py` | Model capabilities and runtime contract |
-| `configs/config.yaml` | Shared experiment and runtime defaults |
+| `configs/config.yaml` | Shared training and runtime defaults |
+
+Use `uv run python run.py --cfg job model=<name>` to inspect the configuration.
+Launch with `uv run torchrun --nproc_per_node=3 run.py model=<name> key=value`
+for two GPU workers and one host rank. Model defaults are library examples;
+paper-specific presets and baseline parity settings live in local experiment tools.
 
 When tuning manually, keep coupled fields aligned: GraphMixer's `num_tokens`
 cannot exceed its sampled history; TCL's `num_depths` follows `fanout[0] + 1`;
@@ -105,6 +110,13 @@ With the official tgbl-wiki-v2 files under
 
 ```bash
 uv run frost-data fetch-tgb tgbl-wiki
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --nproc_per_node=3 run.py model=tgn \
+  dataset=TGBL_WIKI \
+  neg_sampler=rnd_dst_then_tgb_wiki eval_metric=mrr \
+  macro_batch_size=4096 eval_macro_batch_size=128
 ```
 
 Training still uses one random negative per positive. Only validation and test
