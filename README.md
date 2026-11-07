@@ -10,40 +10,6 @@ neighborhood sampling and distributed training. Experiment orchestration and
 paper reproduction belong in [frost_bench](https://github.com/dttutty/frost_bench),
 not in the library package or its dependencies.
 
-<!-- Source: frost_overleaf/figures/F05_frost_pipeline.pdf, rendered at 300 dpi. -->
-[![FROST pipeline: overlapping sampling, transfers, state routing and training across two GPUs](frost_pipeline.png)](frost_pipeline.png)
-
-*FROST pipeline (Fig. 5). Each row advances one macro-batch across two GPU workers.*
-
-## How it works
-
-### Three-tier routing
-
-For memory-based models, a one-macro-batch lookahead identifies the next
-consumers of each node's memory and messages:
-
-1. **Local reuse:** keep fresh state on the same GPU when its next batch needs it.
-2. **Direct GPU-to-GPU transfer:** send fresh state to peer workers over the
-   available interconnect, using NVLink where available.
-3. **CPU backing:** asynchronously write updated entries back to shared memory
-   when they will not be updated again in the next macro-batch. Fetch from the
-   CPU only when local reuse or peer transfers do not supply the required state.
-
-CPU write-back is planned independently: an entry can be reused or transferred
-and also written back for later batches.
-
-### Pipeline
-
-Sampling, graph/feature transfer, dynamic-state fetching, routing and training
-run as overlapping stages. The memory updater runs early in the forward pass,
-so fresh states can be routed while the encoder, predictor and backward pass
-continue. Workers combine CPU-fetched, locally reused and peer-transferred
-states before the next macro-batch consumes them. A communication guard orders
-P2P submissions before gradient collectives; the H2D gate waits for required
-write-backs before later CPU reads. Together these dependencies preserve exact
-per-macro-batch state freshness. Memoryless models use the same staged pipeline
-without the dynamic-state stages.
-
 ## Install
 
 GPU training requires an NVIDIA GPU with a compatible driver.

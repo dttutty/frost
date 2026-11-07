@@ -96,9 +96,6 @@ def generated_output_reason(path: Path) -> str | None:
     lowered_parts = {part.lower() for part in path.parts}
     if lowered_parts & OUTPUT_DIRECTORIES:
         return "generated-output directory"
-    # The README architecture diagram is a documentation asset.
-    if path == Path("frost_pipeline.png"):
-        return None
     if path.suffix.lower() in OUTPUT_SUFFIXES:
         return "generated-output file type"
     if path.name.lower() in OUTPUT_FILENAMES:
