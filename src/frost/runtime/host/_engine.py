@@ -120,7 +120,7 @@ def _layout_work_counts(layouts: LayoutBundle) -> dict[str, int]:
 
 
 class Host:
-    """Orchestrates the host-side pipeline for distributed Temporal GNN training.
+    """Orchestrates the host-side pipeline for distributed Temporal(Dynamic) GNN training.
 
     The Host process drives the full data pipeline: it reads the edge DataFrame,
     splits it into train/val/test, samples neighbors and negative destinations for

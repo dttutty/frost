@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A multi-GPU framework for recommendation systems and self-supervised embedding
-learning with temporal graph neural networks.
+learning with Temporal(Dynamic) GNN.
 
 Learn from user–item interaction histories and score candidate items at a chosen
 time. Start from an event CSV, train a model, and reuse it for new queries.

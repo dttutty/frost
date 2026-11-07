@@ -3,7 +3,7 @@
 [← Score candidate items: installation, CSV format, features and queries](../README.md)
 
 Use this guide to choose models, change training parameters, select sampling
-methods or run multi-GPU training. FROST trains temporal graph neural networks
+methods or run multi-GPU training. FROST trains Temporal(Dynamic) GNN models
 for recommendation systems, using interaction histories to score candidate items.
 
 ## 🧭 Choose a training entry point

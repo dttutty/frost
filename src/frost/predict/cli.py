@@ -51,7 +51,7 @@ def _queries(parser):
 def parser():
     root = argparse.ArgumentParser(
         prog="frost",
-        description="Use temporal GNNs to predict interactions in your data.",
+        description="Use Temporal(Dynamic) GNN to predict interactions in your data.",
     )
     commands = root.add_subparsers(dest="command", required=True)
     fit = commands.add_parser(

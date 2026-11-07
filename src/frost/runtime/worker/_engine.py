@@ -1,4 +1,4 @@
-"""Worker engine for distributed Temporal GNN training.
+"""Worker engine for distributed Temporal(Dynamic) GNN training.
 
 Implements the GPU-resident Worker process that drives the train/eval loop.
 Each Worker owns one GPU rank, a chain of pipeline threads (Receiver, H2D,

@@ -6,7 +6,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "frost-gnn"  # pip accepts frost_gnn and frost-gnn.
 version = "0.3.1"
-description = "Multi-GPU temporal graph neural networks for recommendation systems."
+description = "Multi-GPU Temporal(Dynamic) GNN framework for recommendation systems and self-supervised embedding learning."
 readme = "README.md"
 requires-python = ">=3.12"
 license = {file = "LICENSE"}

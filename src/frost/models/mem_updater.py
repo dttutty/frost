@@ -1,4 +1,4 @@
-"""Memory updater modules for temporal GNN models.
+"""Memory updater modules for Temporal(Dynamic) GNN models.
 
 Provides two implementations:
 
