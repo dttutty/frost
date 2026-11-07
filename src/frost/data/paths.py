@@ -9,7 +9,22 @@ from dotenv import load_dotenv
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-LOCAL_ENV_PATH = REPO_ROOT / ".env.local"
+
+
+def _local_env_path() -> Path:
+    """Read installed-user settings from cwd, with a source-checkout fallback."""
+    local = Path.cwd() / ".env.local"
+    if local.is_file():
+        return local
+    module = Path(__file__).resolve()
+    checkout = module.parents[3]
+    source = checkout / "src/frost/data/paths.py"
+    if source == module and (checkout / ".env.local").is_file():
+        return checkout / ".env.local"
+    return local
+
+
+LOCAL_ENV_PATH = _local_env_path()
 
 # Explicit shell exports win over machine-local file settings.
 load_dotenv(LOCAL_ENV_PATH, override=False)

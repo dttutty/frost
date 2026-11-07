@@ -29,3 +29,7 @@ install(TARGETS _core DESTINATION frost/seq_sampler)
 
 
 
+# Keep one editable configuration tree and include it in installed wheels.
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/configs/"
+        DESTINATION frost/configs
+        FILES_MATCHING PATTERN "*.yaml")

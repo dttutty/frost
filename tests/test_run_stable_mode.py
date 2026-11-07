@@ -1,12 +1,8 @@
 import os
-import sys
-from pathlib import Path
 
 from omegaconf import OmegaConf
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from run import _apply_stable_mode_env
+from frost.cli import _apply_stable_mode_env
 
 
 def test_apply_stable_mode_env_sets_expected_defaults(monkeypatch):

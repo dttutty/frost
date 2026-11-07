@@ -30,6 +30,7 @@ dependencies = [
 
 [project.scripts]
 frost-data = "frost.data.cli:main"
+frost-run = "frost.cli:main"
 
 [dependency-groups]
 dev = [
@@ -78,5 +79,5 @@ warn_unused_configs = true
 cmake.build-type = "RelWithDebInfo"
 # Important: tell scikit-build to package the Python namespace under src into the wheel.
 wheel.packages = ["src/frost"]
-sdist.include = ["CMakeLists.txt"]
+sdist.include = ["CMakeLists.txt", "configs/**"]
 sdist.exclude = ["artifacts/**", "benchmarks/**", "docs/artifact_organization.md", "docs/camera_ready_sources.md", "third_party/**"]

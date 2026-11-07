@@ -95,36 +95,43 @@ for upstream versions and licensing.
 
 ## 📦 Install
 
-GPU training requires an NVIDIA GPU with a compatible driver.
+The release wheel targets Linux x86-64 (glibc 2.31+), Python 3.12 and
+PyTorch 2.9.0 with CUDA 12.8. GPU training requires a compatible NVIDIA driver.
+Download the wheel from [GitHub Releases](https://github.com/dttutty/frost_dev/releases)
+(repository access required), then install it in your Python environment:
 
 ```bash
-uv sync --locked --python 3.12
-cp .env.example .env.local
+python -m pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install ./frost-0.1.0-cp312-cp312-manylinux_2_31_x86_64.whl
 ```
 
-Set `FROST_DATA_ROOT` and `TGB_DATA_ROOT` in `.env.local`.
-Download the [prepared datasets](https://huggingface.co/datasets/dttutty/frost_dataset)
-or use `uv run frost-data --help` for data operations.
+Set `FROST_DATA_ROOT` and `TGB_DATA_ROOT` as environment variables or in a
+`.env.local` file in your working directory. Download the
+[prepared datasets](https://huggingface.co/datasets/dttutty/frost_dataset)
+or use `frost-data --help` for data operations.
+
+For development from a checkout: `uv sync --locked --python 3.12`, then
+`cp .env.example .env.local` and edit the dataset paths.
 
 ## 🚀 Usage
 
 Run two GPU workers and one host rank:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --nproc_per_node=3 run.py \
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=3 -m frost \
   model=tgn dataset=LASTFM
 ```
 
 For one GPU worker, select one GPU and use `--nproc_per_node=2`.
 Override parameters with `key=value`; see [defaults](configs/config.yaml)
 and [model configs](configs/model/). Preview the resolved configuration with
-`uv run python run.py --cfg job model=tgn`.
+`python -m frost --cfg job model=tgn`.
 
 For TPNet, use one process per GPU (no host rank), after downloading the TGB data:
 
 ```bash
-uv run frost-data fetch-tgb tgbl-wiki
-CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --standalone --nproc_per_node=2 \
+frost-data fetch-tgb tgbl-wiki
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 \
   -m frost.tpnet.train --dataset_name tgbl-wiki --batch_size 400 \
   --use_random_projection --report-mrr
 ```
