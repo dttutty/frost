@@ -31,3 +31,15 @@ explicit matrices, scaling, encoder/decoder RP ablations, disabled encoder
 scores, and TGB's disabled embedding path. Sampling fixtures cover all three
 neighbor policies and each variant's negative strategies, including repeated
 calls to check RNG progression.
+
+CPU instruction paths can differ in FP32 reductions and Adam updates even with
+one thread and fixed seeds. AVX2 versus the original host produced gradient
+summary differences up to 3.1e-5 after four updates. Gradient and parameter
+summaries therefore use `rtol=1e-4, atol=2e-5`; losses, logits and projection state
+retain `rtol=2e-5, atol=2e-6`, and sampling outputs remain exact. The committed
+upstream reference values are unchanged. To exercise a different CPU path:
+
+```bash
+CUDA_VISIBLE_DEVICES='' ATEN_CPU_CAPABILITY=avx2 MKL_ENABLE_INSTRUCTIONS=AVX2 \
+  uv run --no-sync pytest tests/test_tpnet_backend.py -q
+```

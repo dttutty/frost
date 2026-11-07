@@ -258,19 +258,34 @@ def capture_sampling(b, *, is_tgb: bool):
     return result
 
 
-def assert_close(actual, expected):
+def assert_close(actual, expected, *, state_stats=False):
     if isinstance(expected, dict):
         assert actual.keys() == expected.keys()
         for key in expected:
-            assert_close(actual[key], expected[key])
+            assert_close(
+                actual[key],
+                expected[key],
+                state_stats=state_stats or key in {"gradients", "parameters"},
+            )
     elif isinstance(expected, list):
         assert len(actual) == len(expected)
         for a, e in zip(actual, expected):
-            assert_close(a, e)
+            assert_close(a, e, state_stats=state_stats)
     elif isinstance(expected, (float, int)):
-        assert actual == pytest.approx(expected, rel=2e-5, abs=2e-6)
+        # FP32 reductions and Adam amplify CPU-kernel rounding in gradients
+        # and parameter summaries. Keep predictions/losses/RP state tighter.
+        rel, absolute = (1e-4, 2e-5) if state_stats else (2e-5, 2e-6)
+        assert actual == pytest.approx(expected, rel=rel, abs=absolute)
     else:
         assert actual == expected
+
+
+def test_snapshot_tolerances_keep_outputs_strict():
+    assert_close({"gradients": [0.100015]}, {"gradients": [0.1]})
+    with pytest.raises(AssertionError):
+        assert_close({"logits": [0.100015]}, {"logits": [0.1]})
+    with pytest.raises(AssertionError):
+        assert_close({"parameters": [0.101]}, {"parameters": [0.1]})
 
 
 @pytest.fixture(scope="module", autouse=True)
