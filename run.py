@@ -22,6 +22,9 @@ def _apply_stable_mode_env(cfg: DictConfig) -> dict[str, str]:
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig):
+    from frost.launch.config import resolve_tgb_negative_sampling
+
+    resolve_tgb_negative_sampling(cfg)
     from frost.data.paths import static_features_present_on_disk
     from frost.launch.affinity import (
         configure_process_affinity,

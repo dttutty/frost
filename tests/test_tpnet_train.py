@@ -36,7 +36,7 @@ def test_option_value_reads_upstream_arguments(argv: list[str], expected: str) -
 def test_tgb_negative_capacity_matches_official_candidates(
     dataset: str, expected: tuple[int, bool]
 ) -> None:
-    assert tpnet_train._tgb_negative_capacity(dataset) == expected
+    assert tpnet_train.tgb_negative_layout(dataset) == expected
 
 
 def test_tpnet_dataset_name_maps_to_frost_registry() -> None:

@@ -25,6 +25,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from frost.data.tgb_protocol import tgb_negative_layout
 from frost.metrics import tgb_reciprocal_ranks
 from frost.tpnet.config import get_args
 from frost.tpnet.data import Data, get_idx_data_loader, get_link_prediction_data
@@ -90,17 +91,6 @@ def _option_value(argv: list[str], option: str, default: str) -> str:
         if argument == option and index + 1 < len(argv):
             return argv[index + 1]
     return default
-
-
-def _tgb_negative_capacity(dataset_name: str) -> tuple[int, bool]:
-    normalized = dataset_name.lower().replace("_", "-")
-    if normalized == "tgbl-wiki":
-        return 999, True
-    if normalized == "tgbl-review":
-        return 100, False
-    if normalized in {"tgbl-coin", "tgbl-comment", "tgbl-flight"}:
-        return 20, False
-    raise ValueError(f"Unsupported TGB link-prediction dataset: {dataset_name}")
 
 
 def _frost_tgb_dataset_name(dataset_name: str) -> str:
@@ -711,7 +701,7 @@ def main() -> int:
             time_scaling_factor=args.time_scaling_factor,
             seed=1,
         )
-        n_eval_negatives, allow_variable_width = _tgb_negative_capacity(
+        n_eval_negatives, allow_variable_width = tgb_negative_layout(
             args.dataset_name
         )
         eval_negative_sampler = TGBEvalNegSampler(

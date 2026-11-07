@@ -14,6 +14,7 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from frost.datatypes.env import Env
 from frost.launch.config import (
     resolve_eval_metric,
+    resolve_tgb_negative_sampling,
     resolve_no_memory_queue_size,
     resolve_time_scaling_factor,
     stable_mode_enabled,
@@ -141,6 +142,7 @@ def launch(cfg: DictConfig):
         cfg: Hydra DictConfig containing all experiment hyperparameters including
             dataset, model, sampler, optimizer, and runtime settings.
     """
+    resolve_tgb_negative_sampling(cfg)
     _, _, is_host = initialize_process_group()
     configure_torch_backends(
         use_tf32=bool(cfg.compute.tf32),

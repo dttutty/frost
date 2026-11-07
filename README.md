@@ -49,8 +49,13 @@ Select a train/evaluation pair with `neg_sampler=<configuration>`.
 | [`rnd_dst_then_fixed_all`](configs/neg_sampler/rnd_dst_then_fixed_all.yaml) | Random, destination partition | Precomputed all-node negatives |
 | [`rnd_dst_then_hist`](configs/neg_sampler/rnd_dst_then_hist.yaml) | Random, destination partition | Previously observed destinations for each source |
 | [`rnd_dst_then_post_train`](configs/neg_sampler/rnd_dst_then_post_train.yaml) | Random, destination partition | Destinations observed for each source after the training cutoff |
-| [`rnd_dst_then_tgb`](configs/neg_sampler/rnd_dst_then_tgb.yaml) | Random, destination partition | Official TGB candidates (20 by default; set `neg_sampler.eval.n_neg=100` for Review) |
-| [`rnd_dst_then_tgb_wiki`](configs/neg_sampler/rnd_dst_then_tgb_wiki.yaml) | Random, destination partition | Official Wiki candidates, padded to 999 with validity masks |
+| [`rnd_dst_then_tgb`](configs/neg_sampler/rnd_dst_then_tgb.yaml) | Random, destination partition | Automatic official layout: Wiki 999 (masked), Review 100, Coin/Comment/Flight 20 |
+
+`rnd_dst_then_tgb` requires `dataset=TGBL_WIKI`, `TGBL_COIN`, `TGBL_COMMENT`,
+`TGBL_FLIGHT` or `TGBL_REVIEW` and `eval_metric=mrr`. Candidate capacity and Wiki
+padding masks are selected automatically; no `neg_sampler.eval.n_neg` override
+is needed. Unsupported datasets and conflicting candidate settings are rejected
+before training setup. `rnd_dst_then_tgb_wiki` remains a compatibility alias.
 
 Historical and post-training sampling use only prior events, exclude current
 positive destinations and fall back to random destination candidates when needed.

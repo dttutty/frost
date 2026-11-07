@@ -3,7 +3,9 @@ from __future__ import annotations
 import math
 from typing import Any, Literal
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, open_dict
+
+from frost.data.tgb_protocol import tgb_negative_layout
 
 DYGLIB_ALIGNED_FEATURE_DIM = 172
 DEFAULT_NO_MEMORY_QUEUE_SIZE = 4
@@ -61,3 +63,31 @@ def resolve_eval_metric(value: object) -> Literal["ap", "mrr"]:
     if metric not in {"ap", "mrr"}:
         raise ValueError(f"Unsupported eval_metric={metric!r}; expected 'ap' or 'mrr'.")
     return metric  # type: ignore[return-value]
+
+
+def resolve_tgb_negative_sampling(cfg: DictConfig) -> None:
+    """Resolve official candidate layout before dataset/GPU setup on every rank."""
+    sampler = cfg.get("neg_sampler")
+    if sampler is None:
+        return
+    evaluation = sampler.get("eval")
+    if (
+        evaluation is None
+        or evaluation.get("_target_") != "frost.neg_sampler.TGBEvalNegSampler"
+    ):
+        return
+
+    dataset = str(cfg.dataset).strip().upper().replace("-", "_")
+    capacity, variable_width = tgb_negative_layout(dataset)
+    resolved = {"n_neg": capacity, "allow_variable_width": variable_width}
+    for name, expected in resolved.items():
+        configured = evaluation.get(name, "auto")
+        if configured != "auto" and configured != expected:
+            raise ValueError(
+                f"Official {dataset} evaluation requires neg_sampler.eval.{name}="
+                f"{expected!r}, got {configured!r}. Use 'auto' or omit the override."
+            )
+    with open_dict(evaluation):
+        for name, value in resolved.items():
+            evaluation[name] = value
+    cfg.dataset = dataset
