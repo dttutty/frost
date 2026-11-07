@@ -84,5 +84,3 @@ Please cite [our paper](https://doi.org/10.1145/3856345). Metadata: [CITATION.cf
   url       = {https://doi.org/10.1145/3856345}
 }
 ```
-
-Code: [MIT](LICENSE) · [TPNet notices](src/frost/tpnet/NOTICE.md) · Paper: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
