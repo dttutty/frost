@@ -4,9 +4,9 @@ requires = ["scikit-build-core>=0.10", "nanobind>=2.12.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "frost"  # Public package name.
-version = "0.1.0"
-description = "A high-performance distributed GNN training framework with sequence-based samplers."
+name = "frost-gnn"  # pip accepts frost_gnn and frost-gnn.
+version = "0.2.0"
+description = "Use temporal graph neural networks to predict interactions in your data."
 readme = "README.md"
 requires-python = ">=3.12"
 license = {file = "LICENSE"}
@@ -29,6 +29,7 @@ dependencies = [
 ]
 
 [project.scripts]
+frost = "frost.predict.cli:main"
 frost-data = "frost.data.cli:main"
 frost-run = "frost.cli:main"
 
