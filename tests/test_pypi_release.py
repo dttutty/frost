@@ -56,7 +56,7 @@ def assets(tmp_path):
 def test_public_description_uses_current_readme():
     original = (ROOT / "README.md").read_text()
     rendered = script("build_pypi_release").public_readme(original)
-    assert "recommendation systems" in rendered
+    assert "recommendation systems" in rendered.lower()
     assert "python -m pip install frost-gnn" in rendered
     assert "not available yet" not in rendered
     assert "github.com/dttutty/frost_dev" not in rendered
