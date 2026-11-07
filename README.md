@@ -14,7 +14,7 @@ Use GNNs to predict interactions in your data.
 Train from an event CSV, save a model, and score candidate interactions.
 
 - **Predict your data:** follow this README; a TGN starter configuration is included.
-- **Tune or develop models:** use the [model and training guide](README.models.md)
+- **Tune or develop models:** use the [model and training guide](docs/model_training.md)
   for hyperparameters, model/sampler support and multi-GPU training.
 
 ## 📦 Install
@@ -88,7 +88,7 @@ frost train events.csv --output model.pt --test test.csv --predictions scores.cs
 
 The starter runs TGN on CPU with four threads. Select a GPU with `--device cuda:0`.
 Use `frost train --show-config` to inspect settings, or see the
-[configuration guide](README.models.md#-tune-the-csv-trainer) to adjust them.
+[configuration guide](docs/model_training.md#-tune-the-csv-trainer) to adjust them.
 For all command options, run `frost train --help` or `frost predict --help`.
 
 ## 🧩 Node features
