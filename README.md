@@ -69,9 +69,6 @@ The converter writes this mapping automatically.
 
 Please cite [our paper](https://doi.org/10.1145/3856345). Metadata: [CITATION.cff](CITATION.cff).
 
-<details>
-<summary>BibTeX</summary>
-
 ```bibtex
 @article{zhao2026frost,
   author    = {Zhao, Lei and Nke, Joseph and Kim, Jongryool and Lee, Chul-Ho},
@@ -87,7 +84,5 @@ Please cite [our paper](https://doi.org/10.1145/3856345). Metadata: [CITATION.cf
   url       = {https://doi.org/10.1145/3856345}
 }
 ```
-
-</details>
 
 Code: [MIT](LICENSE) · [TPNet notices](src/frost/tpnet/NOTICE.md) · Paper: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
