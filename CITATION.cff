@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+message: "If you use FROST in your research, please cite the paper below."
+type: software
+title: FROST
+repository-code: "https://github.com/dttutty/frost_dev"
+authors:
+  - family-names: Zhao
+    given-names: Lei
+  - family-names: Nke
+    given-names: Joseph
+  - family-names: Kim
+    given-names: Jongryool
+  - family-names: Lee
+    given-names: Chul-Ho
+preferred-citation:
+  type: article
+  title: "FROST: Accelerating Temporal Graph Neural Network Training via a Unified Multi-GPU Framework"
+  authors:
+    - family-names: Zhao
+      given-names: Lei
+    - family-names: Nke
+      given-names: Joseph
+    - family-names: Kim
+      given-names: Jongryool
+    - family-names: Lee
+      given-names: Chul-Ho
+  journal: Proceedings of the ACM on Management of Data
+  volume: 4
+  issue: 6
+  number: 350
+  year: 2026
+  month: 12
+  publisher:
+    name: Association for Computing Machinery
+  doi: 10.1145/3856345
+  url: "https://doi.org/10.1145/3856345"
+  license: CC-BY-4.0
