@@ -17,20 +17,12 @@ cp .env.example .env.local
 ```
 
 Set `FROST_DATA_ROOT` and `TGB_DATA_ROOT` in `.env.local`.
-Prepared data is available in the
-[dataset bundle](https://huggingface.co/datasets/dttutty/frost_dataset);
-`uv run frost-data --help` lists data operations.
+Download the [prepared datasets](https://huggingface.co/datasets/dttutty/frost_dataset)
+or use `uv run frost-data --help` for data operations.
 
-## Use the library
+## Usage
 
-Inspect the configuration without training:
-
-```bash
-uv run python run.py --cfg job model=tgn
-```
-
-After [GPU preflight](#gpu-experiment-preflight), run two GPU workers and one
-host rank:
+Run two GPU workers and one host rank:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --nproc_per_node=3 run.py \
@@ -38,50 +30,9 @@ CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --nproc_per_node=3 run.py \
 ```
 
 For one GPU worker, select one GPU and use `--nproc_per_node=2`.
-`runtime.single_gpu_resident=on` optionally keeps features and dynamic state
-on that worker's GPU.
-
-## Configuration
-
-Use Hydra `key=value` overrides. See [shared defaults](configs/config.yaml)
-and [model configs](configs/model/) for available settings.
-`macro_batch_size` is the total batch across GPUs; `eval_macro_batch_size`
-controls evaluation separately and defaults to the training batch size.
-
-`model.embedding_dim` sets embedding/memory width, and
-`model.neighborhood.fanout` sets sampled neighbors per hop. Memory models
-support at most one hop. Keep model-specific sequence and token settings
-consistent with fanouts; capabilities are declared by
-[model recipes](src/frost/models/recipes.py).
-
-## Negative sampling
-
-FROST corrupts destinations while keeping the positive source fixed. The default
-`rnd_dst_then_random` samples all node IDs with replacement, without filtering
-positive-destination collisions. AP uses one evaluation negative per positive.
-
-Fixed, historical, post-training and TGB options are in
-[negative-sampler configs](configs/neg_sampler/) and their
-[implementations](src/frost/neg_sampler/). For comparisons, match splits,
-candidate sets, negative counts, sampling rules, seeds and metrics.
-
-## TGB link prediction
-
-Fetch tgbl-wiki-v2 into `$TGB_DATA_ROOT/raw/tgbl_wiki`, then train with official
-evaluation candidates and MRR:
-
-```bash
-uv run frost-data fetch-tgb tgbl-wiki
-CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --nproc_per_node=3 run.py model=tgn \
-  dataset=TGBL_WIKI \
-  neg_sampler=rnd_dst_then_tgb_wiki eval_metric=mrr \
-  macro_batch_size=4096 eval_macro_batch_size=128
-```
-
-Training uses one random negative; wiki evaluation handles the official
-998/999-negative queries. For generic TGB, set `neg_sampler.eval.n_neg=100`
-for `tgbl-review`, or 20 for `tgbl-coin`, `tgbl-comment` and `tgbl-flight`.
-Use a smaller evaluation batch to limit memory use.
+Override parameters with `key=value`; see [defaults](configs/config.yaml)
+and [model configs](configs/model/). Preview the resolved configuration with
+`uv run python run.py --cfg job model=tgn`.
 
 ## Development
 
@@ -91,25 +42,12 @@ uv run mypy
 uv run pytest tests/ -q
 ```
 
-CPU tests do not require a GPU. Rebuild C++ sampler changes with
-`uv pip install -e .`. Library code is in [src/frost](src/frost/), with
-regression tests in [tests](tests/). Models own computation and contracts;
-queues, transfers and synchronization belong to runtime.
-
-## GPU experiment preflight
-
-Check GPU availability and health, follow your cluster's scheduling policy,
-and verify dependencies with `uv sync --locked --check`. Start with a short
-smoke run; on distributed failures, inspect the earliest rank traceback.
-Record the code revision, data, GPU mapping, command, logs and exit status.
+Code is in [src/frost](src/frost/), tests in [tests](tests/).
+Rebuild C++ sampler changes with `uv pip install -e .`.
 
 ## Citation
 
-If you use FROST in your research, please cite:
-
-Lei Zhao, Joseph Nke, Jongryool Kim, and Chul-Ho Lee.
-[**FROST: Accelerating Temporal Graph Neural Network Training via a Unified Multi-GPU Framework**](https://doi.org/10.1145/3856345).
-*Proc. ACM Manag. Data*, Vol. 4, No. 6 (SIGMOD), Article 350, December 2026.
+If you use FROST, please cite [our paper](https://doi.org/10.1145/3856345):
 
 ```bibtex
 @article{zhao2026frost,
@@ -127,4 +65,5 @@ Lei Zhao, Joseph Nke, Jongryool Kim, and Chul-Ho Lee.
 }
 ```
 
+Citation metadata: [CITATION.cff](CITATION.cff).
 The paper is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
