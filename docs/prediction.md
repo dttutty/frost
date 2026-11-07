@@ -43,7 +43,7 @@ For all command options, run `frost train --help` or `frost predict --help`.
 Reuse the checkpoint without retraining, choose a query time, or score a test CSV:
 
 ```bash
-frost predict frost-model.pt --src 42 --candidates 121,12312 --time 10
+frost predict frost-model.pt --src 42 --candidates 46638,70286 --time 10
 frost predict frost-model.pt --test test.csv --predictions scores.csv
 frost train events.csv --output model.pt --test test.csv --predictions scores.csv
 ```

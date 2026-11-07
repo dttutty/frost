@@ -24,16 +24,16 @@ Create `events.csv`: `src` is the user ID, `dst` is the item ID, and `time` is o
 
 ```csv
 src,dst,time
-42,121,1
-7,12312,2
-42,31231,3
-7,12331,4
+42,46638,1
+7,70286,2
+42,38083,3
+7,95034,4
 ```
 
 Train TGN and score candidate items for user `42`:
 
 ```bash
-frost train events.csv --src 42 --candidates 121,12312,31231,12331
+frost train events.csv --src 42 --candidates 46638,70286,38083,95034
 ```
 
 Saves `frost-model.pt` and prints `src,dst,time,score`. Scores are in [0, 1]; each is
@@ -43,7 +43,7 @@ in training. Query time is the latest training time unless you pass `--time`.
 Reuse the model at a chosen time:
 
 ```bash
-frost predict frost-model.pt --src 42 --candidates 121,12312 --time 10
+frost predict frost-model.pt --src 42 --candidates 46638,70286 --time 10
 ```
 
 Training uses CPU; add `--device cuda:0` to use a GPU.
