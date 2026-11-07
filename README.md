@@ -9,7 +9,8 @@
 [![CPU coverage](https://img.shields.io/badge/CPU%20coverage-70.8%25-yellowgreen)](https://github.com/dttutty/frost/actions/workflows/coverage.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A multi-GPU framework for temporal graph neural networks in recommendation systems.
+A multi-GPU framework for recommendation systems and self-supervised embedding
+learning with temporal graph neural networks.
 
 Learn from user–item interaction histories and score candidate items at a chosen
 time. Start from an event CSV, train a model, and reuse it for new queries.
