@@ -6,7 +6,7 @@
 [![PyTorch 2.9.0](https://img.shields.io/badge/PyTorch-2.9.0-EE4C2C?logo=pytorch&logoColor=white)](pyproject.toml)
 [![CUDA 12.8](https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white)](uv.lock)
 [![Linux x86-64](https://img.shields.io/badge/Linux-x86--64-FCC624?logo=linux&logoColor=black)](#-install)
-[![CPU coverage](https://img.shields.io/badge/CPU%20coverage-69.6%25-yellowgreen)](https://github.com/dttutty/frost_dev/actions/workflows/coverage.yml)
+[![CPU coverage](https://img.shields.io/badge/CPU%20coverage-70.4%25-yellowgreen)](https://github.com/dttutty/frost_dev/actions/workflows/coverage.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Use GNNs to predict interactions in your data.
