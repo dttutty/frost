@@ -7,6 +7,19 @@
 
 A Python library for temporal graph neural networks and multi-GPU training.
 
+## Support matrix
+
+| Model | Dynamic memory | Multi-GPU | Configuration |
+| --- | --- | --- | --- |
+| TGN | Yes | Yes | [`model=tgn`](configs/model/tgn.yaml) |
+| JODIE | Yes | Yes | [`model=jodie`](configs/model/jodie.yaml) |
+| APAN | Yes | Yes | [`model=apan`](configs/model/apan.yaml) |
+| TGAT | No | Yes | [`model=tgat`](configs/model/tgat.yaml) |
+| CAWN | No | Yes | [`model=cawn`](configs/model/cawn.yaml) |
+| TCL | No | Yes | [`model=tcl`](configs/model/tcl.yaml) |
+| GraphMixer | No | Yes | [`model=graph_mixer`](configs/model/graph_mixer.yaml) |
+| DyGFormer | No | Yes | [`model=dygformer`](configs/model/dygformer.yaml) |
+
 ## Install
 
 GPU training requires an NVIDIA GPU with a compatible driver.
