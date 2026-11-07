@@ -20,7 +20,7 @@ def main() -> None:
         raise ValueError("Coverage report must contain a nonempty Python source measurement")
     percent = 100 * covered / total
     color = "brightgreen" if percent >= 80 else "yellowgreen" if percent >= 60 else "orange"
-    repository = os.environ.get("GITHUB_REPOSITORY", "dttutty/frost_dev")
+    repository = os.environ.get("GITHUB_REPOSITORY", "dttutty/frost")
     badge = (
         f"[![CPU coverage](https://img.shields.io/badge/CPU%20coverage-"
         f"{percent:.1f}%25-{color})]"

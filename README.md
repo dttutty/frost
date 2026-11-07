@@ -6,7 +6,7 @@
 [![PyTorch 2.9.0](https://img.shields.io/badge/PyTorch-2.9.0-EE4C2C?logo=pytorch&logoColor=white)](pyproject.toml)
 [![CUDA 12.8](https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white)](uv.lock)
 [![Linux x86-64](https://img.shields.io/badge/Linux-x86--64-FCC624?logo=linux&logoColor=black)](#-install)
-[![CPU coverage](https://img.shields.io/badge/CPU%20coverage-70.8%25-yellowgreen)](https://github.com/dttutty/frost_dev/actions/workflows/coverage.yml)
+[![CPU coverage](https://img.shields.io/badge/CPU%20coverage-70.8%25-yellowgreen)](https://github.com/dttutty/frost/actions/workflows/coverage.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A multi-GPU framework for temporal graph neural networks in recommendation systems.
@@ -20,21 +20,21 @@ time. Start from an event CSV, train a model, and reuse it for new queries.
 
 ## 📦 Install
 
-Python 3.12 and Linux x86-64 are the packaged target. Install the **0.3.0 or newer**
-wheel from [private GitHub Releases](https://github.com/dttutty/frost_dev/releases)
-(repository access required):
+On Linux x86-64 (glibc 2.31+) with Python 3.12:
 
 ```bash
-python -m pip install ./frost_gnn-0.3.0-cp312-cp312-manylinux_2_31_x86_64.whl
+python -m pip install frost-gnn
 ```
 
-When upgrading from the FROST 0.1.0 wheel, first remove the old distribution
-with `python -m pip uninstall frost` to avoid overlapping package files.
+Install from [PyPI](https://pypi.org/project/frost-gnn/) or download a wheel from
+[GitHub Releases](https://github.com/dttutty/frost/releases).
+The distribution is `frost-gnn`; the Python import and CLI command are `frost`.
+The CSV trainer runs on CPU unless you select a GPU. For CPU-only PyTorch,
+install `torch==2.9.0` from `https://download.pytorch.org/whl/cpu` first.
+CUDA execution requires a compatible NVIDIA driver.
 
-The distribution is named `frost_gnn` (Python imports remain `frost`). It is **not
-published on PyPI**: bare `pip install frost_gnn` is not available yet.
-For a CPU-only PyTorch installation, install
-`torch==2.9.0` from `https://download.pytorch.org/whl/cpu` first.
+When upgrading from the FROST 0.1.0 wheel, first run
+`python -m pip uninstall frost` to avoid overlapping package files.
 
 ## 🚀 Score candidate items
 

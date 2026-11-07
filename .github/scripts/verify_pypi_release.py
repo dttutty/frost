@@ -1,4 +1,4 @@
-"""Verify private release assets before copying public distributions to dist/."""
+"""Verify release assets before copying public distributions to dist/."""
 
 from __future__ import annotations
 

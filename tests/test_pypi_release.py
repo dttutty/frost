@@ -37,7 +37,7 @@ def manifest(source):
 def assets(tmp_path):
     source = tmp_path / "assets"
     source.mkdir()
-    metadata = b"Metadata-Version: 2.4\nName: frost-gnn\nVersion: 0.3.1\n\nInstall with pip install frost_gnn.\n"
+    metadata = b"Metadata-Version: 2.4\nName: frost-gnn\nVersion: 0.3.1\n\nInstall with pip install frost-gnn.\n"
     with zipfile.ZipFile(
         source / "frost_gnn-0.3.1-cp312-cp312-manylinux_2_31_x86_64.whl", "w"
     ) as wheel:
@@ -57,7 +57,7 @@ def test_public_description_uses_current_readme():
     original = (ROOT / "README.md").read_text()
     rendered = script("build_pypi_release").public_readme(original)
     assert "recommendation systems" in rendered
-    assert "python -m pip install frost_gnn" in rendered
+    assert "python -m pip install frost-gnn" in rendered
     assert "not available yet" not in rendered
     assert "github.com/dttutty/frost_dev" not in rendered
     assert "assets/frost-banner.png" not in rendered

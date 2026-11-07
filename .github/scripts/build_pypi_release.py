@@ -20,7 +20,7 @@ PUBLIC_INSTALL = """## 📦 Install
 On Linux x86-64 (glibc 2.31+) with Python 3.12:
 
 ```bash
-python -m pip install frost_gnn
+python -m pip install frost-gnn
 ```
 
 The Python import is `frost`; the command is `frost`. The CSV trainer runs on CPU
@@ -57,7 +57,7 @@ def public_readme(source: str) -> str:
     result = re.sub(r"\[([^\[\]]+)\]\(([^\s)]+)\)", link, result)
     if "github.com/dttutty/frost_dev" in result:
         raise ValueError(
-            "The public package description still contains private repository links."
+            "The public package description still contains obsolete repository links."
         )
     return result
 
