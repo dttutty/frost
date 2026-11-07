@@ -25,8 +25,8 @@ model–dataset combination was evaluated in the paper.
 
 ### 🕒 Temporal neighbor sampling
 
-Positive examples are observed interactions; the options below select historical
-neighbors for encoding or mailbox delivery. Select with `ngh_sampler=<method>`.
+For native recipes, positive examples are observed interactions; the options
+below select historical neighbors for encoding or mailbox delivery. Select with `ngh_sampler=<method>`.
 
 | Method | Behavior |
 | --- | --- |
@@ -39,7 +39,7 @@ to the model's supported depth below. JODIE uses no neighbor sampling.
 
 ### 🎲 Negative sampling
 
-All built-in methods keep the source fixed and sample negative destinations.
+Native recipes keep the source fixed and sample negative destinations.
 Select a train/evaluation pair with `neg_sampler=<configuration>`.
 
 | Configuration | Training | Validation / test |
@@ -81,10 +81,12 @@ TGN and JODIE still update the interaction endpoints. APAN samples neighbors for
 TGAT and CAWN accept 1–8 sampling hops; CAWN's `model.encoder.walk_length` must
 match the hop count. The other recipes use the fixed depths shown above.
 
-**TPNet (separate integration).** The paper evaluates TPNet through a separate
-multi-GPU adapter. Its globally decayed random-projection state requires a special
-update path that does not use FROST's native dynamic-state routing and pipeline.
-This library has no built-in `model=tpnet` recipe.
+**TPNet (dedicated trainer).** [TPNet](src/frost/tpnet/) is included with its own
+single-/multi-GPU trainer. It combines an MLP-Mixer encoder with temporal-walk
+random projections. Its globally decayed projection state uses a dedicated update
+path rather than the native memory/mailbox routing and pipeline; launch it with
+`-m frost.tpnet.train` instead of `model=tpnet`. See the [source notice](src/frost/tpnet/NOTICE.md)
+for upstream versions and licensing.
 
 ## 📦 Install
 
@@ -112,6 +114,20 @@ For one GPU worker, select one GPU and use `--nproc_per_node=2`.
 Override parameters with `key=value`; see [defaults](configs/config.yaml)
 and [model configs](configs/model/). Preview the resolved configuration with
 `uv run python run.py --cfg job model=tgn`.
+
+For TPNet, use one process per GPU (no host rank), after downloading the TGB data:
+
+```bash
+uv run frost-data fetch-tgb tgbl-wiki
+CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --standalone --nproc_per_node=2 \
+  -m frost.tpnet.train --dataset_name tgbl-wiki --batch_size 400 \
+  --use_random_projection --report-mrr
+```
+
+TPNet's `--batch_size` is global. For classic datasets, pass
+`--dataset_name wikipedia --processed-data-root /path/to/processed_data --report-ap`
+in place of the TGB dataset and MRR options. Classic data uses
+`<dataset>/ml_<dataset>.csv`, `ml_<dataset>.npy` and `ml_<dataset>_node.npy`.
 
 ## 🛠️ Development
 
