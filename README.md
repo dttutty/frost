@@ -1,6 +1,4 @@
-# FROST
-
-![Forward-looking Routing and Orchestrated Synchronization for TGNN](assets/frost-banner.png)
+# FROST (**F**orward-looking **R**outing and **O**rchestrated **S**ynchronization for **T**emporal(Dynamic) GNN)
 
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![PyTorch 2.9.0](https://img.shields.io/badge/PyTorch-2.9.0-EE4C2C?logo=pytorch&logoColor=white)](pyproject.toml)
