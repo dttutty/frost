@@ -199,6 +199,32 @@ and benchmark matrices. The launcher resolves `dynamic_state_ablation` into
 `runtime.dynamic_state_policy` enums; keep hidden debug branches out of baseline
 execution. See [parameter constraints](#parameter-flow-and-coupling).
 
+## Citation
+
+If you use FROST in your research, please cite:
+
+Lei Zhao, Joseph Nke, Jongryool Kim, and Chul-Ho Lee.
+[**FROST: Accelerating Temporal Graph Neural Network Training via a Unified Multi-GPU Framework**](https://doi.org/10.1145/3856345).
+*Proc. ACM Manag. Data*, Vol. 4, No. 6 (SIGMOD), Article 350, December 2026.
+
+```bibtex
+@article{zhao2026frost,
+  author    = {Zhao, Lei and Nke, Joseph and Kim, Jongryool and Lee, Chul-Ho},
+  title     = {{FROST}: Accelerating Temporal Graph Neural Network Training via a Unified {Multi-GPU} Framework},
+  journal   = {Proceedings of the ACM on Management of Data},
+  volume    = {4},
+  number    = {6},
+  articleno = {350},
+  year      = {2026},
+  month     = dec,
+  publisher = {Association for Computing Machinery},
+  doi       = {10.1145/3856345},
+  url       = {https://doi.org/10.1145/3856345}
+}
+```
+
+The paper is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
 ## Development
 
 ```bash
