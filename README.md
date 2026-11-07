@@ -9,11 +9,12 @@
 [![CPU coverage](https://img.shields.io/badge/CPU%20coverage-70.8%25-yellowgreen)](https://github.com/dttutty/frost_dev/actions/workflows/coverage.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Use GNNs to predict interactions in your data.
+A multi-GPU framework for temporal graph neural networks in recommendation systems.
 
-Train from an event CSV, save a model, and score candidate interactions.
+Learn from user–item interaction histories and score candidate items at a chosen
+time. Start from an event CSV, train a model, and reuse it for new queries.
 
-- **Predict your data:** follow this README; a TGN starter configuration is included.
+- **Score candidate items:** follow this README; a TGN starter configuration is included.
 - **Tune or develop models:** use the [model and training guide](docs/model_training.md)
   for hyperparameters, model/sampler support and multi-GPU training.
 
@@ -35,9 +36,10 @@ published on PyPI**: bare `pip install frost_gnn` is not available yet.
 For a CPU-only PyTorch installation, install
 `torch==2.9.0` from `https://download.pytorch.org/whl/cpu` first.
 
-## 🚀 Predict your data
+## 🚀 Score candidate items
 
-An `events.csv` needs source and destination IDs; time is optional:
+Each row in `events.csv` records an observed interaction, such as a click or
+purchase. Use `src` for the user ID and `dst` for the item ID; `time` is optional:
 
 ```csv
 src,dst,time
@@ -47,7 +49,7 @@ src,dst,time
 7,12331,4
 ```
 
-Train with the bundled TGN configuration and score candidates in one command:
+Train with the bundled TGN configuration and score candidate items for user `42`:
 
 ```bash
 frost train events.csv --src 42 --candidates 121,12312,31231,12331
@@ -73,8 +75,8 @@ frost train events.csv --output model.pt --test test.csv --predictions scores.cs
   are recognized; override names with `--src-col`, `--dst-col`, `--time-col`.
   These column settings also apply to test CSVs.
 - IDs are strings, including leading zeros. Source and destination share one
-  namespace; prefix IDs when different node types reuse the same numbers.
-  Query nodes must have appeared in training.
+  namespace; use prefixes such as `user:42` and `item:42` when users and items
+  reuse the same numbers. Query users and items must have appeared in training.
 - Times can be numeric (use a consistent unit) or ISO-8601 dates (converted to UTC
   seconds). Events are sorted by time. Without timestamps, rows become time
   1, 2, …, representing sequence order rather than measured elapsed time.

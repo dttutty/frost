@@ -1,10 +1,10 @@
 # 🧠 Model and training guide
 
-[← Predict your data: installation, CSV format, features and queries](../README.md)
+[← Score candidate items: installation, CSV format, features and queries](../README.md)
 
 Use this guide to choose models, change training parameters, select sampling
-methods or run multi-GPU training. FROST is a multi-GPU framework for Temporal
-(Dynamic) Graph Neural Network training.
+methods or run multi-GPU training. FROST trains temporal graph neural networks
+for recommendation systems, using interaction histories to score candidate items.
 
 ## 🧭 Choose a training entry point
 
@@ -69,7 +69,7 @@ checkpoints from 0.2.0 can still be loaded.
 | --- | --- |
 | [🤗 frost_dataset](https://huggingface.co/datasets/dttutty/frost_dataset) | Wikipedia (`WIKI`), Reddit, MOOC, LastFM, MAG, GDELT |
 | TGB link prediction | `TGBL_WIKI` (v2), `TGBL_REVIEW` (v2), `TGBL_COIN` (v2), `TGBL_COMMENT` (v1), `TGBL_FLIGHT` (v2) |
-| Your data | [Event CSVs with optional timestamps and node features](../README.md#-predict-your-data) via `frost train` |
+| Your data | [Event CSVs with optional timestamps and node features](../README.md#-score-candidate-items) via `frost train` |
 
 For the advanced trainer, use `dataset=<name>` matching the prepared dataset directory, or a TGB identifier
 above. `frost-data` provides graph construction, temporal splitting, feature
