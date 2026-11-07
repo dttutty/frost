@@ -5,7 +5,7 @@
 [![CUDA 12.8](https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white)](uv.lock)
 [![Linux x86-64](https://img.shields.io/badge/Linux-x86--64-FCC624?logo=linux&logoColor=black)](#install)
 
-A Python library for temporal graph neural networks and multi-GPU training.
+A multi-GPU framework for Graph Neural Network training.
 
 ## Support matrix
 
