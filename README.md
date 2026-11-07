@@ -6,8 +6,6 @@
 [![Linux x86-64](https://img.shields.io/badge/Linux-x86--64-FCC624?logo=linux&logoColor=black)](#install)
 
 A Python library for temporal graph neural networks and multi-GPU training.
-Experiment runners and paper reproduction live in
-[frost_bench](https://github.com/dttutty/frost_bench).
 
 ## Install
 

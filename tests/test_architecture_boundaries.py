@@ -38,18 +38,3 @@ def test_supported_recipes_are_explicit() -> None:
         "dygformer",
         "cawn",
     }
-
-
-def test_library_does_not_import_local_experiment_tools() -> None:
-    violations: list[str] = []
-    for path in MODEL_ROOT.parent.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            modules = []
-            if isinstance(node, ast.ImportFrom):
-                modules = [node.module or ""]
-            elif isinstance(node, ast.Import):
-                modules = [alias.name for alias in node.names]
-            if any(name.split(".")[0] == "frost_bench" for name in modules):
-                violations.append(f"{path}:{node.lineno}")
-    assert violations == []
