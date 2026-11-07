@@ -241,11 +241,8 @@ out of Git. Library code is in `src/frost/`, regression tests in `tests/`.
 
 ## GPU experiment preflight
 
-1. Follow the [compute-resource-ops procedures](/home/sqp17/Projects/compute-resource-ops/README.md)
-   and its agent rules, resource pool and target runbook. Run `uv run resource-status --json`
-   there, then recheck the selected GPU's processes, ownership, memory, utilization
-   and health immediately before launch. A momentarily idle GPU is not unowned.
-   Follow host restrictions, including `NCCL_P2P_DISABLE=1` on Sun.
+1. Check GPU availability, memory usage and health before launch. Follow your
+   cluster's scheduler and resource-sharing policy.
 2. Verify code and recursive submodule commits and require
    `uv sync --locked --check` to report no changes. Use the FROST environment
    for FROST; baselines keep separate environments. For staged snapshots, rebuild
