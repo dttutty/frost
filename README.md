@@ -13,7 +13,7 @@ A multi-GPU framework for Temporal (Dynamic) Graph Neural Network training.
 
 | Data source | Supported datasets |
 | --- | --- |
-| [🤗 dttutty/frost_dataset](https://huggingface.co/datasets/dttutty/frost_dataset) | Wikipedia (`WIKI`), Reddit, MOOC, LastFM, MAG, GDELT |
+| [🤗 frost_dataset](https://huggingface.co/datasets/dttutty/frost_dataset) | Wikipedia (`WIKI`), Reddit, MOOC, LastFM, MAG, GDELT |
 | TGB link prediction | `TGBL_WIKI` (v2), `TGBL_REVIEW` (v2), `TGBL_COIN` (v2), `TGBL_COMMENT` (v1), `TGBL_FLIGHT` (v2) |
 | Custom data | Temporal edge tables and graph artifacts in the [FROST data format](src/frost/data/preparation.py) |
 
