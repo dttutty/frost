@@ -16,12 +16,12 @@ provides a multi-GPU framework for Temporal (Dynamic) Graph Neural Network train
 
 ## 📦 Install
 
-Python 3.12 and Linux x86-64 are the packaged target. Install the **0.2.0 or newer**
+Python 3.12 and Linux x86-64 are the packaged target. Install the **0.3.0 or newer**
 wheel from [private GitHub Releases](https://github.com/dttutty/frost_dev/releases)
 (repository access required):
 
 ```bash
-python -m pip install ./frost_gnn-0.2.0-cp312-cp312-manylinux_2_31_x86_64.whl
+python -m pip install ./frost_gnn-0.3.0-cp312-cp312-manylinux_2_31_x86_64.whl
 ```
 
 When upgrading from the FROST 0.1.0 wheel, first remove the old distribution
@@ -79,14 +79,48 @@ frost train events.csv --output model.pt --test test.csv --predictions scores.cs
   training events up to the query time. Earlier-than-training-cutoff queries are
   rejected: for backtesting, train a separate model only on earlier events.
   Predictions at the cutoff describe the fitted history, not held-out accuracy.
-- The simple trainer uses one-hop TGAT with learned node embeddings, bidirectional
-  historical neighborhoods, and a directional link head. It samples one random
+- The simple trainer uses one-hop TGN with GRU memory, learned node embeddings,
+  bidirectional historical neighborhoods and a directional link head. It samples one random
   destination negative per positive, excluding the source and simultaneous
   positives. Nodes must have appeared in training; unknown IDs are rejected.
 - Runs on CPU with four threads; select a GPU explicitly with `--device cuda:0`.
-  Tune `--epochs`, `--batch-size`, `--fanout`, `--hidden`, `--lr`, `--seed` and
-  `--threads`. Existing output files are protected; choose new paths for new runs.
+  All starter settings below can be overridden. Existing output files are protected; choose new paths for new runs.
   See `frost train --help`. The multi-GPU recipes below use the advanced entry point.
+
+### ⚙️ Starter configuration
+
+`frost train events.csv` uses [configs/predict.yaml](configs/predict.yaml):
+
+| Setting | Value |
+| --- | --- |
+| Model / memory | TGN / GRU, last-message aggregation |
+| Neighbor sampling | Recent, 1 hop, 10 neighbors |
+| Embedding / memory / time dimensions | 128 / 128 / 128 |
+| Attention heads / dropout | 2 / 0.2 |
+| Epochs / batch size | 10 / 200 |
+| Optimizer / learning rate | Adam / 0.001 |
+| Negatives per positive | 1 random destination |
+| Seed / device / CPU threads | 42 / CPU / 4 |
+
+```bash
+frost train --show-config
+frost train events.csv --epochs 20 --lr 0.0005
+frost train --show-config > settings.yaml
+frost train events.csv --config settings.yaml --epochs 20
+frost train events.csv --model tgat --output tgat.pt
+```
+
+Precedence: CLI flags → your YAML → bundled defaults. Unknown YAML keys and
+invalid values are rejected before training. These are starter settings, not
+paper experiment settings; the advanced trainer uses [configs/config.yaml](configs/config.yaml).
+
+TGN resets memory each epoch and publishes positive-event messages after each
+chronological batch. Equal-time events share one frozen memory snapshot; large
+groups use bounded compute chunks. Saving replays history with the final weights
+and persists both memory and pending messages. Predictions read this state without
+updating it, so test rows and query order do not change subsequent answers.
+Resolved settings are stored in the checkpoint. TGAT remains selectable, and
+checkpoints from 0.2.0 can still be loaded.
 
 ### 🧩 Node features
 

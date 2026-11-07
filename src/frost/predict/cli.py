@@ -9,7 +9,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import yaml
 
+from frost.predict.config import DEFAULTS, resolve
 from frost.predict.data import column, convert_features, ids, read_csv, times
 from frost.predict.model import load, score, train
 
@@ -37,9 +39,13 @@ def _queries(parser):
         "--predictions", help="Write scores to a new CSV instead of stdout."
     )
     parser.add_argument(
-        "--device", default="cpu", help="PyTorch device, e.g. cpu or cuda:0."
+        "--device",
+        default=DEFAULTS["device"],
+        help="PyTorch device, e.g. cpu or cuda:0.",
     )
-    parser.add_argument("--threads", type=int, default=4, help="PyTorch CPU threads.")
+    parser.add_argument(
+        "--threads", type=int, default=DEFAULTS["threads"], help="PyTorch CPU threads."
+    )
 
 
 def parser():
@@ -50,25 +56,36 @@ def parser():
     commands = root.add_subparsers(dest="command", required=True)
     fit = commands.add_parser(
         "train",
-        help="Train TGAT on an events CSV; optionally score queries immediately.",
+        help="Train TGN on an events CSV; optionally score queries immediately.",
     )
-    fit.add_argument("events")
+    fit.add_argument("events", nargs="?")
+    fit.add_argument("--config", help="YAML overrides for the starter configuration.")
+    fit.add_argument(
+        "--show-config",
+        action="store_true",
+        help="Print resolved settings without training.",
+    )
+    fit.add_argument("--model", choices=("tgn", "tgat"))
+    fit.add_argument("--time-dim", type=int)
+    fit.add_argument("--heads", type=int)
+    fit.add_argument("--dropout", type=float)
     fit.add_argument("--output", default="frost-model.pt", help="New checkpoint path.")
     fit.add_argument("--node-features", help="Numeric NPY feature matrix.")
     fit.add_argument("--feature-ids", help="JSON list of node IDs in NPY row order.")
-    fit.add_argument("--epochs", type=int, default=10)
-    fit.add_argument("--batch-size", type=int, default=200)
-    fit.add_argument("--fanout", type=int, default=20)
-    fit.add_argument("--hidden", type=int, default=64)
-    fit.add_argument("--lr", type=float, default=0.001)
-    fit.add_argument("--seed", type=int, default=0)
+    fit.add_argument("--epochs", type=int)
+    fit.add_argument("--batch-size", type=int)
+    fit.add_argument("--fanout", type=int)
+    fit.add_argument("--hidden", type=int)
+    fit.add_argument("--lr", type=float)
+    fit.add_argument("--seed", type=int)
     _columns(fit)
     _queries(fit)
+    fit.set_defaults(**{key: None for key in DEFAULTS})
     predict = commands.add_parser(
         "predict", help="Score candidates or a test CSV using a saved checkpoint."
     )
     predict.add_argument("checkpoint")
-    predict.add_argument("--batch-size", type=int, default=200)
+    predict.add_argument("--batch-size", type=int, default=DEFAULTS["batch_size"])
     _columns(predict)
     _queries(predict)
     features = commands.add_parser(
@@ -124,6 +141,17 @@ def main(argv=None):
                 file=sys.stderr,
             )
             return
+        if args.command == "train":
+            settings = resolve(
+                args.config, **{key: getattr(args, key) for key in DEFAULTS}
+            )
+            for key, value in settings.items():
+                setattr(args, key, value)
+            if args.show_config:
+                print(yaml.safe_dump(settings, sort_keys=False), end="")
+                return
+            if not args.events:
+                raise ValueError("Provide an events CSV or use --show-config.")
         if args.threads < 1 or args.batch_size < 1:
             raise ValueError("Threads and batch size must be positive.")
         if bool(args.src) != bool(args.candidates):
@@ -154,6 +182,11 @@ def main(argv=None):
                 lr=args.lr,
                 seed=args.seed,
                 device=args.device,
+                model=args.model,
+                time_dim=args.time_dim,
+                heads=args.heads,
+                dropout=args.dropout,
+                threads=args.threads,
             )
             checkpoint_path = args.output
         else:
@@ -174,7 +207,7 @@ def main(argv=None):
             finally:
                 if args.predictions:
                     stream.close()
-    except (ValueError, OSError, RuntimeError, KeyError) as exc:
+    except (ValueError, OSError, RuntimeError, KeyError, yaml.YAMLError) as exc:
         arg_parser.error(str(exc))
 
 

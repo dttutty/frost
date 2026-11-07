@@ -5,7 +5,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "frost-gnn"  # pip accepts frost_gnn and frost-gnn.
-version = "0.2.0"
+version = "0.3.0"
 description = "Use temporal graph neural networks to predict interactions in your data."
 readme = "README.md"
 requires-python = ">=3.12"

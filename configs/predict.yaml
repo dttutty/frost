@@ -1,0 +1,13 @@
+# Starter settings for `frost train`; override with --config or CLI flags.
+model: tgn
+epochs: 10
+batch_size: 200
+fanout: 10
+hidden: 128
+time_dim: 128
+heads: 2
+dropout: 0.2
+lr: 0.001
+seed: 42
+device: cpu
+threads: 4

@@ -218,3 +218,180 @@ def test_invalid_inputs_fail_before_training(tmp_path):
         main(["predict", "missing.pt"])
     with pytest.raises(ValueError, match="Missing column"):
         events(source, time_col="missing")
+
+
+def test_tgn_memory_is_trained_replayed_and_read_only(trained):
+    from frost.predict.model import TGNPredictor, temporal_batches
+
+    output, saved = trained
+    assert saved["model"] == "tgn" and saved["format_version"] == 2
+    checkpoint, model, history = load(output)
+    assert isinstance(model, TGNPredictor)
+    torch.manual_seed(saved["training"]["seed"])
+    initial = TGNPredictor(
+        len(saved["node_ids"]), saved["state_dict"]["features"], **saved["config"]
+    )
+    assert not torch.equal(initial.updater.rnn.weight_ih, model.updater.rnn.weight_ih)
+    before = {key: value.clone() for key, value in model.state_dict().items()}
+    first = score(
+        checkpoint,
+        model,
+        history,
+        ["alice", "bob"],
+        ["book", "game"],
+        np.array([32.0, 40.0]),
+    )
+    second = score(
+        checkpoint,
+        model,
+        history,
+        ["bob", "alice"],
+        ["game", "book"],
+        np.array([40.0, 32.0]),
+    )
+    np.testing.assert_allclose(first, second[::-1])
+    for key in before:
+        torch.testing.assert_close(model.state_dict()[key], before[key], rtol=0, atol=0)
+    model.reset_memory(float(checkpoint["timestamps"][0]))
+    assert not model.has_mail.any() and not model.memory.any()
+    for start, end in temporal_batches(
+        checkpoint["timestamps"].numpy(), checkpoint["training"]["batch_size"]
+    ):
+        model.observe(
+            checkpoint["edges"][start:end].numpy(),
+            checkpoint["timestamps"][start:end].numpy(),
+        )
+    for key in ("memory", "memory_time", "mail", "mail_time", "has_mail"):
+        torch.testing.assert_close(model.state_dict()[key], before[key], rtol=0, atol=0)
+
+
+def test_tgn_equal_times_never_observe_current_or_future_batch(tmp_path, monkeypatch):
+    from frost.predict.model import TGNPredictor
+
+    source = tmp_path / "events.csv"
+    source.write_text("src,dst,time\na,x,1\nb,y,1\na,x,1\nb,y,2\na,x,3\nb,y,3\n")
+    original = TGNPredictor.forward
+    seen = []
+
+    def checked(self, history, src, dst, timestamps, inclusive=False):
+        if self.has_mail.any():
+            assert self.mail_time[self.has_mail].max().item() < min(timestamps)
+        seen.append(min(timestamps))
+        return original(self, history, src, dst, timestamps, inclusive)
+
+    monkeypatch.setattr(TGNPredictor, "forward", checked)
+    train(
+        source,
+        output=tmp_path / "model.pt",
+        epochs=2,
+        batch_size=2,
+        hidden=8,
+        time_dim=4,
+    )
+    # Equal-time group of 3 is computed in two bounded chunks against frozen state.
+    assert seen == [1.0, 1.0, 2.0, 3.0] * 2
+
+
+def test_tgat_selection_and_legacy_checkpoint(tmp_path):
+    source = tmp_path / "events.csv"
+    source.write_text("src,dst,time\na,x,1\nb,y,2\na,x,3\nb,y,4\n")
+    path = tmp_path / "tgat.pt"
+    saved = train(
+        source,
+        output=path,
+        model="tgat",
+        epochs=1,
+        hidden=8,
+        time_dim=16,
+        heads=2,
+        dropout=0.1,
+    )
+    expected = score(*load(path), ["a"], ["x"], np.array([4.0]))
+    saved["format_version"] = 1
+    saved["config"] = {key: saved["config"][key] for key in ("fanout", "hidden")}
+    saved.pop("resolved_config")
+    legacy = tmp_path / "legacy.pt"
+    torch.save(saved, legacy)
+    np.testing.assert_allclose(
+        score(*load(legacy), ["a"], ["x"], np.array([4.0])), expected
+    )
+
+
+def test_default_config_and_override_precedence(tmp_path, capsys):
+    import yaml
+    from frost.predict.config import DEFAULTS
+
+    main(["train", "--show-config"])
+    config = yaml.safe_load(capsys.readouterr().out)
+    assert config == DEFAULTS
+    assert (
+        config["model"] == "tgn" and config["fanout"] == 10 and config["hidden"] == 128
+    )
+    custom = tmp_path / "settings.yaml"
+    custom.write_text("model: tgat\nepochs: 3\nhidden: 16\nthreads: 2\n")
+    main(["train", "--config", str(custom), "--epochs", "5", "--show-config"])
+    resolved = yaml.safe_load(capsys.readouterr().out)
+    assert (
+        resolved["model"] == "tgat"
+        and resolved["epochs"] == 5
+        and resolved["hidden"] == 16
+    )
+    source = tmp_path / "events.csv"
+    source.write_text("src,dst\na,x\nb,y\n")
+    output = tmp_path / "custom.pt"
+    main(
+        [
+            "train",
+            str(source),
+            "--config",
+            str(custom),
+            "--epochs",
+            "1",
+            "--output",
+            str(output),
+        ]
+    )
+    saved = load(output)[0]["resolved_config"]
+    assert saved["epochs"] == 1 and saved["threads"] == 2 and saved["model"] == "tgat"
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "[]",
+        "unknown: 1",
+        "epochs: 0",
+        "hidden: 7",
+        "dropout: 1",
+        "seed: -1",
+        "model: bad",
+        "epochs: true",
+        "lr: .nan",
+    ],
+)
+def test_bad_config_fails_before_training(tmp_path, contents):
+    config = tmp_path / "bad.yaml"
+    config.write_text(contents)
+    with pytest.raises(SystemExit) as exc:
+        main(["train", "--config", str(config), "--show-config"])
+    assert exc.value.code == 2
+
+
+def test_tgn_last_message_uses_matching_peer_and_preserves_other_nodes():
+    from frost.predict.model import TGNPredictor
+
+    model = TGNPredictor(4, torch.empty(4, 0), hidden=2, time_dim=2)
+    with torch.no_grad():
+        model.memory.copy_(
+            torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+        )
+    model.observe(np.array([[0, 1], [2, 0]]), np.array([1.0, 2.0]))
+    torch.testing.assert_close(
+        model.mail[:3],
+        torch.tensor(
+            [[1.0, 2.0, 5.0, 6.0], [3.0, 4.0, 1.0, 2.0], [5.0, 6.0, 1.0, 2.0]]
+        ),
+    )
+    assert model.mail_time.tolist() == [2.0, 1.0, 2.0, 0.0]
+    assert model.has_mail.tolist() == [True, True, True, False]
+    torch.testing.assert_close(model.memory[3], torch.tensor([7.0, 8.0]))
