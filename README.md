@@ -30,7 +30,7 @@ below select historical neighbors for encoding or mailbox delivery. Select with 
 
 | Method | Behavior |
 | --- | --- |
-| [`recent`](configs/ngh_sampler/recent.yaml) (default) | Most recent eligible neighbors |
+| [`recent`](configs/ngh_sampler/recent.yaml) | Most recent eligible neighbors |
 | [`uniform`](configs/ngh_sampler/uniform.yaml) | Uniform sampling from eligible neighbors |
 | [`time_interval_aware`](configs/ngh_sampler/time_interval_aware.yaml) | Time-aware weighted sampling, controlled by `ngh_sampler.time_scaling_factor` |
 
@@ -44,7 +44,7 @@ Select a train/evaluation pair with `neg_sampler=<configuration>`.
 
 | Configuration | Training | Validation / test |
 | --- | --- | --- |
-| [`rnd_dst_then_random`](configs/neg_sampler/rnd_dst_then_random.yaml) (default) | Random, all nodes | Random, all nodes |
+| [`rnd_dst_then_random`](configs/neg_sampler/rnd_dst_then_random.yaml) | Random, all nodes | Random, all nodes |
 | [`rnd_dst_then_fixed`](configs/neg_sampler/rnd_dst_then_fixed.yaml) | Random, destination partition | Precomputed destination negatives |
 | [`rnd_dst_then_fixed_all`](configs/neg_sampler/rnd_dst_then_fixed_all.yaml) | Random, destination partition | Precomputed all-node negatives |
 | [`rnd_dst_then_hist`](configs/neg_sampler/rnd_dst_then_hist.yaml) | Random, destination partition | Previously observed destinations for each source |
@@ -61,7 +61,7 @@ Historical and post-training sampling use only prior events, exclude current
 positive destinations and fall back to random destination candidates when needed.
 The random default and precomputed CSV recipes use one negative per positive;
 TGB recipes use one during training and multiple during evaluation. Evaluation
-supports AP/AUC (default) and `eval_metric=mrr` for TGB candidate ranking.
+supports AP/AUC and `eval_metric=mrr` for TGB candidate ranking.
 
 ### 🧠 Models
 
