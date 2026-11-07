@@ -206,3 +206,24 @@ Code is in [src/frost](../src/frost/), tests in [tests](../tests/).
 Rebuild C++ sampler changes with `uv pip install -e .`.
 
 For citation and licensing, see the [prediction README](../README.md#-citation).
+
+## 📦 Package publishing
+
+Build from a clean commit on the Linux release host with Python 3.12:
+
+```bash
+uv run --no-sync python .github/scripts/build_pypi_release.py --output /tmp/frost-release-new
+```
+
+The build derives the PyPI description from the main README, replacing private
+installation instructions and repository-only links in a temporary source tree.
+The source distribution includes the model guide. The build host must support
+the requested `manylinux_2_31_x86_64` target; newer-glibc builds cannot simply be
+relabeled. Upload the generated `assets/` files to a GitHub Release whose tag
+points to the recorded source commit.
+
+The **Publish to PyPI** workflow validates release checksums, package metadata
+and tag provenance. Run it with `release_tag` and `dry_run=true` to validate;
+`dry_run=false` publishes through the `pypi` environment using Trusted Publishing.
+Configure the PyPI publisher for the repository, `publish-pypi.yml`, and `pypi`
+environment before publishing. No long-lived PyPI token is needed.

@@ -5,8 +5,8 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "frost-gnn"  # pip accepts frost_gnn and frost-gnn.
-version = "0.3.0"
-description = "Use temporal graph neural networks to predict interactions in your data."
+version = "0.3.1"
+description = "Multi-GPU temporal graph neural networks for recommendation systems."
 readme = "README.md"
 requires-python = ">=3.12"
 license = {file = "LICENSE"}
@@ -27,6 +27,10 @@ dependencies = [
     "tqdm>=4.60",
     "PyYAML>=6.0",
 ]
+
+[project.urls]
+Paper = "https://doi.org/10.1145/3856345"
+Datasets = "https://huggingface.co/datasets/dttutty/frost_dataset"
 
 [project.scripts]
 frost = "frost.predict.cli:main"
