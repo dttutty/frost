@@ -1,6 +1,7 @@
 cff-version: 1.2.0
 message: "If you use FROST in your research, please cite the paper below."
 type: software
+license: MIT
 title: FROST
 repository-code: "https://github.com/dttutty/frost_dev"
 authors:

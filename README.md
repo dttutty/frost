@@ -5,6 +5,7 @@
 [![CUDA 12.8](https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white)](uv.lock)
 [![Linux x86-64](https://img.shields.io/badge/Linux-x86--64-FCC624?logo=linux&logoColor=black)](#-install)
 [![CPU coverage](https://img.shields.io/badge/CPU%20coverage-69.6%25-yellowgreen)](https://github.com/dttutty/frost_dev/actions/workflows/coverage.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A multi-GPU framework for Temporal (Dynamic) Graph Neural Network training.
 
@@ -178,4 +179,5 @@ If you use FROST, please cite [our paper](https://doi.org/10.1145/3856345):
 ```
 
 Citation metadata: [CITATION.cff](CITATION.cff).
+Code is licensed under [MIT](LICENSE); TPNet retains its [upstream notices](src/frost/tpnet/NOTICE.md).
 The paper is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).

@@ -9,7 +9,7 @@ version = "0.1.0"
 description = "A high-performance distributed GNN training framework with sequence-based samplers."
 readme = "README.md"
 requires-python = ">=3.12"
-license = {text = "MIT"}
+license = {file = "LICENSE"}
 dependencies = [
     # Core ML
     "torch==2.9.0",
