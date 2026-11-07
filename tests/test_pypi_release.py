@@ -60,7 +60,6 @@ def test_public_description_uses_current_readme():
     assert "python -m pip install frost-gnn" in rendered
     assert "not available yet" not in rendered
     assert "github.com/dttutty/frost_dev" not in rendered
-    assert "assets/frost-banner.png" not in rendered
     assert "docs/model_training.md" in rendered
     assert "not a calibrated probability" in rendered
     assert original[original.index("```bibtex") :].split("```")[1] in rendered

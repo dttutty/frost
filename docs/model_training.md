@@ -219,8 +219,8 @@ The build derives the PyPI description from the main README, replacing private
 installation instructions and repository-only links in a temporary source tree.
 The source distribution includes the model guide. The build host must support
 the requested `manylinux_2_31_x86_64` target; newer-glibc builds cannot simply be
-relabeled. Upload the generated `assets/` files to a GitHub Release whose tag
-points to the recorded source commit.
+relabeled. Upload the generated files from `/tmp/frost-release-new/assets/` to a
+GitHub Release whose tag points to the recorded source commit.
 
 The **Publish to PyPI** workflow validates release checksums, package metadata
 and tag provenance. Run it with `release_tag` and `dry_run=true` to validate;

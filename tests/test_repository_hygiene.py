@@ -93,9 +93,6 @@ def tracked_paths() -> list[Path]:
 
 
 def generated_output_reason(path: Path) -> str | None:
-    # Versioned artwork for the README.
-    if path == Path("assets/frost-banner.png"):
-        return None
     lowered_parts = {part.lower() for part in path.parts}
     if lowered_parts & OUTPUT_DIRECTORIES:
         return "generated-output directory"
