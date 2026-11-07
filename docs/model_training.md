@@ -1,6 +1,6 @@
 # 🧠 Model and training guide
 
-[← Score candidate items: installation, CSV format, features and queries](../README.md)
+[← Quick start](../README.md) · [CSV data and prediction rules](prediction.md)
 
 Use this guide to choose models, change training parameters, select sampling
 methods or run multi-GPU training. FROST trains Temporal(Dynamic) GNN models
