@@ -3,13 +3,13 @@
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![PyTorch 2.9.0](https://img.shields.io/badge/PyTorch-2.9.0-EE4C2C?logo=pytorch&logoColor=white)](pyproject.toml)
 [![CUDA 12.8](https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white)](uv.lock)
-[![Linux x86-64](https://img.shields.io/badge/Linux-x86--64-FCC624?logo=linux&logoColor=black)](#install)
+[![Linux x86-64](https://img.shields.io/badge/Linux-x86--64-FCC624?logo=linux&logoColor=black)](#-install)
 
 A multi-GPU framework for Graph Neural Network training.
 
-## Support matrix
+## 📋 Support matrix
 
-### Datasets
+### 🗃️ Datasets
 
 | Data source | Supported datasets |
 | --- | --- |
@@ -23,7 +23,7 @@ conversion and TGB downloads. Graph direction can be automatic, directed or
 bidirectional. These are loader capabilities, not a claim that every
 model–dataset combination was evaluated in the paper.
 
-### Temporal neighbor sampling
+### 🕒 Temporal neighbor sampling
 
 Positive examples are observed interactions; the options below select historical
 neighbors for encoding or mailbox delivery. Select with `ngh_sampler=<method>`.
@@ -37,7 +37,7 @@ neighbors for encoding or mailbox delivery. Select with `ngh_sampler=<method>`.
 Sampling depth and per-hop fanout are set by `model.neighborhood.fanout`, subject
 to the model's supported depth below. JODIE uses no neighbor sampling.
 
-### Negative sampling
+### 🎲 Negative sampling
 
 All built-in methods keep the source fixed and sample negative destinations.
 Select a train/evaluation pair with `neg_sampler=<configuration>`.
@@ -58,7 +58,7 @@ The random default and precomputed CSV recipes use one negative per positive;
 TGB recipes use one during training and multiple during evaluation. Evaluation
 supports AP/AUC (default) and `eval_metric=mrr` for TGB candidate ranking.
 
-### Models
+### 🧠 Models
 
 All eight native recipes support single- and multi-GPU training. Values below
 are **defaults in this library**; click a model for its configuration.
@@ -86,7 +86,7 @@ multi-GPU adapter. Its globally decayed random-projection state requires a speci
 update path that does not use FROST's native dynamic-state routing and pipeline.
 This library has no built-in `model=tpnet` recipe.
 
-## Install
+## 📦 Install
 
 GPU training requires an NVIDIA GPU with a compatible driver.
 
@@ -99,7 +99,7 @@ Set `FROST_DATA_ROOT` and `TGB_DATA_ROOT` in `.env.local`.
 Download the [prepared datasets](https://huggingface.co/datasets/dttutty/frost_dataset)
 or use `uv run frost-data --help` for data operations.
 
-## Usage
+## 🚀 Usage
 
 Run two GPU workers and one host rank:
 
@@ -113,7 +113,7 @@ Override parameters with `key=value`; see [defaults](configs/config.yaml)
 and [model configs](configs/model/). Preview the resolved configuration with
 `uv run python run.py --cfg job model=tgn`.
 
-## Development
+## 🛠️ Development
 
 ```bash
 uv run ruff check .
@@ -124,7 +124,7 @@ uv run pytest tests/ -q
 Code is in [src/frost](src/frost/), tests in [tests](tests/).
 Rebuild C++ sampler changes with `uv pip install -e .`.
 
-## Citation
+## 📚 Citation
 
 If you use FROST, please cite [our paper](https://doi.org/10.1145/3856345):
 
