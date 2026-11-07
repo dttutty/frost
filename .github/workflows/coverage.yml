@@ -1,0 +1,88 @@
+name: CPU coverage
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: [README.md]
+  pull_request:
+    paths-ignore: [README.md]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpu-coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install CPU test environment
+        run: |
+          uv venv --python 3.12
+          uv pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --no-sources -e . pytest pytest-cov
+      - name: Measure Python line coverage
+        run: >-
+          uv run --no-sync pytest tests/ -q
+          --cov=src/frost --cov-report=term:skip-covered
+          --cov-report=json:coverage.json --cov-report=html:htmlcov
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: cpu-coverage
+          path: |
+            coverage.json
+            htmlcov/
+          retention-days: 14
+          if-no-files-found: warn
+
+  badge:
+    needs: tests
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cpu-coverage
+          path: ${{ runner.temp }}/cpu-coverage
+      - name: Update measured badge on the tested revision
+        env:
+          COVERAGE_REPORT: ${{ runner.temp }}/cpu-coverage/coverage.json
+        run: |
+          uv run --no-project --python 3.12 python .github/scripts/update_coverage_badge.py "$COVERAGE_REPORT"
+          if git diff --quiet -- README.md; then
+            exit 0
+          fi
+          git fetch origin main
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+            echo "main advanced; a newer run will update the badge."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md
+          git commit -m 'docs: update CPU coverage badge'
+          git push origin HEAD:main

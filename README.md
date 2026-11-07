@@ -4,6 +4,7 @@
 [![PyTorch 2.9.0](https://img.shields.io/badge/PyTorch-2.9.0-EE4C2C?logo=pytorch&logoColor=white)](pyproject.toml)
 [![CUDA 12.8](https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white)](uv.lock)
 [![Linux x86-64](https://img.shields.io/badge/Linux-x86--64-FCC624?logo=linux&logoColor=black)](#-install)
+[![CPU coverage](https://img.shields.io/badge/CPU%20coverage-69.6%25-yellowgreen)](https://github.com/dttutty/frost_dev/actions/workflows/coverage.yml)
 
 A multi-GPU framework for Temporal (Dynamic) Graph Neural Network training.
 
@@ -148,6 +149,10 @@ uv run ruff check .
 uv run mypy
 uv run pytest tests/ -q
 ```
+
+The coverage badge measures Python lines exercised by CPU tests; C++ and GPU
+execution are not measured. GitHub Actions updates it after successful main-branch
+tests and retains the full report as an artifact.
 
 Code is in [src/frost](src/frost/), tests in [tests](tests/).
 Rebuild C++ sampler changes with `uv pip install -e .`.
