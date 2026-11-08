@@ -36,7 +36,7 @@ If upgrading from the old FROST 0.1.0 distribution, first run
 
 def public_readme(source: str) -> str:
     """Reuse user documentation, stripping repository-only artwork and links."""
-    intro = source.index("A multi-GPU framework")
+    intro = source.index("A Temporal(Dynamic) GNN Training framework")
     result = "# FROST\n\n" + source[intro:]
     result, count = re.subn(
         r"^## 📦 Install\n.*?(?=^## )",

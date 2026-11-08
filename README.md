@@ -7,8 +7,8 @@
 [![CPU coverage](https://img.shields.io/badge/CPU%20coverage-70.8%25-yellowgreen)](https://github.com/dttutty/frost/actions/workflows/coverage.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A multi-GPU framework for Recommendation Systems and Self-Supervised Embedding
-Learning with Temporal(Dynamic) GNN.
+A Temporal(Dynamic) GNN Training framework for recommendation systems, link prediction
+and self-supervised embedding learning.
 
 ## 📦 Install
 
